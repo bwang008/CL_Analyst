@@ -1,0 +1,24 @@
+
+-Create random forest of learners to predict stock values however utilize a dynamic learner. 
+Assign weights to the learner values which are predicting [-1,0,1], initially all weights are equal, but based on the outcome of the prediction, weights will be updated.
+
+if correct, make multiplier exp(proportional to error) if a lot of learners got it wrong, and few got it right, we potentially want to make those that got it right to have more weight. This is iterative, so the learners that continue to get it right/wrong will have the weights increase/decrease. 
+
+weights are normalized after the changes are done. SO something like multiply the weight by exp(err) or maybe multiply by the total loss...
+
+-So gainers get multiplied by percentage gain, holder nothing, and loss is multiply by percentage down.
+
+Rather have the ones that are wrong get less weight, versus increase weight of the ones that are right. 
+
+------
+
+add temperature data to the features as well
+-min max for the window
+-percentage relative to the start of the window for large window size
+-i was thinking to add percentage relative to the 5 year average as well, but requires more data. 
+-split the features as temperature for west, midwest, and east
+
+-Based on the opening movement and volume, does it cluster into a group that has low volatility or high volatiliy with high confidence? I.e. maybe after a big move, the next day is very quiet, or vice versa, or after a big move we have another big move, we want to get a statistical breakdown of the percentage chance before making a trade to know if there is a very low chance because the market looks like it is going to be a quiet day based on prior information on how things have gone.
+
+
+
