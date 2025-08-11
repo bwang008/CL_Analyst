@@ -13,6 +13,8 @@ There will be a breakdown of the following
 
 import numpy as np
 import pandas as pd
+import util
+import nIndicators as ind
 
 #data = pd.read_csv('data/cl-5m_bk.csv',sep=';',parse_dates=[[0,1]],index_col=0,dayfirst=True)
 data = pd.read_csv('data/test.csv',sep=';',header=None,index_col=None)
@@ -23,8 +25,20 @@ data.columns = cols
 #Merge the date and time columns to form single DT column and assign it as the index/key
 
 
-breakpoint()
+#breakpoint()
 #data.columns(cols)
 
 
-print(data.head())
+#data.head()
+
+if __name__ == '__main__':
+    
+    #Get the data
+    cl_test_data = util.get_cl_data()
+    print(cl_test_data.head())
+    
+    features = ind.generate_features(cl_test_data)
+    print(features.head())
+    
+    
+    

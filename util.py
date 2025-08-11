@@ -83,3 +83,19 @@ def get_data(symbols, dates, addSPY=True, colname='Close'):
     print(f"Final DataFrame columns: {df.columns}")
 
     return df
+
+
+def get_cl_data():
+    """
+    Read OHLCV intraday data from 'data/test10k.csv' which has no header row.
+    Applies the same formatting shown in main.py for similar files:
+      - sep=';'
+      - header=None
+      - assign columns: ['Date','Time','Open','High','Low','Close','Volume']
+
+    Returns a pandas DataFrame containing the CSV contents.
+    """
+    data_file = 'data/test10k.csv'
+    df = pd.read_csv(data_file, sep=';', header=None, index_col=None)
+    df.columns = ['Date', 'Time', 'Open', 'High', 'Low', 'Close', 'Volume']
+    return df
