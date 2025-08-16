@@ -90,7 +90,7 @@ class RTLearner(object):
             self.talk("Single Sample. End.")
             #return np.array([leaf,np.median(y),None, None])
             #return np.array([leaf,np.mean(y),None, None])
-            return np.array([leaf,stats.mode(y)[0][0],None,None])
+            return np.array([leaf,stats.mode(y).mode,None,None])
 
 
         
@@ -98,8 +98,8 @@ class RTLearner(object):
             #compare first row with the rest. If they're all the same then kill.
             self.talk("Same Sample. End.")
             #return np.array([leaf, np.median(y),None,None])
-            #return np.array([leaf,np.mean(y),None, None])
-            return np.array([leaf,stats.mode(y)[0][0],None,None])
+            #return np.array([leaf,np.mean(y), None, None])
+            return np.array([leaf,stats.mode(y).mode,None,None])
         else:  
             #did not terminate so let's build the tree
             '''
@@ -130,7 +130,7 @@ class RTLearner(object):
             #    return np.array([leaf, np.median(y), None, None])
 
             if y[mask].shape[0] == 0 or y[~mask].shape[0] == 0:
-                return np.array([leaf, stats.mode(y)[0][0], None, None])
+                return np.array([leaf, stats.mode(y).mode, None, None])
 
             if self.dbg==True:
                 self.talk("Right before calling build_tree: Line 99")
