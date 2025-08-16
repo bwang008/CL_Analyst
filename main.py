@@ -37,8 +37,13 @@ if __name__ == '__main__':
     cl_test_data = util.get_cl_data()
     print(cl_test_data.head())
     
+    
+    #Generate the indicators?
     features = ind.generate_features(cl_test_data)
     print(features.head())
     
     
+    #Select the model and parameters
+    #Run indicator calculation
+    #Feed into model and run
     
