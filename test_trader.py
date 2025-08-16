@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas_ta as ta
-import sklearn as sk
+#import sklearn as sk
 import datetime as dt
 
 import StrategyLearner as sl

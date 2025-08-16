@@ -120,21 +120,53 @@ class StrategyLearner(object):
   		  	   		 	 	 			  		 			     			  	 
     
     def add_evidence(self,symbol="JPM",sd=dt.datetime(2008, 1, 1),ed=dt.datetime(2009, 12, 31),sv=10000):
-        # example usage of the old backward compatible util function  		  	   		 	 	 			  		 			     			  	 
-        syms = [symbol]  		  	   		 	 	 			  		 			     			  	 
-        dates = pd.date_range(sd, ed)  		  	   		 	 	 			  		 			     			  	 
-        prices_all = ut.get_data(syms, dates)  # automatically adds SPY  		  	   		 	 	 			  		 			     			  	 
-        prices = prices_all[syms]  # only portfolio symbols  		  	   		 	 	 			  		 			     			  	 
+        # example usage of the old backward compatible util function
+        syms = [symbol]
+        dates = pd.date_range(sd, ed)
+        prices_all = ut.get_data(syms, dates, colname="Close")  # automatically adds SPY
+        if self.verbose:
+            print(f"DEBUG: prices_all shape: {prices_all.shape}")
+            print(f"DEBUG: prices_all columns: {prices_all.columns}")
+            print(f"DEBUG: syms: {syms}")
+            print(f"DEBUG: symbol: {symbol}")
+            print(f"DEBUG: prices_all.dtypes: {prices_all.dtypes}")
+            print(f"DEBUG: syms type: {type(syms)}")
+            print(f"DEBUG: syms[0] type: {type(syms[0])}")
+            print(f"DEBUG: prices_all.columns.dtype: {prices_all.columns.dtype}")
+        try:
+            prices = prices_all[syms]  # only portfolio symbols
+            if self.verbose:
+                print(f"DEBUG: Successfully accessed prices_all[syms]")
+                print(f"DEBUG: prices shape: {prices.shape}")
+        except Exception as e:
+            if self.verbose:
+                print(f"DEBUG: Error accessing prices_all[syms]: {e}")
+                print(f"DEBUG: Trying alternative access method...")
+            # Try alternative access method
+            prices = prices_all.loc[:, syms]
         #prices_SPY = prices_all["SPY"]  # only SPY, for comparison later  		  	   		 	 	 			  		 			     			  	 
         #if self.verbose:  		  	   		 	 	 			  		 			     			  	 
         #    print(prices)  		  	   		 	 	 			  		 			     			  	 
   		  	   		 	 	 			  		 			     			  	 
-        # example use with new colname  		  	   		 	 	 			  		 			     			  	 
-        volume_all = ut.get_data(  		  	   		 	 	 			  		 			     			  	 
-            syms, dates, colname="Volume"  		  	   		 	 	 			  		 			     			  	 
+                # example use with new colname
+        if self.verbose:
+            print(f"DEBUG: Getting volume data...")
+        volume_all = ut.get_data(
+            syms, dates, colname="Volume"
         )  # automatically adds SPY
-        volume = volume_all[syms]  # only portfolio symbols  		  	   		 	 	 			  		 			     			  	 
-        #volume_SPY = volume_all["SPY"]  # only SPY, for comparison later  		  	   		 	 	 			  		 			     			  	 
+        if self.verbose:
+            print(f"DEBUG: volume_all shape: {volume_all.shape}")
+            print(f"DEBUG: volume_all columns: {volume_all.columns}")
+        try:
+            volume = volume_all[syms]  # only portfolio symbols
+            if self.verbose:
+                print(f"DEBUG: Successfully accessed volume_all[syms]")
+        except Exception as e:
+            if self.verbose:
+                print(f"DEBUG: Error accessing volume_all[syms]: {e}")
+            # Try alternative access method
+            volume = volume_all.loc[:, syms]
+        #volume_SPY = volume_all["SPY"]  # only SPY, for comparison later
         #if self.verbose:
         #    print(volume)
 
@@ -245,7 +277,7 @@ class StrategyLearner(object):
   	   		 	 	 			  		 			     			  	 
         syms = [symbol]  		  	   		 	 	 			  		 			     			  	 
         dates = pd.date_range(sd, ed)  		  	   		 	 	 			  		 			     			  	 
-        prices_all = ut.get_data(syms, dates)  # automatically adds SPY  		  	   		 	 	 			  		 			     			  	 
+        prices_all = ut.get_data(syms, dates, colname="Close")  # automatically adds SPY  		  	   		 	 	 			  		 			     			  	 
         prices = prices_all[syms]  # only portfolio symbols  		  	   		 	 	 			  		 			     			  	 	  	   		 	 	 			  		 			     			  	 	  	   		 	 	 			  		 			     			  	 
   		  	   		 	 	 			  		 			     			  	 
         # example use with new colname  		  	   		 	 	 			  		 			     			  	 
