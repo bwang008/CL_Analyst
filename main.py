@@ -14,7 +14,7 @@ There will be a breakdown of the following
 import numpy as np
 import pandas as pd
 import util
-import nIndicators as ind
+import indicatorBuilder as ind
 
 #data = pd.read_csv('data/cl-5m_bk.csv',sep=';',parse_dates=[[0,1]],index_col=0,dayfirst=True)
 data = pd.read_csv('data/test.csv',sep=';',header=None,index_col=None)
@@ -38,12 +38,9 @@ if __name__ == '__main__':
     print(cl_test_data.head())
     
     
-    #Generate the indicators?
+    #Generate the indicators
     features = ind.generate_features(cl_test_data)
     print(features.head())
     
-    
-    #Select the model and parameters
-    #Run indicator calculation
-    #Feed into model and run
+    #
     

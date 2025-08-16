@@ -15,8 +15,8 @@ def generate_features(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         pd.DataFrame: A new DataFrame containing the calculated indicators.
     """
-    # Create a new DataFrame to store the features
-    features = pd.DataFrame(index=df.index)
+    # Create a new DataFrame to store the features, preserving original columns
+    features = df.copy()
 
     # --- Use pandas-ta to calculate standard indicators ---
     # The .ta accessor is added to the DataFrame by the pandas_ta library.
