@@ -106,17 +106,44 @@ def get_robot_world_file(basefilename):
     )  		  	   		 	 	 			  		 			     			  	 
 
 
-def get_cl_data():
+def get_cl_data(data_file='data/test10k.csv'):
     """
-    Read OHLCV intraday data from 'data/test10k.csv' which has no header row.
+    Read OHLCV intraday data from CSV file which has no header row.
+    Automatically detects separator (semicolon, comma, or tab) and applies appropriate formatting.
     Applies the same formatting shown in main.py for similar files:
-      - sep=';'
       - header=None
       - assign columns: ['Date','Time','Open','High','Low','Close','Volume']
+    - Creates proper datetime index for time-based operations
 
-    Returns a pandas DataFrame containing the CSV contents.
+    Returns a pandas DataFrame containing the CSV contents with datetime index.
     """
-    data_file = 'data/test10k.csv'
-    df = pd.read_csv(data_file, sep=';', header=None, index_col=None)
-    df.columns = ['Date', 'Time', 'Open', 'High', 'Low', 'Close', 'Volume']
-    return df
+    # Try different separators in order of likelihood
+    separators = [';', ',', '\t']
+    
+    for sep in separators:
+        try:
+            # Read a small sample to test the separator
+            sample_df = pd.read_csv(data_file, sep=sep, header=None, nrows=5)
+            
+            # Check if we got the expected 7 columns
+            if sample_df.shape[1] == 7:
+                # This separator works, read the full file
+                df = pd.read_csv(data_file, sep=sep, header=None, index_col=None)
+                df.columns = ['Date', 'Time', 'Open', 'High', 'Low', 'Close', 'Volume']
+                
+                # Combine Date and Time columns and parse as datetime
+                df['DateTime'] = pd.to_datetime(df['Date'] + ' ' + df['Time'], format='%d/%m/%Y %H:%M')
+                
+                # Set as index and drop the separate Date and Time columns
+                df.set_index('DateTime', inplace=True)
+                df.drop(['Date', 'Time'], axis=1, inplace=True)
+                
+                print(f"Successfully read {data_file} using separator: '{sep}'")
+                return df
+                
+        except Exception as e:
+            continue  # Try next separator
+    
+    # If we get here, none of the separators worked
+    raise ValueError(f"Could not read {data_file} with any of the separators: {separators}. "
+                    f"Please check the file format.")
