@@ -1,3 +1,11 @@
+Create a loop where cursor or the LLM generates/changes the code and then the model reruns against metrics
+The bot updates the readme which is shared history detailing what they tried to do, and then we see what the performance change was.
+The next bot is given the previous code and the readme as context, and the metric that the code performed at. 
+Do an analysis of the results, if there was an improvement where might the credit lie and the intuition behind the relationship? If bad then same question.
+Iterate on your own hypothesis and changes, make said changes, then submit model.
+Repeat the loop. 
+
+---
 
 -Create random forest of learners to predict stock values however utilize a dynamic learner. 
 Assign weights to the learner values which are predicting [-1,0,1], initially all weights are equal, but based on the outcome of the prediction, 
