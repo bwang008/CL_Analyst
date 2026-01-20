@@ -8,14 +8,26 @@ This module handles ETL (Extract, Transform, Load) for OHLCV data:
 - Normalization and cleanup
 - Saving processed data to Parquet/CSV
 
+Multiple dataset configurations are supported:
+- set_01: Base feature set with RSI, MACD, SMAs, Volatility, Log Returns
+- set_02: (Planned) Alternative feature set
+
 Author: CL Analyst
 """
 
 import os
+import json
 import numpy as np
 import pandas as pd
 import pandas_ta as ta
 from pathlib import Path
+
+
+# Dataset version suffix
+DATASET_VERSIONS = {
+    'set_01': 'Base features: RSI, MACD, SMAs, Volatility, Log Returns, Cyclical Time',
+    'set_02': 'Planned: Alternative feature set',
+}
 
 
 class DataProcessor:
@@ -34,20 +46,23 @@ class DataProcessor:
     MINUTES_PER_DAY = 1440
     
     def __init__(self, input_path: str = "data/raw/test100k.csv", 
-                 output_path: str = None):
+                 output_path: str = None,
+                 dataset_version: str = "set_01"):
         """
         Initialize the DataProcessor.
         
         Args:
             input_path: Path to the input CSV file (semicolon-separated, no headers)
             output_path: Path for processed output. If None, auto-generates based on input name.
+            dataset_version: Version identifier for the dataset (e.g., 'set_01', 'set_02')
         """
         self.input_path = input_path
+        self.dataset_version = dataset_version
         
         if output_path is None:
-            # Auto-generate output path based on input filename
+            # Auto-generate output path based on input filename and dataset version
             input_name = Path(input_path).stem
-            self.output_path = f"data/processed/{input_name}_PROCESSED.parquet"
+            self.output_path = f"data/processed/{input_name}_{dataset_version}.parquet"
         else:
             self.output_path = output_path
             
@@ -254,13 +269,13 @@ class DataProcessor:
         Args:
             df: DataFrame with High, Low, Close columns (absolute prices)
             threshold: Percentage threshold for significant move (default 0.08 = 8%)
-            horizon: Forward-looking window in bars (default: 288 = 24 hours)
+            horizon: Forward-looking window in bars (default: 576 = 48 hours)
             
         Returns:
             pd.DataFrame: DataFrame with Target column added
         """
         if horizon is None:
-            horizon = self.BARS_PER_DAY  # 288 bars = 24 hours
+            horizon = 2 * self.BARS_PER_DAY  # 576 bars = 48 hours
             
         print(f"Creating target with {threshold*100}% threshold, {horizon} bar ({horizon/self.BARS_PER_DAY:.1f} day) horizon...")
         
@@ -298,7 +313,7 @@ class DataProcessor:
         Normalize features for ML training.
         
         Transformations:
-        - OHLC prices: Convert to log returns
+        - OHLC prices: Convert to log returns (used for regime features, then dropped)
         - Moving averages: Convert to percent distance from Close
         - Volume: Apply log1p transformation
         
@@ -314,6 +329,7 @@ class DataProcessor:
         close_orig = df['Close'].copy()
         
         # 1. Convert OHLC to log returns
+        # These are intermediate features used for regime calculations
         for col in ['Open', 'High', 'Low', 'Close']:
             df[f'{col}_Return'] = np.log(df[col] / df[col].shift(1))
         
@@ -338,7 +354,59 @@ class DataProcessor:
         
         return df
     
-    def cleanup(self, df: pd.DataFrame) -> pd.DataFrame:
+    def add_regime_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Extract regime/microstructure features from raw returns.
+        
+        These features capture the "physics" of the market - volatility structure,
+        tail risk, and distribution shape - which are predictive of large moves.
+        
+        Features added:
+        - Parkinson_Vol_24H: High-Low range volatility (more efficient than Close-Close)
+        - Return_Skew_24H: Skewness of returns (detects fragility/crash risk)
+        - Return_Kurt_24H: Kurtosis of returns (fat tails / shock risk)
+        
+        Note: Raw return columns (Open_Return, etc.) will be dropped in cleanup()
+        since they are "noise" for predicting 48-hour moves.
+        
+        Args:
+            df: DataFrame with *_Return columns already calculated
+            
+        Returns:
+            pd.DataFrame: DataFrame with regime features added
+        """
+        print("Adding regime/microstructure features...")
+        
+        window_24h = self.BARS_PER_DAY  # 288 bars
+        
+        # 1. Parkinson Volatility (High-Low Range)
+        # High-Low range is ~5x more efficient at estimating volatility than Close-Close
+        # This captures "panic" that doesn't result in a net price change
+        df['Parkinson_Vol_24H'] = (df['High_Return'] - df['Low_Return']).pow(2).rolling(
+            window=window_24h, min_periods=1
+        ).mean().apply(np.sqrt)
+        
+        # 2. Return Skewness (Tail Risk / Crash Detection)
+        # Are returns lopsided? (e.g., lots of small ups, one big down?)
+        # Negative skew = potential crash risk
+        df['Return_Skew_24H'] = df['Close_Return'].rolling(
+            window=window_24h, min_periods=window_24h // 2
+        ).skew()
+        
+        # 3. Return Kurtosis (Fat Tails / Shock Risk)
+        # Are we seeing fatter tails than normal in the return distribution?
+        # High kurtosis = higher probability of extreme moves
+        df['Return_Kurt_24H'] = df['Close_Return'].rolling(
+            window=window_24h, min_periods=window_24h // 2
+        ).kurt()
+        
+        print(f"  - Parkinson_Vol_24H: High-Low range volatility ({window_24h} bars)")
+        print(f"  - Return_Skew_24H: Return distribution skewness ({window_24h} bars)")
+        print(f"  - Return_Kurt_24H: Return distribution kurtosis ({window_24h} bars)")
+        
+        return df
+    
+    def cleanup(self, df: pd.DataFrame, drop_raw_returns: bool = True) -> pd.DataFrame:
         """
         Clean up the DataFrame by removing raw columns and NaN rows.
         
@@ -346,11 +414,15 @@ class DataProcessor:
         1. Drop original raw price columns (Open, High, Low, Close)
         2. Drop original raw MA columns (SMA_20, SMA_30d)
         3. Drop original Volume column
-        4. Drop rows with any NaN values
-        5. Convert Target to integer type
+        4. Drop raw return columns (noise for long-horizon predictions)
+        5. Drop rows with any NaN values
+        6. Convert Target to integer type
         
         Args:
             df: DataFrame after normalization
+            drop_raw_returns: If True, drop the raw *_Return columns (default True)
+                             These are "noise" for 48-hour predictions but were
+                             needed to calculate regime features.
             
         Returns:
             pd.DataFrame: Cleaned DataFrame ready for training
@@ -361,6 +433,12 @@ class DataProcessor:
         
         # Columns to drop (raw values that have been normalized)
         cols_to_drop = ['Open', 'High', 'Low', 'Close', 'Volume', 'SMA_20', 'SMA_30d']
+        
+        # Also drop raw return columns - they are "ingredients" not "features"
+        # We've extracted the signal (volatility, skew, kurtosis); discard the noise
+        if drop_raw_returns:
+            cols_to_drop.extend(['Open_Return', 'High_Return', 'Low_Return', 'Close_Return'])
+        
         cols_existing = [col for col in cols_to_drop if col in df.columns]
         
         if cols_existing:
@@ -425,27 +503,53 @@ class DataProcessor:
     
     def process(self, threshold: float = 0.08, horizon: int = None) -> pd.DataFrame:
         """
-        Run the complete data processing pipeline.
+        Run the complete data processing pipeline based on dataset_version.
         
-        Pipeline steps:
-        1. Load data
-        2. Add time features (cyclical encoding)
-        3. Add technical indicators (RSI, MACD, SMAs)
-        4. Add volatility features
-        5. Create target labels (BEFORE normalization)
-        6. Normalize features
-        7. Cleanup (drop raw columns, remove NaN rows)
-        8. Save to file
+        Routes to the appropriate processing function:
+        - set_01: process_set_01() - Base features
+        - set_02: process_set_02() - Alternative features (planned)
         
         Args:
             threshold: Target threshold for significant price move (default 0.08 = 8%)
-            horizon: Forward-looking window for target in bars (default: 288 = 24 hours)
+            horizon: Forward-looking window for target in bars (default: 576 = 48 hours)
+            
+        Returns:
+            pd.DataFrame: Fully processed DataFrame
+        """
+        if self.dataset_version == "set_01":
+            return self.process_set_01(threshold=threshold, horizon=horizon)
+        elif self.dataset_version == "set_02":
+            return self.process_set_02(threshold=threshold, horizon=horizon)
+        else:
+            raise ValueError(f"Unknown dataset version: {self.dataset_version}. "
+                           f"Available: {list(DATASET_VERSIONS.keys())}")
+    
+    def process_set_01(self, threshold: float = 0.08, horizon: int = None) -> pd.DataFrame:
+        """
+        Process data using SET_01 feature configuration.
+        
+        SET_01 Features:
+        - Time: Time_Sin, Time_Cos (cyclical encoding of time of day)
+        - Momentum: RSI (14), MACD (12,26,9), MACD_Signal, MACD_Hist
+        - Trend: SMA_20_Dist, SMA_30d_Dist (percent distance from MAs)
+        - Volatility: VOL_3D, VOL_7D, VOL_30D (rolling std of returns)
+        - Regime: Parkinson_Vol_24H, Return_Skew_24H, Return_Kurt_24H
+        - Volume: Volume_Log (log-transformed)
+        - Target: 0=Hold, 1=Buy, 2=Sell (based on threshold % move in horizon)
+        
+        Note: Raw return columns (Open_Return, etc.) are calculated internally
+        for regime features but dropped from final output as they are "noise"
+        for long-horizon (48h) predictions.
+        
+        Args:
+            threshold: Target threshold for significant price move (default 0.08 = 8%)
+            horizon: Forward-looking window for target in bars (default: 576 = 48 hours)
             
         Returns:
             pd.DataFrame: Fully processed DataFrame
         """
         print("=" * 60)
-        print("Starting Data Processing Pipeline")
+        print(f"Starting Data Processing Pipeline - {self.dataset_version.upper()}")
         print("=" * 60)
         
         # Step 1: Load data
@@ -463,13 +567,16 @@ class DataProcessor:
         # Step 5: Create target (MUST be before normalization)
         df = self.create_target(df, threshold=threshold, horizon=horizon)
         
-        # Step 6: Normalize features
+        # Step 6: Normalize features (creates *_Return columns as intermediates)
         df = self.normalize_features(df)
         
-        # Step 7: Cleanup
-        df = self.cleanup(df)
+        # Step 7: Add regime features (extracts signal from returns)
+        df = self.add_regime_features(df)
         
-        # Step 8: Save
+        # Step 8: Cleanup (drops raw columns AND raw returns - they're "noise")
+        df = self.cleanup(df, drop_raw_returns=True)
+        
+        # Step 9: Save
         saved_path = self.save(df)
         
         print("=" * 60)
@@ -481,13 +588,44 @@ class DataProcessor:
         
         self.df = df
         return df
+    
+    def process_set_02(self, threshold: float = 0.08, horizon: int = None) -> pd.DataFrame:
+        """
+        Process data using SET_02 feature configuration.
+        
+        SET_02 Features: (PLACEHOLDER - To be implemented)
+        This is a template for an alternative feature set.
+        
+        Args:
+            threshold: Target threshold for significant price move (default 0.08 = 8%)
+            horizon: Forward-looking window for target in bars (default: 576 = 48 hours)
+            
+        Returns:
+            pd.DataFrame: Fully processed DataFrame
+        """
+        print("=" * 60)
+        print(f"Starting Data Processing Pipeline - {self.dataset_version.upper()}")
+        print("=" * 60)
+        
+        # Step 1: Load data
+        df = self.load_data()
+        
+        # TODO: Implement set_02 specific feature engineering
+        # For now, raise NotImplementedError
+        raise NotImplementedError(
+            "set_02 processing is not yet implemented. "
+            "Please define the features you want in process_set_02()."
+        )
 
 
-def main():
+def main(dataset_version: str = "set_01"):
     """
     Main entry point for running the data processor.
     
     Processes test100k.csv from data/raw/ and outputs to data/processed/.
+    
+    Args:
+        dataset_version: Which dataset configuration to use (default: 'set_01')
     """
     # Check if input file exists in data/raw/, if not try data/
     input_path = "data/raw/test100k.csv"
@@ -503,10 +641,10 @@ def main():
             return
     
     # Create processor and run pipeline
-    processor = DataProcessor(input_path=input_path)
+    processor = DataProcessor(input_path=input_path, dataset_version=dataset_version)
     
     try:
-        df = processor.process(threshold=0.08, horizon=288)
+        df = processor.process(threshold=0.08, horizon=576)
         
         # Print summary statistics
         print("\nFeature Summary:")
@@ -525,4 +663,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    # Allow passing dataset version as command line argument
+    version = sys.argv[1] if len(sys.argv) > 1 else "set_01"
+    main(dataset_version=version)
