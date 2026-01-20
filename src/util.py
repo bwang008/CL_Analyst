@@ -106,7 +106,7 @@ def get_robot_world_file(basefilename):
     )  		  	   		 	 	 			  		 			     			  	 
 
 
-def get_cl_data(data_file='data/test10k.csv'):
+def get_cl_data(data_file='data/raw/test10k.csv'):
     """
     Read OHLCV intraday data from CSV file which has no header row.
     Automatically detects separator (semicolon, comma, or tab) and applies appropriate formatting.

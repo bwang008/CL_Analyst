@@ -1,0 +1,145 @@
+{
+  "description": "Documentation for processed datasets in the CL Analyst ML pipeline",
+  "last_updated": "2026-01-20",
+  "datasets": {
+    "set_01": {
+      "name": "Base Feature Set",
+      "description": "Core technical indicators with normalized prices, volatility measures, and cyclical time encoding. Suitable for classification models predicting significant price moves.",
+      "parameters": {
+        "threshold": "0.08 (8% price move)",
+        "horizon": "576 bars (48 hours of 5-min data)"
+      },
+      "columns": {
+        "Time_Sin": {
+          "type": "float",
+          "description": "Sine component of cyclical time encoding",
+          "calculation": "sin(2 * pi * minutes_since_midnight / 1440)",
+          "range": "[-1, 1]",
+          "purpose": "Captures daily trading cycle patterns (e.g., market open/close effects)"
+        },
+        "Time_Cos": {
+          "type": "float",
+          "description": "Cosine component of cyclical time encoding",
+          "calculation": "cos(2 * pi * minutes_since_midnight / 1440)",
+          "range": "[-1, 1]",
+          "purpose": "Complements Time_Sin to fully encode circular time relationship"
+        },
+        "RSI": {
+          "type": "float",
+          "description": "Relative Strength Index (14-period)",
+          "calculation": "100 - (100 / (1 + avg_gain / avg_loss)) over 14 periods",
+          "range": "[0, 100]",
+          "purpose": "Momentum indicator; >70 overbought, <30 oversold"
+        },
+        "MACD": {
+          "type": "float",
+          "description": "Moving Average Convergence Divergence line",
+          "calculation": "EMA(12) - EMA(26) of Close price",
+          "range": "unbounded",
+          "purpose": "Trend-following momentum indicator"
+        },
+        "MACD_Signal": {
+          "type": "float",
+          "description": "MACD Signal line",
+          "calculation": "EMA(9) of MACD line",
+          "range": "unbounded",
+          "purpose": "Smoothed MACD for crossover signals"
+        },
+        "MACD_Hist": {
+          "type": "float",
+          "description": "MACD Histogram",
+          "calculation": "MACD - MACD_Signal",
+          "range": "unbounded",
+          "purpose": "Visualizes momentum strength and direction changes"
+        },
+        "VOL_3D": {
+          "type": "float",
+          "description": "3-day volatility",
+          "calculation": "Rolling standard deviation of returns over 864 bars (3 days)",
+          "range": "[0, inf)",
+          "purpose": "Short-term volatility measure"
+        },
+        "VOL_7D": {
+          "type": "float",
+          "description": "7-day volatility",
+          "calculation": "Rolling standard deviation of returns over 2016 bars (7 days)",
+          "range": "[0, inf)",
+          "purpose": "Medium-term volatility measure"
+        },
+        "VOL_30D": {
+          "type": "float",
+          "description": "30-day volatility",
+          "calculation": "Rolling standard deviation of returns over 8640 bars (30 days)",
+          "range": "[0, inf)",
+          "purpose": "Long-term volatility baseline"
+        },
+        "Target": {
+          "type": "int",
+          "description": "Classification target for ML training",
+          "calculation": "0=Hold (no 8% move), 1=Buy (price up >8% in 48h), 2=Sell (price down >8% in 48h)",
+          "range": "[0, 1, 2]",
+          "purpose": "Supervised learning label for price movement prediction"
+        },
+        "Parkinson_Vol_24H": {
+          "type": "float",
+          "description": "Parkinson volatility estimator using High-Low range",
+          "calculation": "sqrt(rolling_mean((High_Return - Low_Return)^2, 288 bars))",
+          "range": "[0, inf)",
+          "purpose": "More efficient volatility estimate than Close-Close; captures intrabar panic/activity that may not result in net price change"
+        },
+        "Return_Skew_24H": {
+          "type": "float",
+          "description": "Rolling skewness of 5-minute returns over 24 hours",
+          "calculation": "rolling_skew(Close_Return, 288 bars)",
+          "range": "unbounded (typically -3 to 3)",
+          "purpose": "Detects asymmetric return distribution; negative skew indicates crash risk (many small ups, occasional big down)"
+        },
+        "Return_Kurt_24H": {
+          "type": "float",
+          "description": "Rolling kurtosis of 5-minute returns over 24 hours",
+          "calculation": "rolling_kurt(Close_Return, 288 bars)",
+          "range": "unbounded (>3 is fat-tailed)",
+          "purpose": "Measures tail thickness; high kurtosis indicates elevated probability of extreme moves (shock risk)"
+        },
+        "SMA_20_Dist": {
+          "type": "float",
+          "description": "Percent distance from 20-period SMA",
+          "calculation": "(Close - SMA_20) / SMA_20",
+          "range": "unbounded (typically -0.1 to 0.1)",
+          "purpose": "Shows price position relative to short-term trend"
+        },
+        "SMA_30d_Dist": {
+          "type": "float",
+          "description": "Percent distance from 30-day SMA",
+          "calculation": "(Close - SMA_30d) / SMA_30d where SMA_30d uses 8640 bars",
+          "range": "unbounded",
+          "purpose": "Shows price position relative to long-term trend"
+        },
+        "Volume_Log": {
+          "type": "float",
+          "description": "Log-transformed volume",
+          "calculation": "log(1 + Volume)",
+          "range": "[0, inf)",
+          "purpose": "Normalized volume that handles spikes and zero values"
+        }
+      },
+      "notes": [
+        "Approximately 8640 rows are dropped due to NaN from 30-day rolling windows",
+        "Target is calculated BEFORE price normalization using absolute prices",
+        "If both Buy and Sell conditions are met, the larger move determines the label",
+        "Raw return columns (Open_Return, High_Return, Low_Return, Close_Return) are calculated internally but DROPPED from final output",
+        "Raw returns are 'noise' for 48-hour predictions - we extract their signal via regime features (Parkinson Vol, Skew, Kurtosis)"
+      ]
+    },
+    "set_02": {
+      "name": "Alternative Feature Set (Planned)",
+      "description": "To be implemented - placeholder for alternative feature engineering approach",
+      "parameters": {},
+      "columns": {},
+      "notes": [
+        "This dataset configuration is not yet implemented",
+        "Define your desired features in data_processor.py process_set_02()"
+      ]
+    }
+  }
+}
