@@ -1,4 +1,99 @@
-conda activate trader
+# CL Analyst - Crude Oil Futures ML Pipeline
 
-Run test_trader.py as the main function. 
-Calls all other objects. Builds data, calls trainer, simulates market, calcs metrics, etc...
+A machine learning pipeline for predicting significant price movements in Crude Oil (CL) futures using 5-minute OHLCV data.
+
+## Setup
+
+```bash
+conda activate trader
+```
+
+## Quick Start
+
+```bash
+# Generate default dataset (set_01)
+python main.py
+
+# Generate specific dataset
+python main.py set_02
+
+# Generate all datasets
+python main.py all
+
+# Force regenerate (even if file exists)
+python main.py set_01 --force
+python main.py all --force
+```
+
+## Project Structure
+
+```
+CL_Analyst/
+├── data/
+│   ├── raw/              # Raw OHLCV CSV files
+│   ├── processed/        # Generated ML-ready datasets
+│   └── DATASETS.json     # Documentation for each dataset
+├── src/
+│   ├── data_processor.py # Main ETL pipeline
+│   ├── indicatorBuilder.py
+│   └── util.py
+├── main.py               # Entry point
+└── README.me
+```
+
+## Available Datasets
+
+| Dataset | Time Features | Best For |
+|---------|---------------|----------|
+| `set_01` | Cyclical (Time_Sin, Time_Cos) | Linear models, Neural networks |
+| `set_02` | Raw (Hour, Minute) | Tree-based models (XGBoost, LightGBM) |
+
+### Common Features (both datasets)
+- **Momentum**: RSI, MACD, MACD_Signal, MACD_Hist
+- **Volatility**: VOL_3D, VOL_7D, VOL_30D
+- **Regime**: Parkinson_Vol_24H, Return_Skew_24H, Return_Kurt_24H
+- **Trend**: SMA_20_Dist, SMA_30d_Dist
+- **Volume**: Volume_Log
+- **Target**: 0=Hold, 1=Buy (8%+ up), 2=Sell (8%+ down) within 48 hours
+
+## Usage in Code
+
+```python
+from main import get_processed_cl_df
+
+# Load set_01 (cyclical time)
+df = get_processed_cl_df(dataset_version="set_01")
+
+# Load set_02 (raw time)
+df = get_processed_cl_df(dataset_version="set_02")
+
+# Force reprocess
+df = get_processed_cl_df(dataset_version="set_01", force_reprocess=True)
+```
+
+## Parameters
+
+Default processing parameters:
+- **threshold**: 0.08 (8% price move triggers Buy/Sell signal)
+- **horizon**: 576 bars (48 hours of 5-min data)
+
+To customize:
+```python
+df = get_processed_cl_df(
+    input_path="data/raw/your_data.csv",
+    dataset_version="set_01",
+    threshold=0.05,  # 5% move
+    horizon=288,     # 24 hours
+    force_reprocess=True
+)
+```
+
+## Output Files
+
+Generated files are saved to `data/processed/`:
+- `test100k_set_01.parquet` - Cyclical time encoding
+- `test100k_set_02.parquet` - Raw hour/minute
+
+## Dataset Documentation
+
+See `data/DATASETS.json` for detailed column descriptions and calculations.
