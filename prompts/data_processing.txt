@@ -1,7 +1,15 @@
-I want to feed to cursor a prompt to build a data_processor.py 
+Write me a planning prompt.
+I want to feed to cursor the prompt to build a data_processor.py 
 file in the src folder which will read by default "test.csv" from the data/ 
 folder that main.py resides in. I want this file to execute the functions 
 discussed here. 
 Build a modular process where it will load the raw data of test.csv, 
-Create the changes to the time column split and discussed,
+Create the changes to the time column using cyclical encoding,
+have both the datetime column as the index and the time column mentioned,
 add the header columns for the OHLCV data, 
+calculate and add the indicator columns,
+scale the data like discussed using percent and returns,
+reformat the data to cut out the columns that are not needed for training,
+save this file to data/processed as <filename>_PROCESSED.csv
+
+Review this plan and tell me if there are any steps I am missing or should include/exclude
