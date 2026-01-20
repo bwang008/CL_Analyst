@@ -89,8 +89,29 @@ def get_processed_cl_df(input_path="data/raw/test100k.csv",
 
 
 if __name__ == '__main__':
+    import sys
     
-    # Old CL df raw data (using indicatorBuilder)
+    # Parse command line arguments
+    # Usage: python main.py [dataset_version] [--force]
+    # Examples:
+    #   python main.py              # Run set_01 (default)
+    #   python main.py set_02       # Run set_02
+    #   python main.py all          # Run all datasets
+    #   python main.py set_01 --force  # Force reprocess set_01
+    
+    args = sys.argv[1:]
+    dataset_version = "set_01"  # Default
+    force_reprocess = "--force" in args
+    
+    if args and args[0] not in ["--force"]:
+        dataset_version = args[0]
+    
+    # Old CL df raw data (using indicatorBuilder) - only run if not generating specific dataset
+    if dataset_version not in ["set_01", "set_02", "all"]:
+        print(f"Unknown dataset version: {dataset_version}")
+        print("Available: set_01, set_02, all")
+        sys.exit(1)
+    
     print("=" * 60)
     print("OLD METHOD: Using indicatorBuilder")
     print("=" * 60)
@@ -101,11 +122,21 @@ if __name__ == '__main__':
     
     print("\n")
     
-    # New CL df processed data (using DataProcessor) - SET_01
-    print("=" * 60)
-    print("NEW METHOD: Using DataProcessor (set_01)")
-    print("=" * 60)
-    processed_features = get_processed_cl_df(dataset_version="set_01")
-    print("Total records:", processed_features.shape)
-    print("Columns:", list(processed_features.columns))
-    print(processed_features.head())
+    # Process requested dataset(s)
+    if dataset_version == "all":
+        datasets_to_process = ["set_01", "set_02"]
+    else:
+        datasets_to_process = [dataset_version]
+    
+    for ds_version in datasets_to_process:
+        print("=" * 60)
+        print(f"NEW METHOD: Using DataProcessor ({ds_version})")
+        print("=" * 60)
+        processed_features = get_processed_cl_df(
+            dataset_version=ds_version,
+            force_reprocess=force_reprocess
+        )
+        print("Total records:", processed_features.shape)
+        print("Columns:", list(processed_features.columns))
+        print(processed_features.head())
+        print("\n")
