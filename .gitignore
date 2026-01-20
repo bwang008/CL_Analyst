@@ -1,0 +1,14 @@
+/__pycache__
+*.pyc
+*.csv
+*.parquet
+*.json
+*.yaml
+*.yml
+*.jsonl
+*.jsonl.gz
+*.jsonl.bz2
+*.jsonl.xz
+*.jsonl.lzma
+*.jsonl.zstd
+*.pkl
