@@ -7,13 +7,13 @@ import pandas_ta as ta
 #import sklearn as sk
 import datetime as dt
 
-import StrategyLearner as sl
-import StrategyQLearner as sql
-import LearnerBag as lbg
-import LearnerRT as lrt
+import src.StrategyLearner as sl
+import src.StrategyQLearner as sql
+import src.LearnerBag as lbg
+import src.LearnerRT as lrt
 import os
 import yfinance as yf
-import util as ut
+import src.util as ut
 import marketsimcode as msc
 
 #import yfinance as yf

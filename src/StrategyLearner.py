@@ -33,15 +33,14 @@ import numpy as np
 from scipy import stats #This is to calculate the mode (Not sure why it can't be done in numpy..)
 
 import pandas as pd  		  	   		 	 	 			  		 			     			  	 
-  		  	   		 	 	 			  		 			     			  	 
-import pandas as pd  		  	   		 	 	 			  		 			     			  	 
-import util as ut  		  	   
+from . import util as ut  		  	   
 
 #Try to build with RTLearner
 
-import LearnerRT as rtl
+from . import LearnerRT as rtl
+from . import LearnerBag as bgl
+# Note: indicators.py is still in root, keep absolute import
 import indicators as ind
-import LearnerBag as bgl
   		  	   		 	 	 			  		 			     			  	 
   		  	   		 	 	 			  		 			     			  	 
 class StrategyLearner(object):  		  	   		 	 	 			  		 			     			  	 
