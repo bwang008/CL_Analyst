@@ -7,8 +7,8 @@ from sklearn.metrics import mean_squared_error, accuracy_score, roc_auc_score
 
 # --- Import your custom modules ---
 # The script now assumes you have these .py files in your project directory.
-import util
-import indicatorBuilder as ind
+import src.util as util
+import src.indicatorBuilder as ind
 
 if __name__ == '__main__':
     

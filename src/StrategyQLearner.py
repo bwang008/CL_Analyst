@@ -4,9 +4,10 @@ import datetime as dt
 import random
 import numpy as np
 import pandas as pd
-import util as ut
+from . import util as ut
+from . import QLearner as ql
+# Note: indicators.py is still in root, keep absolute import
 import indicators as ind
-import QLearner as ql
 import pdb # For debugging if needed
 
 class StrategyQLearner(object):

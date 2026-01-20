@@ -13,14 +13,15 @@ There will be a breakdown of the following
 
 import numpy as np
 import pandas as pd
-import util
-import indicatorBuilder as ind
+import src.util as util
+import src.indicatorBuilder as ind
 
 #data = pd.read_csv('data/cl-5m_bk.csv',sep=';',parse_dates=[[0,1]],index_col=0,dayfirst=True)
-data = pd.read_csv('data/test.csv',sep=';',header=None,index_col=None)
-        
-cols=['Date','Time','Open','High','Low','Close','Volume']
-data.columns = cols
+# Commented out - this code runs on import and causes issues when importing from notebooks
+# If needed, move this inside the if __name__ == '__main__' block or use absolute paths
+# data = pd.read_csv('data/test.csv',sep=';',header=None,index_col=None)
+# cols=['Date','Time','Open','High','Low','Close','Volume']
+# data.columns = cols
 
 #Merge the date and time columns to form single DT column and assign it as the index/key
 
@@ -31,16 +32,16 @@ data.columns = cols
 
 #data.head()
 
-if __name__ == '__main__':
-    
+def get_cl_df(cl_test_data="data/test.csv"):
     #Get the data
-    cl_test_data = util.get_cl_data()
-    print(cl_test_data.head())
-    
-    
-    #Generate the indicators
+    cl_test_data = util.get_cl_data(cl_test_data)
     features = ind.generate_features(cl_test_data)
+    #print(features.head())
+    return features
+
+if __name__ == '__main__':
+    features = get_cl_df()
     print(features.head())
     
-    #
+
     

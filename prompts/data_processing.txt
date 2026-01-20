@@ -1,0 +1,7 @@
+I want to feed to cursor a prompt to build a data_processor.py 
+file in the src folder which will read by default "test.csv" from the data/ 
+folder that main.py resides in. I want this file to execute the functions 
+discussed here. 
+Build a modular process where it will load the raw data of test.csv, 
+Create the changes to the time column split and discussed,
+add the header columns for the OHLCV data, 
