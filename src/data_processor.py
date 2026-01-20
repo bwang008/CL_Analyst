@@ -25,8 +25,8 @@ from pathlib import Path
 
 # Dataset version suffix
 DATASET_VERSIONS = {
-    'set_01': 'Base features: RSI, MACD, SMAs, Volatility, Log Returns, Cyclical Time',
-    'set_02': 'Planned: Alternative feature set',
+    'set_01': 'Base features with cyclical time (Time_Sin, Time_Cos)',
+    'set_02': 'Same as set_01 but with raw time (Hour, Minute)',
 }
 
 
@@ -141,6 +141,26 @@ class DataProcessor:
         # Cyclical encoding using sine and cosine
         df['Time_Sin'] = np.sin(2 * np.pi * minutes / self.MINUTES_PER_DAY)
         df['Time_Cos'] = np.cos(2 * np.pi * minutes / self.MINUTES_PER_DAY)
+        
+        return df
+    
+    def add_time_features_raw(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Add raw time features (Hour and Minute) instead of cyclical encoding.
+        
+        This provides direct hour and minute values which may be useful for
+        models that can learn non-linear time relationships on their own.
+        
+        Args:
+            df: DataFrame with DateTime index
+            
+        Returns:
+            pd.DataFrame: DataFrame with Hour and Minute columns added
+        """
+        print("Adding raw time features (Hour, Minute)...")
+        
+        df['Hour'] = df.index.hour
+        df['Minute'] = df.index.minute
         
         return df
     
@@ -593,8 +613,17 @@ class DataProcessor:
         """
         Process data using SET_02 feature configuration.
         
-        SET_02 Features: (PLACEHOLDER - To be implemented)
-        This is a template for an alternative feature set.
+        SET_02 is identical to SET_01 except for time features:
+        - Uses raw Hour and Minute instead of cyclical Time_Sin/Time_Cos
+        
+        SET_02 Features:
+        - Time: Hour (0-23), Minute (0-55 in 5-min increments)
+        - Momentum: RSI (14), MACD (12,26,9), MACD_Signal, MACD_Hist
+        - Trend: SMA_20_Dist, SMA_30d_Dist (percent distance from MAs)
+        - Volatility: VOL_3D, VOL_7D, VOL_30D (rolling std of returns)
+        - Regime: Parkinson_Vol_24H, Return_Skew_24H, Return_Kurt_24H
+        - Volume: Volume_Log (log-transformed)
+        - Target: 0=Hold, 1=Buy, 2=Sell (based on threshold % move in horizon)
         
         Args:
             threshold: Target threshold for significant price move (default 0.08 = 8%)
@@ -610,12 +639,39 @@ class DataProcessor:
         # Step 1: Load data
         df = self.load_data()
         
-        # TODO: Implement set_02 specific feature engineering
-        # For now, raise NotImplementedError
-        raise NotImplementedError(
-            "set_02 processing is not yet implemented. "
-            "Please define the features you want in process_set_02()."
-        )
+        # Step 2: Add RAW time features (Hour, Minute) - differs from set_01
+        df = self.add_time_features_raw(df)
+        
+        # Step 3: Add technical indicators
+        df = self.add_technical_indicators(df)
+        
+        # Step 4: Add volatility features
+        df = self.add_volatility_features(df)
+        
+        # Step 5: Create target (MUST be before normalization)
+        df = self.create_target(df, threshold=threshold, horizon=horizon)
+        
+        # Step 6: Normalize features (creates *_Return columns as intermediates)
+        df = self.normalize_features(df)
+        
+        # Step 7: Add regime features (extracts signal from returns)
+        df = self.add_regime_features(df)
+        
+        # Step 8: Cleanup (drops raw columns AND raw returns - they're "noise")
+        df = self.cleanup(df, drop_raw_returns=True)
+        
+        # Step 9: Save
+        saved_path = self.save(df)
+        
+        print("=" * 60)
+        print("Processing Complete!")
+        print(f"Output: {saved_path}")
+        print(f"Shape: {df.shape}")
+        print(f"Columns: {list(df.columns)}")
+        print("=" * 60)
+        
+        self.df = df
+        return df
 
 
 def main(dataset_version: str = "set_01"):
