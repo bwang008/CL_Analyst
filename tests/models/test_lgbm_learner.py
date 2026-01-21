@@ -35,11 +35,6 @@ class TestOverfittingCapability:
     100% accuracy on `y = 1 if x[0] > 0.5 else 0` is broken.
     """
     
-    @pytest.mark.xfail(
-        reason="LGBMLearner not yet implemented",
-        raises=NotImplementedError,
-        strict=True
-    )
     def test_lgbm_overfitting_capability(self, toy_classification_data):
         """
         Model must achieve 100% accuracy on trivially learnable data.
@@ -77,11 +72,6 @@ class TestOverfittingCapability:
         assert accuracy == 1.0, \
             f"Model should achieve 100% accuracy on trivial data, got {accuracy:.2%}"
     
-    @pytest.mark.xfail(
-        reason="LGBMLearner not yet implemented",
-        raises=NotImplementedError,
-        strict=True
-    )
     def test_lgbm_multiclass_overfitting(self):
         """
         Model must handle multiclass classification correctly.
@@ -134,11 +124,6 @@ class TestPersistence:
     - Production deployment is reproducible
     """
     
-    @pytest.mark.xfail(
-        reason="LGBMLearner not yet implemented",
-        raises=NotImplementedError,
-        strict=True
-    )
     def test_lgbm_persistence_identical_predictions(self, toy_classification_data):
         """
         Predictions must be bitwise identical after save/load.
@@ -188,11 +173,6 @@ class TestPersistence:
             if os.path.exists(filepath):
                 os.remove(filepath)
     
-    @pytest.mark.xfail(
-        reason="LGBMLearner not yet implemented",
-        raises=NotImplementedError,
-        strict=True
-    )
     def test_lgbm_persistence_file_created(self, toy_classification_data):
         """
         save() should create a file at the specified path.
@@ -218,11 +198,6 @@ class TestPersistence:
             if os.path.exists(filepath):
                 os.remove(filepath)
     
-    @pytest.mark.xfail(
-        reason="LGBMLearner not yet implemented",
-        raises=NotImplementedError,
-        strict=True
-    )
     def test_lgbm_load_nonexistent_file_raises(self):
         """
         load() should raise an error for nonexistent file.
@@ -249,11 +224,6 @@ class TestInputGuardrails:
     - Handle edge cases gracefully
     """
     
-    @pytest.mark.xfail(
-        reason="LGBMLearner not yet implemented",
-        raises=NotImplementedError,
-        strict=True
-    )
     def test_lgbm_missing_columns_error(self, toy_classification_data):
         """
         Model must raise error if predict() called with wrong feature count.
@@ -284,11 +254,6 @@ class TestInputGuardrails:
                "shape" in str(exc_info.value).lower() or \
                "mismatch" in str(exc_info.value).lower()
     
-    @pytest.mark.xfail(
-        reason="LGBMLearner not yet implemented",
-        raises=NotImplementedError,
-        strict=True
-    )
     def test_lgbm_extra_columns_error(self, toy_classification_data):
         """
         Model must raise error if predict() called with extra features.
@@ -308,21 +273,14 @@ class TestInputGuardrails:
     
     def test_lgbm_query_before_train_error(self):
         """
-        For the STUB phase, we expect NotImplementedError from LGBMLearner().
-        Once implemented, this test should be updated to expect an error from
-        query() when called before add_evidence().
+        query() must raise an error when called before add_evidence() or load().
         """
         from src.LGBMLearner import LGBMLearner
 
-        with pytest.raises(NotImplementedError):
-            learner = LGBMLearner(verbose=-1)
-            learner.query(np.array([[0.5]]))  # stub never reaches here
+        learner = LGBMLearner(verbose=-1)
+        with pytest.raises(ValueError):
+            learner.query(np.array([[0.5]]))
     
-    @pytest.mark.xfail(
-        reason="LGBMLearner not yet implemented",
-        raises=NotImplementedError,
-        strict=True
-    )
     def test_lgbm_empty_data_error(self):
         """
         Model must raise error when trained with empty data.
@@ -337,11 +295,6 @@ class TestInputGuardrails:
         with pytest.raises((ValueError, IndexError)):
             learner.add_evidence(X_empty, y_empty)
     
-    @pytest.mark.xfail(
-        reason="LGBMLearner not yet implemented",
-        raises=NotImplementedError,
-        strict=True
-    )
     def test_lgbm_mismatched_xy_shapes_error(self):
         """
         Model must raise error when X and y have different row counts.
@@ -369,11 +322,6 @@ class TestInterfaceCompliance:
     (RTLearner, BagLearner) for use in ensemble methods.
     """
     
-    @pytest.mark.xfail(
-        reason="LGBMLearner not yet implemented",
-        raises=NotImplementedError,
-        strict=True
-    )
     def test_lgbm_has_add_evidence_method(self):
         """
         LGBMLearner must have add_evidence(x_data, y_data) method.
@@ -385,11 +333,6 @@ class TestInterfaceCompliance:
         assert hasattr(learner, 'add_evidence')
         assert callable(getattr(learner, 'add_evidence'))
     
-    @pytest.mark.xfail(
-        reason="LGBMLearner not yet implemented",
-        raises=NotImplementedError,
-        strict=True
-    )
     def test_lgbm_has_query_method(self):
         """
         LGBMLearner must have query(x_data) method.
@@ -401,11 +344,6 @@ class TestInterfaceCompliance:
         assert hasattr(learner, 'query')
         assert callable(getattr(learner, 'query'))
     
-    @pytest.mark.xfail(
-        reason="LGBMLearner not yet implemented",
-        raises=NotImplementedError,
-        strict=True
-    )
     def test_lgbm_query_returns_numpy_array(self, toy_classification_data):
         """
         query() must return a numpy array.
@@ -422,11 +360,6 @@ class TestInterfaceCompliance:
         assert isinstance(predictions, np.ndarray), \
             f"query() should return numpy array, got {type(predictions)}"
     
-    @pytest.mark.xfail(
-        reason="LGBMLearner not yet implemented",
-        raises=NotImplementedError,
-        strict=True
-    )
     def test_lgbm_query_returns_correct_shape(self, toy_classification_data):
         """
         query() must return predictions with shape (n_samples,).
@@ -444,11 +377,6 @@ class TestInterfaceCompliance:
         assert predictions.shape == (n_samples,), \
             f"predictions should have shape ({n_samples},), got {predictions.shape}"
     
-    @pytest.mark.xfail(
-        reason="LGBMLearner not yet implemented",
-        raises=NotImplementedError,
-        strict=True
-    )
     def test_lgbm_author_method(self):
         """
         LGBMLearner should have author() method returning identifier.
@@ -472,11 +400,6 @@ class TestReproducibility:
     Tests that verify training is reproducible with same random seed.
     """
     
-    @pytest.mark.xfail(
-        reason="LGBMLearner not yet implemented",
-        raises=NotImplementedError,
-        strict=True
-    )
     def test_lgbm_reproducible_with_seed(self, toy_classification_data):
         """
         Two models with same random_state should produce identical predictions.
@@ -500,11 +423,6 @@ class TestReproducibility:
             err_msg="Models with same random_state should produce identical predictions"
         )
     
-    @pytest.mark.xfail(
-        reason="LGBMLearner not yet implemented",
-        raises=NotImplementedError,
-        strict=True
-    )
     def test_lgbm_different_seeds_may_differ(self, toy_classification_data):
         """
         Two models with different random_states may produce different predictions.
