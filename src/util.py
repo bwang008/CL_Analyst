@@ -147,3 +147,89 @@ def get_cl_data(data_file='data/raw/test10k.csv'):
     # If we get here, none of the separators worked
     raise ValueError(f"Could not read {data_file} with any of the separators: {separators}. "
                     f"Please check the file format.")
+
+
+# =============================================================================
+# ML Pipeline Utilities
+# =============================================================================
+
+# Column prefixes that should be excluded from ML features
+EXCLUDED_PREFIXES = ('RAW_', 'TARGET_', 'META_')
+
+
+def get_feature_columns(df: pd.DataFrame) -> list:
+    """
+    Returns column names that are valid ML features.
+    
+    Excludes columns starting with:
+    - RAW_: Raw/diagnostic data for evaluation (e.g., RAW_Close, RAW_Future_High)
+    - TARGET_: Target labels for training (e.g., TARGET_Direction)
+    - META_: Metadata columns (e.g., META_Symbol)
+    
+    This is the SINGLE SOURCE OF TRUTH for what the model sees.
+    All training/evaluation code should use this function to extract features.
+    
+    Args:
+        df: DataFrame containing processed data with features, RAW_, and TARGET_ columns
+        
+    Returns:
+        list: Column names that are valid ML features (no excluded prefixes)
+        
+    Example:
+        >>> df.columns
+        ['RSI', 'MACD', 'RAW_Close', 'RAW_Future_High', 'TARGET_Direction']
+        >>> get_feature_columns(df)
+        ['RSI', 'MACD']
+    """
+    return [col for col in df.columns if not col.startswith(EXCLUDED_PREFIXES)]
+
+
+def get_target_column(df: pd.DataFrame, target_name: str = 'TARGET_Direction') -> str:
+    """
+    Returns the target column name if it exists in the DataFrame.
+    
+    Args:
+        df: DataFrame to check
+        target_name: Expected target column name (default: 'TARGET_Direction')
+        
+    Returns:
+        str: The target column name
+        
+    Raises:
+        ValueError: If target column is not found in DataFrame
+    """
+    if target_name not in df.columns:
+        target_cols = [c for c in df.columns if c.startswith('TARGET_')]
+        raise ValueError(
+            f"Target column '{target_name}' not found. "
+            f"Available TARGET_ columns: {target_cols}"
+        )
+    return target_name
+
+
+def get_X_y(df: pd.DataFrame, target_name: str = 'TARGET_Direction'):
+    """
+    Safely extract features (X) and target (y) from a DataFrame.
+    
+    This function ensures that only valid feature columns are used for X,
+    preventing data leakage from RAW_ or other excluded columns.
+    
+    Args:
+        df: DataFrame containing features and target
+        target_name: Name of the target column (default: 'TARGET_Direction')
+        
+    Returns:
+        tuple: (X, y) where X is a DataFrame of features and y is a Series of targets
+        
+    Example:
+        >>> X, y = get_X_y(df)
+        >>> X.columns  # Only feature columns, no RAW_ or TARGET_
+        ['RSI', 'MACD', 'VOL_3D', ...]
+    """
+    feature_cols = get_feature_columns(df)
+    target_col = get_target_column(df, target_name)
+    
+    X = df[feature_cols]
+    y = df[target_col]
+    
+    return X, y

@@ -276,12 +276,17 @@ class DataProcessor:
     def create_target(self, df: pd.DataFrame, threshold: float = 0.08, 
                       horizon: int = None) -> pd.DataFrame:
         """
-        Create target labels for classification.
+        Create target labels for classification and RAW_ columns for evaluation.
         
-        Target values:
+        Target values (stored as TARGET_Direction):
         - 0: Hold (no significant move)
         - 1: Buy signal (price moves up > threshold)
         - 2: Sell signal (price moves down > threshold)
+        
+        RAW_ columns (for evaluation, NOT used as features):
+        - RAW_Close: Current close price (for visualization)
+        - RAW_Future_High: Max high price over horizon (for actual move calculation)
+        - RAW_Future_Low: Min low price over horizon (for actual move calculation)
         
         IMPORTANT: This must be called BEFORE normalizing prices, as it requires
         absolute price values to calculate percentage moves.
@@ -292,7 +297,7 @@ class DataProcessor:
             horizon: Forward-looking window in bars (default: 576 = 48 hours)
             
         Returns:
-            pd.DataFrame: DataFrame with Target column added
+            pd.DataFrame: DataFrame with TARGET_Direction and RAW_ columns added
         """
         if horizon is None:
             horizon = 2 * self.BARS_PER_DAY  # 576 bars = 48 hours
@@ -305,26 +310,33 @@ class DataProcessor:
         future_high = df['High'].iloc[::-1].rolling(window=horizon, min_periods=1).max().iloc[::-1].shift(-1)
         future_low = df['Low'].iloc[::-1].rolling(window=horizon, min_periods=1).min().iloc[::-1].shift(-1)
         
+        # Store RAW_ columns for evaluation (these are NOT features - filtered out by get_feature_columns())
+        # These allow the evaluator to calculate actual move magnitudes vs predictions
+        df['RAW_Close'] = df['Close'].copy()
+        df['RAW_Future_High'] = future_high
+        df['RAW_Future_Low'] = future_low
+        print("  - Added RAW_Close, RAW_Future_High, RAW_Future_Low for evaluation")
+        
         # Calculate percentage moves from current close
         up_move = (future_high - df['Close']) / df['Close']
         down_move = (df['Close'] - future_low) / df['Close']
         
-        # Create target labels
-        df['Target'] = 0  # Default: Hold
-        df.loc[up_move > threshold, 'Target'] = 1   # Buy signal
-        df.loc[down_move > threshold, 'Target'] = 2  # Sell signal
+        # Create target labels (will be renamed to TARGET_Direction in cleanup)
+        df['TARGET_Direction'] = 0  # Default: Hold
+        df.loc[up_move > threshold, 'TARGET_Direction'] = 1   # Buy signal
+        df.loc[down_move > threshold, 'TARGET_Direction'] = 2  # Sell signal
         
         # If both conditions are met, prioritize based on which move is larger
         both_signals = (up_move > threshold) & (down_move > threshold)
-        df.loc[both_signals & (up_move >= down_move), 'Target'] = 1
-        df.loc[both_signals & (down_move > up_move), 'Target'] = 2
+        df.loc[both_signals & (up_move >= down_move), 'TARGET_Direction'] = 1
+        df.loc[both_signals & (down_move > up_move), 'TARGET_Direction'] = 2
         
         # The last 'horizon' rows don't have enough forward data - mark as NaN
-        df.loc[df.index[-horizon:], 'Target'] = np.nan
+        df.loc[df.index[-horizon:], 'TARGET_Direction'] = np.nan
         
         # Print distribution
-        target_counts = df['Target'].value_counts(dropna=False)
-        print(f"  - Target distribution: {dict(target_counts)}")
+        target_counts = df['TARGET_Direction'].value_counts(dropna=False)
+        print(f"  - TARGET_Direction distribution: {dict(target_counts)}")
         
         return df
     
@@ -431,12 +443,16 @@ class DataProcessor:
         Clean up the DataFrame by removing raw columns and NaN rows.
         
         Steps:
-        1. Drop original raw price columns (Open, High, Low, Close)
+        1. Drop original raw price columns (Open, High, Low, Close) - but keep RAW_ prefixed versions
         2. Drop original raw MA columns (SMA_20, SMA_30d)
         3. Drop original Volume column
         4. Drop raw return columns (noise for long-horizon predictions)
         5. Drop rows with any NaN values
-        6. Convert Target to integer type
+        6. Convert TARGET_Direction to integer type
+        
+        Note: RAW_ prefixed columns (RAW_Close, RAW_Future_High, RAW_Future_Low) are 
+        preserved for evaluation. They are filtered out by get_feature_columns() 
+        and never used as ML features.
         
         Args:
             df: DataFrame after normalization
@@ -452,6 +468,7 @@ class DataProcessor:
         rows_before = len(df)
         
         # Columns to drop (raw values that have been normalized)
+        # Note: RAW_ prefixed columns are NOT dropped - they are needed for evaluation
         cols_to_drop = ['Open', 'High', 'Low', 'Close', 'Volume', 'SMA_20', 'SMA_30d']
         
         # Also drop raw return columns - they are "ingredients" not "features"
@@ -472,9 +489,9 @@ class DataProcessor:
         print(f"  - Dropped {rows_before - rows_after} rows with NaN values")
         print(f"  - Remaining rows: {rows_after}")
         
-        # Convert Target to integer if it exists
-        if 'Target' in df.columns:
-            df['Target'] = df['Target'].astype(int)
+        # Convert TARGET_Direction to integer if it exists
+        if 'TARGET_Direction' in df.columns:
+            df['TARGET_Direction'] = df['TARGET_Direction'].astype(int)
         
         # Verify no NaN values remain
         nan_count = df.isna().sum().sum()
@@ -482,6 +499,14 @@ class DataProcessor:
             print(f"  WARNING: {nan_count} NaN values still present!")
         else:
             print("  - Verified: No NaN values in final DataFrame")
+        
+        # Report which columns are features vs RAW/TARGET
+        feature_cols = [c for c in df.columns if not c.startswith(('RAW_', 'TARGET_', 'META_'))]
+        raw_cols = [c for c in df.columns if c.startswith('RAW_')]
+        target_cols = [c for c in df.columns if c.startswith('TARGET_')]
+        print(f"  - Feature columns ({len(feature_cols)}): {feature_cols}")
+        print(f"  - RAW columns (for eval): {raw_cols}")
+        print(f"  - TARGET columns: {target_cols}")
         
         return df
     
@@ -684,7 +709,8 @@ def main(dataset_version: str = "set_01"):
         dataset_version: Which dataset configuration to use (default: 'set_01')
     """
     # Check if input file exists in data/raw/, if not try data/
-    input_path = "data/raw/test100k.csv"
+    #input_path = "data/raw/test100k.csv"
+    input_path = "data/raw/CL.csv"
     if not os.path.exists(input_path):
         # Try the main data folder as fallback
         alt_path = "data/test100k.csv"
@@ -707,10 +733,10 @@ def main(dataset_version: str = "set_01"):
         print("-" * 40)
         print(df.describe().T)
         
-        if 'Target' in df.columns:
-            print("\nTarget Distribution:")
+        if 'TARGET_Direction' in df.columns:
+            print("\nTARGET_Direction Distribution:")
             print("-" * 40)
-            print(df['Target'].value_counts().sort_index())
+            print(df['TARGET_Direction'].value_counts().sort_index())
             
     except Exception as e:
         print(f"Error during processing: {e}")

@@ -11,19 +11,34 @@ conda activate trader
 ## Quick Start
 
 ```bash
-# Generate default dataset (set_01)
-python main.py
+# Process raw data into ML-ready features
+python main.py process
 
-# Generate specific dataset
-python main.py set_02
+# Force reprocess even if output exists
+python main.py process --force
 
-# Generate all datasets
-python main.py all
+# Train and evaluate with walk-forward validation
+python main.py train
 
-# Force regenerate (even if file exists)
-python main.py set_01 --force
-python main.py all --force
+# Train with a specific processed file
+python main.py train data/processed/CL_set_01.parquet
 ```
+
+## Run data_processor.py Directly
+
+If you want to process a specific raw file without using `main.py`, call
+`DataProcessor` directly so you can set both the input file and dataset set.
+
+```bash
+# Example: process data/raw/CL.csv as set_01
+python -c "from src.data_processor import DataProcessor; DataProcessor(input_path='data/raw/CL.csv', dataset_version='set_01').process()"
+
+# Example: process data/raw/CL.csv as set_02
+python -c "from src.data_processor import DataProcessor; DataProcessor(input_path='data/raw/CL.csv', dataset_version='set_02').process()"
+```
+
+This writes to `data/processed/CL_set_01.parquet` or `data/processed/CL_set_02.parquet`
+(CSV fallback if Parquet is unavailable).
 
 ## Project Structure
 
@@ -35,9 +50,15 @@ CL_Analyst/
 │   └── DATASETS.json     # Documentation for each dataset
 ├── src/
 │   ├── data_processor.py # Main ETL pipeline
+│   ├── walk_forward.py   # Walk-forward splitter
+│   ├── evaluator.py      # Metrics + actual move analysis
+│   ├── visualizer.py     # Plots for signals and fold summaries
+│   ├── LGBMLearner.py    # LightGBM model wrapper
 │   ├── indicatorBuilder.py
 │   └── util.py
-├── main.py               # Entry point
+├── main.py               # CLI entry point (process/train)
+├── reports/              # Metrics + plots (generated)
+├── models/               # Saved models (generated)
 └── README.me
 ```
 
@@ -59,7 +80,7 @@ CL_Analyst/
 ## Usage in Code
 
 ```python
-from main import get_processed_cl_df
+from main import get_processed_cl_df, train_and_evaluate
 
 # Load set_01 (cyclical time)
 df = get_processed_cl_df(dataset_version="set_01")
@@ -69,6 +90,18 @@ df = get_processed_cl_df(dataset_version="set_02")
 
 # Force reprocess
 df = get_processed_cl_df(dataset_version="set_01", force_reprocess=True)
+
+# Run walk-forward training and evaluation
+results = train_and_evaluate(
+    data_path="data/processed/CL_set_01.parquet",
+    holdout_pct=0.15,
+    purge_bars=576,
+    min_train_bars=8640,
+    fold_size_bars=8640,
+    threshold=0.08,
+    output_dir="reports",
+    model_dir="models",
+)
 ```
 
 ## Parameters
@@ -90,10 +123,27 @@ df = get_processed_cl_df(
 
 ## Output Files
 
-Generated files are saved to `data/processed/`:
-- `test100k_set_01.parquet` - Cyclical time encoding
-- `test100k_set_02.parquet` - Raw hour/minute
+Generated files are saved to:
+- `data/processed/` for datasets (parquet or csv fallback)
+- `reports/` for metrics and plots:
+  - `metrics.json` (fold aggregate)
+  - `vault_metrics.json` (holdout evaluation)
+  - `fold_predictions.csv`, `vault_predictions.csv`
+  - `fold_summary.png`, `vault_signals.png`, `actual_moves_distribution.png`
+- `models/` for trained models (e.g., `final_model.pkl`)
 
 ## Dataset Documentation
 
 See `data/DATASETS.json` for detailed column descriptions and calculations.
+
+## Tests
+
+```bash
+pytest
+```
+
+Targeted tests for the new modules:
+
+```bash
+pytest tests/test_walk_forward.py tests/test_evaluator.py tests/test_visualizer.py
+```

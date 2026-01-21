@@ -1,22 +1,30 @@
 '''
-This will serve as a testing shell for the market analyzer and forecaster that I am planning to use for CL trading
+CL Futures ML Pipeline - Main Entry Point
 
-There will be a breakdown of the following
+This module serves as the main entry point for:
+1. Data Processing: Convert raw OHLCV data to ML-ready features
+2. Model Training: Train LightGBM models with walk-forward validation
+3. Evaluation: Generate metrics and visualizations
 
--Data builder - Takes the raw csv file for the CL data, and produces the post-processed datasets that will be used for analysis
+Usage:
+    python main.py process [--force]     # Process raw data
+    python main.py train [data_path]     # Train and evaluate model
+    python main.py --help                # Show help
 
-    -Window analysis - Breaks the raw data into windows which provide summaries of metrics
-    -Trade opportunities - Highlights conditions where a buy or a sell would have resulted in significant profit and provides metrics
-        for these moments
-    -Reversal/Trend finder
+Author: CL Analyst
 '''
 
 import os
+import sys
 import numpy as np
 import pandas as pd
 import src.util as util
 import src.indicatorBuilder as ind
 from src.data_processor import DataProcessor
+from src.LGBMLearner import LGBMLearner
+from src.walk_forward import WalkForwardSplitter, walk_forward_validate
+from src.evaluator import ModelEvaluator
+from src.visualizer import SignalVisualizer
 
 #data = pd.read_csv('data/cl-5m_bk.csv',sep=';',parse_dates=[[0,1]],index_col=0,dayfirst=True)
 # Commented out - this code runs on import and causes issues when importing from notebooks
@@ -88,55 +96,324 @@ def get_processed_cl_df(input_path="data/raw/test100k.csv",
     return processor.process(threshold=threshold, horizon=horizon)
 
 
-if __name__ == '__main__':
-    import sys
+def train_and_evaluate(
+    data_path: str = "data/processed/CL_set_01.parquet",
+    holdout_pct: float = 0.15,
+    purge_bars: int = 576,
+    min_train_bars: int = 8640,
+    fold_size_bars: int = 8640,
+    threshold: float = 0.08,
+    output_dir: str = "reports",
+    model_dir: str = "models",
+    model_params: dict = None,
+    verbose: bool = True,
+):
+    """
+    Train and evaluate an LightGBM model using walk-forward validation.
     
-    # Parse command line arguments
-    # Usage: python main.py [dataset_version] [--force]
-    # Examples:
-    #   python main.py              # Run set_01 (default)
-    #   python main.py set_02       # Run set_02
-    #   python main.py all          # Run all datasets
-    #   python main.py set_01 --force  # Force reprocess set_01
+    This function orchestrates the full ML pipeline:
+    1. Load processed data (with features, RAW_, and TARGET_ columns)
+    2. Split into gym (85%) and vault (15%) holdout
+    3. Run walk-forward validation on gym with expanding window
+    4. Evaluate each fold and generate metrics
+    5. Final evaluation on vault (untouched until now)
+    6. Generate reports and visualizations
     
-    args = sys.argv[1:]
-    dataset_version = "set_01"  # Default
-    force_reprocess = "--force" in args
-    
-    if args and args[0] not in ["--force"]:
-        dataset_version = args[0]
-    
-    # Old CL df raw data (using indicatorBuilder) - only run if not generating specific dataset
-    if dataset_version not in ["set_01", "set_02", "all"]:
-        print(f"Unknown dataset version: {dataset_version}")
-        print("Available: set_01, set_02, all")
-        sys.exit(1)
-    
+    Args:
+        data_path: Path to processed data file (parquet or CSV)
+        holdout_pct: Percentage of data for final holdout (0.15 = 15%)
+        purge_bars: Gap between train/test to prevent leakage (576 = 48h)
+        min_train_bars: Minimum training set size (8640 = ~30 days)
+        fold_size_bars: Size of each test fold (8640 = ~30 days)
+        threshold: Target threshold used in data processing (for evaluation)
+        output_dir: Directory for reports and visualizations
+        model_dir: Directory for saved models
+        model_params: Optional dict of LightGBM parameters
+        verbose: Whether to print progress
+        
+    Returns:
+        dict: Results containing fold_results, vault_result, and report
+    """
     print("=" * 60)
-    print("OLD METHOD: Using indicatorBuilder")
+    print("TRAIN AND EVALUATE PIPELINE")
     print("=" * 60)
-    features = get_cl_df()
-    print("Total records:", features.shape)
-    print("Columns:", list(features.columns))
-    print(features.head())
     
-    print("\n")
+    # -------------------------------------------------------------------------
+    # Step 1: Load processed data
+    # -------------------------------------------------------------------------
+    print(f"\n[Step 1] Loading data from {data_path}...")
     
-    # Process requested dataset(s)
-    if dataset_version == "all":
-        datasets_to_process = ["set_01", "set_02"]
+    if not os.path.exists(data_path):
+        # Try alternative extensions
+        alt_paths = [
+            data_path.replace('.parquet', '.csv'),
+            data_path.replace('.csv', '.parquet'),
+        ]
+        for alt in alt_paths:
+            if os.path.exists(alt):
+                data_path = alt
+                break
+        else:
+            raise FileNotFoundError(f"Data file not found: {data_path}")
+    
+    if data_path.endswith('.parquet'):
+        df = pd.read_parquet(data_path)
     else:
-        datasets_to_process = [dataset_version]
+        df = pd.read_csv(data_path, index_col=0, parse_dates=True)
     
-    for ds_version in datasets_to_process:
+    print(f"  Loaded {len(df):,} rows, {len(df.columns)} columns")
+    print(f"  Date range: {df.index[0]} to {df.index[-1]}")
+    
+    # Verify required columns
+    feature_cols = util.get_feature_columns(df)
+    required_raw = ['RAW_Close', 'RAW_Future_High', 'RAW_Future_Low']
+    missing_raw = [c for c in required_raw if c not in df.columns]
+    if missing_raw:
+        raise ValueError(
+            f"Missing required RAW columns: {missing_raw}. "
+            "Please reprocess data with the updated data_processor.py"
+        )
+    
+    if 'TARGET_Direction' not in df.columns:
+        raise ValueError(
+            "Missing TARGET_Direction column. "
+            "Please reprocess data with the updated data_processor.py"
+        )
+    
+    print(f"  Feature columns ({len(feature_cols)}): {feature_cols[:5]}...")
+    print(f"  RAW columns: {[c for c in df.columns if c.startswith('RAW_')]}")
+    print(f"  TARGET columns: {[c for c in df.columns if c.startswith('TARGET_')]}")
+    
+    # -------------------------------------------------------------------------
+    # Step 2: Create splitter and split data
+    # -------------------------------------------------------------------------
+    print(f"\n[Step 2] Setting up walk-forward validation...")
+    
+    splitter = WalkForwardSplitter(
+        holdout_pct=holdout_pct,
+        purge_bars=purge_bars,
+        min_train_bars=min_train_bars,
+        fold_size_bars=fold_size_bars,
+    )
+    
+    gym_df, vault_df = splitter.get_holdout(df)
+    
+    # -------------------------------------------------------------------------
+    # Step 3: Walk-forward validation on gym
+    # -------------------------------------------------------------------------
+    print(f"\n[Step 3] Running walk-forward validation...")
+    
+    if model_params is None:
+        model_params = {
+            'n_estimators': 100,
+            'learning_rate': 0.1,
+            'num_leaves': 31,
+            'verbose': -1,
+        }
+    
+    fold_results, _ = walk_forward_validate(
+        df=gym_df,
+        model_class=LGBMLearner,
+        model_params=model_params,
+        splitter=splitter,
+        verbose=verbose,
+    )
+    
+    # -------------------------------------------------------------------------
+    # Step 4: Evaluate folds
+    # -------------------------------------------------------------------------
+    print(f"\n[Step 4] Evaluating fold results...")
+    
+    evaluator = ModelEvaluator(threshold=threshold)
+    
+    evaluated_folds = []
+    for fold_result in fold_results:
+        eval_result = evaluator.evaluate_fold(
+            y_true=fold_result['y_true'],
+            y_pred=fold_result['y_pred'],
+            df_test=fold_result['df_test'],
+        )
+        eval_result['fold'] = fold_result['fold']
+        eval_result['train_size'] = fold_result['train_size']
+        eval_result['test_size'] = fold_result['test_size']
+        eval_result['train_date_range'] = fold_result['train_date_range']
+        eval_result['test_date_range'] = fold_result['test_date_range']
+        evaluated_folds.append(eval_result)
+    
+    # Generate aggregate report
+    report = evaluator.generate_report(evaluated_folds)
+    
+    # Print report
+    if verbose:
+        evaluator.print_report(report)
+    
+    # -------------------------------------------------------------------------
+    # Step 5: Final evaluation on vault
+    # -------------------------------------------------------------------------
+    print(f"\n[Step 5] Final evaluation on vault (holdout set)...")
+    
+    # Train final model on entire gym set
+    X_gym, y_gym = util.get_X_y(gym_df)
+    final_model = LGBMLearner(**model_params)
+    final_model.add_evidence(X_gym, y_gym)
+    
+    # Predict on vault
+    X_vault, y_vault = util.get_X_y(vault_df)
+    y_vault_pred = final_model.query(X_vault)
+    
+    vault_eval = evaluator.evaluate_fold(
+        y_true=y_vault.values,
+        y_pred=y_vault_pred,
+        df_test=vault_df,
+    )
+    
+    print(f"\n  Vault Results:")
+    print(f"    Accuracy: {vault_eval['accuracy']:.4f}")
+    print(f"    Samples: {vault_eval['n_samples']:,}")
+    
+    # -------------------------------------------------------------------------
+    # Step 6: Save results and generate visualizations
+    # -------------------------------------------------------------------------
+    print(f"\n[Step 6] Saving results and generating visualizations...")
+    
+    # Create output directories
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(model_dir, exist_ok=True)
+    
+    # Save report
+    report_path = os.path.join(output_dir, "metrics.json")
+    evaluator.save_report(report, report_path)
+    
+    # Save vault report
+    vault_report_path = os.path.join(output_dir, "vault_metrics.json")
+    vault_report = {
+        'accuracy': vault_eval['accuracy'],
+        'precision': vault_eval['precision'],
+        'recall': vault_eval['recall'],
+        'f1': vault_eval['f1'],
+        'confusion_matrix': vault_eval['confusion_matrix'].tolist(),
+        'n_samples': vault_eval['n_samples'],
+        'move_analysis': vault_eval['move_analysis'],
+    }
+    evaluator.save_report(vault_report, vault_report_path)
+    
+    # Export predictions
+    predictions_path = os.path.join(output_dir, "fold_predictions.csv")
+    evaluator.export_predictions(evaluated_folds, predictions_path)
+    
+    # Export vault predictions
+    vault_predictions_path = os.path.join(output_dir, "vault_predictions.csv")
+    vault_eval['actual_moves'].to_csv(vault_predictions_path)
+    print(f"  Saved vault predictions to {vault_predictions_path}")
+    
+    # Save final model
+    model_path = os.path.join(model_dir, "final_model.pkl")
+    final_model.save(model_path)
+    print(f"  Saved final model to {model_path}")
+    
+    # Generate visualizations
+    visualizer = SignalVisualizer()
+    
+    # Fold summary plot
+    fold_summary_path = os.path.join(output_dir, "fold_summary.png")
+    visualizer.plot_fold_summary(fold_results, fold_summary_path)
+    
+    # Signal plot for vault
+    signals_path = os.path.join(output_dir, "vault_signals.png")
+    visualizer.plot_signals(
+        vault_df, y_vault_pred, signals_path,
+        title="Vault Set: Model Signals"
+    )
+    
+    # Actual moves distribution
+    moves_path = os.path.join(output_dir, "actual_moves_distribution.png")
+    visualizer.plot_actual_moves(vault_eval['actual_moves'], moves_path)
+    
+    print("\n" + "=" * 60)
+    print("PIPELINE COMPLETE")
+    print("=" * 60)
+    print(f"\nOutputs saved to:")
+    print(f"  - Reports: {output_dir}/")
+    print(f"  - Models: {model_dir}/")
+    
+    return {
+        'fold_results': evaluated_folds,
+        'vault_result': vault_eval,
+        'report': report,
+        'final_model': final_model,
+    }
+
+
+def print_help():
+    """Print usage help."""
+    print("""
+CL Futures ML Pipeline
+
+Usage:
+    python main.py process [--force]           Process raw data to ML-ready features
+    python main.py train [data_path]           Train and evaluate model
+    python main.py --help                      Show this help message
+
+Commands:
+    process     Run data processing pipeline
+                --force: Force reprocessing even if output exists
+    
+    train       Train model with walk-forward validation
+                data_path: Path to processed data (default: data/processed/CL_set_01.parquet)
+
+Examples:
+    python main.py process                     # Process raw data
+    python main.py process --force             # Force reprocess
+    python main.py train                       # Train with default data
+    python main.py train data/processed/CL_set_01.csv   # Train with specific file
+""")
+
+
+if __name__ == '__main__':
+    args = sys.argv[1:]
+    
+    if not args or args[0] == '--help' or args[0] == '-h':
+        print_help()
+        sys.exit(0)
+    
+    command = args[0]
+    
+    if command == 'process':
+        # Data processing mode
+        force_reprocess = "--force" in args
+        
         print("=" * 60)
-        print(f"NEW METHOD: Using DataProcessor ({ds_version})")
+        print("DATA PROCESSING MODE")
         print("=" * 60)
+        
+        # Process CL data
         processed_features = get_processed_cl_df(
-            dataset_version=ds_version,
+            input_path="data/raw/CL.csv",
+            dataset_version="set_01",
             force_reprocess=force_reprocess
         )
-        print("Total records:", processed_features.shape)
-        print("Columns:", list(processed_features.columns))
+        print("\nProcessed data:")
+        print(f"  Total records: {processed_features.shape}")
+        print(f"  Columns: {list(processed_features.columns)}")
         print(processed_features.head())
-        print("\n")
+    
+    elif command == 'train':
+        # Training mode
+        data_path = args[1] if len(args) > 1 else "data/processed/CL_set_01.parquet"
+        
+        results = train_and_evaluate(
+            data_path=data_path,
+            holdout_pct=0.15,
+            purge_bars=576,      # 48 hours
+            min_train_bars=8640,  # ~30 days
+            fold_size_bars=8640,  # ~30 days per fold
+            threshold=0.08,
+            output_dir="reports",
+            model_dir="models",
+            verbose=True,
+        )
+    
+    else:
+        print(f"Unknown command: {command}")
+        print("Use --help for usage information.")
+        sys.exit(1)
