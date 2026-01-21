@@ -36,3 +36,11 @@ very low chance because the market looks like it is going to be a quiet day base
 
 
 
+---
+
+Pipeline updates:
+- `python main.py process` generates processed datasets (parquet or csv fallback)
+- `python main.py train` runs walk-forward validation + holdout evaluation
+- Outputs: `reports/` metrics/plots and `models/` saved model
+- Tests: `pytest tests/test_walk_forward.py tests/test_evaluator.py tests/test_visualizer.py`
+
