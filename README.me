@@ -22,6 +22,9 @@ python main.py train
 
 # Train with a specific processed file
 python main.py train data/processed/CL_set_01.parquet
+
+# Simple 85/15 split sanity check (no walk-forward)
+python main.py train --method simple
 ```
 
 ## Run data_processor.py Directly
@@ -130,6 +133,9 @@ Generated files are saved to:
   - `vault_metrics.json` (holdout evaluation)
   - `fold_predictions.csv`, `vault_predictions.csv`
   - `fold_summary.png`, `vault_signals.png`, `actual_moves_distribution.png`
+  - `simple.json`, `simple_predictions.csv`, `simple_signals.png`,
+    `simple_confusion_matrix.png`, `simple_actual_moves_distribution.png`,
+    `simple_feature_importance.png`
 - `models/` for trained models (e.g., `final_model.pkl`)
 
 ## Dataset Documentation
