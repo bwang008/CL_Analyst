@@ -16,6 +16,7 @@ Author: CL Analyst
 
 import os
 import sys
+import time
 import numpy as np
 import pandas as pd
 import src.util as util
@@ -107,6 +108,7 @@ def train_and_evaluate(
     model_dir: str = "models",
     model_params: dict = None,
     verbose: bool = True,
+    method: str = "walk_forward",
 ):
     """
     Train and evaluate an LightGBM model using walk-forward validation.
@@ -134,6 +136,8 @@ def train_and_evaluate(
     Returns:
         dict: Results containing fold_results, vault_result, and report
     """
+    start_time = time.perf_counter()
+
     print("=" * 60)
     print("TRAIN AND EVALUATE PIPELINE")
     print("=" * 60)
@@ -187,21 +191,25 @@ def train_and_evaluate(
     # -------------------------------------------------------------------------
     # Step 2: Create splitter and split data
     # -------------------------------------------------------------------------
-    print(f"\n[Step 2] Setting up walk-forward validation...")
+    print(f"\n[Step 2] Setting up training method: {method}...")
     
-    splitter = WalkForwardSplitter(
-        holdout_pct=holdout_pct,
-        purge_bars=purge_bars,
-        min_train_bars=min_train_bars,
-        fold_size_bars=fold_size_bars,
-    )
-    
-    gym_df, vault_df = splitter.get_holdout(df)
+    if method == "simple":
+        splitter = None
+        gym_df = None
+        vault_df = None
+    else:
+        splitter = WalkForwardSplitter(
+            holdout_pct=holdout_pct,
+            purge_bars=purge_bars,
+            min_train_bars=min_train_bars,
+            fold_size_bars=fold_size_bars,
+        )
+        gym_df, vault_df = splitter.get_holdout(df)
     
     # -------------------------------------------------------------------------
     # Step 3: Walk-forward validation on gym
     # -------------------------------------------------------------------------
-    print(f"\n[Step 3] Running walk-forward validation...")
+    print(f"\n[Step 3] Training and validation...")
     
     if model_params is None:
         model_params = {
@@ -211,13 +219,47 @@ def train_and_evaluate(
             'verbose': -1,
         }
     
-    fold_results, _ = walk_forward_validate(
-        df=gym_df,
-        model_class=LGBMLearner,
-        model_params=model_params,
-        splitter=splitter,
-        verbose=verbose,
-    )
+    if method == "simple":
+        split_idx = int(len(df) * (1 - holdout_pct))
+        train_df = df.iloc[:split_idx]
+        test_df = df.iloc[split_idx:]
+
+        # Purge gap to prevent leakage
+        if purge_bars > 0 and len(test_df) > purge_bars:
+            test_df = test_df.iloc[purge_bars:]
+
+        if verbose:
+            print(f"  SIMPLE SPLIT: Train {len(train_df):,} bars, Test {len(test_df):,} bars")
+
+        X_train, y_train = util.get_X_y(train_df)
+        X_test, y_test = util.get_X_y(test_df)
+
+        model = LGBMLearner(**model_params)
+        model.add_evidence(X_train, y_train)
+        y_pred = model.query(X_test)
+
+        fold_results = [
+            {
+                "fold": 1,
+                "train_size": len(X_train),
+                "test_size": len(X_test),
+                "y_true": y_test.values,
+                "y_pred": y_pred,
+                "df_test": test_df,
+                "train_date_range": (train_df.index[0], train_df.index[-1]),
+                "test_date_range": (test_df.index[0], test_df.index[-1]),
+                "model": model,
+            }
+        ]
+        vault_df = None
+    else:
+        fold_results, _ = walk_forward_validate(
+            df=gym_df,
+            model_class=LGBMLearner,
+            model_params=model_params,
+            splitter=splitter,
+            verbose=verbose,
+        )
     
     # -------------------------------------------------------------------------
     # Step 4: Evaluate folds
@@ -252,24 +294,29 @@ def train_and_evaluate(
     # -------------------------------------------------------------------------
     print(f"\n[Step 5] Final evaluation on vault (holdout set)...")
     
-    # Train final model on entire gym set
-    X_gym, y_gym = util.get_X_y(gym_df)
-    final_model = LGBMLearner(**model_params)
-    final_model.add_evidence(X_gym, y_gym)
-    
-    # Predict on vault
-    X_vault, y_vault = util.get_X_y(vault_df)
-    y_vault_pred = final_model.query(X_vault)
-    
-    vault_eval = evaluator.evaluate_fold(
-        y_true=y_vault.values,
-        y_pred=y_vault_pred,
-        df_test=vault_df,
-    )
-    
-    print(f"\n  Vault Results:")
-    print(f"    Accuracy: {vault_eval['accuracy']:.4f}")
-    print(f"    Samples: {vault_eval['n_samples']:,}")
+    if method == "simple":
+        final_model = fold_results[0]["model"]
+        vault_eval = None
+        y_vault_pred = None
+    else:
+        # Train final model on entire gym set
+        X_gym, y_gym = util.get_X_y(gym_df)
+        final_model = LGBMLearner(**model_params)
+        final_model.add_evidence(X_gym, y_gym)
+
+        # Predict on vault
+        X_vault, y_vault = util.get_X_y(vault_df)
+        y_vault_pred = final_model.query(X_vault)
+
+        vault_eval = evaluator.evaluate_fold(
+            y_true=y_vault.values,
+            y_pred=y_vault_pred,
+            df_test=vault_df,
+        )
+
+        print(f"\n  Vault Results:")
+        print(f"    Accuracy: {vault_eval['accuracy']:.4f}")
+        print(f"    Samples: {vault_eval['n_samples']:,}")
     
     # -------------------------------------------------------------------------
     # Step 6: Save results and generate visualizations
@@ -281,60 +328,104 @@ def train_and_evaluate(
     os.makedirs(model_dir, exist_ok=True)
     
     # Save report
-    report_path = os.path.join(output_dir, "metrics.json")
+    report_suffix = "simple" if method == "simple" else "metrics"
+    report_path = os.path.join(output_dir, f"{report_suffix}.json")
     evaluator.save_report(report, report_path)
     
-    # Save vault report
-    vault_report_path = os.path.join(output_dir, "vault_metrics.json")
-    vault_report = {
-        'accuracy': vault_eval['accuracy'],
-        'precision': vault_eval['precision'],
-        'recall': vault_eval['recall'],
-        'f1': vault_eval['f1'],
-        'confusion_matrix': vault_eval['confusion_matrix'].tolist(),
-        'n_samples': vault_eval['n_samples'],
-        'move_analysis': vault_eval['move_analysis'],
-    }
-    evaluator.save_report(vault_report, vault_report_path)
+    # Save vault report (walk-forward only)
+    if vault_eval is not None:
+        vault_report_path = os.path.join(output_dir, "vault_metrics.json")
+        vault_report = {
+            'accuracy': vault_eval['accuracy'],
+            'precision': vault_eval['precision'],
+            'recall': vault_eval['recall'],
+            'f1': vault_eval['f1'],
+            'confusion_matrix': vault_eval['confusion_matrix'].tolist(),
+            'n_samples': vault_eval['n_samples'],
+            'move_analysis': vault_eval['move_analysis'],
+        }
+        evaluator.save_report(vault_report, vault_report_path)
     
     # Export predictions
-    predictions_path = os.path.join(output_dir, "fold_predictions.csv")
+    predictions_path = os.path.join(output_dir, f"{report_suffix}_predictions.csv")
     evaluator.export_predictions(evaluated_folds, predictions_path)
     
     # Export vault predictions
-    vault_predictions_path = os.path.join(output_dir, "vault_predictions.csv")
-    vault_eval['actual_moves'].to_csv(vault_predictions_path)
-    print(f"  Saved vault predictions to {vault_predictions_path}")
+    if vault_eval is not None:
+        vault_predictions_path = os.path.join(output_dir, "vault_predictions.csv")
+        vault_eval['actual_moves'].to_csv(vault_predictions_path)
+        print(f"  Saved vault predictions to {vault_predictions_path}")
     
     # Save final model
-    model_path = os.path.join(model_dir, "final_model.pkl")
+    model_name = "final_model.pkl" if method != "simple" else "simple_split_model.pkl"
+    model_path = os.path.join(model_dir, model_name)
     final_model.save(model_path)
     print(f"  Saved final model to {model_path}")
     
     # Generate visualizations
     visualizer = SignalVisualizer()
     
-    # Fold summary plot
-    fold_summary_path = os.path.join(output_dir, "fold_summary.png")
-    visualizer.plot_fold_summary(fold_results, fold_summary_path)
+    # Fold summary plot (walk-forward only)
+    if method != "simple":
+        fold_summary_path = os.path.join(output_dir, "fold_summary.png")
+        visualizer.plot_fold_summary(fold_results, fold_summary_path)
     
-    # Signal plot for vault
-    signals_path = os.path.join(output_dir, "vault_signals.png")
-    visualizer.plot_signals(
-        vault_df, y_vault_pred, signals_path,
-        title="Vault Set: Model Signals"
-    )
+    # Signal plot for vault or simple split test
+    if method == "simple":
+        signals_path = os.path.join(output_dir, "simple_signals.png")
+        visualizer.plot_signals(
+            fold_results[0]["df_test"],
+            fold_results[0]["y_pred"],
+            signals_path,
+            title="Simple Split: Model Signals",
+        )
+    else:
+        signals_path = os.path.join(output_dir, "vault_signals.png")
+        visualizer.plot_signals(
+            vault_df, y_vault_pred, signals_path,
+            title="Vault Set: Model Signals"
+        )
     
     # Actual moves distribution
-    moves_path = os.path.join(output_dir, "actual_moves_distribution.png")
-    visualizer.plot_actual_moves(vault_eval['actual_moves'], moves_path)
+    moves_path = os.path.join(
+        output_dir,
+        "simple_actual_moves_distribution.png" if method == "simple" else "actual_moves_distribution.png",
+    )
+    moves_source = evaluated_folds[-1]['actual_moves'] if method == "simple" else vault_eval['actual_moves']
+    visualizer.plot_actual_moves(moves_source, moves_path)
+
+    # Confusion matrix for vault or simple split
+    if method == "simple":
+        cm_path = os.path.join(output_dir, "simple_confusion_matrix.png")
+        visualizer.plot_confusion_matrix(
+            evaluated_folds[-1]["confusion_matrix"],
+            output_path=cm_path,
+            title="Simple Split Confusion Matrix",
+        )
+    else:
+        cm_path = os.path.join(output_dir, "vault_confusion_matrix.png")
+        visualizer.plot_confusion_matrix(
+            vault_eval["confusion_matrix"],
+            output_path=cm_path,
+            title="Vault Confusion Matrix",
+        )
+
+    # Feature importance (simple split only)
+    if method == "simple":
+        importance_path = os.path.join(output_dir, "simple_feature_importance.png")
+        feature_names = util.get_feature_columns(df)
+        visualizer.plot_feature_importance(final_model, feature_names, importance_path)
     
+    elapsed_seconds = time.perf_counter() - start_time
+    elapsed_minutes = elapsed_seconds / 60
+
     print("\n" + "=" * 60)
     print("PIPELINE COMPLETE")
     print("=" * 60)
     print(f"\nOutputs saved to:")
     print(f"  - Reports: {output_dir}/")
     print(f"  - Models: {model_dir}/")
+    print(f"  - Wall clock time: {elapsed_minutes:.2f} min ({elapsed_seconds:.1f} sec)")
     
     return {
         'fold_results': evaluated_folds,
@@ -351,7 +442,8 @@ CL Futures ML Pipeline
 
 Usage:
     python main.py process [--force]           Process raw data to ML-ready features
-    python main.py train [data_path]           Train and evaluate model
+    python main.py train [data_path]           Train and evaluate model (walk-forward)
+    python main.py train [data_path] --method simple  Simple 85/15 split sanity check
     python main.py --help                      Show this help message
 
 Commands:
@@ -364,8 +456,9 @@ Commands:
 Examples:
     python main.py process                     # Process raw data
     python main.py process --force             # Force reprocess
-    python main.py train                       # Train with default data
+    python main.py train                       # Train with default data (walk-forward)
     python main.py train data/processed/CL_set_01.csv   # Train with specific file
+    python main.py train --method simple       # Simple 85/15 split sanity check
 """)
 
 
@@ -399,7 +492,26 @@ if __name__ == '__main__':
     
     elif command == 'train':
         # Training mode
-        data_path = args[1] if len(args) > 1 else "data/processed/CL_set_01.parquet"
+        method = "walk_forward"
+        data_path = "data/processed/CL_set_01.parquet"
+
+        if "--method" in args:
+            method_idx = args.index("--method")
+            if method_idx + 1 < len(args):
+                method = args[method_idx + 1]
+
+        # First non-flag arg after "train" is treated as data_path
+        skip_next = False
+        for arg in args[1:]:
+            if skip_next:
+                skip_next = False
+                continue
+            if arg == "--method":
+                skip_next = True
+                continue
+            if not arg.startswith("-"):
+                data_path = arg
+                break
         
         results = train_and_evaluate(
             data_path=data_path,
@@ -411,6 +523,7 @@ if __name__ == '__main__':
             output_dir="reports",
             model_dir="models",
             verbose=True,
+            method=method,
         )
     
     else:

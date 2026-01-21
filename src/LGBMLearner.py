@@ -48,6 +48,7 @@ class LGBMLearner:
         "num_leaves": 31,
         "verbose": -1,
         "min_child_samples": 1,
+        "class_weight": "balanced",
     }
 
     def __init__(self, **kwargs: Any) -> None:

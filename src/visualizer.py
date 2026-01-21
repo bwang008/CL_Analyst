@@ -334,6 +334,115 @@ class SignalVisualizer:
             print(f"Saved actual moves plot to {output_path}")
         
         return fig
+
+    def plot_confusion_matrix(
+        self,
+        confusion_matrix: np.ndarray,
+        output_path: Optional[str] = None,
+        title: str = "Confusion Matrix",
+        class_labels: Optional[List[str]] = None,
+    ) -> plt.Figure:
+        """
+        Plot a confusion matrix heatmap.
+
+        Args:
+            confusion_matrix: 2D array (n_classes x n_classes)
+            output_path: Path to save figure (optional)
+            title: Plot title
+            class_labels: Optional list of class names in order
+
+        Returns:
+            matplotlib Figure object
+        """
+        if class_labels is None:
+            class_labels = ["Hold", "Buy", "Sell"]
+
+        fig, ax = plt.subplots(figsize=(6, 5))
+        im = ax.imshow(confusion_matrix, cmap="Blues")
+
+        ax.set_title(title, fontsize=14, fontweight="bold")
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("Actual")
+        ax.set_xticks(np.arange(len(class_labels)))
+        ax.set_yticks(np.arange(len(class_labels)))
+        ax.set_xticklabels(class_labels)
+        ax.set_yticklabels(class_labels)
+
+        # Annotate cells
+        for i in range(confusion_matrix.shape[0]):
+            for j in range(confusion_matrix.shape[1]):
+                ax.text(
+                    j,
+                    i,
+                    str(confusion_matrix[i, j]),
+                    ha="center",
+                    va="center",
+                    color="black",
+                    fontsize=10,
+                )
+
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        plt.tight_layout()
+
+        if output_path:
+            output_dir = os.path.dirname(output_path)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+            fig.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+            print(f"Saved confusion matrix to {output_path}")
+
+        return fig
+
+    def plot_feature_importance(
+        self,
+        learner,
+        feature_names: Optional[List[str]] = None,
+        output_path: Optional[str] = None,
+        title: str = "Feature Importance (Gain)",
+        max_features: int = 20,
+    ) -> plt.Figure:
+        """
+        Plot feature importance for a trained LightGBM model.
+
+        Args:
+            learner: LGBMLearner instance with a trained model
+            feature_names: Optional list of feature names
+            output_path: Path to save figure (optional)
+            title: Plot title
+            max_features: Maximum number of features to display
+
+        Returns:
+            matplotlib Figure object
+        """
+        if learner is None or learner.model is None:
+            raise ValueError("Learner model is not trained.")
+
+        importances = learner.model.feature_importance(importance_type="gain")
+        if feature_names is None:
+            feature_names = [f"f{i}" for i in range(len(importances))]
+
+        pairs = list(zip(feature_names, importances))
+        pairs.sort(key=lambda x: x[1], reverse=True)
+        top_pairs = pairs[:max_features]
+
+        labels = [p[0] for p in top_pairs][::-1]
+        scores = [p[1] for p in top_pairs][::-1]
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.barh(labels, scores, color="steelblue")
+        ax.set_title(title, fontsize=14, fontweight="bold")
+        ax.set_xlabel("Importance (Gain)")
+        ax.grid(True, axis="x", alpha=0.3)
+        plt.tight_layout()
+
+        if output_path:
+            output_dir = os.path.dirname(output_path)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+            fig.savefig(output_path, dpi=self.dpi, bbox_inches="tight")
+            print(f"Saved feature importance to {output_path}")
+
+        return fig
     
     def plot_signals_with_actual_moves(
         self,
