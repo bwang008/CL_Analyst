@@ -156,6 +156,9 @@ def get_cl_data(data_file='data/raw/test10k.csv'):
 # Column prefixes that should be excluded from ML features
 EXCLUDED_PREFIXES = ('RAW_', 'TARGET_', 'META_')
 
+# Explicit column names to exclude from ML features (legacy or non-feature cols)
+EXCLUDED_COLUMNS = {'Target'}
+
 
 def get_feature_columns(df: pd.DataFrame) -> list:
     """
@@ -181,7 +184,10 @@ def get_feature_columns(df: pd.DataFrame) -> list:
         >>> get_feature_columns(df)
         ['RSI', 'MACD']
     """
-    return [col for col in df.columns if not col.startswith(EXCLUDED_PREFIXES)]
+    return [
+        col for col in df.columns
+        if not col.startswith(EXCLUDED_PREFIXES) and col not in EXCLUDED_COLUMNS
+    ]
 
 
 def get_target_column(df: pd.DataFrame, target_name: str = 'TARGET_Direction') -> str:
@@ -198,13 +204,18 @@ def get_target_column(df: pd.DataFrame, target_name: str = 'TARGET_Direction') -
     Raises:
         ValueError: If target column is not found in DataFrame
     """
-    if target_name not in df.columns:
-        target_cols = [c for c in df.columns if c.startswith('TARGET_')]
-        raise ValueError(
-            f"Target column '{target_name}' not found. "
-            f"Available TARGET_ columns: {target_cols}"
-        )
-    return target_name
+    if target_name in df.columns:
+        return target_name
+    
+    # Legacy fallback for older processed files
+    if target_name == 'TARGET_Direction' and 'Target' in df.columns:
+        return 'Target'
+    
+    target_cols = [c for c in df.columns if c.startswith('TARGET_')]
+    raise ValueError(
+        f"Target column '{target_name}' not found. "
+        f"Available TARGET_ columns: {target_cols}"
+    )
 
 
 def get_X_y(df: pd.DataFrame, target_name: str = 'TARGET_Direction'):

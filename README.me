@@ -43,6 +43,25 @@ python -c "from src.data_processor import DataProcessor; DataProcessor(input_pat
 This writes to `data/processed/CL_set_01.parquet` or `data/processed/CL_set_02.parquet`
 (CSV fallback if Parquet is unavailable).
 
+## Verify Target Labels
+
+Use the helper script to validate a single timestamp’s target label against
+the raw OHLCV data. It prints the raw row, the processed target (if present),
+and recomputes the future high/low and target classification for the horizon.
+
+```bash
+# Default files, verify a specific timestamp
+python scripts/verify_target.py --timestamp "2009-01-07 03:00:00"
+
+# Custom files or parameters
+python scripts/verify_target.py \
+  --raw "data/raw/test100k.csv" \
+  --processed "data/processed/test100k_set_01.csv" \
+  --timestamp "2009-07-01 03:00:00" \
+  --horizon 576 \
+  --threshold 0.08
+```
+
 ## Project Structure
 
 ```
