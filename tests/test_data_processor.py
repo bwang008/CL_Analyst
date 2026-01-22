@@ -219,24 +219,24 @@ class TestTargetCreation:
     
     def test_create_target_adds_column(self, sample_raw_csv):
         """
-        create_target adds Target column.
+        create_target adds TARGET_Direction column.
         """
         processor = DataProcessor(input_path=sample_raw_csv)
         df = processor.load_data()
         df = processor.create_target(df)
         
-        assert 'Target' in df.columns
+        assert 'TARGET_Direction' in df.columns
     
     def test_target_values_valid(self, sample_raw_csv):
         """
-        Target values are 0, 1, 2, or NaN (at the end).
+        TARGET_Direction values are 0, 1, 2, or NaN (at the end).
         """
         processor = DataProcessor(input_path=sample_raw_csv)
         df = processor.load_data()
         df = processor.create_target(df)
         
         # Valid values (excluding NaN)
-        valid_targets = df['Target'].dropna().unique()
+        valid_targets = df['TARGET_Direction'].dropna().unique()
         assert set(valid_targets).issubset({0, 1, 2}), \
             f"Invalid target values: {valid_targets}"
     
@@ -249,7 +249,7 @@ class TestTargetCreation:
         df = processor.create_target(df, horizon=100)
         
         # Last 100 rows should be NaN
-        assert df['Target'].iloc[-100:].isna().all()
+        assert df['TARGET_Direction'].iloc[-100:].isna().all()
 
 
 # =============================================================================
@@ -328,7 +328,7 @@ class TestFullPipeline:
     
     def test_processed_data_has_target(self, sample_raw_csv, tmp_path):
         """
-        Processed data has Target column with integer values.
+        Processed data has TARGET_Direction column with integer values.
         """
         output_path = str(tmp_path / "output.parquet")
         
@@ -339,8 +339,8 @@ class TestFullPipeline:
         
         df = processor.process(threshold=0.08, horizon=100)
         
-        assert 'Target' in df.columns
-        assert df['Target'].dtype in [np.int32, np.int64, int]
+        assert 'TARGET_Direction' in df.columns
+        assert df['TARGET_Direction'].dtype in [np.int32, np.int64, int]
 
 
 # =============================================================================

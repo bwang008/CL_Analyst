@@ -120,7 +120,7 @@ def toy_classification_data():
     
     Properties:
     - 100 samples, 5 features
-    - Target is deterministic: 1 if Feature[0] > 0.5 else 0
+    - TARGET_Direction is deterministic: 1 if Feature[0] > 0.5 else 0
     - Used to verify model can achieve 100% accuracy (overfitting test)
     - NOT for testing prediction quality, only model capability
     
@@ -132,7 +132,7 @@ def toy_classification_data():
     n_features = 5
     
     X = np.random.rand(n_samples, n_features)
-    # Target is deterministic based on first feature
+    # TARGET_Direction is deterministic based on first feature
     y = (X[:, 0] > 0.5).astype(int)
     
     return X, y
@@ -358,7 +358,7 @@ def sample_processed_data(synthetic_price_data):
     df['Volume_Log'] = np.log1p(df['Volume'])
     
     # Add target (0, 1, or 2)
-    df['Target'] = np.random.choice([0, 1, 2], n)
+    df['TARGET_Direction'] = np.random.choice([0, 1, 2], n)
     
     # Drop raw OHLCV columns (like DataProcessor does)
     df = df.drop(columns=['Open', 'High', 'Low', 'Close', 'Volume'])
@@ -389,9 +389,9 @@ def sample_processed_data_with_inf(sample_processed_data):
 @pytest.fixture
 def sample_processed_data_with_leakage(sample_processed_data):
     """
-    Processed data with target leakage (Target perfectly correlates with a feature).
+    Processed data with target leakage (TARGET_Direction perfectly correlates with a feature).
     """
     df = sample_processed_data.copy()
-    # Create perfect correlation between Target and RSI
-    df['RSI'] = df['Target'].astype(float) * 50  # Perfect correlation
+    # Create perfect correlation between target and RSI
+    df['RSI'] = df['TARGET_Direction'].astype(float) * 50  # Perfect correlation
     return df

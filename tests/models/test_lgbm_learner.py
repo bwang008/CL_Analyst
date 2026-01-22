@@ -40,7 +40,7 @@ class TestOverfittingCapability:
         Model must achieve 100% accuracy on trivially learnable data.
         
         The toy_classification_data fixture provides data where:
-        - Target = 1 if Feature[0] > 0.5 else 0
+    - TARGET_Direction = 1 if Feature[0] > 0.5 else 0
         
         Any tree-based model should achieve perfect accuracy on this.
         
@@ -77,7 +77,7 @@ class TestOverfittingCapability:
         Model must handle multiclass classification correctly.
         
         Tests the 3-class scenario used in the actual trading strategy
-        (Target: 0=Hold, 1=Buy, 2=Sell).
+        (TARGET_Direction: 0=Hold, 1=Buy, 2=Sell).
         """
         from src.LGBMLearner import LGBMLearner
         from sklearn.metrics import accuracy_score

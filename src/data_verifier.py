@@ -48,7 +48,7 @@ class OilDatasetVerifier:
         'Time_Sin', 'Time_Cos', 'RSI', 'MACD', 'MACD_Signal', 'MACD_Hist',
         'VOL_3D', 'VOL_7D', 'VOL_30D', 'Parkinson_Vol_24H',
         'Return_Skew_24H', 'Return_Kurt_24H', 'SMA_20_Dist', 'SMA_30d_Dist',
-        'Volume_Log', 'Target'
+        'Volume_Log', 'TARGET_Direction'
     ]
     
     # Columns that must be non-negative
@@ -292,12 +292,20 @@ class OilDatasetVerifier:
         Returns:
             bool: True if no leakage detected
         """
-        if 'Target' not in self.df.columns:
-            self.warnings.append("Target column not found, skipping leakage check")
+        target_col = None
+        if 'TARGET_Direction' in self.df.columns:
+            target_col = 'TARGET_Direction'
+        elif 'Target' in self.df.columns:
+            target_col = 'Target'
+        
+        if target_col is None:
+            self.warnings.append(
+                "Target column not found (expected TARGET_Direction or Target), skipping leakage check"
+            )
             return True
         
-        target = self.df['Target']
-        feature_cols = [col for col in self.df.columns if col != 'Target']
+        target = self.df[target_col]
+        feature_cols = [col for col in self.df.columns if col != target_col]
         
         leaking_features = []
         for col in feature_cols:

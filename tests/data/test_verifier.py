@@ -249,7 +249,7 @@ class TestSanityChecks:
         or contains future information that wouldn't be available at prediction time.
         
         Sabotage Verification:
-            In data_processor.py, add a line that copies Target to a feature column.
+            In data_processor.py, add a line that copies TARGET_Direction to a feature column.
             Run this test - it MUST fail. Then revert.
         """
         verifier = OilDatasetVerifier(sample_processed_data_with_leakage)
@@ -467,7 +467,7 @@ class TestMissingColumnHandling:
     
     def test_target_leakage_check_warns_when_target_missing(self, synthetic_price_data):
         """
-        Target leakage check should warn when Target column is missing.
+        Target leakage check should warn when target column is missing.
         """
         verifier = OilDatasetVerifier(synthetic_price_data)
         result = verifier.check_no_target_leakage()
