@@ -31,12 +31,24 @@ class AlphaFactory:
 
         self.df["log_ret"] = np.log(self.close / self.close.shift(1))
 
-    def add_all_features(self, window: int = 24) -> pd.DataFrame:
-        """Run all feature clusters with a shared rolling window."""
-        self.add_volatility_cluster(window=window)
-        self.add_liquidity_cluster(window=window)
-        self.add_structure_cluster(window=window)
-        self.add_momentum_cluster()
+    def add_all_features(
+        self,
+        windows: list[int] | tuple[int, ...] | int | None = None,
+        include_momentum: bool = True,
+    ) -> pd.DataFrame:
+        """Run all feature clusters across multiple rolling windows."""
+        if windows is None:
+            windows = [24, 288, 1440]
+        if isinstance(windows, int):
+            windows = [windows]
+
+        for window in windows:
+            self.add_volatility_cluster(window=window)
+            self.add_liquidity_cluster(window=window)
+            self.add_structure_cluster(window=window)
+
+        if include_momentum:
+            self.add_momentum_cluster()
 
         self.df.replace([np.inf, -np.inf], np.nan, inplace=True)
         return self.df
@@ -45,7 +57,8 @@ class AlphaFactory:
         """Range-based volatility estimators."""
         const_parkinson = 1.0 / (4.0 * np.log(2.0))
         log_hl = np.log(self.high / self.low)
-        self.df[f"VOL_PARKINSON_{window}"] = np.sqrt(
+        suffix = f"_{window}"
+        self.df[f"VOL_PARK{suffix}"] = np.sqrt(
             const_parkinson * (log_hl**2).rolling(window).mean()
         )
 
@@ -54,7 +67,7 @@ class AlphaFactory:
         log_lc = np.log(self.low / self.close)
         log_lo = np.log(self.low / self.open)
         rs_term = (log_hc * log_ho) + (log_lc * log_lo)
-        self.df[f"VOL_RS_{window}"] = np.sqrt(rs_term.rolling(window).mean())
+        self.df[f"VOL_RS{suffix}"] = np.sqrt(rs_term.rolling(window).mean())
 
         log_oc = np.log(self.open / self.close.shift(1))
         var_overnight = (log_oc**2).rolling(window).mean()
@@ -63,7 +76,7 @@ class AlphaFactory:
         var_rs = rs_term.rolling(window).mean()
 
         k = 0.34
-        self.df[f"VOL_YZ_{window}"] = np.sqrt(
+        self.df[f"VOL_YZ{suffix}"] = np.sqrt(
             var_overnight + k * var_open_close + (1 - k) * var_rs
         )
 
@@ -72,7 +85,8 @@ class AlphaFactory:
     def add_liquidity_cluster(self, window: int = 24) -> pd.DataFrame:
         """Liquidity proxies from OHLCV data."""
         dollar_vol = (self.close * self.volume).replace(0, np.nan)
-        self.df[f"LIQ_AMIHUD_{window}"] = (
+        suffix = f"_{window}"
+        self.df[f"LIQ_AMIHUD{suffix}"] = (
             (self.df["log_ret"].abs() / dollar_vol).rolling(window).mean() * 1e6
         )
 
@@ -86,7 +100,7 @@ class AlphaFactory:
         spread = (2.0 * (np.exp(alpha) - 1.0)) / (1.0 + np.exp(alpha))
         spread = spread.clip(lower=0)
 
-        self.df[f"LIQ_CORWIN_{window}"] = spread.rolling(window).mean()
+        self.df[f"LIQ_CORWIN{suffix}"] = spread.rolling(window).mean()
 
         return self.df
 
