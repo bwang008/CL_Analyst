@@ -109,8 +109,13 @@ class AlphaFactory:
 
         bb = self.df.ta.bbands(length=20, std=2)
         if bb is not None and not bb.empty:
-            self.df["MOM_BB_Width"] = bb.get("BBW_20_2.0")
-            self.df["MOM_BB_PctB"] = bb.get("BBP_20_2.0")
+            bb_width = bb.get("BBB_20_2.0")
+            if bb_width is None:
+                bb_width = bb.get("BBW_20_2.0")
+            bb_pctb = bb.get("BBP_20_2.0")
+
+            self.df["MOM_BB_Width"] = bb_width if bb_width is not None else np.nan
+            self.df["MOM_BB_PctB"] = bb_pctb if bb_pctb is not None else np.nan
         else:
             self.df["MOM_BB_Width"] = np.nan
             self.df["MOM_BB_PctB"] = np.nan
