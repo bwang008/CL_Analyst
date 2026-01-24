@@ -53,7 +53,7 @@ def test_volatility_flat_line(flat_line_data):
     factory = AlphaFactory(flat_line_data)
     df = factory.add_volatility_cluster(window=10)
 
-    for col in ["VOL_PARKINSON_10", "VOL_RS_10", "VOL_YZ_10"]:
+    for col in ["VOL_PARK_10", "VOL_RS_10", "VOL_YZ_10"]:
         series = df[col].dropna()
         assert np.isclose(series, 0.0).all(), f"{col} should be 0 for flat data"
 
@@ -62,7 +62,7 @@ def test_volatility_non_negative(perfect_trend_data):
     factory = AlphaFactory(perfect_trend_data)
     df = factory.add_volatility_cluster(window=10)
 
-    for col in ["VOL_PARKINSON_10", "VOL_RS_10", "VOL_YZ_10"]:
+    for col in ["VOL_PARK_10", "VOL_RS_10", "VOL_YZ_10"]:
         series = df[col].dropna()
         assert (series >= 0).all(), f"{col} should be non-negative"
 
@@ -78,10 +78,10 @@ def test_liquidity_non_negative(perfect_trend_data):
 
 def test_add_all_features_columns(flat_line_data):
     factory = AlphaFactory(flat_line_data)
-    df = factory.add_all_features(window=10)
+    df = factory.add_all_features(windows=[10])
 
     expected_cols = [
-        "VOL_PARKINSON_10",
+        "VOL_PARK_10",
         "VOL_RS_10",
         "VOL_YZ_10",
         "LIQ_AMIHUD_10",
@@ -98,13 +98,13 @@ def test_add_all_features_columns(flat_line_data):
 
 def test_no_inf_or_nan_after_warmup(perfect_trend_data):
     factory = AlphaFactory(perfect_trend_data)
-    df = factory.add_all_features(window=10)
+    df = factory.add_all_features(windows=[10])
 
     warmup_df = df.iloc[25:]
     assert not warmup_df.isin([np.inf, -np.inf]).any().any(), "Found inf values"
 
     feature_cols = [
-        "VOL_PARKINSON_10",
+        "VOL_PARK_10",
         "VOL_RS_10",
         "VOL_YZ_10",
         "LIQ_AMIHUD_10",
