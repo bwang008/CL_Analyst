@@ -20,6 +20,7 @@ import os
 import json
 import numpy as np
 import pandas as pd
+import pandas_ta as ta  # noqa: F401
 from pathlib import Path
 from datetime import datetime
 
@@ -165,6 +166,33 @@ class DataProcessor:
         df['Hour'] = df.index.hour
         df['Minute'] = df.index.minute
         
+        return df
+
+    def add_squeeze_target(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Creates 'TARGET_SQUEEZE':
+        - 0: No trade
+        - 1: Long Squeeze (Quiet Volatility -> Big Up Move)
+        - 2: Short Squeeze (Quiet Volatility -> Big Down Move)
+        """
+        print("   [Target] Generating Squeeze Targets...")
+
+        if 'ATR_14' not in df.columns:
+            df['ATR_14'] = df.ta.atr(length=14)
+
+        df['vol_metric'] = df['ATR_14'] / df['Close']
+        vol_threshold = df['vol_metric'].rolling(window=10000).quantile(0.30)
+        is_quiet = df['vol_metric'] < vol_threshold
+
+        future_return = df['Close'].shift(-576) / df['Close'] - 1.0
+
+        df['TARGET_SQUEEZE'] = 0
+        mask_long = is_quiet & (future_return > 0.04)
+        df.loc[mask_long, 'TARGET_SQUEEZE'] = 1
+
+        mask_short = is_quiet & (future_return < -0.04)
+        df.loc[mask_short, 'TARGET_SQUEEZE'] = 2
+
         return df
     
     def create_target(self, df: pd.DataFrame, threshold: float = 0.08, 
@@ -330,10 +358,12 @@ class DataProcessor:
             df = df.iloc[warmup_rows:]
             print(f"  - Dropped first {warmup_rows} warmup rows")
 
-        # Fill small gaps, then drop any remaining NaNs
-        df = df.ffill().bfill()
+        # Fill small gaps for non-target columns, then drop any remaining NaNs
+        target_cols = [c for c in df.columns if c.startswith('TARGET_')]
+        non_target_cols = [c for c in df.columns if c not in target_cols]
+        df[non_target_cols] = df[non_target_cols].ffill().bfill()
         rows_before_dropna = len(df)
-        df = df.dropna()
+        df = df.dropna(subset=non_target_cols)
         rows_after_dropna = len(df)
         dropped_after_fill = rows_before_dropna - rows_after_dropna
         if rows_before_dropna > 0:
@@ -348,9 +378,11 @@ class DataProcessor:
         print(f"  - Dropped {rows_before - rows_after} rows with NaN values")
         print(f"  - Remaining rows: {rows_after}")
         
-        # Convert TARGET_Direction to integer if it exists
+        # Convert targets to integer while preserving NaNs at the tail
         if 'TARGET_Direction' in df.columns:
-            df['TARGET_Direction'] = df['TARGET_Direction'].astype(int)
+            df['TARGET_Direction'] = df['TARGET_Direction'].astype('Int64')
+        if 'TARGET_SQUEEZE' in df.columns:
+            df['TARGET_SQUEEZE'] = df['TARGET_SQUEEZE'].astype('Int64')
         
         # Verify no NaN values remain
         nan_count = df.isna().sum().sum()
@@ -475,6 +507,7 @@ class DataProcessor:
 
         # Step 4: Create target (MUST be before normalization)
         df = self.create_target(df, threshold=threshold, horizon=horizon)
+        df = self.add_squeeze_target(df)
 
         # Step 5: Normalize features (creates *_Return columns as intermediates)
         df = self.normalize_features(df)
@@ -546,6 +579,7 @@ class DataProcessor:
 
         # Step 4: Create target (MUST be before normalization)
         df = self.create_target(df, threshold=threshold, horizon=horizon)
+        df = self.add_squeeze_target(df)
 
         # Step 5: Normalize features (creates *_Return columns as intermediates)
         df = self.normalize_features(df)
