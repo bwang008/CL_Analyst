@@ -49,6 +49,24 @@ def perfect_trend_data():
     )
 
 
+@pytest.fixture
+def long_trend_data():
+    """Longer trend to support macro windows."""
+    n_rows = 30000
+    index = pd.date_range(start="2024-01-01", periods=n_rows, freq="5min")
+    prices = np.linspace(100.0, 160.0, n_rows)
+    return pd.DataFrame(
+        {
+            "Open": prices,
+            "High": prices + 0.5,
+            "Low": prices - 0.5,
+            "Close": prices,
+            "Volume": np.full(n_rows, 1000),
+        },
+        index=index,
+    )
+
+
 def test_volatility_flat_line(flat_line_data):
     factory = AlphaFactory(flat_line_data)
     df = factory.add_volatility_cluster(window=10)
@@ -78,7 +96,7 @@ def test_liquidity_non_negative(perfect_trend_data):
 
 def test_add_all_features_columns(flat_line_data):
     factory = AlphaFactory(flat_line_data)
-    df = factory.add_all_features(windows=[10])
+    df = factory.add_all_features(windows=[10], include_macro=False)
 
     expected_cols = [
         "VOL_PARK_10",
@@ -98,7 +116,7 @@ def test_add_all_features_columns(flat_line_data):
 
 def test_no_inf_or_nan_after_warmup(perfect_trend_data):
     factory = AlphaFactory(perfect_trend_data)
-    df = factory.add_all_features(windows=[10])
+    df = factory.add_all_features(windows=[10], include_macro=False)
 
     warmup_df = df.iloc[25:]
     assert not warmup_df.isin([np.inf, -np.inf]).any().any(), "Found inf values"
@@ -115,3 +133,18 @@ def test_no_inf_or_nan_after_warmup(perfect_trend_data):
         "MOM_BB_PctB",
     ]
     assert not warmup_df[feature_cols].isna().any().any(), "Found NaNs after warmup"
+
+
+def test_macro_context_integration(long_trend_data):
+    factory = AlphaFactory(long_trend_data)
+    df = factory.add_all_features(
+        windows=[10],
+        include_macro=True,
+        macro_windows={"1M": 840, "3M": 2160},
+    )
+
+    assert "MACRO_POS_3M" in df.columns
+    pos_series = df["MACRO_POS_3M"]
+    first_valid = pos_series.first_valid_index()
+    assert first_valid is not None, "MACRO_POS_3M should not be all NaN"
+    assert not pos_series.loc[first_valid:].isna().any(), "Forward-fill gaps detected"
