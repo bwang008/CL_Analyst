@@ -35,6 +35,8 @@ class AlphaFactory:
         self,
         windows: list[int] | tuple[int, ...] | int | None = None,
         include_momentum: bool = True,
+        include_macro: bool = True,
+        macro_windows: dict[str, int] | None = None,
     ) -> pd.DataFrame:
         """Run all feature clusters across multiple rolling windows."""
         if windows is None:
@@ -46,9 +48,13 @@ class AlphaFactory:
             self.add_volatility_cluster(window=window)
             self.add_liquidity_cluster(window=window)
             self.add_structure_cluster(window=window)
+            self.add_trend_cluster(window=window)
+            self.add_volume_flow_cluster(window=window)
 
         if include_momentum:
             self.add_momentum_cluster()
+        if include_macro:
+            self.add_macro_context(macro_windows=macro_windows)
 
         self.df.replace([np.inf, -np.inf], np.nan, inplace=True)
         return self.df
@@ -112,6 +118,97 @@ class AlphaFactory:
         volatility = abs_change.rolling(window).sum()
         self.df[f"STRUC_EFFICIENCY_{window}"] = direction / volatility
         return self.df
+
+    def add_trend_cluster(self, window: int) -> pd.DataFrame:
+        """Trend positioning and regression fit."""
+        suffix = f"_{window}"
+        roll_max = self.close.rolling(window).max()
+        roll_min = self.close.rolling(window).min()
+        range_span = roll_max - roll_min
+        self.df[f"TREND_DONCHIAN_POS{suffix}"] = (self.close - roll_min) / range_span
+
+        linreg = ta.linreg(self.close, length=window, slope=True, r=True)
+        if isinstance(linreg, pd.Series):
+            self.df[f"TREND_LR_SLOPE{suffix}"] = linreg
+            self.df[f"TREND_LR_R2{suffix}"] = np.nan
+        else:
+            slope_col = linreg.get(f"LRS_{window}") if linreg is not None else None
+            r_col = linreg.get(f"LRr_{window}") if linreg is not None else None
+            if slope_col is None and linreg is not None:
+                slope_col = linreg.get(f"LRS_{window}.0")
+            if r_col is None and linreg is not None:
+                r_col = linreg.get(f"LRr_{window}.0")
+
+            self.df[f"TREND_LR_SLOPE{suffix}"] = slope_col if slope_col is not None else np.nan
+            if r_col is not None:
+                self.df[f"TREND_LR_R2{suffix}"] = r_col.pow(2)
+            else:
+                self.df[f"TREND_LR_R2{suffix}"] = np.nan
+
+        return self.df
+
+    def add_volume_flow_cluster(self, window: int) -> pd.DataFrame:
+        """Volume flow and price/volume divergence signals."""
+        suffix = f"_{window}"
+        obv = ta.obv(self.close, self.volume)
+        if obv is None:
+            self.df[f"VOLFLOW_OBV_SLOPE{suffix}"] = np.nan
+            self.df[f"VOLFLOW_DIVERGENCE{suffix}"] = np.nan
+        else:
+            obv_slope = ta.linreg(obv, length=window, slope=True)
+            price_slope = ta.linreg(self.close, length=window, slope=True)
+            self.df[f"VOLFLOW_OBV_SLOPE{suffix}"] = (
+                obv_slope if isinstance(obv_slope, pd.Series) else obv_slope.iloc[:, 0]
+            )
+            price_slope_series = (
+                price_slope if isinstance(price_slope, pd.Series) else price_slope.iloc[:, 0]
+            )
+            self.df[f"VOLFLOW_DIVERGENCE{suffix}"] = (
+                self.df[f"VOLFLOW_OBV_SLOPE{suffix}"] - price_slope_series
+            )
+
+        vol_sum = self.volume.rolling(window).sum()
+        vwap = (self.close * self.volume).rolling(window).sum() / vol_sum.replace(0, np.nan)
+        self.df[f"VOLFLOW_VWAP_DIST{suffix}"] = (self.close - vwap) / vwap
+
+        return self.df
+
+    def add_macro_context(self, macro_windows: dict[str, int] | None = None) -> pd.DataFrame:
+        """Macro context features via resampled windows."""
+        if not isinstance(self.df.index, pd.DatetimeIndex):
+            raise ValueError("AlphaFactory requires a DatetimeIndex for resampling.")
+
+        if macro_windows is None:
+            macro_windows = {"1M": 840, "3M": 2160}
+
+        ohlcv = {
+            "Open": "first",
+            "High": "max",
+            "Low": "min",
+            "Close": "last",
+            "Volume": "sum",
+        }
+
+        hourly = self.df.resample("1H").agg(ohlcv).dropna()
+        macro_frames = []
+        for label, window in macro_windows.items():
+            macro_frames.append(self._add_macro_donchian(hourly, window=window, label=label))
+
+        macro = pd.concat(macro_frames, axis=1)
+        macro = macro.reindex(self.df.index, method="ffill")
+        self.df = self.df.join(macro)
+        return self.df
+
+    def _add_macro_donchian(self, df: pd.DataFrame, window: int, label: str) -> pd.DataFrame:
+        roll_max = df["High"].rolling(window).max()
+        roll_min = df["Low"].rolling(window).min()
+        range_span = roll_max - roll_min
+
+        width_col = f"MACRO_WIDTH_{label}"
+        pos_col = f"MACRO_POS_{label}"
+        df[width_col] = range_span / df["Close"]
+        df[pos_col] = (df["Close"] - roll_min) / range_span
+        return df[[width_col, pos_col]]
 
     def add_momentum_cluster(self) -> pd.DataFrame:
         """Momentum indicators via pandas_ta."""
