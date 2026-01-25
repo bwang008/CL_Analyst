@@ -117,6 +117,39 @@ class AlphaFactory:
         direction = self.close.diff(window).abs()
         volatility = abs_change.rolling(window).sum()
         self.df[f"STRUC_EFFICIENCY_{window}"] = direction / volatility
+
+        if "STRUC_HURST_100" not in self.df.columns:
+            physics_window = 100
+            log_ret = self.df["log_ret"]
+
+            def _hurst_rs(values: np.ndarray) -> float:
+                values = values[np.isfinite(values)]
+                if values.size == 0:
+                    return np.nan
+                r = np.max(values) - np.min(values)
+                s = np.std(values)
+                if r == 0 or s == 0:
+                    return 0.0
+                return np.log(r / s) / np.log(values.size)
+
+            def _entropy(values: np.ndarray, num_bins: int = 20) -> float:
+                values = values[np.isfinite(values)]
+                if values.size == 0:
+                    return np.nan
+                hist, _ = np.histogram(values, bins=num_bins)
+                hist = hist[hist > 0]
+                if hist.size == 0:
+                    return 0.0
+                probs = hist / hist.sum()
+                return -np.sum(probs * np.log(probs))
+
+            self.df["STRUC_HURST_100"] = log_ret.rolling(physics_window).apply(
+                _hurst_rs, raw=True
+            )
+            self.df["STRUC_ENTROPY_100"] = log_ret.rolling(physics_window).apply(
+                _entropy, raw=True
+            )
+
         return self.df
 
     def add_trend_cluster(self, window: int) -> pd.DataFrame:
@@ -189,7 +222,7 @@ class AlphaFactory:
             "Volume": "sum",
         }
 
-        hourly = self.df.resample("1H").agg(ohlcv).dropna()
+        hourly = self.df.resample("1h").agg(ohlcv).dropna()
         macro_frames = []
         for label, window in macro_windows.items():
             macro_frames.append(self._add_macro_donchian(hourly, window=window, label=label))
