@@ -109,6 +109,7 @@ def train_and_evaluate(
     model_params: dict = None,
     verbose: bool = True,
     method: str = "walk_forward",
+    target_name: str = "TARGET_Direction",
 ):
     """
     Train and evaluate an LightGBM model using walk-forward validation.
@@ -178,15 +179,12 @@ def train_and_evaluate(
             "Please reprocess data with the updated data_processor.py"
         )
     
-    if 'TARGET_Direction' not in df.columns:
-        raise ValueError(
-            "Missing TARGET_Direction column. "
-            "Please reprocess data with the updated data_processor.py"
-        )
+    target_col = util.get_target_column(df, target_name=target_name)
     
     print(f"  Feature columns ({len(feature_cols)}): {feature_cols[:5]}...")
     print(f"  RAW columns: {[c for c in df.columns if c.startswith('RAW_')]}")
     print(f"  TARGET columns: {[c for c in df.columns if c.startswith('TARGET_')]}")
+    print(f"  Using target: {target_col}")
     
     # -------------------------------------------------------------------------
     # Step 2: Create splitter and split data
@@ -231,8 +229,8 @@ def train_and_evaluate(
         if verbose:
             print(f"  SIMPLE SPLIT: Train {len(train_df):,} bars, Test {len(test_df):,} bars")
 
-        X_train, y_train = util.get_X_y(train_df)
-        X_test, y_test = util.get_X_y(test_df)
+        X_train, y_train = util.get_X_y(train_df, target_name=target_name)
+        X_test, y_test = util.get_X_y(test_df, target_name=target_name)
 
         model = LGBMLearner(**model_params)
         model.add_evidence(X_train, y_train)
@@ -259,6 +257,7 @@ def train_and_evaluate(
             model_params=model_params,
             splitter=splitter,
             verbose=verbose,
+            target_name=target_name,
         )
     
     # -------------------------------------------------------------------------
@@ -300,12 +299,12 @@ def train_and_evaluate(
         y_vault_pred = None
     else:
         # Train final model on entire gym set
-        X_gym, y_gym = util.get_X_y(gym_df)
+        X_gym, y_gym = util.get_X_y(gym_df, target_name=target_name)
         final_model = LGBMLearner(**model_params)
         final_model.add_evidence(X_gym, y_gym)
 
         # Predict on vault
-        X_vault, y_vault = util.get_X_y(vault_df)
+        X_vault, y_vault = util.get_X_y(vault_df, target_name=target_name)
         y_vault_pred = final_model.query(X_vault)
 
         vault_eval = evaluator.evaluate_fold(
@@ -444,6 +443,7 @@ Usage:
     python main.py process [--force]           Process raw data to ML-ready features
     python main.py train [data_path]           Train and evaluate model (walk-forward)
     python main.py train [data_path] --method simple  Simple 85/15 split sanity check
+    python main.py train [data_path] --target TARGET_SQUEEZE
     python main.py --help                      Show this help message
 
 Commands:
@@ -452,6 +452,7 @@ Commands:
     
     train       Train model with walk-forward validation
                 data_path: Path to processed data (default: data/processed/CL_set_01.parquet)
+                --target: Target column to train on (default: TARGET_Direction)
 
 Examples:
     python main.py process                     # Process raw data
@@ -459,6 +460,7 @@ Examples:
     python main.py train                       # Train with default data (walk-forward)
     python main.py train data/processed/CL_set_01.csv   # Train with specific file
     python main.py train --method simple       # Simple 85/15 split sanity check
+    python main.py train --target TARGET_SQUEEZE
 """)
 
 
@@ -494,11 +496,16 @@ if __name__ == '__main__':
         # Training mode
         method = "walk_forward"
         data_path = "data/processed/CL_set_01.parquet"
+        target_name = "TARGET_Direction"
 
         if "--method" in args:
             method_idx = args.index("--method")
             if method_idx + 1 < len(args):
                 method = args[method_idx + 1]
+        if "--target" in args:
+            target_idx = args.index("--target")
+            if target_idx + 1 < len(args):
+                target_name = args[target_idx + 1]
 
         # First non-flag arg after "train" is treated as data_path
         skip_next = False
@@ -507,6 +514,9 @@ if __name__ == '__main__':
                 skip_next = False
                 continue
             if arg == "--method":
+                skip_next = True
+                continue
+            if arg == "--target":
                 skip_next = True
                 continue
             if not arg.startswith("-"):
@@ -524,6 +534,7 @@ if __name__ == '__main__':
             model_dir="models",
             verbose=True,
             method=method,
+            target_name=target_name,
         )
     
     else:

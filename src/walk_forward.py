@@ -21,6 +21,21 @@ from typing import Iterator, Tuple, List, Optional
 from .util import get_feature_columns, get_X_y
 
 
+def _precision_recall(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, float]:
+    labels = np.unique(np.concatenate([y_true, y_pred]))
+    precisions = []
+    recalls = []
+    for label in labels:
+        tp = np.sum((y_pred == label) & (y_true == label))
+        fp = np.sum((y_pred == label) & (y_true != label))
+        fn = np.sum((y_pred != label) & (y_true == label))
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        precisions.append(precision)
+        recalls.append(recall)
+    return float(np.mean(precisions)), float(np.mean(recalls))
+
+
 class WalkForwardSplitter:
     """
     Walk-Forward Cross-Validation with Holdout and Purge.
@@ -182,10 +197,11 @@ class WalkForwardSplitter:
         return sum(1 for _ in self.split(df))
     
     def get_fold_data(
-        self, 
-        df: pd.DataFrame, 
-        train_indices: np.ndarray, 
-        test_indices: np.ndarray
+        self,
+        df: pd.DataFrame,
+        train_indices: np.ndarray,
+        test_indices: np.ndarray,
+        target_name: str = "TARGET_Direction",
     ) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame]:
         """
         Extract features and targets for a fold, ensuring no data leakage.
@@ -211,8 +227,8 @@ class WalkForwardSplitter:
         df_test = df.iloc[test_indices]
         
         # Extract X, y using the safe utility function
-        X_train, y_train = get_X_y(df_train)
-        X_test, y_test = get_X_y(df_test)
+        X_train, y_train = get_X_y(df_train, target_name=target_name)
+        X_test, y_test = get_X_y(df_test, target_name=target_name)
         
         return X_train, y_train, X_test, y_test, df_test
     
@@ -256,6 +272,7 @@ def walk_forward_validate(
     model_params: dict = None,
     splitter: WalkForwardSplitter = None,
     verbose: bool = True,
+    target_name: str = "TARGET_Direction",
 ) -> List[dict]:
     """
     Run walk-forward validation on a dataset.
@@ -303,7 +320,7 @@ def walk_forward_validate(
         
         # Get fold data
         X_train, y_train, X_test, y_test, df_test = splitter.get_fold_data(
-            gym_df, train_idx, test_idx
+            gym_df, train_idx, test_idx, target_name=target_name
         )
         
         if verbose:
@@ -330,8 +347,11 @@ def walk_forward_validate(
         results.append(fold_result)
         
         if verbose:
-            accuracy = (y_pred == y_test.values).mean()
+            y_true = y_test.to_numpy()
+            accuracy = np.mean(y_pred == y_true)
+            precision, recall = _precision_recall(y_true, y_pred)
             print(f"Fold {fold_num} accuracy: {accuracy:.4f}")
+            print(f"  Precision (macro): {precision:.4f} | Recall (macro): {recall:.4f}")
     
     if verbose:
         print(f"\nWalk-forward validation complete. {len(results)} folds evaluated.")
