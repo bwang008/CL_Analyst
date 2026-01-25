@@ -1,6 +1,59 @@
 import numpy as np
 import pandas as pd
 import pandas_ta as ta  # noqa: F401
+from datetime import datetime
+
+try:
+    from numba import njit  # type: ignore[import]
+except ImportError:  # pragma: no cover - optional speedup
+    njit = None
+
+
+def _jit_or_py(func):
+    if njit is None:
+        return func
+    return njit(func)
+
+
+@_jit_or_py
+def _hurst_rs_numba(values):
+    if np.isnan(values[0]):
+        return np.nan
+
+    mean_val = np.mean(values)
+    cum_dev = np.cumsum(values - mean_val)
+    r = np.max(cum_dev) - np.min(cum_dev)
+    s = np.std(values)
+    if r == 0.0 or s == 0.0:
+        return 0.0
+    return np.log(r / s) / np.log(len(values))
+
+
+@_jit_or_py
+def _entropy_numba(values):
+    if np.isnan(values[0]):
+        return np.nan
+
+    n_bins = 20
+    v_min = np.min(values)
+    v_max = np.max(values)
+    if v_min == v_max:
+        return 0.0
+
+    bins = np.zeros(n_bins, dtype=np.int64)
+    bin_width = (v_max - v_min) / n_bins
+    for x in values:
+        bin_idx = int((x - v_min) / bin_width)
+        if bin_idx >= n_bins:
+            bin_idx = n_bins - 1
+        bins[bin_idx] += 1
+
+    probs = bins / len(values)
+    ent = 0.0
+    for p in probs:
+        if p > 0.0:
+            ent -= p * np.log(p)
+    return ent
 
 
 class AlphaFactory:
@@ -37,6 +90,7 @@ class AlphaFactory:
         include_momentum: bool = True,
         include_macro: bool = True,
         macro_windows: dict[str, int] | None = None,
+        log_progress: bool = False,
     ) -> pd.DataFrame:
         """Run all feature clusters across multiple rolling windows."""
         if windows is None:
@@ -44,19 +98,36 @@ class AlphaFactory:
         if isinstance(windows, int):
             windows = [windows]
 
+        if log_progress:
+            print(f"[AlphaFactory] Start: {datetime.now().isoformat(timespec='seconds')}")
+
         for window in windows:
+            if log_progress:
+                print(f"[AlphaFactory] Window {window} start")
             self.add_volatility_cluster(window=window)
             self.add_liquidity_cluster(window=window)
             self.add_structure_cluster(window=window)
             self.add_trend_cluster(window=window)
             self.add_volume_flow_cluster(window=window)
+            if log_progress:
+                print(f"[AlphaFactory] Window {window} done at {datetime.now().isoformat(timespec='seconds')}")
 
         if include_momentum:
+            if log_progress:
+                print(f"[AlphaFactory] Momentum start")
             self.add_momentum_cluster()
+            if log_progress:
+                print(f"[AlphaFactory] Momentum done at {datetime.now().isoformat(timespec='seconds')}")
         if include_macro:
+            if log_progress:
+                print(f"[AlphaFactory] Macro start")
             self.add_macro_context(macro_windows=macro_windows)
+            if log_progress:
+                print(f"[AlphaFactory] Macro done at {datetime.now().isoformat(timespec='seconds')}")
 
         self.df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        if log_progress:
+            print(f"[AlphaFactory] Complete: {datetime.now().isoformat(timespec='seconds')}")
         return self.df
 
     def add_volatility_cluster(self, window: int = 24) -> pd.DataFrame:
@@ -122,33 +193,12 @@ class AlphaFactory:
             physics_window = 100
             log_ret = self.df["log_ret"].fillna(0.0)
 
-            def _hurst_rs(values: np.ndarray) -> float:
-                values = values[np.isfinite(values)]
-                if values.size == 0:
-                    return np.nan
-                r = np.max(values) - np.min(values)
-                s = np.std(values)
-                if r == 0 or s == 0:
-                    return 0.0
-                return np.log(r / s) / np.log(values.size)
-
-            def _entropy(values: np.ndarray, num_bins: int = 20) -> float:
-                values = values[np.isfinite(values)]
-                if values.size == 0:
-                    return np.nan
-                hist, _ = np.histogram(values, bins=num_bins)
-                hist = hist[hist > 0]
-                if hist.size == 0:
-                    return 0.0
-                probs = hist / hist.sum()
-                return -np.sum(probs * np.log(probs))
-
             self.df["STRUC_HURST_100"] = log_ret.rolling(
                 physics_window, min_periods=physics_window
-            ).apply(_hurst_rs, raw=True)
+            ).apply(_hurst_rs_numba, raw=True)
             self.df["STRUC_ENTROPY_100"] = log_ret.rolling(
                 physics_window, min_periods=physics_window
-            ).apply(_entropy, raw=True)
+            ).apply(_entropy_numba, raw=True)
 
         return self.df
 
