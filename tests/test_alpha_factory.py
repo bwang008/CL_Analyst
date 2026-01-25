@@ -135,6 +135,21 @@ def test_no_inf_or_nan_after_warmup(perfect_trend_data):
     assert not warmup_df[feature_cols].isna().any().any(), "Found NaNs after warmup"
 
 
+def test_structure_physics(flat_line_data):
+    factory = AlphaFactory(flat_line_data)
+    df = factory.add_structure_cluster(window=10)
+
+    assert "STRUC_ENTROPY_100" in df.columns
+    assert "STRUC_HURST_100" in df.columns
+
+    entropy_series = df["STRUC_ENTROPY_100"].dropna()
+    assert not entropy_series.empty, "Entropy should be calculated"
+    assert entropy_series.iloc[-1] < 1e-6, "Entropy should be near 0 on flat data"
+
+    hurst_series = df["STRUC_HURST_100"].dropna()
+    assert not hurst_series.empty, "Hurst should be calculated"
+
+
 def test_macro_context_integration(long_trend_data):
     factory = AlphaFactory(long_trend_data)
     df = factory.add_all_features(
