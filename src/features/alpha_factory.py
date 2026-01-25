@@ -99,6 +99,47 @@ def _corwin_schultz_numba(high, low, window):
     return rolling_spread
 
 
+@_jit_or_py
+def _rolling_slope_r2_numba(y, window):
+    n = len(y)
+    slopes = np.full(n, np.nan)
+    r2s = np.full(n, np.nan)
+
+    x = np.arange(window)
+    sum_x = np.sum(x)
+    sum_x_sq = np.sum(x * x)
+    denom_x = window * sum_x_sq - sum_x * sum_x
+    if denom_x == 0.0:
+        return slopes, r2s
+
+    for i in range(window, n + 1):
+        y_slice = y[i - window : i]
+        if np.isnan(y_slice).any():
+            continue
+
+        sum_y = np.sum(y_slice)
+        sum_xy = np.sum(x * y_slice)
+
+        numerator = window * sum_xy - sum_x * sum_y
+        slope = numerator / denom_x
+        intercept = (sum_y - slope * sum_x) / window
+
+        mean_y = sum_y / window
+        ss_tot = np.sum((y_slice - mean_y) ** 2)
+        y_pred = slope * x + intercept
+        ss_res = np.sum((y_slice - y_pred) ** 2)
+
+        if ss_tot == 0.0:
+            r2 = 0.0
+        else:
+            r2 = 1.0 - (ss_res / ss_tot)
+
+        slopes[i - 1] = slope
+        r2s[i - 1] = r2
+
+    return slopes, r2s
+
+
 class AlphaFactory:
     """
     Feature generation engine for OHLCV-based signals.
@@ -244,26 +285,13 @@ class AlphaFactory:
         suffix = f"_{window}"
         roll_max = self.close.rolling(window).max()
         roll_min = self.close.rolling(window).min()
-        range_span = roll_max - roll_min
+        range_span = (roll_max - roll_min).replace(0, np.nan)
         self.df[f"TREND_DONCHIAN_POS{suffix}"] = (self.close - roll_min) / range_span
 
-        linreg = ta.linreg(self.close, length=window, slope=True, r=True)
-        if isinstance(linreg, pd.Series):
-            self.df[f"TREND_LR_SLOPE{suffix}"] = linreg
-            self.df[f"TREND_LR_R2{suffix}"] = np.nan
-        else:
-            slope_col = linreg.get(f"LRS_{window}") if linreg is not None else None
-            r_col = linreg.get(f"LRr_{window}") if linreg is not None else None
-            if slope_col is None and linreg is not None:
-                slope_col = linreg.get(f"LRS_{window}.0")
-            if r_col is None and linreg is not None:
-                r_col = linreg.get(f"LRr_{window}.0")
-
-            self.df[f"TREND_LR_SLOPE{suffix}"] = slope_col if slope_col is not None else np.nan
-            if r_col is not None:
-                self.df[f"TREND_LR_R2{suffix}"] = r_col.pow(2)
-            else:
-                self.df[f"TREND_LR_R2{suffix}"] = np.nan
+        prices = self.close.to_numpy(dtype=np.float64)
+        slopes, r2s = _rolling_slope_r2_numba(prices, window)
+        self.df[f"TREND_LR_SLOPE{suffix}"] = slopes
+        self.df[f"TREND_LR_R2{suffix}"] = r2s
 
         return self.df
 
