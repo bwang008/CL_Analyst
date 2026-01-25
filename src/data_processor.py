@@ -21,6 +21,7 @@ import json
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from datetime import datetime
 
 from src.features.alpha_factory import AlphaFactory
 
@@ -275,7 +276,12 @@ class DataProcessor:
         
         return df
     
-    def cleanup(self, df: pd.DataFrame, drop_raw_returns: bool = True) -> pd.DataFrame:
+    def cleanup(
+        self,
+        df: pd.DataFrame,
+        drop_raw_returns: bool = True,
+        warmup_rows: int = 10500,
+    ) -> pd.DataFrame:
         """
         Clean up the DataFrame by removing raw columns and NaN rows.
         
@@ -319,8 +325,24 @@ class DataProcessor:
             df = df.drop(columns=cols_existing)
             print(f"  - Dropped raw columns: {cols_existing}")
         
-        # Drop rows with NaN values
+        # Drop initial warmup rows to avoid rolling window NaNs
+        if warmup_rows and len(df) > warmup_rows:
+            df = df.iloc[warmup_rows:]
+            print(f"  - Dropped first {warmup_rows} warmup rows")
+
+        # Fill small gaps, then drop any remaining NaNs
+        df = df.ffill().bfill()
+        rows_before_dropna = len(df)
         df = df.dropna()
+        rows_after_dropna = len(df)
+        dropped_after_fill = rows_before_dropna - rows_after_dropna
+        if rows_before_dropna > 0:
+            dropped_pct = dropped_after_fill / rows_before_dropna
+            if dropped_pct > 0.01:
+                print(
+                    f"  WARNING: Dropped {dropped_after_fill} rows after fill "
+                    f"({dropped_pct:.2%} of remaining data)"
+                )
         
         rows_after = len(df)
         print(f"  - Dropped {rows_before - rows_after} rows with NaN values")
@@ -425,13 +447,17 @@ class DataProcessor:
         """
         print("=" * 60)
         print(f"Starting Data Processing Pipeline - {self.dataset_version.upper()}")
+        print(f"Started at: {datetime.now().isoformat(timespec='seconds')}")
         print("=" * 60)
         
         # Step 1: Load data
         df = self.load_data()
+        total_rows = len(df)
+        print(f"  [25%] Loaded {total_rows} rows at {datetime.now().isoformat(timespec='seconds')}")
         
         # Step 2: Add time features
         df = self.add_time_features(df)
+        print(f"  [50%] Time features added at {datetime.now().isoformat(timespec='seconds')}")
 
         # Step 3: Add AlphaFactory features (windows in bars for 5-min data)
         windows = [
@@ -440,7 +466,12 @@ class DataProcessor:
             14 * self.BARS_PER_DAY,
             35 * self.BARS_PER_DAY,
         ]
-        df = AlphaFactory(df).add_all_features(windows=windows, include_macro=True)
+        df = AlphaFactory(df).add_all_features(
+            windows=windows,
+            include_macro=True,
+            log_progress=True,
+        )
+        print(f"  [75%] AlphaFactory features added at {datetime.now().isoformat(timespec='seconds')}")
 
         # Step 4: Create target (MUST be before normalization)
         df = self.create_target(df, threshold=threshold, horizon=horizon)
@@ -453,6 +484,7 @@ class DataProcessor:
 
         # Step 7: Save
         saved_path = self.save(df)
+        print(f"  [100%] Saved output at {datetime.now().isoformat(timespec='seconds')}")
         
         print("=" * 60)
         print("Processing Complete!")
@@ -486,13 +518,17 @@ class DataProcessor:
         """
         print("=" * 60)
         print(f"Starting Data Processing Pipeline - {self.dataset_version.upper()}")
+        print(f"Started at: {datetime.now().isoformat(timespec='seconds')}")
         print("=" * 60)
         
         # Step 1: Load data
         df = self.load_data()
+        total_rows = len(df)
+        print(f"  [25%] Loaded {total_rows} rows at {datetime.now().isoformat(timespec='seconds')}")
         
         # Step 2: Add RAW time features (Hour, Minute) - differs from set_01
         df = self.add_time_features_raw(df)
+        print(f"  [50%] Time features added at {datetime.now().isoformat(timespec='seconds')}")
 
         # Step 3: Add AlphaFactory features (windows in bars for 5-min data)
         windows = [
@@ -501,7 +537,12 @@ class DataProcessor:
             14 * self.BARS_PER_DAY,
             35 * self.BARS_PER_DAY,
         ]
-        df = AlphaFactory(df).add_all_features(windows=windows, include_macro=True)
+        df = AlphaFactory(df).add_all_features(
+            windows=windows,
+            include_macro=True,
+            log_progress=True,
+        )
+        print(f"  [75%] AlphaFactory features added at {datetime.now().isoformat(timespec='seconds')}")
 
         # Step 4: Create target (MUST be before normalization)
         df = self.create_target(df, threshold=threshold, horizon=horizon)
@@ -514,6 +555,7 @@ class DataProcessor:
 
         # Step 7: Save
         saved_path = self.save(df)
+        print(f"  [100%] Saved output at {datetime.now().isoformat(timespec='seconds')}")
         
         print("=" * 60)
         print("Processing Complete!")
