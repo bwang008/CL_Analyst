@@ -434,8 +434,13 @@ class DataProcessor:
         df = self.add_time_features(df)
 
         # Step 3: Add AlphaFactory features (windows in bars for 5-min data)
-        windows = [3 * self.BARS_PER_DAY, 7 * self.BARS_PER_DAY, 14 * self.BARS_PER_DAY]
-        df = AlphaFactory(df).add_all_features(windows=windows)
+        windows = [
+            3 * self.BARS_PER_DAY,
+            7 * self.BARS_PER_DAY,
+            14 * self.BARS_PER_DAY,
+            35 * self.BARS_PER_DAY,
+        ]
+        df = AlphaFactory(df).add_all_features(windows=windows, include_macro=True)
 
         # Step 4: Create target (MUST be before normalization)
         df = self.create_target(df, threshold=threshold, horizon=horizon)
@@ -490,8 +495,13 @@ class DataProcessor:
         df = self.add_time_features_raw(df)
 
         # Step 3: Add AlphaFactory features (windows in bars for 5-min data)
-        windows = [3 * self.BARS_PER_DAY, 7 * self.BARS_PER_DAY, 14 * self.BARS_PER_DAY]
-        df = AlphaFactory(df).add_all_features(windows=windows)
+        windows = [
+            3 * self.BARS_PER_DAY,
+            7 * self.BARS_PER_DAY,
+            14 * self.BARS_PER_DAY,
+            35 * self.BARS_PER_DAY,
+        ]
+        df = AlphaFactory(df).add_all_features(windows=windows, include_macro=True)
 
         # Step 4: Create target (MUST be before normalization)
         df = self.create_target(df, threshold=threshold, horizon=horizon)

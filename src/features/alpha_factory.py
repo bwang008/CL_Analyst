@@ -120,7 +120,7 @@ class AlphaFactory:
 
         if "STRUC_HURST_100" not in self.df.columns:
             physics_window = 100
-            log_ret = self.df["log_ret"]
+            log_ret = self.df["log_ret"].fillna(0.0)
 
             def _hurst_rs(values: np.ndarray) -> float:
                 values = values[np.isfinite(values)]
@@ -143,12 +143,12 @@ class AlphaFactory:
                 probs = hist / hist.sum()
                 return -np.sum(probs * np.log(probs))
 
-            self.df["STRUC_HURST_100"] = log_ret.rolling(physics_window).apply(
-                _hurst_rs, raw=True
-            )
-            self.df["STRUC_ENTROPY_100"] = log_ret.rolling(physics_window).apply(
-                _entropy, raw=True
-            )
+            self.df["STRUC_HURST_100"] = log_ret.rolling(
+                physics_window, min_periods=physics_window
+            ).apply(_hurst_rs, raw=True)
+            self.df["STRUC_ENTROPY_100"] = log_ret.rolling(
+                physics_window, min_periods=physics_window
+            ).apply(_entropy, raw=True)
 
         return self.df
 
