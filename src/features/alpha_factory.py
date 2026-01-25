@@ -56,6 +56,49 @@ def _entropy_numba(values):
     return ent
 
 
+@_jit_or_py
+def _corwin_schultz_numba(high, low, window):
+    n = len(high)
+    spreads = np.full(n, np.nan)
+    log_hl_sq = np.log(high / low) ** 2
+    const_sqrt2 = np.sqrt(2.0)
+    denom = 3.0 - 2.0 * const_sqrt2
+
+    for i in range(1, n):
+        h2 = max(high[i], high[i - 1])
+        l2 = min(low[i], low[i - 1])
+        gamma = np.log(h2 / l2) ** 2
+        beta = log_hl_sq[i] + log_hl_sq[i - 1]
+        if beta <= 0.0 or gamma <= 0.0:
+            spreads[i] = 0.0
+            continue
+
+        sqrt_beta = np.sqrt(beta)
+        alpha = (const_sqrt2 * sqrt_beta - sqrt_beta) / denom - np.sqrt(gamma / denom)
+        if alpha <= 0.0:
+            spreads[i] = 0.0
+        else:
+            exp_alpha = np.exp(alpha)
+            spreads[i] = 2.0 * (exp_alpha - 1.0) / (1.0 + exp_alpha)
+
+    rolling_spread = np.full(n, np.nan)
+    current_sum = 0.0
+    count = 0
+    for i in range(n):
+        if np.isfinite(spreads[i]):
+            current_sum += spreads[i]
+            count += 1
+        if i >= window:
+            old_val = spreads[i - window]
+            if np.isfinite(old_val):
+                current_sum -= old_val
+                count -= 1
+        if i >= window - 1:
+            if count > 0:
+                rolling_spread[i] = current_sum / window
+    return rolling_spread
+
+
 class AlphaFactory:
     """
     Feature generation engine for OHLCV-based signals.
@@ -167,17 +210,11 @@ class AlphaFactory:
             (self.df["log_ret"].abs() / dollar_vol).rolling(window).mean() * 1e6
         )
 
-        hl = self.high / self.low
-        hl_2 = self.high.rolling(2).max() / self.low.rolling(2).min()
-        beta = (np.log(hl) ** 2).rolling(2).sum()
-        gamma = np.log(hl_2) ** 2
-
-        denom = 3.0 - 2.0 * np.sqrt(2.0)
-        alpha = (np.sqrt(2.0 * beta) - np.sqrt(beta)) / denom - np.sqrt(gamma / denom)
-        spread = (2.0 * (np.exp(alpha) - 1.0)) / (1.0 + np.exp(alpha))
-        spread = spread.clip(lower=0)
-
-        self.df[f"LIQ_CORWIN{suffix}"] = spread.rolling(window).mean()
+        high_values = self.high.to_numpy(dtype=np.float64)
+        low_values = self.low.to_numpy(dtype=np.float64)
+        self.df[f"LIQ_CORWIN{suffix}"] = _corwin_schultz_numba(
+            high_values, low_values, window
+        )
 
         return self.df
 
