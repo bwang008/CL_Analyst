@@ -334,6 +334,7 @@ def walk_forward_validate(
             mask = ~y_test.isna()
             X_test = X_test.loc[mask]
             y_test = y_test.loc[mask]
+            df_test = df_test.loc[mask]
 
         if balance_mode == "downsample":
             X_train, y_train = util.downsample_majority(
