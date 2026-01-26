@@ -167,7 +167,7 @@ def get_feature_columns(df: pd.DataFrame) -> list:
     
     Excludes columns starting with:
     - RAW_: Raw/diagnostic data for evaluation (e.g., RAW_Close, RAW_Future_High)
-    - TARGET_: Target labels for training (e.g., TARGET_Direction)
+    - TARGET_: Target labels for training (e.g., TARGET_DIR_8PCT_MULTI)
     - META_: Metadata columns (e.g., META_Symbol)
     
     This is the SINGLE SOURCE OF TRUTH for what the model sees.
@@ -181,7 +181,7 @@ def get_feature_columns(df: pd.DataFrame) -> list:
         
     Example:
         >>> df.columns
-        ['RSI', 'MACD', 'RAW_Close', 'RAW_Future_High', 'TARGET_Direction']
+        ['RSI', 'MACD', 'RAW_Close', 'RAW_Future_High', 'TARGET_DIR_8PCT_MULTI']
         >>> get_feature_columns(df)
         ['RSI', 'MACD']
     """
@@ -191,13 +191,13 @@ def get_feature_columns(df: pd.DataFrame) -> list:
     ]
 
 
-def get_target_column(df: pd.DataFrame, target_name: str = 'TARGET_Direction') -> str:
+def get_target_column(df: pd.DataFrame, target_name: str = 'TARGET_DIR_8PCT_MULTI') -> str:
     """
     Returns the target column name if it exists in the DataFrame.
     
     Args:
         df: DataFrame to check
-        target_name: Expected target column name (default: 'TARGET_Direction')
+        target_name: Expected target column name (default: 'TARGET_DIR_8PCT_MULTI')
         
     Returns:
         str: The target column name
@@ -209,6 +209,8 @@ def get_target_column(df: pd.DataFrame, target_name: str = 'TARGET_Direction') -
         return target_name
     
     # Legacy fallback for older processed files
+    if target_name == 'TARGET_DIR_8PCT_MULTI' and 'TARGET_Direction' in df.columns:
+        return 'TARGET_Direction'
     if target_name == 'TARGET_Direction' and 'Target' in df.columns:
         return 'Target'
     
@@ -219,7 +221,7 @@ def get_target_column(df: pd.DataFrame, target_name: str = 'TARGET_Direction') -
     )
 
 
-def get_X_y(df: pd.DataFrame, target_name: str = 'TARGET_Direction'):
+def get_X_y(df: pd.DataFrame, target_name: str = 'TARGET_DIR_8PCT_MULTI'):
     """
     Safely extract features (X) and target (y) from a DataFrame.
     
@@ -228,7 +230,7 @@ def get_X_y(df: pd.DataFrame, target_name: str = 'TARGET_Direction'):
     
     Args:
         df: DataFrame containing features and target
-        target_name: Name of the target column (default: 'TARGET_Direction')
+        target_name: Name of the target column (default: 'TARGET_DIR_8PCT_MULTI')
         
     Returns:
         tuple: (X, y) where X is a DataFrame of features and y is a Series of targets

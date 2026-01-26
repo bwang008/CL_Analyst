@@ -110,7 +110,7 @@ def train_and_evaluate(
     model_params: dict = None,
     verbose: bool = True,
     method: str = "walk_forward",
-    target_name: str = "TARGET_Direction",
+    target_name: str = "TARGET_DIR_8PCT_MULTI",
     balance_mode: str = "weight",
     random_state: int | None = None,
 ):
@@ -532,7 +532,7 @@ Commands:
     
     train       Train model with walk-forward validation
                 data_path: Path to processed data (default: data/processed/CL_set_03.parquet)
-                --target: Target column to train on (default: TARGET_Direction)
+                --target: Target column to train on (default: TARGET_DIR_8PCT_MULTI)
                 --targets: Comma-separated targets to train sequentially (logs to reports/train_runs.log)
                 --balance_mode: weight (default) or downsample
                 --config: JSON file with experiment list
@@ -582,7 +582,7 @@ if __name__ == '__main__':
         # Training mode
         method = "walk_forward"
         data_path = "data/processed/CL_set_03.parquet"
-        target_name = "TARGET_Direction"
+        target_name = "TARGET_DIR_8PCT_MULTI"
         target_list = None
         balance_mode = "weight"
         config_path = None
@@ -644,6 +644,28 @@ if __name__ == '__main__':
                 exp_balance = exp.get("balance_mode", balance_mode)
                 exp_method = exp.get("method", method)
                 exp_data_path = exp.get("data_path", data_path)
+                exp_dataset_version = exp.get("dataset_version")
+                exp_input_path = exp.get("input_path", "data/raw/CL.csv")
+                exp_output_path = exp.get("output_path")
+                exp_force_reprocess = exp.get("force_reprocess", False)
+                exp_threshold = exp.get("threshold", 0.08)
+                exp_horizon = exp.get("horizon", 576)
+                if exp_dataset_version:
+                    processor = DataProcessor(
+                        input_path=exp_input_path,
+                        output_path=exp_output_path,
+                        dataset_version=exp_dataset_version,
+                    )
+                    exp_data_path = processor.output_path
+                    if exp_force_reprocess or not os.path.exists(exp_data_path):
+                        get_processed_cl_df(
+                            input_path=exp_input_path,
+                            output_path=exp_output_path,
+                            dataset_version=exp_dataset_version,
+                            threshold=exp_threshold,
+                            horizon=exp_horizon,
+                            force_reprocess=exp_force_reprocess,
+                        )
                 exp_target_list = exp_targets or ([exp_target] if exp_target else [target_name])
 
                 for target in exp_target_list:
@@ -653,7 +675,7 @@ if __name__ == '__main__':
                         purge_bars=exp.get("purge_bars", 576),
                         min_train_bars=exp.get("min_train_bars", 8640),
                         fold_size_bars=exp.get("fold_size_bars", 8640),
-                        threshold=exp.get("threshold", 0.08),
+                        threshold=exp_threshold,
                         output_dir=exp.get("output_dir", "reports"),
                         model_dir=exp.get("model_dir", "models"),
                         verbose=True,

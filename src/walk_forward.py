@@ -202,7 +202,7 @@ class WalkForwardSplitter:
         df: pd.DataFrame,
         train_indices: np.ndarray,
         test_indices: np.ndarray,
-        target_name: str = "TARGET_Direction",
+        target_name: str = "TARGET_DIR_8PCT_MULTI",
     ) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame]:
         """
         Extract features and targets for a fold, ensuring no data leakage.
@@ -273,7 +273,7 @@ def walk_forward_validate(
     model_params: dict = None,
     splitter: WalkForwardSplitter = None,
     verbose: bool = True,
-    target_name: str = "TARGET_Direction",
+    target_name: str = "TARGET_DIR_8PCT_MULTI",
     balance_mode: str = "weight",
     random_state: int | None = None,
 ) -> List[dict]:

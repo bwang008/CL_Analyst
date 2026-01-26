@@ -214,71 +214,91 @@ class DataProcessor:
 
         return df
     
-    def create_target(self, df: pd.DataFrame, threshold: float = 0.08, 
-                      horizon: int = None) -> pd.DataFrame:
+    def add_direction_target(
+        self,
+        df: pd.DataFrame,
+        prefix: str,
+        threshold: float = 0.08,
+        horizon: int = None,
+        add_raw: bool = False,
+    ) -> pd.DataFrame:
         """
-        Create target labels for classification and RAW_ columns for evaluation.
-        
-        Target values (stored as TARGET_Direction):
+        Create direction targets for classification and RAW_ columns for evaluation.
+
+        Target values (stored as {prefix}_MULTI):
         - 0: Hold (no significant move)
         - 1: Buy signal (price moves up > threshold)
         - 2: Sell signal (price moves down > threshold)
-        
+
         RAW_ columns (for evaluation, NOT used as features):
         - RAW_Close: Current close price (for visualization)
         - RAW_Future_High: Max high price over horizon (for actual move calculation)
         - RAW_Future_Low: Min low price over horizon (for actual move calculation)
-        
+
         IMPORTANT: This must be called BEFORE normalizing prices, as it requires
         absolute price values to calculate percentage moves.
-        
+
         Args:
             df: DataFrame with High, Low, Close columns (absolute prices)
+            prefix: Target prefix (e.g., TARGET_DIR_8PCT)
             threshold: Percentage threshold for significant move (default 0.08 = 8%)
             horizon: Forward-looking window in bars (default: 576 = 48 hours)
-            
+            add_raw: If True, (re)compute RAW_ columns
+
         Returns:
-            pd.DataFrame: DataFrame with TARGET_Direction and RAW_ columns added
+            pd.DataFrame: DataFrame with {prefix}_MULTI/LONG/SHORT and RAW_ columns added
         """
         if horizon is None:
             horizon = 2 * self.BARS_PER_DAY  # 576 bars = 48 hours
-            
-        print(f"Creating target with {threshold*100}% threshold, {horizon} bar ({horizon/self.BARS_PER_DAY:.1f} day) horizon...")
-        
-        # Calculate future high and low over the horizon
-        # We look at the NEXT 'horizon' bars (not including current)
-        # Using shift(-horizon) to look forward, then rolling max/min backwards
-        future_high = df['High'].iloc[::-1].rolling(window=horizon, min_periods=1).max().iloc[::-1].shift(-1)
-        future_low = df['Low'].iloc[::-1].rolling(window=horizon, min_periods=1).min().iloc[::-1].shift(-1)
-        
-        # Store RAW_ columns for evaluation (these are NOT features - filtered out by get_feature_columns())
-        # These allow the evaluator to calculate actual move magnitudes vs predictions
-        df['RAW_Close'] = df['Close'].copy()
-        df['RAW_Future_High'] = future_high
-        df['RAW_Future_Low'] = future_low
-        print("  - Added RAW_Close, RAW_Future_High, RAW_Future_Low for evaluation")
-        
+
+        print(
+            f"Creating direction target ({prefix}) with {threshold*100}% threshold, "
+            f"{horizon} bar ({horizon/self.BARS_PER_DAY:.1f} day) horizon..."
+        )
+
+        if add_raw or "RAW_Future_High" not in df.columns or "RAW_Future_Low" not in df.columns:
+            # Calculate future high and low over the horizon
+            # We look at the NEXT 'horizon' bars (not including current)
+            # Using shift(-horizon) to look forward, then rolling max/min backwards
+            future_high = df['High'].iloc[::-1].rolling(window=horizon, min_periods=1).max().iloc[::-1].shift(-1)
+            future_low = df['Low'].iloc[::-1].rolling(window=horizon, min_periods=1).min().iloc[::-1].shift(-1)
+
+            # Store RAW_ columns for evaluation (these are NOT features - filtered out by get_feature_columns())
+            # These allow the evaluator to calculate actual move magnitudes vs predictions
+            df['RAW_Close'] = df['Close'].copy()
+            df['RAW_Future_High'] = future_high
+            df['RAW_Future_Low'] = future_low
+            print("  - Added RAW_Close, RAW_Future_High, RAW_Future_Low for evaluation")
+
         # Calculate percentage moves from current close
-        up_move = (future_high - df['Close']) / df['Close']
-        down_move = (df['Close'] - future_low) / df['Close']
-        
-        # Create target labels (will be renamed to TARGET_Direction in cleanup)
-        df['TARGET_Direction'] = 0  # Default: Hold
-        df.loc[up_move > threshold, 'TARGET_Direction'] = 1   # Buy signal
-        df.loc[down_move > threshold, 'TARGET_Direction'] = 2  # Sell signal
-        
+        up_move = (df['RAW_Future_High'] - df['Close']) / df['Close']
+        down_move = (df['Close'] - df['RAW_Future_Low']) / df['Close']
+
+        multi_col = f"{prefix}_MULTI"
+        long_col = f"{prefix}_LONG"
+        short_col = f"{prefix}_SHORT"
+
+        # Create target labels
+        df[multi_col] = 0  # Default: Hold
+        df.loc[up_move > threshold, multi_col] = 1   # Buy signal
+        df.loc[down_move > threshold, multi_col] = 2  # Sell signal
+
         # If both conditions are met, prioritize based on which move is larger
         both_signals = (up_move > threshold) & (down_move > threshold)
-        df.loc[both_signals & (up_move >= down_move), 'TARGET_Direction'] = 1
-        df.loc[both_signals & (down_move > up_move), 'TARGET_Direction'] = 2
-        
+        df.loc[both_signals & (up_move >= down_move), multi_col] = 1
+        df.loc[both_signals & (down_move > up_move), multi_col] = 2
+
         # The last 'horizon' rows don't have enough forward data - mark as NaN
-        df.loc[df.index[-horizon:], 'TARGET_Direction'] = np.nan
-        
+        df.loc[df.index[-horizon:], multi_col] = np.nan
+
+        df[long_col] = (df[multi_col] == 1).astype("Int64")
+        df[short_col] = (df[multi_col] == 2).astype("Int64")
+        df.loc[df[multi_col].isna(), [long_col, short_col]] = pd.NA
+
         # Print distribution
-        target_counts = df['TARGET_Direction'].value_counts(dropna=False)
-        print(f"  - TARGET_Direction distribution: {dict(target_counts)}")
-        
+        target_counts = df[multi_col].value_counts(dropna=False)
+        print(f"  - {multi_col} distribution: {dict(target_counts)}")
+
         return df
     
     def normalize_features(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -338,7 +358,7 @@ class DataProcessor:
         3. Drop original Volume column
         4. Drop raw return columns (noise for long-horizon predictions)
         5. Drop rows with any NaN values
-        6. Convert TARGET_Direction to integer type
+        6. Convert TARGET_ columns to integer type
         
         Note: RAW_ prefixed columns (RAW_Close, RAW_Future_High, RAW_Future_Low) are 
         preserved for evaluation. They are filtered out by get_feature_columns() 
@@ -497,9 +517,10 @@ class DataProcessor:
         Returns:
             pd.DataFrame: Fully processed DataFrame
         """
+        start_time = datetime.now()
         print("=" * 60)
         print(f"Starting Data Processing Pipeline - {self.dataset_version.upper()}")
-        print(f"Started at: {datetime.now().isoformat(timespec='seconds')}")
+        print(f"Started at: {start_time.isoformat(timespec='seconds')}")
         print("=" * 60)
         
         # Step 1: Load data
@@ -525,8 +546,20 @@ class DataProcessor:
         )
         print(f"  [75%] AlphaFactory features added at {datetime.now().isoformat(timespec='seconds')}")
 
-        # Step 4: Create target (MUST be before normalization)
-        df = self.create_target(df, threshold=threshold, horizon=horizon)
+        # Step 4: Create targets (MUST be before normalization)
+        df = self.add_direction_target(
+            df,
+            prefix="TARGET_DIR_8PCT",
+            threshold=threshold,
+            horizon=horizon,
+            add_raw=True,
+        )
+        df = self.add_direction_target(
+            df,
+            prefix="TARGET_DIR_4PCT",
+            threshold=0.04,
+            horizon=horizon,
+        )
         df = self.add_squeeze_target(
             df,
             prefix="TARGET_SQUEEZE",
@@ -550,6 +583,8 @@ class DataProcessor:
         print(f"Output: {saved_path}")
         print(f"Shape: {df.shape}")
         print(f"Columns: {list(df.columns)}")
+        duration = datetime.now() - start_time
+        print(f"Wall time: {str(duration).split('.')[0]}")
         print("=" * 60)
         
         self.df = df
@@ -575,9 +610,10 @@ class DataProcessor:
         Returns:
             pd.DataFrame: Fully processed DataFrame
         """
+        start_time = datetime.now()
         print("=" * 60)
         print(f"Starting Data Processing Pipeline - {self.dataset_version.upper()}")
-        print(f"Started at: {datetime.now().isoformat(timespec='seconds')}")
+        print(f"Started at: {start_time.isoformat(timespec='seconds')}")
         print("=" * 60)
         
         # Step 1: Load data
@@ -603,8 +639,20 @@ class DataProcessor:
         )
         print(f"  [75%] AlphaFactory features added at {datetime.now().isoformat(timespec='seconds')}")
 
-        # Step 4: Create target (MUST be before normalization)
-        df = self.create_target(df, threshold=threshold, horizon=horizon)
+        # Step 4: Create targets (MUST be before normalization)
+        df = self.add_direction_target(
+            df,
+            prefix="TARGET_DIR_8PCT",
+            threshold=threshold,
+            horizon=horizon,
+            add_raw=True,
+        )
+        df = self.add_direction_target(
+            df,
+            prefix="TARGET_DIR_4PCT",
+            threshold=0.04,
+            horizon=horizon,
+        )
         df = self.add_squeeze_target(
             df,
             prefix="TARGET_SQUEEZE",
@@ -627,6 +675,8 @@ class DataProcessor:
         print(f"Output: {saved_path}")
         print(f"Shape: {df.shape}")
         print(f"Columns: {list(df.columns)}")
+        duration = datetime.now() - start_time
+        print(f"Wall time: {str(duration).split('.')[0]}")
         print("=" * 60)
 
         self.df = df
@@ -642,9 +692,10 @@ class DataProcessor:
         - Volume: Volume_Log (log-transformed)
         - Targets: Multiple squeeze targets (4% and 8%) with binary splits
         """
+        start_time = datetime.now()
         print("=" * 60)
         print(f"Starting Data Processing Pipeline - {self.dataset_version.upper()}")
-        print(f"Started at: {datetime.now().isoformat(timespec='seconds')}")
+        print(f"Started at: {start_time.isoformat(timespec='seconds')}")
         print("=" * 60)
 
         # Step 1: Load data
@@ -671,7 +722,19 @@ class DataProcessor:
         print(f"  [75%] AlphaFactory features added at {datetime.now().isoformat(timespec='seconds')}")
 
         # Step 4: Create targets (MUST be before normalization)
-        df = self.create_target(df, threshold=threshold, horizon=horizon)
+        df = self.add_direction_target(
+            df,
+            prefix="TARGET_DIR_8PCT",
+            threshold=threshold,
+            horizon=horizon,
+            add_raw=True,
+        )
+        df = self.add_direction_target(
+            df,
+            prefix="TARGET_DIR_4PCT",
+            threshold=0.04,
+            horizon=horizon,
+        )
         df = self.add_squeeze_target(
             df,
             prefix="TARGET_SQZ_8PCT",
@@ -700,6 +763,8 @@ class DataProcessor:
         print(f"Output: {saved_path}")
         print(f"Shape: {df.shape}")
         print(f"Columns: {list(df.columns)}")
+        duration = datetime.now() - start_time
+        print(f"Wall time: {str(duration).split('.')[0]}")
         print("=" * 60)
 
         self.df = df
@@ -760,10 +825,10 @@ def main(dataset_version: str = "set_01"):
         print("-" * 40)
         print(df.describe().T)
         
-        if 'TARGET_Direction' in df.columns:
-            print("\nTARGET_Direction Distribution:")
+        if 'TARGET_DIR_8PCT_MULTI' in df.columns:
+            print("\nTARGET_DIR_8PCT_MULTI Distribution:")
             print("-" * 40)
-            print(df['TARGET_Direction'].value_counts().sort_index())
+            print(df['TARGET_DIR_8PCT_MULTI'].value_counts().sort_index())
             
     except Exception as e:
         print(f"Error during processing: {e}")

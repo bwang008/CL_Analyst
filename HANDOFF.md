@@ -4,7 +4,8 @@
 - **Primary dataset default:** `set_03` (master squeeze targets).
 - **Data pipeline:** `DataProcessor` -> `AlphaFactory` -> targets -> cleanup -> save.
 - **Targets now available:**
-  - `TARGET_Direction` (multi-class, 0/1/2)
+  - `TARGET_DIR_8PCT_*` (multi/long/short)
+  - `TARGET_DIR_4PCT_*` (multi/long/short)
   - `TARGET_SQZ_8PCT_*` (multi/long/short)
   - `TARGET_SQZ_4PCT_*` (multi/long/short)
   - `TARGET_SQUEEZE*` still present in `set_01`/`set_02` for backward compatibility.
