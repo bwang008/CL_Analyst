@@ -252,6 +252,7 @@ def train_and_evaluate(
             mask = ~y_test.isna()
             X_test = X_test.loc[mask]
             y_test = y_test.loc[mask]
+            test_df = test_df.loc[mask]
 
         if balance_mode == "downsample":
             X_train, y_train = util.downsample_majority(
@@ -341,16 +342,18 @@ def train_and_evaluate(
 
         # Predict on vault
         X_vault, y_vault = util.get_X_y(vault_df, target_name=target_name)
+        vault_eval_df = vault_df
         if y_vault.isna().any():
             mask = ~y_vault.isna()
             X_vault = X_vault.loc[mask]
             y_vault = y_vault.loc[mask]
+            vault_eval_df = vault_df.loc[mask]
         y_vault_pred = final_model.query(X_vault)
 
         vault_eval = evaluator.evaluate_fold(
             y_true=y_vault.values,
             y_pred=y_vault_pred,
-            df_test=vault_df,
+            df_test=vault_eval_df,
         )
 
         print(f"\n  Vault Results:")
@@ -421,8 +424,10 @@ def train_and_evaluate(
     else:
         signals_path = os.path.join(output_dir, "vault_signals.png")
         visualizer.plot_signals(
-            vault_df, y_vault_pred, signals_path,
-            title="Vault Set: Model Signals"
+            vault_eval_df,
+            y_vault_pred,
+            signals_path,
+            title="Vault Set: Model Signals",
         )
     
     # Actual moves distribution
@@ -471,6 +476,7 @@ def train_and_evaluate(
         'vault_result': vault_eval,
         'report': report,
         'final_model': final_model,
+        'wall_time_seconds': elapsed_seconds,
     }
 
 
@@ -493,21 +499,45 @@ def log_train_run(
     with open(report_path, "a", encoding="utf-8") as f:
         f.write(line)
 
+    def _metric_scalar(value):
+        if isinstance(value, dict):
+            vals = [v for v in value.values() if v is not None]
+            return float(np.mean(vals)) if vals else None
+        return value
+
+    def _signal_metric(value):
+        if isinstance(value, dict):
+            return value.get("Buy")
+        return None
+
     batch_path = os.path.join("reports", "batch_results.csv")
     write_header = not os.path.exists(batch_path)
+    wall_time_seconds = results.get("wall_time_seconds")
     with open(batch_path, "a", encoding="utf-8") as f:
         if write_header:
             f.write(
                 "timestamp,target,method,balance_mode,data_path,"
-                "vault_accuracy,vault_precision,vault_recall,vault_f1,n_samples\n"
+                "vault_accuracy,vault_precision,vault_recall,vault_f1,"
+                "signal_precision,signal_recall,signal_f1,"
+                "n_samples,wall_time_seconds\n"
             )
+        vault_precision = _metric_scalar(vault_result.get("precision"))
+        vault_recall = _metric_scalar(vault_result.get("recall"))
+        vault_f1 = _metric_scalar(vault_result.get("f1"))
+        signal_precision = _signal_metric(vault_result.get("precision"))
+        signal_recall = _signal_metric(vault_result.get("recall"))
+        signal_f1 = _signal_metric(vault_result.get("f1"))
         f.write(
             f"{timestamp},{target_name},{method},{balance_mode},{data_path},"
             f"{vault_result.get('accuracy')},"
-            f"{vault_result.get('precision')},"
-            f"{vault_result.get('recall')},"
-            f"{vault_result.get('f1')},"
-            f"{vault_result.get('n_samples')}\n"
+            f"{vault_precision},"
+            f"{vault_recall},"
+            f"{vault_f1},"
+            f"{signal_precision},"
+            f"{signal_recall},"
+            f"{signal_f1},"
+            f"{vault_result.get('n_samples')},"
+            f"{wall_time_seconds}\n"
         )
 
 
@@ -637,7 +667,10 @@ if __name__ == '__main__':
         if config_path:
             with open(config_path, "r", encoding="utf-8") as f:
                 config_data = json.load(f)
-            experiments = config_data.get("experiments", config_data)
+            if isinstance(config_data, dict):
+                experiments = config_data.get("experiments", config_data)
+            else:
+                experiments = config_data
             for exp in experiments:
                 exp_target = exp.get("target")
                 exp_targets = exp.get("targets")
