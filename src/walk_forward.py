@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 from typing import Iterator, Tuple, List, Optional
 
+from . import util
 from .util import get_feature_columns, get_X_y
 
 
@@ -273,6 +274,8 @@ def walk_forward_validate(
     splitter: WalkForwardSplitter = None,
     verbose: bool = True,
     target_name: str = "TARGET_Direction",
+    balance_mode: str = "weight",
+    random_state: int | None = None,
 ) -> List[dict]:
     """
     Run walk-forward validation on a dataset.
@@ -322,6 +325,20 @@ def walk_forward_validate(
         X_train, y_train, X_test, y_test, df_test = splitter.get_fold_data(
             gym_df, train_idx, test_idx, target_name=target_name
         )
+
+        if y_train.isna().any():
+            mask = ~y_train.isna()
+            X_train = X_train.loc[mask]
+            y_train = y_train.loc[mask]
+        if y_test.isna().any():
+            mask = ~y_test.isna()
+            X_test = X_test.loc[mask]
+            y_test = y_test.loc[mask]
+
+        if balance_mode == "downsample":
+            X_train, y_train = util.downsample_majority(
+                X_train, y_train, random_state=random_state
+            )
         
         if verbose:
             print(f"Training on {len(X_train):,} samples, testing on {len(X_test):,} samples")

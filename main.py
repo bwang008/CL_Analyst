@@ -17,6 +17,7 @@ Author: CL Analyst
 import os
 import sys
 import time
+import json
 import numpy as np
 import pandas as pd
 import src.util as util
@@ -110,6 +111,8 @@ def train_and_evaluate(
     verbose: bool = True,
     method: str = "walk_forward",
     target_name: str = "TARGET_Direction",
+    balance_mode: str = "weight",
+    random_state: int | None = None,
 ):
     """
     Train and evaluate an LightGBM model using walk-forward validation.
@@ -216,6 +219,16 @@ def train_and_evaluate(
             'num_leaves': 31,
             'verbose': -1,
         }
+
+    is_binary_target = target_name.endswith("_LONG") or target_name.endswith("_SHORT")
+    if balance_mode == "downsample" and not is_binary_target:
+        raise ValueError("downsample balance_mode requires a binary target (_LONG/_SHORT).")
+    if is_binary_target:
+        model_params["objective"] = "binary"
+        model_params["metric"] = "binary_logloss"
+        model_params.pop("num_class", None)
+    if balance_mode == "downsample":
+        model_params["class_weight"] = None
     
     if method == "simple":
         split_idx = int(len(df) * (1 - holdout_pct))
@@ -231,6 +244,19 @@ def train_and_evaluate(
 
         X_train, y_train = util.get_X_y(train_df, target_name=target_name)
         X_test, y_test = util.get_X_y(test_df, target_name=target_name)
+        if y_train.isna().any():
+            mask = ~y_train.isna()
+            X_train = X_train.loc[mask]
+            y_train = y_train.loc[mask]
+        if y_test.isna().any():
+            mask = ~y_test.isna()
+            X_test = X_test.loc[mask]
+            y_test = y_test.loc[mask]
+
+        if balance_mode == "downsample":
+            X_train, y_train = util.downsample_majority(
+                X_train, y_train, random_state=random_state
+            )
 
         model = LGBMLearner(**model_params)
         model.add_evidence(X_train, y_train)
@@ -258,6 +284,8 @@ def train_and_evaluate(
             splitter=splitter,
             verbose=verbose,
             target_name=target_name,
+            balance_mode=balance_mode,
+            random_state=random_state,
         )
     
     # -------------------------------------------------------------------------
@@ -300,11 +328,23 @@ def train_and_evaluate(
     else:
         # Train final model on entire gym set
         X_gym, y_gym = util.get_X_y(gym_df, target_name=target_name)
+        if y_gym.isna().any():
+            mask = ~y_gym.isna()
+            X_gym = X_gym.loc[mask]
+            y_gym = y_gym.loc[mask]
+        if balance_mode == "downsample":
+            X_gym, y_gym = util.downsample_majority(
+                X_gym, y_gym, random_state=random_state
+            )
         final_model = LGBMLearner(**model_params)
         final_model.add_evidence(X_gym, y_gym)
 
         # Predict on vault
         X_vault, y_vault = util.get_X_y(vault_df, target_name=target_name)
+        if y_vault.isna().any():
+            mask = ~y_vault.isna()
+            X_vault = X_vault.loc[mask]
+            y_vault = y_vault.loc[mask]
         y_vault_pred = final_model.query(X_vault)
 
         vault_eval = evaluator.evaluate_fold(
@@ -439,18 +479,36 @@ def log_train_run(
     target_name: str,
     method: str,
     data_path: str,
+    balance_mode: str,
     results: dict,
 ):
     os.makedirs(os.path.dirname(report_path), exist_ok=True)
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     vault_result = results.get("vault_result") or {}
-    accuracy = vault_result.get("accuracy", None)
     line = (
         f"{timestamp} | target={target_name} | method={method} | "
-        f"data={data_path} | vault_accuracy={accuracy}\n"
+        f"balance_mode={balance_mode} | data={data_path} | "
+        f"vault_accuracy={vault_result.get('accuracy')}\n"
     )
     with open(report_path, "a", encoding="utf-8") as f:
         f.write(line)
+
+    batch_path = os.path.join("reports", "batch_results.csv")
+    write_header = not os.path.exists(batch_path)
+    with open(batch_path, "a", encoding="utf-8") as f:
+        if write_header:
+            f.write(
+                "timestamp,target,method,balance_mode,data_path,"
+                "vault_accuracy,vault_precision,vault_recall,vault_f1,n_samples\n"
+            )
+        f.write(
+            f"{timestamp},{target_name},{method},{balance_mode},{data_path},"
+            f"{vault_result.get('accuracy')},"
+            f"{vault_result.get('precision')},"
+            f"{vault_result.get('recall')},"
+            f"{vault_result.get('f1')},"
+            f"{vault_result.get('n_samples')}\n"
+        )
 
 
 def print_help():
@@ -464,6 +522,8 @@ Usage:
     python main.py train [data_path] --method simple  Simple 85/15 split sanity check
     python main.py train [data_path] --target TARGET_SQZ_4PCT_LONG
     python main.py train [data_path] --targets TARGET_SQZ_8PCT_LONG,TARGET_SQZ_4PCT_LONG
+    python main.py train --balance_mode downsample
+    python main.py --config experiments.json
     python main.py --help                      Show this help message
 
 Commands:
@@ -474,6 +534,8 @@ Commands:
                 data_path: Path to processed data (default: data/processed/CL_set_03.parquet)
                 --target: Target column to train on (default: TARGET_Direction)
                 --targets: Comma-separated targets to train sequentially (logs to reports/train_runs.log)
+                --balance_mode: weight (default) or downsample
+                --config: JSON file with experiment list
 
 Examples:
     python main.py process                     # Process raw data
@@ -482,6 +544,7 @@ Examples:
     python main.py train data/processed/CL_set_01.csv   # Train with specific file
     python main.py train --method simple       # Simple 85/15 split sanity check
     python main.py train --target TARGET_SQZ_4PCT_LONG
+    python main.py train --balance_mode downsample --target TARGET_SQZ_4PCT_LONG
 """)
 
 
@@ -493,6 +556,8 @@ if __name__ == '__main__':
         sys.exit(0)
     
     command = args[0]
+    if command.startswith("--") and "--config" in args:
+        command = "train"
     
     if command == 'process':
         # Data processing mode
@@ -519,11 +584,17 @@ if __name__ == '__main__':
         data_path = "data/processed/CL_set_03.parquet"
         target_name = "TARGET_Direction"
         target_list = None
+        balance_mode = "weight"
+        config_path = None
 
         if "--method" in args:
             method_idx = args.index("--method")
             if method_idx + 1 < len(args):
                 method = args[method_idx + 1]
+        if "--balance_mode" in args:
+            balance_idx = args.index("--balance_mode")
+            if balance_idx + 1 < len(args):
+                balance_mode = args[balance_idx + 1]
         if "--target" in args:
             target_idx = args.index("--target")
             if target_idx + 1 < len(args):
@@ -533,6 +604,10 @@ if __name__ == '__main__':
             if targets_idx + 1 < len(args):
                 raw_targets = args[targets_idx + 1]
                 target_list = [t.strip() for t in raw_targets.split(",") if t.strip()]
+        if "--config" in args:
+            config_idx = args.index("--config")
+            if config_idx + 1 < len(args):
+                config_path = args[config_idx + 1]
 
         # First non-flag arg after "train" is treated as data_path
         skip_next = False
@@ -549,9 +624,53 @@ if __name__ == '__main__':
             if arg == "--targets":
                 skip_next = True
                 continue
+            if arg == "--balance_mode":
+                skip_next = True
+                continue
+            if arg == "--config":
+                skip_next = True
+                continue
             if not arg.startswith("-"):
                 data_path = arg
                 break
+
+        if config_path:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config_data = json.load(f)
+            experiments = config_data.get("experiments", config_data)
+            for exp in experiments:
+                exp_target = exp.get("target")
+                exp_targets = exp.get("targets")
+                exp_balance = exp.get("balance_mode", balance_mode)
+                exp_method = exp.get("method", method)
+                exp_data_path = exp.get("data_path", data_path)
+                exp_target_list = exp_targets or ([exp_target] if exp_target else [target_name])
+
+                for target in exp_target_list:
+                    results = train_and_evaluate(
+                        data_path=exp_data_path,
+                        holdout_pct=exp.get("holdout_pct", 0.15),
+                        purge_bars=exp.get("purge_bars", 576),
+                        min_train_bars=exp.get("min_train_bars", 8640),
+                        fold_size_bars=exp.get("fold_size_bars", 8640),
+                        threshold=exp.get("threshold", 0.08),
+                        output_dir=exp.get("output_dir", "reports"),
+                        model_dir=exp.get("model_dir", "models"),
+                        verbose=True,
+                        method=exp_method,
+                        target_name=target,
+                        balance_mode=exp_balance,
+                        random_state=exp.get("random_state"),
+                    )
+                    log_train_run(
+                        report_path=os.path.join("reports", "train_runs.log"),
+                        target_name=target,
+                        method=exp_method,
+                        balance_mode=exp_balance,
+                        data_path=exp_data_path,
+                        results=results,
+                    )
+            sys.exit(0)
         
         if target_list:
             for target in target_list:
@@ -567,11 +686,13 @@ if __name__ == '__main__':
                     verbose=True,
                     method=method,
                     target_name=target,
+                    balance_mode=balance_mode,
                 )
                 log_train_run(
                     report_path=os.path.join("reports", "train_runs.log"),
                     target_name=target,
                     method=method,
+                    balance_mode=balance_mode,
                     data_path=data_path,
                     results=results,
                 )
@@ -588,11 +709,13 @@ if __name__ == '__main__':
                 verbose=True,
                 method=method,
                 target_name=target_name,
+                balance_mode=balance_mode,
             )
             log_train_run(
                 report_path=os.path.join("reports", "train_runs.log"),
                 target_name=target_name,
                 method=method,
+                balance_mode=balance_mode,
                 data_path=data_path,
                 results=results,
             )
