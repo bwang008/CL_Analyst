@@ -183,8 +183,10 @@ class SignalVisualizer:
         n_folds = len(fold_results)
         
         # Extract metrics
-        accuracies = [(fold['y_pred'] == fold['y_true']).mean() 
-                     for fold in fold_results]
+        accuracies = [
+            np.mean(fold['y_pred'] == np.asarray(fold['y_true']))
+            for fold in fold_results
+        ]
         train_sizes = [fold['train_size'] for fold in fold_results]
         test_sizes = [fold['test_size'] for fold in fold_results]
         
