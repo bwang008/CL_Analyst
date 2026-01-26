@@ -160,7 +160,11 @@ class ModelEvaluator:
             'DateTime': df_test.index,
             'Predicted': y_pred,
             'Predicted_Label': [self.CLASS_NAMES.get(p, 'Unknown') for p in y_pred],
-            'TARGET_Direction': df_test['TARGET_Direction'].values if 'TARGET_Direction' in df_test.columns else np.nan,
+            'TARGET_DIR_8PCT_MULTI': (
+                df_test['TARGET_DIR_8PCT_MULTI'].values
+                if 'TARGET_DIR_8PCT_MULTI' in df_test.columns
+                else (df_test['TARGET_Direction'].values if 'TARGET_Direction' in df_test.columns else np.nan)
+            ),
             'Actual_Up_Pct': actual_up.values,
             'Actual_Down_Pct': actual_down.values,
             'Hit_Threshold_Up': (actual_up >= self.threshold).values,

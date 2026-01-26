@@ -132,7 +132,9 @@ CL_Analyst/
 - **Macro**: resampled 1M/3M Donchian width & position
 - **Volume**: Volume_Log
 - **Targets**:
-  - `TARGET_Direction`: 0=Hold, 1=Buy (8%+ up), 2=Sell (8%+ down) within 48 hours
+  - `TARGET_DIR_8PCT_MULTI`: 0=Hold, 1=Buy (8%+ up), 2=Sell (8%+ down) within 48 hours
+  - `TARGET_DIR_8PCT_LONG` / `TARGET_DIR_8PCT_SHORT`
+  - `TARGET_DIR_4PCT_MULTI`, `TARGET_DIR_4PCT_LONG`, `TARGET_DIR_4PCT_SHORT`
   - `TARGET_SQUEEZE_*`: squeeze targets with multi/long/short splits
   - `TARGET_SQZ_8PCT_*` and `TARGET_SQZ_4PCT_*` for set_03
 
@@ -160,7 +162,7 @@ results = train_and_evaluate(
     threshold=0.08,
     output_dir="reports",
     model_dir="models",
-    target_name="TARGET_Direction",
+    target_name="TARGET_DIR_8PCT_MULTI",
 )
 ```
 
@@ -170,7 +172,7 @@ Default processing parameters:
 - **threshold**: 0.08 (8% price move triggers Buy/Sell signal)
 - **horizon**: 576 bars (48 hours of 5-min data)
 Default training parameter:
-- **target_name**: `TARGET_Direction`
+- **target_name**: `TARGET_DIR_8PCT_MULTI`
 - **balance_mode**: `weight` (default) or `downsample` (binary only)
 
 ### Batch Experiments
@@ -179,8 +181,8 @@ Create a JSON file (e.g., `experiments.json`) with a list of runs:
 
 ```json
 [
-  {"target": "TARGET_SQZ_8PCT_LONG", "balance_mode": "weight"},
-  {"target": "TARGET_SQZ_4PCT_LONG", "balance_mode": "downsample"}
+  {"dataset_version": "set_03", "target": "TARGET_SQZ_8PCT_LONG", "balance_mode": "weight"},
+  {"dataset_version": "set_03", "target": "TARGET_SQZ_4PCT_LONG", "balance_mode": "downsample"}
 ]
 ```
 
