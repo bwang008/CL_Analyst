@@ -3,7 +3,8 @@ Data Processor Module for CL Futures ML Pipeline.
 
 This module handles ETL (Extract, Transform, Load) for OHLCV data:
 - Loading raw semicolon-separated CSV data
-- Feature engineering (technical indicators, volatility, time features)
+- Time feature generation
+- Feature generation via AlphaFactory
 - Target creation for ML classification
 - Normalization and cleanup
 - Saving processed data to Parquet/CSV
@@ -19,14 +20,17 @@ import os
 import json
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
+import pandas_ta as ta  # noqa: F401
 from pathlib import Path
+from datetime import datetime
+
+from src.features.alpha_factory import AlphaFactory
 
 
 # Dataset version suffix
 DATASET_VERSIONS = {
-    'set_01': 'Base features with cyclical time (Time_Sin, Time_Cos)',
-    'set_02': 'Same as set_01 but with raw time (Hour, Minute)',
+    'set_01': 'AlphaFactory features with cyclical time (Time_Sin, Time_Cos)',
+    'set_02': 'AlphaFactory features with raw time (Hour, Minute)',
 }
 
 
@@ -163,114 +167,32 @@ class DataProcessor:
         df['Minute'] = df.index.minute
         
         return df
-    
-    def add_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+
+    def add_squeeze_target(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Add technical indicators using pandas_ta.
-        
-        Indicators added:
-        - RSI (14 periods)
-        - MACD (12, 26, 9) - returns MACD line, Signal line, and Histogram
-        - SMA_20 (20 periods)
-        - SMA_30d (8640 periods - 30 days of 5-min bars)
-        
-        Args:
-            df: DataFrame with OHLCV columns
-            
-        Returns:
-            pd.DataFrame: DataFrame with technical indicator columns added
+        Creates 'TARGET_SQUEEZE':
+        - 0: No trade
+        - 1: Long Squeeze (Quiet Volatility -> Big Up Move)
+        - 2: Short Squeeze (Quiet Volatility -> Big Down Move)
         """
-        print("Adding technical indicators...")
-        
-        data_length = len(df)
-        
-        # RSI - Relative Strength Index (14 periods)
-        rsi_result = df.ta.rsi(length=14)
-        if rsi_result is not None:
-            df['RSI'] = rsi_result if isinstance(rsi_result, pd.Series) else rsi_result.iloc[:, 0]
-        else:
-            df['RSI'] = np.nan
-            print("  WARNING: RSI could not be calculated (insufficient data)")
-        
-        # MACD - Moving Average Convergence Divergence
-        # Returns DataFrame with columns: MACD_12_26_9, MACDh_12_26_9, MACDs_12_26_9
-        macd = df.ta.macd(fast=12, slow=26, signal=9)
-        if macd is not None and not macd.empty:
-            df['MACD'] = macd.iloc[:, 0]  # MACD line
-            df['MACD_Signal'] = macd.iloc[:, 2]  # Signal line
-            df['MACD_Hist'] = macd.iloc[:, 1]  # Histogram
-        else:
-            df['MACD'] = np.nan
-            df['MACD_Signal'] = np.nan
-            df['MACD_Hist'] = np.nan
-            print("  WARNING: MACD could not be calculated (insufficient data)")
-        
-        # SMA - Simple Moving Averages
-        sma_20_result = df.ta.sma(length=20)
-        if sma_20_result is not None:
-            df['SMA_20'] = sma_20_result if isinstance(sma_20_result, pd.Series) else sma_20_result.iloc[:, 0]
-        else:
-            df['SMA_20'] = np.nan
-            print("  WARNING: SMA_20 could not be calculated (insufficient data)")
-        
-        # 30-day SMA (30 days * 288 bars/day = 8640 bars)
-        sma_30d_length = 30 * self.BARS_PER_DAY
-        if data_length >= sma_30d_length:
-            sma_30d_result = df.ta.sma(length=sma_30d_length)
-            if sma_30d_result is not None:
-                df['SMA_30d'] = sma_30d_result if isinstance(sma_30d_result, pd.Series) else sma_30d_result.iloc[:, 0]
-            else:
-                df['SMA_30d'] = np.nan
-        else:
-            df['SMA_30d'] = np.nan
-            print(f"  WARNING: SMA_30d requires {sma_30d_length} bars but only {data_length} available")
-        
-        print(f"  - RSI (14), MACD (12,26,9), SMA_20, SMA_30d ({sma_30d_length} bars)")
-        
-        return df
-    
-    def add_volatility_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Add volatility features as rolling standard deviation of returns.
-        
-        Windows:
-        - VOL_3D: 3 days (864 bars)
-        - VOL_7D: 7 days (2016 bars)
-        - VOL_30D: 30 days (8640 bars)
-        
-        Args:
-            df: DataFrame with Close prices
-            
-        Returns:
-            pd.DataFrame: DataFrame with volatility columns added
-        """
-        print("Adding volatility features...")
-        
-        data_length = len(df)
-        
-        # Calculate returns for volatility calculation
-        returns = df['Close'].pct_change()
-        
-        # Volatility windows
-        vol_3d_window = 3 * self.BARS_PER_DAY   # 864 bars
-        vol_7d_window = 7 * self.BARS_PER_DAY   # 2016 bars
-        vol_30d_window = 30 * self.BARS_PER_DAY  # 8640 bars
-        
-        # Calculate volatility with warnings for insufficient data
-        df['VOL_3D'] = returns.rolling(window=vol_3d_window, min_periods=1).std()
-        if data_length < vol_3d_window:
-            print(f"  WARNING: VOL_3D requires {vol_3d_window} bars but only {data_length} available")
-            
-        df['VOL_7D'] = returns.rolling(window=vol_7d_window, min_periods=1).std()
-        if data_length < vol_7d_window:
-            print(f"  WARNING: VOL_7D requires {vol_7d_window} bars but only {data_length} available")
-            
-        df['VOL_30D'] = returns.rolling(window=vol_30d_window, min_periods=1).std()
-        if data_length < vol_30d_window:
-            print(f"  WARNING: VOL_30D requires {vol_30d_window} bars but only {data_length} available")
-        
-        print(f"  - VOL_3D ({vol_3d_window} bars), VOL_7D ({vol_7d_window} bars), VOL_30D ({vol_30d_window} bars)")
-        
+        print("   [Target] Generating Squeeze Targets...")
+
+        if 'ATR_14' not in df.columns:
+            df['ATR_14'] = df.ta.atr(length=14)
+
+        df['vol_metric'] = df['ATR_14'] / df['Close']
+        vol_threshold = df['vol_metric'].rolling(window=10000).quantile(0.30)
+        is_quiet = df['vol_metric'] < vol_threshold
+
+        future_return = df['Close'].shift(-576) / df['Close'] - 1.0
+
+        df['TARGET_SQUEEZE'] = 0
+        mask_long = is_quiet & (future_return > 0.04)
+        df.loc[mask_long, 'TARGET_SQUEEZE'] = 1
+
+        mask_short = is_quiet & (future_return < -0.04)
+        df.loc[mask_short, 'TARGET_SQUEEZE'] = 2
+
         return df
     
     def create_target(self, df: pd.DataFrame, threshold: float = 0.08, 
@@ -365,80 +287,29 @@ class DataProcessor:
         for col in ['Open', 'High', 'Low', 'Close']:
             df[f'{col}_Return'] = np.log(df[col] / df[col].shift(1))
         
-        # 2. Convert Moving Averages to percent distance from Close
-        # Only compute if the column has valid (non-NaN) values
+        # 2. Convert Moving Averages to percent distance from Close (if present)
         if 'SMA_20' in df.columns and df['SMA_20'].notna().any():
             df['SMA_20_Dist'] = (close_orig - df['SMA_20']) / df['SMA_20']
-        else:
-            df['SMA_20_Dist'] = np.nan
-            
+
         if 'SMA_30d' in df.columns and df['SMA_30d'].notna().any():
             df['SMA_30d_Dist'] = (close_orig - df['SMA_30d']) / df['SMA_30d']
-        else:
-            df['SMA_30d_Dist'] = np.nan
         
         # 3. Normalize Volume using log1p
         df['Volume_Log'] = np.log1p(df['Volume'])
         
         print("  - OHLC converted to log returns")
-        print("  - SMAs converted to percent distance")
+        if 'SMA_20_Dist' in df.columns or 'SMA_30d_Dist' in df.columns:
+            print("  - SMAs converted to percent distance")
         print("  - Volume log-transformed")
         
         return df
     
-    def add_regime_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Extract regime/microstructure features from raw returns.
-        
-        These features capture the "physics" of the market - volatility structure,
-        tail risk, and distribution shape - which are predictive of large moves.
-        
-        Features added:
-        - Parkinson_Vol_24H: High-Low range volatility (more efficient than Close-Close)
-        - Return_Skew_24H: Skewness of returns (detects fragility/crash risk)
-        - Return_Kurt_24H: Kurtosis of returns (fat tails / shock risk)
-        
-        Note: Raw return columns (Open_Return, etc.) will be dropped in cleanup()
-        since they are "noise" for predicting 48-hour moves.
-        
-        Args:
-            df: DataFrame with *_Return columns already calculated
-            
-        Returns:
-            pd.DataFrame: DataFrame with regime features added
-        """
-        print("Adding regime/microstructure features...")
-        
-        window_24h = self.BARS_PER_DAY  # 288 bars
-        
-        # 1. Parkinson Volatility (High-Low Range)
-        # High-Low range is ~5x more efficient at estimating volatility than Close-Close
-        # This captures "panic" that doesn't result in a net price change
-        df['Parkinson_Vol_24H'] = (df['High_Return'] - df['Low_Return']).pow(2).rolling(
-            window=window_24h, min_periods=1
-        ).mean().apply(np.sqrt)
-        
-        # 2. Return Skewness (Tail Risk / Crash Detection)
-        # Are returns lopsided? (e.g., lots of small ups, one big down?)
-        # Negative skew = potential crash risk
-        df['Return_Skew_24H'] = df['Close_Return'].rolling(
-            window=window_24h, min_periods=window_24h // 2
-        ).skew()
-        
-        # 3. Return Kurtosis (Fat Tails / Shock Risk)
-        # Are we seeing fatter tails than normal in the return distribution?
-        # High kurtosis = higher probability of extreme moves
-        df['Return_Kurt_24H'] = df['Close_Return'].rolling(
-            window=window_24h, min_periods=window_24h // 2
-        ).kurt()
-        
-        print(f"  - Parkinson_Vol_24H: High-Low range volatility ({window_24h} bars)")
-        print(f"  - Return_Skew_24H: Return distribution skewness ({window_24h} bars)")
-        print(f"  - Return_Kurt_24H: Return distribution kurtosis ({window_24h} bars)")
-        
-        return df
-    
-    def cleanup(self, df: pd.DataFrame, drop_raw_returns: bool = True) -> pd.DataFrame:
+    def cleanup(
+        self,
+        df: pd.DataFrame,
+        drop_raw_returns: bool = True,
+        warmup_rows: int = 10500,
+    ) -> pd.DataFrame:
         """
         Clean up the DataFrame by removing raw columns and NaN rows.
         
@@ -482,16 +353,36 @@ class DataProcessor:
             df = df.drop(columns=cols_existing)
             print(f"  - Dropped raw columns: {cols_existing}")
         
-        # Drop rows with NaN values
-        df = df.dropna()
+        # Drop initial warmup rows to avoid rolling window NaNs
+        if warmup_rows and len(df) > warmup_rows:
+            df = df.iloc[warmup_rows:]
+            print(f"  - Dropped first {warmup_rows} warmup rows")
+
+        # Fill small gaps for non-target columns, then drop any remaining NaNs
+        target_cols = [c for c in df.columns if c.startswith('TARGET_')]
+        non_target_cols = [c for c in df.columns if c not in target_cols]
+        df[non_target_cols] = df[non_target_cols].ffill().bfill()
+        rows_before_dropna = len(df)
+        df = df.dropna(subset=non_target_cols)
+        rows_after_dropna = len(df)
+        dropped_after_fill = rows_before_dropna - rows_after_dropna
+        if rows_before_dropna > 0:
+            dropped_pct = dropped_after_fill / rows_before_dropna
+            if dropped_pct > 0.01:
+                print(
+                    f"  WARNING: Dropped {dropped_after_fill} rows after fill "
+                    f"({dropped_pct:.2%} of remaining data)"
+                )
         
         rows_after = len(df)
         print(f"  - Dropped {rows_before - rows_after} rows with NaN values")
         print(f"  - Remaining rows: {rows_after}")
         
-        # Convert TARGET_Direction to integer if it exists
+        # Convert targets to integer while preserving NaNs at the tail
         if 'TARGET_Direction' in df.columns:
-            df['TARGET_Direction'] = df['TARGET_Direction'].astype(int)
+            df['TARGET_Direction'] = df['TARGET_Direction'].astype('Int64')
+        if 'TARGET_SQUEEZE' in df.columns:
+            df['TARGET_SQUEEZE'] = df['TARGET_SQUEEZE'].astype('Int64')
         
         # Verify no NaN values remain
         nan_count = df.isna().sum().sum()
@@ -575,16 +466,9 @@ class DataProcessor:
         
         SET_01 Features:
         - Time: Time_Sin, Time_Cos (cyclical encoding of time of day)
-        - Momentum: RSI (14), MACD (12,26,9), MACD_Signal, MACD_Hist
-        - Trend: SMA_20_Dist, SMA_30d_Dist (percent distance from MAs)
-        - Volatility: VOL_3D, VOL_7D, VOL_30D (rolling std of returns)
-        - Regime: Parkinson_Vol_24H, Return_Skew_24H, Return_Kurt_24H
+        - AlphaFactory: volatility, liquidity, structure, momentum features
         - Volume: Volume_Log (log-transformed)
         - Target: 0=Hold, 1=Buy, 2=Sell (based on threshold % move in horizon)
-        
-        Note: Raw return columns (Open_Return, etc.) are calculated internally
-        for regime features but dropped from final output as they are "noise"
-        for long-horizon (48h) predictions.
         
         Args:
             threshold: Target threshold for significant price move (default 0.08 = 8%)
@@ -595,34 +479,45 @@ class DataProcessor:
         """
         print("=" * 60)
         print(f"Starting Data Processing Pipeline - {self.dataset_version.upper()}")
+        print(f"Started at: {datetime.now().isoformat(timespec='seconds')}")
         print("=" * 60)
         
         # Step 1: Load data
         df = self.load_data()
+        total_rows = len(df)
+        print(f"  [25%] Loaded {total_rows} rows at {datetime.now().isoformat(timespec='seconds')}")
         
         # Step 2: Add time features
         df = self.add_time_features(df)
-        
-        # Step 3: Add technical indicators
-        df = self.add_technical_indicators(df)
-        
-        # Step 4: Add volatility features
-        df = self.add_volatility_features(df)
-        
-        # Step 5: Create target (MUST be before normalization)
+        print(f"  [50%] Time features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 3: Add AlphaFactory features (windows in bars for 5-min data)
+        windows = [
+            3 * self.BARS_PER_DAY,
+            7 * self.BARS_PER_DAY,
+            14 * self.BARS_PER_DAY,
+            35 * self.BARS_PER_DAY,
+        ]
+        df = AlphaFactory(df).add_all_features(
+            windows=windows,
+            include_macro=True,
+            log_progress=True,
+        )
+        print(f"  [75%] AlphaFactory features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 4: Create target (MUST be before normalization)
         df = self.create_target(df, threshold=threshold, horizon=horizon)
-        
-        # Step 6: Normalize features (creates *_Return columns as intermediates)
+        df = self.add_squeeze_target(df)
+
+        # Step 5: Normalize features (creates *_Return columns as intermediates)
         df = self.normalize_features(df)
-        
-        # Step 7: Add regime features (extracts signal from returns)
-        df = self.add_regime_features(df)
-        
-        # Step 8: Cleanup (drops raw columns AND raw returns - they're "noise")
+
+        # Step 6: Cleanup (drops raw columns AND raw returns - they're "noise")
         df = self.cleanup(df, drop_raw_returns=True)
-        
-        # Step 9: Save
+
+        # Step 7: Save
         saved_path = self.save(df)
+        print(f"  [100%] Saved output at {datetime.now().isoformat(timespec='seconds')}")
         
         print("=" * 60)
         print("Processing Complete!")
@@ -643,10 +538,7 @@ class DataProcessor:
         
         SET_02 Features:
         - Time: Hour (0-23), Minute (0-55 in 5-min increments)
-        - Momentum: RSI (14), MACD (12,26,9), MACD_Signal, MACD_Hist
-        - Trend: SMA_20_Dist, SMA_30d_Dist (percent distance from MAs)
-        - Volatility: VOL_3D, VOL_7D, VOL_30D (rolling std of returns)
-        - Regime: Parkinson_Vol_24H, Return_Skew_24H, Return_Kurt_24H
+        - AlphaFactory: volatility, liquidity, structure, momentum features
         - Volume: Volume_Log (log-transformed)
         - Target: 0=Hold, 1=Buy, 2=Sell (based on threshold % move in horizon)
         
@@ -659,34 +551,45 @@ class DataProcessor:
         """
         print("=" * 60)
         print(f"Starting Data Processing Pipeline - {self.dataset_version.upper()}")
+        print(f"Started at: {datetime.now().isoformat(timespec='seconds')}")
         print("=" * 60)
         
         # Step 1: Load data
         df = self.load_data()
+        total_rows = len(df)
+        print(f"  [25%] Loaded {total_rows} rows at {datetime.now().isoformat(timespec='seconds')}")
         
         # Step 2: Add RAW time features (Hour, Minute) - differs from set_01
         df = self.add_time_features_raw(df)
-        
-        # Step 3: Add technical indicators
-        df = self.add_technical_indicators(df)
-        
-        # Step 4: Add volatility features
-        df = self.add_volatility_features(df)
-        
-        # Step 5: Create target (MUST be before normalization)
+        print(f"  [50%] Time features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 3: Add AlphaFactory features (windows in bars for 5-min data)
+        windows = [
+            3 * self.BARS_PER_DAY,
+            7 * self.BARS_PER_DAY,
+            14 * self.BARS_PER_DAY,
+            35 * self.BARS_PER_DAY,
+        ]
+        df = AlphaFactory(df).add_all_features(
+            windows=windows,
+            include_macro=True,
+            log_progress=True,
+        )
+        print(f"  [75%] AlphaFactory features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 4: Create target (MUST be before normalization)
         df = self.create_target(df, threshold=threshold, horizon=horizon)
-        
-        # Step 6: Normalize features (creates *_Return columns as intermediates)
+        df = self.add_squeeze_target(df)
+
+        # Step 5: Normalize features (creates *_Return columns as intermediates)
         df = self.normalize_features(df)
-        
-        # Step 7: Add regime features (extracts signal from returns)
-        df = self.add_regime_features(df)
-        
-        # Step 8: Cleanup (drops raw columns AND raw returns - they're "noise")
+
+        # Step 6: Cleanup (drops raw columns AND raw returns - they're "noise")
         df = self.cleanup(df, drop_raw_returns=True)
-        
-        # Step 9: Save
+
+        # Step 7: Save
         saved_path = self.save(df)
+        print(f"  [100%] Saved output at {datetime.now().isoformat(timespec='seconds')}")
         
         print("=" * 60)
         print("Processing Complete!")
