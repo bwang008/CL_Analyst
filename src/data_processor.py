@@ -31,6 +31,7 @@ from src.features.alpha_factory import AlphaFactory
 DATASET_VERSIONS = {
     'set_01': 'AlphaFactory features with cyclical time (Time_Sin, Time_Cos)',
     'set_02': 'AlphaFactory features with raw time (Hour, Minute)',
+    'set_03': 'Master squeeze targets (4% and 8%) with binary splits',
 }
 
 
@@ -51,7 +52,7 @@ class DataProcessor:
     
     def __init__(self, input_path: str = "data/raw/test100k.csv", 
                  output_path: str = None,
-                 dataset_version: str = "set_01"):
+                 dataset_version: str = "set_03"):
         """
         Initialize the DataProcessor.
         
@@ -168,14 +169,20 @@ class DataProcessor:
         
         return df
 
-    def add_squeeze_target(self, df: pd.DataFrame) -> pd.DataFrame:
+    def add_squeeze_target(
+        self,
+        df: pd.DataFrame,
+        prefix: str,
+        threshold: float,
+        horizon: int = 576,
+    ) -> pd.DataFrame:
         """
-        Creates 'TARGET_SQUEEZE':
-        - 0: No trade
-        - 1: Long Squeeze (Quiet Volatility -> Big Up Move)
-        - 2: Short Squeeze (Quiet Volatility -> Big Down Move)
+        Creates squeeze targets using the provided prefix:
+        - {prefix}_MULTI: 0=Hold, 1=Long, 2=Short
+        - {prefix}_LONG: 0/1 binary
+        - {prefix}_SHORT: 0/1 binary
         """
-        print("   [Target] Generating Squeeze Targets...")
+        print(f"   [Target] Generating Squeeze Targets ({prefix})...")
 
         if 'ATR_14' not in df.columns:
             df['ATR_14'] = df.ta.atr(length=14)
@@ -184,14 +191,26 @@ class DataProcessor:
         vol_threshold = df['vol_metric'].rolling(window=10000).quantile(0.30)
         is_quiet = df['vol_metric'] < vol_threshold
 
-        future_return = df['Close'].shift(-576) / df['Close'] - 1.0
+        future_return = df['Close'].shift(-horizon) / df['Close'] - 1.0
 
-        df['TARGET_SQUEEZE'] = 0
-        mask_long = is_quiet & (future_return > 0.04)
-        df.loc[mask_long, 'TARGET_SQUEEZE'] = 1
+        multi_col = f"{prefix}_MULTI"
+        long_col = f"{prefix}_LONG"
+        short_col = f"{prefix}_SHORT"
 
-        mask_short = is_quiet & (future_return < -0.04)
-        df.loc[mask_short, 'TARGET_SQUEEZE'] = 2
+        df[multi_col] = 0
+        mask_long = is_quiet & (future_return > threshold)
+        df.loc[mask_long, multi_col] = 1
+
+        mask_short = is_quiet & (future_return < -threshold)
+        df.loc[mask_short, multi_col] = 2
+
+        df[long_col] = (df[multi_col] == 1).astype('Int64')
+        df[short_col] = (df[multi_col] == 2).astype('Int64')
+        df[multi_col] = df[multi_col].astype('Int64')
+
+        df[multi_col] = df[multi_col].fillna(0)
+        df[long_col] = df[long_col].fillna(0)
+        df[short_col] = df[short_col].fillna(0)
 
         return df
     
@@ -378,11 +397,10 @@ class DataProcessor:
         print(f"  - Dropped {rows_before - rows_after} rows with NaN values")
         print(f"  - Remaining rows: {rows_after}")
         
-        # Convert targets to integer while preserving NaNs at the tail
-        if 'TARGET_Direction' in df.columns:
-            df['TARGET_Direction'] = df['TARGET_Direction'].astype('Int64')
-        if 'TARGET_SQUEEZE' in df.columns:
-            df['TARGET_SQUEEZE'] = df['TARGET_SQUEEZE'].astype('Int64')
+        # Convert target columns to nullable integers (preserve NaNs where needed)
+        target_cols = [c for c in df.columns if c.startswith('TARGET_')]
+        for col in target_cols:
+            df[col] = df[col].astype('Int64')
         
         # Verify no NaN values remain
         nan_count = df.isna().sum().sum()
@@ -456,6 +474,8 @@ class DataProcessor:
             return self.process_set_01(threshold=threshold, horizon=horizon)
         elif self.dataset_version == "set_02":
             return self.process_set_02(threshold=threshold, horizon=horizon)
+        elif self.dataset_version == "set_03":
+            return self.process_set_03(threshold=threshold, horizon=horizon)
         else:
             raise ValueError(f"Unknown dataset version: {self.dataset_version}. "
                            f"Available: {list(DATASET_VERSIONS.keys())}")
@@ -507,7 +527,13 @@ class DataProcessor:
 
         # Step 4: Create target (MUST be before normalization)
         df = self.create_target(df, threshold=threshold, horizon=horizon)
-        df = self.add_squeeze_target(df)
+        df = self.add_squeeze_target(
+            df,
+            prefix="TARGET_SQUEEZE",
+            threshold=0.04,
+            horizon=576,
+        )
+        df['TARGET_SQUEEZE'] = df['TARGET_SQUEEZE_MULTI']
 
         # Step 5: Normalize features (creates *_Return columns as intermediates)
         df = self.normalize_features(df)
@@ -579,7 +605,105 @@ class DataProcessor:
 
         # Step 4: Create target (MUST be before normalization)
         df = self.create_target(df, threshold=threshold, horizon=horizon)
-        df = self.add_squeeze_target(df)
+        df = self.add_squeeze_target(
+            df,
+            prefix="TARGET_SQUEEZE",
+            threshold=0.04,
+            horizon=576,
+        )
+        df['TARGET_SQUEEZE'] = df['TARGET_SQUEEZE_MULTI']
+
+        # Step 5: Normalize features (creates *_Return columns as intermediates)
+        df = self.normalize_features(df)
+
+        # Step 6: Cleanup (drops raw columns AND raw returns - they're "noise")
+        df = self.cleanup(df, drop_raw_returns=True)
+
+        # Step 7: Save
+        saved_path = self.save(df)
+
+        print("=" * 60)
+        print("Processing Complete!")
+        print(f"Output: {saved_path}")
+        print(f"Shape: {df.shape}")
+        print(f"Columns: {list(df.columns)}")
+        print("=" * 60)
+
+        self.df = df
+        return df
+
+    def process_set_03(self, threshold: float = 0.08, horizon: int = None) -> pd.DataFrame:
+        """
+        Process data using SET_03 feature configuration.
+
+        SET_03 Features:
+        - Time: Time_Sin, Time_Cos (cyclical encoding of time of day)
+        - AlphaFactory: volatility, liquidity, structure, trend, volume-flow
+        - Volume: Volume_Log (log-transformed)
+        - Targets: Multiple squeeze targets (4% and 8%) with binary splits
+        """
+        print("=" * 60)
+        print(f"Starting Data Processing Pipeline - {self.dataset_version.upper()}")
+        print(f"Started at: {datetime.now().isoformat(timespec='seconds')}")
+        print("=" * 60)
+
+        # Step 1: Load data
+        df = self.load_data()
+        total_rows = len(df)
+        print(f"  [25%] Loaded {total_rows} rows at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 2: Add time features
+        df = self.add_time_features(df)
+        print(f"  [50%] Time features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 3: Add AlphaFactory features (windows in bars for 5-min data)
+        windows = [
+            3 * self.BARS_PER_DAY,
+            7 * self.BARS_PER_DAY,
+            14 * self.BARS_PER_DAY,
+            35 * self.BARS_PER_DAY,
+        ]
+        df = AlphaFactory(df).add_all_features(
+            windows=windows,
+            include_macro=True,
+            log_progress=True,
+        )
+        print(f"  [75%] AlphaFactory features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 4: Create targets (MUST be before normalization)
+        df = self.create_target(df, threshold=threshold, horizon=horizon)
+        df = self.add_squeeze_target(
+            df,
+            prefix="TARGET_SQZ_8PCT",
+            threshold=0.08,
+            horizon=576,
+        )
+        df = self.add_squeeze_target(
+            df,
+            prefix="TARGET_SQZ_4PCT",
+            threshold=0.04,
+            horizon=576,
+        )
+
+        # Step 5: Normalize features (creates *_Return columns as intermediates)
+        df = self.normalize_features(df)
+
+        # Step 6: Cleanup (drops raw columns AND raw returns - they're "noise")
+        df = self.cleanup(df, drop_raw_returns=True)
+
+        # Step 7: Save
+        saved_path = self.save(df)
+        print(f"  [100%] Saved output at {datetime.now().isoformat(timespec='seconds')}")
+
+        print("=" * 60)
+        print("Processing Complete!")
+        print(f"Output: {saved_path}")
+        print(f"Shape: {df.shape}")
+        print(f"Columns: {list(df.columns)}")
+        print("=" * 60)
+
+        self.df = df
+        return df
 
         # Step 5: Normalize features (creates *_Return columns as intermediates)
         df = self.normalize_features(df)
@@ -650,5 +774,5 @@ def main(dataset_version: str = "set_01"):
 if __name__ == "__main__":
     import sys
     # Allow passing dataset version as command line argument
-    version = sys.argv[1] if len(sys.argv) > 1 else "set_01"
+    version = sys.argv[1] if len(sys.argv) > 1 else "set_03"
     main(dataset_version=version)

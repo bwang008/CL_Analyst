@@ -53,7 +53,7 @@ def get_cl_df(cl_test_data="data/raw/test100k.csv"):
 
 def get_processed_cl_df(input_path="data/raw/test100k.csv", 
                         output_path=None,
-                        dataset_version="set_01",
+                        dataset_version="set_03",
                         threshold=0.08, 
                         horizon=576,
                         force_reprocess=False):
@@ -98,7 +98,7 @@ def get_processed_cl_df(input_path="data/raw/test100k.csv",
 
 
 def train_and_evaluate(
-    data_path: str = "data/processed/CL_set_01.parquet",
+    data_path: str = "data/processed/CL_set_03.parquet",
     holdout_pct: float = 0.15,
     purge_bars: int = 576,
     min_train_bars: int = 8640,
@@ -434,6 +434,25 @@ def train_and_evaluate(
     }
 
 
+def log_train_run(
+    report_path: str,
+    target_name: str,
+    method: str,
+    data_path: str,
+    results: dict,
+):
+    os.makedirs(os.path.dirname(report_path), exist_ok=True)
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    vault_result = results.get("vault_result") or {}
+    accuracy = vault_result.get("accuracy", None)
+    line = (
+        f"{timestamp} | target={target_name} | method={method} | "
+        f"data={data_path} | vault_accuracy={accuracy}\n"
+    )
+    with open(report_path, "a", encoding="utf-8") as f:
+        f.write(line)
+
+
 def print_help():
     """Print usage help."""
     print("""
@@ -443,7 +462,8 @@ Usage:
     python main.py process [--force]           Process raw data to ML-ready features
     python main.py train [data_path]           Train and evaluate model (walk-forward)
     python main.py train [data_path] --method simple  Simple 85/15 split sanity check
-    python main.py train [data_path] --target TARGET_SQUEEZE
+    python main.py train [data_path] --target TARGET_SQZ_4PCT_LONG
+    python main.py train [data_path] --targets TARGET_SQZ_8PCT_LONG,TARGET_SQZ_4PCT_LONG
     python main.py --help                      Show this help message
 
 Commands:
@@ -451,8 +471,9 @@ Commands:
                 --force: Force reprocessing even if output exists
     
     train       Train model with walk-forward validation
-                data_path: Path to processed data (default: data/processed/CL_set_01.parquet)
+                data_path: Path to processed data (default: data/processed/CL_set_03.parquet)
                 --target: Target column to train on (default: TARGET_Direction)
+                --targets: Comma-separated targets to train sequentially (logs to reports/train_runs.log)
 
 Examples:
     python main.py process                     # Process raw data
@@ -460,7 +481,7 @@ Examples:
     python main.py train                       # Train with default data (walk-forward)
     python main.py train data/processed/CL_set_01.csv   # Train with specific file
     python main.py train --method simple       # Simple 85/15 split sanity check
-    python main.py train --target TARGET_SQUEEZE
+    python main.py train --target TARGET_SQZ_4PCT_LONG
 """)
 
 
@@ -484,7 +505,7 @@ if __name__ == '__main__':
         # Process CL data
         processed_features = get_processed_cl_df(
             input_path="data/raw/CL.csv",
-            dataset_version="set_01",
+            dataset_version="set_03",
             force_reprocess=force_reprocess
         )
         print("\nProcessed data:")
@@ -495,8 +516,9 @@ if __name__ == '__main__':
     elif command == 'train':
         # Training mode
         method = "walk_forward"
-        data_path = "data/processed/CL_set_01.parquet"
+        data_path = "data/processed/CL_set_03.parquet"
         target_name = "TARGET_Direction"
+        target_list = None
 
         if "--method" in args:
             method_idx = args.index("--method")
@@ -506,6 +528,11 @@ if __name__ == '__main__':
             target_idx = args.index("--target")
             if target_idx + 1 < len(args):
                 target_name = args[target_idx + 1]
+        if "--targets" in args:
+            targets_idx = args.index("--targets")
+            if targets_idx + 1 < len(args):
+                raw_targets = args[targets_idx + 1]
+                target_list = [t.strip() for t in raw_targets.split(",") if t.strip()]
 
         # First non-flag arg after "train" is treated as data_path
         skip_next = False
@@ -519,23 +546,56 @@ if __name__ == '__main__':
             if arg == "--target":
                 skip_next = True
                 continue
+            if arg == "--targets":
+                skip_next = True
+                continue
             if not arg.startswith("-"):
                 data_path = arg
                 break
         
-        results = train_and_evaluate(
-            data_path=data_path,
-            holdout_pct=0.15,
-            purge_bars=576,      # 48 hours
-            min_train_bars=8640,  # ~30 days
-            fold_size_bars=8640,  # ~30 days per fold
-            threshold=0.08,
-            output_dir="reports",
-            model_dir="models",
-            verbose=True,
-            method=method,
-            target_name=target_name,
-        )
+        if target_list:
+            for target in target_list:
+                results = train_and_evaluate(
+                    data_path=data_path,
+                    holdout_pct=0.15,
+                    purge_bars=576,      # 48 hours
+                    min_train_bars=8640,  # ~30 days
+                    fold_size_bars=8640,  # ~30 days per fold
+                    threshold=0.08,
+                    output_dir="reports",
+                    model_dir="models",
+                    verbose=True,
+                    method=method,
+                    target_name=target,
+                )
+                log_train_run(
+                    report_path=os.path.join("reports", "train_runs.log"),
+                    target_name=target,
+                    method=method,
+                    data_path=data_path,
+                    results=results,
+                )
+        else:
+            results = train_and_evaluate(
+                data_path=data_path,
+                holdout_pct=0.15,
+                purge_bars=576,      # 48 hours
+                min_train_bars=8640,  # ~30 days
+                fold_size_bars=8640,  # ~30 days per fold
+                threshold=0.08,
+                output_dir="reports",
+                model_dir="models",
+                verbose=True,
+                method=method,
+                target_name=target_name,
+            )
+            log_train_run(
+                report_path=os.path.join("reports", "train_runs.log"),
+                target_name=target_name,
+                method=method,
+                data_path=data_path,
+                results=results,
+            )
     
     else:
         print(f"Unknown command: {command}")
