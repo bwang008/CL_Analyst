@@ -5,9 +5,10 @@ Atlanta, Georgia 30332-0415
 All Rights Reserved  		  	   		 	 	 			  		 			     			  	 
 """  		  	   		 	 	 			  		 			     			  	 
   		  	   		 	 	 			  		 			     			  	 
-import os  		  	   		 	 	 			  		 			     			  	 
-  		  	   		 	 	 			  		 			     			  	 
-import pandas as pd  		  	   		 	 	 			  		 			     			  	 
+import os  		 	 
+import numpy as np
+
+import pandas as pd  		 	 
   		  	   		 	 	 			  		 			     			  	 
   		  	   		 	 	 			  		 			     			  	 
 def symbol_to_path(symbol, base_dir=None):  		  	   		 	 	 			  		 			     			  	 
@@ -244,3 +245,30 @@ def get_X_y(df: pd.DataFrame, target_name: str = 'TARGET_Direction'):
     y = df[target_col]
     
     return X, y
+
+
+def downsample_majority(
+    X: pd.DataFrame,
+    y: pd.Series,
+    random_state: int | None = None,
+) -> tuple[pd.DataFrame, pd.Series]:
+    """
+    Downsample majority class for binary targets to achieve 50/50 balance.
+    Keeps all minority samples and randomly samples the majority.
+    """
+    y_values = y.to_numpy()
+    classes, counts = np.unique(y_values, return_counts=True)
+    if len(classes) != 2:
+        raise ValueError("downsample_majority only supports binary targets.")
+
+    minority_class = classes[np.argmin(counts)]
+    majority_class = classes[np.argmax(counts)]
+    minority_idx = np.where(y_values == minority_class)[0]
+    majority_idx = np.where(y_values == majority_class)[0]
+
+    rng = np.random.default_rng(random_state)
+    sampled_majority_idx = rng.choice(majority_idx, size=len(minority_idx), replace=False)
+    keep_idx = np.concatenate([minority_idx, sampled_majority_idx])
+    rng.shuffle(keep_idx)
+
+    return X.iloc[keep_idx], y.iloc[keep_idx]

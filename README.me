@@ -29,9 +29,37 @@ python main.py train --target TARGET_SQZ_4PCT_LONG
 # Train multiple targets sequentially (logs to reports/train_runs.log)
 python main.py train --targets TARGET_SQZ_8PCT_LONG,TARGET_SQZ_4PCT_LONG
 
+# Train with downsampled balance (binary targets only)
+python main.py train --balance_mode downsample --target TARGET_SQZ_4PCT_LONG
+
+# Run a batch config
+python main.py --config experiments.json
+
 # Simple 85/15 split sanity check (no walk-forward)
 python main.py train --method simple
 ```
+
+## Architecture Overview
+
+**Data Flow**
+1. **Raw OHLCV** (`data/raw/*.csv`)
+2. **Processing** (`src/data_processor.py`)  
+   - Time features
+   - AlphaFactory features
+   - Target construction
+   - Cleanup and save
+3. **Training** (`main.py train`)  
+   - Walk-forward split
+   - Model training/evaluation
+   - Reports + artifacts
+
+**Key Modules**
+- `src/data_processor.py`: orchestrates feature generation + targets.
+- `src/features/alpha_factory.py`: core feature engine (vol/liq/structure/trend/macro).
+- `src/walk_forward.py`: time-series split + validation.
+- `src/evaluator.py`: metrics + move analysis.
+- `src/visualizer.py`: plots + summaries.
+- `main.py`: CLI for processing/training.
 
 ## Run data_processor.py Directly
 
@@ -143,6 +171,24 @@ Default processing parameters:
 - **horizon**: 576 bars (48 hours of 5-min data)
 Default training parameter:
 - **target_name**: `TARGET_Direction`
+- **balance_mode**: `weight` (default) or `downsample` (binary only)
+
+### Batch Experiments
+
+Create a JSON file (e.g., `experiments.json`) with a list of runs:
+
+```json
+[
+  {"target": "TARGET_SQZ_8PCT_LONG", "balance_mode": "weight"},
+  {"target": "TARGET_SQZ_4PCT_LONG", "balance_mode": "downsample"}
+]
+```
+
+Run with:
+
+```bash
+python main.py --config experiments.json
+```
 
 To customize:
 ```python
@@ -171,7 +217,7 @@ Generated files are saved to:
 
 ## Dataset Documentation
 
-See `data/DATASETS.json` for detailed column descriptions and calculations.
+See `data/DATASETS.json` for dataset summaries and target columns.
 
 ## Tests
 
