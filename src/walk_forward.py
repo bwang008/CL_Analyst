@@ -347,6 +347,12 @@ def walk_forward_validate(
         # Train model
         model = model_class(**model_params)
         model.add_evidence(X_train, y_train)
+        feature_importance = None
+        feature_names = None
+        if hasattr(model, "get_feature_importance"):
+            feature_importance = model.get_feature_importance()
+            if isinstance(X_train, pd.DataFrame):
+                feature_names = X_train.columns.tolist()
         
         # Predict
         y_pred = model.query(X_test)
@@ -361,6 +367,8 @@ def walk_forward_validate(
             'df_test': df_test,
             'train_date_range': (gym_df.index[train_idx[0]], gym_df.index[train_idx[-1]]),
             'test_date_range': (df_test.index[0], df_test.index[-1]),
+            'feature_importance': feature_importance,
+            'feature_names': feature_names,
         }
         results.append(fold_result)
         

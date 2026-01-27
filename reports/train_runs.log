@@ -36,3 +36,16 @@
 2026-01-26 20:24:54 | target=TARGET_DIR_8PCT_LONG | method=walk_forward | balance_mode=weight | data=data/processed/CL_set_03.parquet | vault_accuracy=0.9813130115051595
 2026-01-26 20:25:54 | target=TARGET_DIR_8PCT_LONG | method=walk_forward | balance_mode=downsample | data=data/processed/CL_set_03.parquet | vault_accuracy=0.9737041869291899
 2026-01-26 20:29:25 | target=TARGET_DIR_8PCT_SHORT | method=walk_forward | balance_mode=weight | data=data/processed/CL_set_03.parquet | vault_accuracy=0.9751749495907959
+2026-01-26 20:30:35 | target=TARGET_DIR_8PCT_SHORT | method=walk_forward | balance_mode=downsample | data=data/processed/CL_set_03.parquet | vault_accuracy=0.9498873206025382
+2026-01-26 20:34:10 | target=TARGET_DIR_4PCT_LONG | method=walk_forward | balance_mode=weight | data=data/processed/CL_set_03.parquet | vault_accuracy=0.8445854584272329
+2026-01-26 20:36:04 | target=TARGET_DIR_4PCT_LONG | method=walk_forward | balance_mode=downsample | data=data/processed/CL_set_03.parquet | vault_accuracy=0.6537421420946506
+2026-01-26 20:39:26 | target=TARGET_DIR_4PCT_SHORT | method=walk_forward | balance_mode=weight | data=data/processed/CL_set_03.parquet | vault_accuracy=0.7967560194520223
+2026-01-26 20:41:23 | target=TARGET_DIR_4PCT_SHORT | method=walk_forward | balance_mode=downsample | data=data/processed/CL_set_03.parquet | vault_accuracy=0.6742853754003084
+2026-01-26 20:44:14 | target=TARGET_SQZ_8PCT_LONG | method=walk_forward | balance_mode=weight | data=data/processed/CL_set_03.parquet | vault_accuracy=0.9949230478261898
+2026-01-26 20:45:06 | target=TARGET_SQZ_8PCT_LONG | method=walk_forward | balance_mode=downsample | data=data/processed/CL_set_03.parquet | vault_accuracy=0.997245797772997
+2026-01-26 20:47:56 | target=TARGET_SQZ_8PCT_SHORT | method=walk_forward | balance_mode=weight | data=data/processed/CL_set_03.parquet | vault_accuracy=0.9963060592448995
+2026-01-26 20:48:50 | target=TARGET_SQZ_8PCT_SHORT | method=walk_forward | balance_mode=downsample | data=data/processed/CL_set_03.parquet | vault_accuracy=0.9865481453462257
+2026-01-26 20:52:13 | target=TARGET_SQZ_4PCT_LONG | method=walk_forward | balance_mode=weight | data=data/processed/CL_set_03.parquet | vault_accuracy=0.9773694413579517
+2026-01-26 20:53:13 | target=TARGET_SQZ_4PCT_LONG | method=walk_forward | balance_mode=downsample | data=data/processed/CL_set_03.parquet | vault_accuracy=0.8565391616823093
+2026-01-26 20:56:37 | target=TARGET_SQZ_4PCT_SHORT | method=walk_forward | balance_mode=weight | data=data/processed/CL_set_03.parquet | vault_accuracy=0.9634093004562756
+2026-01-26 20:57:42 | target=TARGET_SQZ_4PCT_SHORT | method=walk_forward | balance_mode=downsample | data=data/processed/CL_set_03.parquet | vault_accuracy=0.898833305751909

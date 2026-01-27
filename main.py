@@ -20,6 +20,8 @@ import time
 import json
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import re
 import src.util as util
 import src.indicatorBuilder as ind
 from src.data_processor import DataProcessor
@@ -454,11 +456,49 @@ def train_and_evaluate(
             title="Vault Confusion Matrix",
         )
 
-    # Feature importance (simple split only)
+    # Feature importance
     if method == "simple":
         importance_path = os.path.join(output_dir, "simple_feature_importance.png")
         feature_names = util.get_feature_columns(df)
         visualizer.plot_feature_importance(final_model, feature_names, importance_path)
+    else:
+        importances = [
+            fr["feature_importance"]
+            for fr in fold_results
+            if fr.get("feature_importance") is not None
+        ]
+        feature_names = fold_results[0].get("feature_names") if fold_results else None
+        if feature_names is None:
+            feature_names = util.get_feature_columns(df)
+        if importances:
+            mean_importance = np.mean(importances, axis=0)
+            pairs = list(zip(feature_names, mean_importance))
+            pairs.sort(key=lambda x: x[1], reverse=True)
+            top_pairs = pairs[:20]
+
+            labels = [p[0] for p in top_pairs][::-1]
+            scores = [p[1] for p in top_pairs][::-1]
+
+            safe_target = re.sub(r"[^A-Za-z0-9_]+", "_", target_name)
+            safe_balance = re.sub(r"[^A-Za-z0-9_]+", "_", balance_mode)
+            importance_path = os.path.join(
+                output_dir,
+                f"walk_forward_feature_importance_{safe_target}_{safe_balance}.png",
+            )
+
+            fig, ax = plt.subplots(figsize=(10, 6))
+            ax.barh(labels, scores, color="steelblue")
+            ax.set_title(
+                f"Walk-Forward Feature Importance: {target_name} ({balance_mode})",
+                fontsize=12,
+                fontweight="bold",
+            )
+            ax.set_xlabel("Mean Importance (Gain)")
+            ax.grid(True, axis="x", alpha=0.3)
+            plt.tight_layout()
+            fig.savefig(importance_path, dpi=100, bbox_inches="tight")
+            plt.close(fig)
+            print(f"Saved walk-forward feature importance to {importance_path}")
     
     elapsed_seconds = time.perf_counter() - start_time
     elapsed_minutes = elapsed_seconds / 60
