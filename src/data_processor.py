@@ -31,6 +31,9 @@ from src.features.alpha_factory import AlphaFactory
 DATASET_VERSIONS = {
     'set_01': 'AlphaFactory features with cyclical time (Time_Sin, Time_Cos)',
     'set_02': 'AlphaFactory features with raw time (Hour, Minute)',
+    'set_03': 'Master squeeze targets (4% and 8%) with binary splits',
+    'set_04': 'Lower thresholds (2%/3%) with shorter horizons (12h/24h)',
+    'set_05': 'Dynamic Triple Barrier targets with ATR-based barriers',
 }
 
 
@@ -51,7 +54,7 @@ class DataProcessor:
     
     def __init__(self, input_path: str = "data/raw/test100k.csv", 
                  output_path: str = None,
-                 dataset_version: str = "set_01"):
+                 dataset_version: str = "set_03"):
         """
         Initialize the DataProcessor.
         
@@ -168,14 +171,20 @@ class DataProcessor:
         
         return df
 
-    def add_squeeze_target(self, df: pd.DataFrame) -> pd.DataFrame:
+    def add_squeeze_target(
+        self,
+        df: pd.DataFrame,
+        prefix: str,
+        threshold: float,
+        horizon: int = 576,
+    ) -> pd.DataFrame:
         """
-        Creates 'TARGET_SQUEEZE':
-        - 0: No trade
-        - 1: Long Squeeze (Quiet Volatility -> Big Up Move)
-        - 2: Short Squeeze (Quiet Volatility -> Big Down Move)
+        Creates squeeze targets using the provided prefix:
+        - {prefix}_MULTI: 0=Hold, 1=Long, 2=Short
+        - {prefix}_LONG: 0/1 binary
+        - {prefix}_SHORT: 0/1 binary
         """
-        print("   [Target] Generating Squeeze Targets...")
+        print(f"   [Target] Generating Squeeze Targets ({prefix})...")
 
         if 'ATR_14' not in df.columns:
             df['ATR_14'] = df.ta.atr(length=14)
@@ -184,82 +193,232 @@ class DataProcessor:
         vol_threshold = df['vol_metric'].rolling(window=10000).quantile(0.30)
         is_quiet = df['vol_metric'] < vol_threshold
 
-        future_return = df['Close'].shift(-576) / df['Close'] - 1.0
+        future_return = df['Close'].shift(-horizon) / df['Close'] - 1.0
 
-        df['TARGET_SQUEEZE'] = 0
-        mask_long = is_quiet & (future_return > 0.04)
-        df.loc[mask_long, 'TARGET_SQUEEZE'] = 1
+        multi_col = f"{prefix}_MULTI"
+        long_col = f"{prefix}_LONG"
+        short_col = f"{prefix}_SHORT"
 
-        mask_short = is_quiet & (future_return < -0.04)
-        df.loc[mask_short, 'TARGET_SQUEEZE'] = 2
+        df[multi_col] = 0
+        mask_long = is_quiet & (future_return > threshold)
+        df.loc[mask_long, multi_col] = 1
+
+        mask_short = is_quiet & (future_return < -threshold)
+        df.loc[mask_short, multi_col] = 2
+
+        df[long_col] = (df[multi_col] == 1).astype('Int64')
+        df[short_col] = (df[multi_col] == 2).astype('Int64')
+        df[multi_col] = df[multi_col].astype('Int64')
+
+        df[multi_col] = df[multi_col].fillna(0)
+        df[long_col] = df[long_col].fillna(0)
+        df[short_col] = df[short_col].fillna(0)
+
+        return df
+
+    def add_triple_barrier_target(
+        self,
+        df: pd.DataFrame,
+        prefix: str,
+        tp_atr_mult: float = 2.0,
+        sl_atr_mult: float = 1.0,
+        max_horizon: int = 288,
+        atr_period: int = 14,
+    ) -> pd.DataFrame:
+        """
+        Dynamic Triple Barrier Method target.
+
+        Barriers are set using rolling ATR (not fixed percentages):
+        - Take-profit: +tp_atr_mult * ATR above entry
+        - Stop-loss:   -sl_atr_mult * ATR below entry
+        - Vertical:     max_horizon bars time limit
+
+        Target values:
+        - {prefix}_MULTI: 0=Hold (time expired), 1=Long (TP hit first going up),
+                          2=Short (SL hit first going down)
+        - {prefix}_LONG:  Binary 0/1
+        - {prefix}_SHORT: Binary 0/1
+
+        Args:
+            df: DataFrame with OHLCV columns
+            prefix: Target column prefix
+            tp_atr_mult: ATR multiplier for take-profit barrier
+            sl_atr_mult: ATR multiplier for stop-loss barrier
+            max_horizon: Maximum bars to look ahead (vertical barrier)
+            atr_period: Period for ATR calculation
+        """
+        print(
+            f"   [Target] Generating Triple Barrier ({prefix}): "
+            f"TP={tp_atr_mult}xATR, SL={sl_atr_mult}xATR, horizon={max_horizon}"
+        )
+
+        # Compute ATR if not present
+        atr_col = f'ATR_{atr_period}'
+        if atr_col not in df.columns:
+            df[atr_col] = df.ta.atr(length=atr_period)
+
+        close = df['Close'].values
+        high_all = df['High'].values
+        low_all = df['Low'].values
+        atr = df[atr_col].values
+        n = len(df)
+
+        labels = np.zeros(n, dtype=np.float64)
+
+        for i in range(n - 1):
+            if np.isnan(atr[i]) or atr[i] <= 0:
+                labels[i] = 0
+                continue
+
+            entry = close[i]
+            tp_barrier = entry + tp_atr_mult * atr[i]
+            sl_barrier = entry - sl_atr_mult * atr[i]
+            end_idx = min(i + max_horizon, n)
+
+            hit_tp = False
+            hit_sl = False
+            for j in range(i + 1, end_idx):
+                if high_all[j] >= tp_barrier:
+                    hit_tp = True
+                    break
+                if low_all[j] <= sl_barrier:
+                    hit_sl = True
+                    break
+
+            if hit_tp:
+                labels[i] = 1  # Long signal
+            elif hit_sl:
+                labels[i] = 2  # Short signal
+            else:
+                labels[i] = 0  # Hold (time expired)
+
+        # Mark final bars as NaN (insufficient look-ahead)
+        labels[-max_horizon:] = np.nan
+
+        multi_col = f"{prefix}_MULTI"
+        long_col = f"{prefix}_LONG"
+        short_col = f"{prefix}_SHORT"
+
+        df[multi_col] = pd.array(labels, dtype='Int64')
+        df[long_col] = (df[multi_col] == 1).astype('Int64')
+        df[short_col] = (df[multi_col] == 2).astype('Int64')
+        df.loc[df[multi_col].isna(), [long_col, short_col]] = pd.NA
+
+        counts = df[multi_col].value_counts(dropna=False)
+        print(f"  - {multi_col} distribution: {dict(counts)}")
+
+        return df
+
+    def add_return_target(
+        self,
+        df: pd.DataFrame,
+        horizons: list[int] | None = None,
+    ) -> pd.DataFrame:
+        """
+        Add continuous future-return target columns for regression.
+
+        Creates TARGET_RET_{horizon} = future return over horizon bars.
+        These can be thresholded post-hoc to create classification labels.
+
+        Args:
+            df: DataFrame with Close column
+            horizons: List of bar counts to compute returns for
+        """
+        if horizons is None:
+            horizons = [144, 288, 576]  # 12h, 24h, 48h
+
+        for h in horizons:
+            col = f"TARGET_RET_{h}"
+            df[col] = df['Close'].shift(-h) / df['Close'] - 1.0
+            print(f"  - Added {col} (mean={df[col].mean():.6f}, std={df[col].std():.6f})")
 
         return df
     
-    def create_target(self, df: pd.DataFrame, threshold: float = 0.08, 
-                      horizon: int = None) -> pd.DataFrame:
+    def add_direction_target(
+        self,
+        df: pd.DataFrame,
+        prefix: str,
+        threshold: float = 0.08,
+        horizon: int = None,
+        add_raw: bool = False,
+    ) -> pd.DataFrame:
         """
-        Create target labels for classification and RAW_ columns for evaluation.
-        
-        Target values (stored as TARGET_Direction):
+        Create direction targets for classification and RAW_ columns for evaluation.
+
+        Target values (stored as {prefix}_MULTI):
         - 0: Hold (no significant move)
         - 1: Buy signal (price moves up > threshold)
         - 2: Sell signal (price moves down > threshold)
-        
+
         RAW_ columns (for evaluation, NOT used as features):
         - RAW_Close: Current close price (for visualization)
         - RAW_Future_High: Max high price over horizon (for actual move calculation)
         - RAW_Future_Low: Min low price over horizon (for actual move calculation)
-        
+
         IMPORTANT: This must be called BEFORE normalizing prices, as it requires
         absolute price values to calculate percentage moves.
-        
+
         Args:
             df: DataFrame with High, Low, Close columns (absolute prices)
+            prefix: Target prefix (e.g., TARGET_DIR_8PCT)
             threshold: Percentage threshold for significant move (default 0.08 = 8%)
             horizon: Forward-looking window in bars (default: 576 = 48 hours)
-            
+            add_raw: If True, (re)compute RAW_ columns
+
         Returns:
-            pd.DataFrame: DataFrame with TARGET_Direction and RAW_ columns added
+            pd.DataFrame: DataFrame with {prefix}_MULTI/LONG/SHORT and RAW_ columns added
         """
         if horizon is None:
             horizon = 2 * self.BARS_PER_DAY  # 576 bars = 48 hours
-            
-        print(f"Creating target with {threshold*100}% threshold, {horizon} bar ({horizon/self.BARS_PER_DAY:.1f} day) horizon...")
-        
-        # Calculate future high and low over the horizon
-        # We look at the NEXT 'horizon' bars (not including current)
-        # Using shift(-horizon) to look forward, then rolling max/min backwards
-        future_high = df['High'].iloc[::-1].rolling(window=horizon, min_periods=1).max().iloc[::-1].shift(-1)
-        future_low = df['Low'].iloc[::-1].rolling(window=horizon, min_periods=1).min().iloc[::-1].shift(-1)
-        
-        # Store RAW_ columns for evaluation (these are NOT features - filtered out by get_feature_columns())
-        # These allow the evaluator to calculate actual move magnitudes vs predictions
-        df['RAW_Close'] = df['Close'].copy()
-        df['RAW_Future_High'] = future_high
-        df['RAW_Future_Low'] = future_low
-        print("  - Added RAW_Close, RAW_Future_High, RAW_Future_Low for evaluation")
-        
+
+        print(
+            f"Creating direction target ({prefix}) with {threshold*100}% threshold, "
+            f"{horizon} bar ({horizon/self.BARS_PER_DAY:.1f} day) horizon..."
+        )
+
+        if add_raw or "RAW_Future_High" not in df.columns or "RAW_Future_Low" not in df.columns:
+            # Calculate future high and low over the horizon
+            # We look at the NEXT 'horizon' bars (not including current)
+            # Using shift(-horizon) to look forward, then rolling max/min backwards
+            future_high = df['High'].iloc[::-1].rolling(window=horizon, min_periods=1).max().iloc[::-1].shift(-1)
+            future_low = df['Low'].iloc[::-1].rolling(window=horizon, min_periods=1).min().iloc[::-1].shift(-1)
+
+            # Store RAW_ columns for evaluation (these are NOT features - filtered out by get_feature_columns())
+            # These allow the evaluator to calculate actual move magnitudes vs predictions
+            df['RAW_Close'] = df['Close'].copy()
+            df['RAW_Future_High'] = future_high
+            df['RAW_Future_Low'] = future_low
+            print("  - Added RAW_Close, RAW_Future_High, RAW_Future_Low for evaluation")
+
         # Calculate percentage moves from current close
-        up_move = (future_high - df['Close']) / df['Close']
-        down_move = (df['Close'] - future_low) / df['Close']
-        
-        # Create target labels (will be renamed to TARGET_Direction in cleanup)
-        df['TARGET_Direction'] = 0  # Default: Hold
-        df.loc[up_move > threshold, 'TARGET_Direction'] = 1   # Buy signal
-        df.loc[down_move > threshold, 'TARGET_Direction'] = 2  # Sell signal
-        
+        up_move = (df['RAW_Future_High'] - df['Close']) / df['Close']
+        down_move = (df['Close'] - df['RAW_Future_Low']) / df['Close']
+
+        multi_col = f"{prefix}_MULTI"
+        long_col = f"{prefix}_LONG"
+        short_col = f"{prefix}_SHORT"
+
+        # Create target labels
+        df[multi_col] = 0  # Default: Hold
+        df.loc[up_move > threshold, multi_col] = 1   # Buy signal
+        df.loc[down_move > threshold, multi_col] = 2  # Sell signal
+
         # If both conditions are met, prioritize based on which move is larger
         both_signals = (up_move > threshold) & (down_move > threshold)
-        df.loc[both_signals & (up_move >= down_move), 'TARGET_Direction'] = 1
-        df.loc[both_signals & (down_move > up_move), 'TARGET_Direction'] = 2
-        
+        df.loc[both_signals & (up_move >= down_move), multi_col] = 1
+        df.loc[both_signals & (down_move > up_move), multi_col] = 2
+
         # The last 'horizon' rows don't have enough forward data - mark as NaN
-        df.loc[df.index[-horizon:], 'TARGET_Direction'] = np.nan
-        
+        df.loc[df.index[-horizon:], multi_col] = np.nan
+
+        df[long_col] = (df[multi_col] == 1).astype("Int64")
+        df[short_col] = (df[multi_col] == 2).astype("Int64")
+        df.loc[df[multi_col].isna(), [long_col, short_col]] = pd.NA
+
         # Print distribution
-        target_counts = df['TARGET_Direction'].value_counts(dropna=False)
-        print(f"  - TARGET_Direction distribution: {dict(target_counts)}")
-        
+        target_counts = df[multi_col].value_counts(dropna=False)
+        print(f"  - {multi_col} distribution: {dict(target_counts)}")
+
         return df
     
     def normalize_features(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -319,7 +478,7 @@ class DataProcessor:
         3. Drop original Volume column
         4. Drop raw return columns (noise for long-horizon predictions)
         5. Drop rows with any NaN values
-        6. Convert TARGET_Direction to integer type
+        6. Convert TARGET_ columns to integer type
         
         Note: RAW_ prefixed columns (RAW_Close, RAW_Future_High, RAW_Future_Low) are 
         preserved for evaluation. They are filtered out by get_feature_columns() 
@@ -378,11 +537,13 @@ class DataProcessor:
         print(f"  - Dropped {rows_before - rows_after} rows with NaN values")
         print(f"  - Remaining rows: {rows_after}")
         
-        # Convert targets to integer while preserving NaNs at the tail
-        if 'TARGET_Direction' in df.columns:
-            df['TARGET_Direction'] = df['TARGET_Direction'].astype('Int64')
-        if 'TARGET_SQUEEZE' in df.columns:
-            df['TARGET_SQUEEZE'] = df['TARGET_SQUEEZE'].astype('Int64')
+        # Convert target columns to nullable integers (preserve NaNs where needed)
+        # Skip TARGET_RET_* columns — they are continuous returns for regression
+        target_cols = [c for c in df.columns if c.startswith('TARGET_')]
+        for col in target_cols:
+            if col.startswith('TARGET_RET_'):
+                continue  # continuous return targets stay as float
+            df[col] = df[col].astype('Int64')
         
         # Verify no NaN values remain
         nan_count = df.isna().sum().sum()
@@ -456,6 +617,12 @@ class DataProcessor:
             return self.process_set_01(threshold=threshold, horizon=horizon)
         elif self.dataset_version == "set_02":
             return self.process_set_02(threshold=threshold, horizon=horizon)
+        elif self.dataset_version == "set_03":
+            return self.process_set_03(threshold=threshold, horizon=horizon)
+        elif self.dataset_version == "set_04":
+            return self.process_set_04(threshold=threshold, horizon=horizon)
+        elif self.dataset_version == "set_05":
+            return self.process_set_05(threshold=threshold, horizon=horizon)
         else:
             raise ValueError(f"Unknown dataset version: {self.dataset_version}. "
                            f"Available: {list(DATASET_VERSIONS.keys())}")
@@ -477,9 +644,10 @@ class DataProcessor:
         Returns:
             pd.DataFrame: Fully processed DataFrame
         """
+        start_time = datetime.now()
         print("=" * 60)
         print(f"Starting Data Processing Pipeline - {self.dataset_version.upper()}")
-        print(f"Started at: {datetime.now().isoformat(timespec='seconds')}")
+        print(f"Started at: {start_time.isoformat(timespec='seconds')}")
         print("=" * 60)
         
         # Step 1: Load data
@@ -505,9 +673,27 @@ class DataProcessor:
         )
         print(f"  [75%] AlphaFactory features added at {datetime.now().isoformat(timespec='seconds')}")
 
-        # Step 4: Create target (MUST be before normalization)
-        df = self.create_target(df, threshold=threshold, horizon=horizon)
-        df = self.add_squeeze_target(df)
+        # Step 4: Create targets (MUST be before normalization)
+        df = self.add_direction_target(
+            df,
+            prefix="TARGET_DIR_8PCT",
+            threshold=threshold,
+            horizon=horizon,
+            add_raw=True,
+        )
+        df = self.add_direction_target(
+            df,
+            prefix="TARGET_DIR_4PCT",
+            threshold=0.04,
+            horizon=horizon,
+        )
+        df = self.add_squeeze_target(
+            df,
+            prefix="TARGET_SQUEEZE",
+            threshold=0.04,
+            horizon=576,
+        )
+        df['TARGET_SQUEEZE'] = df['TARGET_SQUEEZE_MULTI']
 
         # Step 5: Normalize features (creates *_Return columns as intermediates)
         df = self.normalize_features(df)
@@ -524,6 +710,8 @@ class DataProcessor:
         print(f"Output: {saved_path}")
         print(f"Shape: {df.shape}")
         print(f"Columns: {list(df.columns)}")
+        duration = datetime.now() - start_time
+        print(f"Wall time: {str(duration).split('.')[0]}")
         print("=" * 60)
         
         self.df = df
@@ -549,9 +737,10 @@ class DataProcessor:
         Returns:
             pd.DataFrame: Fully processed DataFrame
         """
+        start_time = datetime.now()
         print("=" * 60)
         print(f"Starting Data Processing Pipeline - {self.dataset_version.upper()}")
-        print(f"Started at: {datetime.now().isoformat(timespec='seconds')}")
+        print(f"Started at: {start_time.isoformat(timespec='seconds')}")
         print("=" * 60)
         
         # Step 1: Load data
@@ -577,9 +766,114 @@ class DataProcessor:
         )
         print(f"  [75%] AlphaFactory features added at {datetime.now().isoformat(timespec='seconds')}")
 
-        # Step 4: Create target (MUST be before normalization)
-        df = self.create_target(df, threshold=threshold, horizon=horizon)
-        df = self.add_squeeze_target(df)
+        # Step 4: Create targets (MUST be before normalization)
+        df = self.add_direction_target(
+            df,
+            prefix="TARGET_DIR_8PCT",
+            threshold=threshold,
+            horizon=horizon,
+            add_raw=True,
+        )
+        df = self.add_direction_target(
+            df,
+            prefix="TARGET_DIR_4PCT",
+            threshold=0.04,
+            horizon=horizon,
+        )
+        df = self.add_squeeze_target(
+            df,
+            prefix="TARGET_SQUEEZE",
+            threshold=0.04,
+            horizon=576,
+        )
+        df['TARGET_SQUEEZE'] = df['TARGET_SQUEEZE_MULTI']
+
+        # Step 5: Normalize features (creates *_Return columns as intermediates)
+        df = self.normalize_features(df)
+
+        # Step 6: Cleanup (drops raw columns AND raw returns - they're "noise")
+        df = self.cleanup(df, drop_raw_returns=True)
+
+        # Step 7: Save
+        saved_path = self.save(df)
+
+        print("=" * 60)
+        print("Processing Complete!")
+        print(f"Output: {saved_path}")
+        print(f"Shape: {df.shape}")
+        print(f"Columns: {list(df.columns)}")
+        duration = datetime.now() - start_time
+        print(f"Wall time: {str(duration).split('.')[0]}")
+        print("=" * 60)
+
+        self.df = df
+        return df
+
+    def process_set_03(self, threshold: float = 0.08, horizon: int = None) -> pd.DataFrame:
+        """
+        Process data using SET_03 feature configuration.
+
+        SET_03 Features:
+        - Time: Time_Sin, Time_Cos (cyclical encoding of time of day)
+        - AlphaFactory: volatility, liquidity, structure, trend, volume-flow
+        - Volume: Volume_Log (log-transformed)
+        - Targets: Multiple squeeze targets (4% and 8%) with binary splits
+        """
+        start_time = datetime.now()
+        print("=" * 60)
+        print(f"Starting Data Processing Pipeline - {self.dataset_version.upper()}")
+        print(f"Started at: {start_time.isoformat(timespec='seconds')}")
+        print("=" * 60)
+
+        # Step 1: Load data
+        df = self.load_data()
+        total_rows = len(df)
+        print(f"  [25%] Loaded {total_rows} rows at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 2: Add time features
+        df = self.add_time_features(df)
+        print(f"  [50%] Time features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 3: Add AlphaFactory features (windows in bars for 5-min data)
+        windows = [
+            3 * self.BARS_PER_DAY,
+            7 * self.BARS_PER_DAY,
+            14 * self.BARS_PER_DAY,
+            35 * self.BARS_PER_DAY,
+        ]
+        df = AlphaFactory(df).add_all_features(
+            windows=windows,
+            include_macro=True,
+            log_progress=True,
+        )
+        print(f"  [75%] AlphaFactory features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 4: Create targets (MUST be before normalization)
+        df = self.add_direction_target(
+            df,
+            prefix="TARGET_DIR_8PCT",
+            threshold=threshold,
+            horizon=horizon,
+            add_raw=True,
+        )
+        df = self.add_direction_target(
+            df,
+            prefix="TARGET_DIR_4PCT",
+            threshold=0.04,
+            horizon=horizon,
+        )
+        df = self.add_squeeze_target(
+            df,
+            prefix="TARGET_SQZ_8PCT",
+            threshold=0.08,
+            horizon=576,
+        )
+        df = self.add_squeeze_target(
+            df,
+            prefix="TARGET_SQZ_4PCT",
+            threshold=0.04,
+            horizon=576,
+        )
 
         # Step 5: Normalize features (creates *_Return columns as intermediates)
         df = self.normalize_features(df)
@@ -590,14 +884,207 @@ class DataProcessor:
         # Step 7: Save
         saved_path = self.save(df)
         print(f"  [100%] Saved output at {datetime.now().isoformat(timespec='seconds')}")
-        
+
         print("=" * 60)
         print("Processing Complete!")
         print(f"Output: {saved_path}")
         print(f"Shape: {df.shape}")
         print(f"Columns: {list(df.columns)}")
+        duration = datetime.now() - start_time
+        print(f"Wall time: {str(duration).split('.')[0]}")
         print("=" * 60)
-        
+
+        self.df = df
+        return df
+
+    def process_set_04(self, threshold: float = 0.03, horizon: int = None) -> pd.DataFrame:
+        """
+        Process data using SET_04 feature configuration.
+
+        SET_04: Lower thresholds + shorter horizons for more trainable signal.
+        - Time: Time_Sin, Time_Cos (cyclical encoding)
+        - AlphaFactory: volatility, liquidity, structure, trend, volume-flow
+        - Volume: Volume_Log
+        - Targets:
+            - DIR_3PCT at 12h and 24h horizons
+            - DIR_2PCT at 12h and 24h horizons
+            - Continuous return targets at 12h, 24h, 48h
+        """
+        start_time = datetime.now()
+        print("=" * 60)
+        print(f"Starting Data Processing Pipeline - {self.dataset_version.upper()}")
+        print(f"  Lower threshold targets (2%/3%) with shorter horizons")
+        print(f"Started at: {start_time.isoformat(timespec='seconds')}")
+        print("=" * 60)
+
+        # Step 1: Load data
+        df = self.load_data()
+        total_rows = len(df)
+        print(f"  [20%] Loaded {total_rows} rows at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 2: Add time features
+        df = self.add_time_features(df)
+        print(f"  [30%] Time features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 3: Add AlphaFactory features
+        windows = [
+            3 * self.BARS_PER_DAY,
+            7 * self.BARS_PER_DAY,
+            14 * self.BARS_PER_DAY,
+            35 * self.BARS_PER_DAY,
+        ]
+        df = AlphaFactory(df).add_all_features(
+            windows=windows,
+            include_macro=True,
+            log_progress=True,
+        )
+        print(f"  [60%] AlphaFactory features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 4: Create targets — lower thresholds, shorter horizons
+        # 3% threshold, 12h horizon (144 bars)
+        df = self.add_direction_target(
+            df, prefix="TARGET_DIR_3PCT_12H",
+            threshold=0.03, horizon=144, add_raw=True,
+        )
+        # 3% threshold, 24h horizon (288 bars)
+        df = self.add_direction_target(
+            df, prefix="TARGET_DIR_3PCT_24H",
+            threshold=0.03, horizon=288,
+        )
+        # 2% threshold, 12h horizon (144 bars)
+        df = self.add_direction_target(
+            df, prefix="TARGET_DIR_2PCT_12H",
+            threshold=0.02, horizon=144,
+        )
+        # 2% threshold, 24h horizon (288 bars)
+        df = self.add_direction_target(
+            df, prefix="TARGET_DIR_2PCT_24H",
+            threshold=0.02, horizon=288,
+        )
+
+        # Continuous returns for regression approach
+        df = self.add_return_target(df, horizons=[144, 288, 576])
+
+        print(f"  [80%] All targets created at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 5: Normalize features
+        df = self.normalize_features(df)
+
+        # Step 6: Cleanup
+        df = self.cleanup(df, drop_raw_returns=True)
+
+        # Step 7: Save
+        saved_path = self.save(df)
+        print(f"  [100%] Saved output at {datetime.now().isoformat(timespec='seconds')}")
+
+        print("=" * 60)
+        print("Processing Complete!")
+        print(f"Output: {saved_path}")
+        print(f"Shape: {df.shape}")
+        print(f"Columns: {list(df.columns)}")
+        duration = datetime.now() - start_time
+        print(f"Wall time: {str(duration).split('.')[0]}")
+        print("=" * 60)
+
+        self.df = df
+        return df
+
+    def process_set_05(self, threshold: float = 0.08, horizon: int = None) -> pd.DataFrame:
+        """
+        Process data using SET_05 feature configuration.
+
+        SET_05: Dynamic Triple Barrier targets with ATR-based barriers.
+        - Time: Time_Sin, Time_Cos
+        - AlphaFactory: volatility, liquidity, structure, trend, volume-flow
+        - Volume: Volume_Log
+        - Targets:
+            - TRIPLE_2x1_12H: TP=2×ATR, SL=1×ATR, max_horizon=12h
+            - TRIPLE_2x1_24H: TP=2×ATR, SL=1×ATR, max_horizon=24h
+            - TRIPLE_3x1_24H: TP=3×ATR, SL=1×ATR, max_horizon=24h (asymmetric)
+        """
+        start_time = datetime.now()
+        print("=" * 60)
+        print(f"Starting Data Processing Pipeline - {self.dataset_version.upper()}")
+        print(f"  Dynamic Triple Barrier targets (ATR-based)")
+        print(f"Started at: {start_time.isoformat(timespec='seconds')}")
+        print("=" * 60)
+
+        # Step 1: Load data
+        df = self.load_data()
+        total_rows = len(df)
+        print(f"  [20%] Loaded {total_rows} rows at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 2: Add time features
+        df = self.add_time_features(df)
+        print(f"  [30%] Time features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 3: Add AlphaFactory features
+        windows = [
+            3 * self.BARS_PER_DAY,
+            7 * self.BARS_PER_DAY,
+            14 * self.BARS_PER_DAY,
+            35 * self.BARS_PER_DAY,
+        ]
+        df = AlphaFactory(df).add_all_features(
+            windows=windows,
+            include_macro=True,
+            log_progress=True,
+        )
+        print(f"  [60%] AlphaFactory features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 4: Add RAW columns for evaluation (required by evaluator)
+        raw_horizon = 288  # 24h horizon for actual move analysis
+        future_high = df['High'].iloc[::-1].rolling(window=raw_horizon, min_periods=1).max().iloc[::-1].shift(-1)
+        future_low = df['Low'].iloc[::-1].rolling(window=raw_horizon, min_periods=1).min().iloc[::-1].shift(-1)
+        df['RAW_Close'] = df['Close'].copy()
+        df['RAW_Future_High'] = future_high
+        df['RAW_Future_Low'] = future_low
+        print("  - Added RAW_Close, RAW_Future_High, RAW_Future_Low for evaluation")
+
+        # Step 5: Create Triple Barrier targets
+        # Balanced: TP=2×ATR, SL=1×ATR, 12h horizon
+        df = self.add_triple_barrier_target(
+            df, prefix="TARGET_TRIPLE_2x1_12H",
+            tp_atr_mult=2.0, sl_atr_mult=1.0,
+            max_horizon=144, atr_period=14,
+        )
+        # Balanced: TP=2×ATR, SL=1×ATR, 24h horizon
+        df = self.add_triple_barrier_target(
+            df, prefix="TARGET_TRIPLE_2x1_24H",
+            tp_atr_mult=2.0, sl_atr_mult=1.0,
+            max_horizon=288, atr_period=14,
+        )
+        # Asymmetric: TP=3×ATR, SL=1×ATR, 24h horizon (bigger winners)
+        df = self.add_triple_barrier_target(
+            df, prefix="TARGET_TRIPLE_3x1_24H",
+            tp_atr_mult=3.0, sl_atr_mult=1.0,
+            max_horizon=288, atr_period=14,
+        )
+
+        # Also add continuous returns for comparison
+        df = self.add_return_target(df, horizons=[144, 288])
+
+        print(f"  [80%] All targets created at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 5: Normalize features
+        df = self.normalize_features(df)
+
+        # Step 6: Cleanup — keep ATR columns (useful features)
+        df = self.cleanup(df, drop_raw_returns=True)
+
+        # Step 7: Save
+        saved_path = self.save(df)
+        print(f"  [100%] Saved output at {datetime.now().isoformat(timespec='seconds')}")
+
+        print("=" * 60)
+        print("Processing Complete!")
+        print(f"Output: {saved_path}")
+        print(f"Shape: {df.shape}")
+        print(f"Columns: {list(df.columns)}")
+        duration = datetime.now() - start_time
+        print(f"Wall time: {str(duration).split('.')[0]}")
+        print("=" * 60)
+
         self.df = df
         return df
 
@@ -636,10 +1123,10 @@ def main(dataset_version: str = "set_01"):
         print("-" * 40)
         print(df.describe().T)
         
-        if 'TARGET_Direction' in df.columns:
-            print("\nTARGET_Direction Distribution:")
+        if 'TARGET_DIR_8PCT_MULTI' in df.columns:
+            print("\nTARGET_DIR_8PCT_MULTI Distribution:")
             print("-" * 40)
-            print(df['TARGET_Direction'].value_counts().sort_index())
+            print(df['TARGET_DIR_8PCT_MULTI'].value_counts().sort_index())
             
     except Exception as e:
         print(f"Error during processing: {e}")
@@ -650,5 +1137,5 @@ def main(dataset_version: str = "set_01"):
 if __name__ == "__main__":
     import sys
     # Allow passing dataset version as command line argument
-    version = sys.argv[1] if len(sys.argv) > 1 else "set_01"
+    version = sys.argv[1] if len(sys.argv) > 1 else "set_03"
     main(dataset_version=version)

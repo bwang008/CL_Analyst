@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 from typing import Iterator, Tuple, List, Optional
 
+from . import util
 from .util import get_feature_columns, get_X_y
 
 
@@ -201,7 +202,7 @@ class WalkForwardSplitter:
         df: pd.DataFrame,
         train_indices: np.ndarray,
         test_indices: np.ndarray,
-        target_name: str = "TARGET_Direction",
+        target_name: str = "TARGET_DIR_8PCT_MULTI",
     ) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame]:
         """
         Extract features and targets for a fold, ensuring no data leakage.
@@ -272,7 +273,9 @@ def walk_forward_validate(
     model_params: dict = None,
     splitter: WalkForwardSplitter = None,
     verbose: bool = True,
-    target_name: str = "TARGET_Direction",
+    target_name: str = "TARGET_DIR_8PCT_MULTI",
+    balance_mode: str = "weight",
+    random_state: int | None = None,
 ) -> List[dict]:
     """
     Run walk-forward validation on a dataset.
@@ -322,6 +325,21 @@ def walk_forward_validate(
         X_train, y_train, X_test, y_test, df_test = splitter.get_fold_data(
             gym_df, train_idx, test_idx, target_name=target_name
         )
+
+        if y_train.isna().any():
+            mask = ~y_train.isna()
+            X_train = X_train.loc[mask]
+            y_train = y_train.loc[mask]
+        if y_test.isna().any():
+            mask = ~y_test.isna()
+            X_test = X_test.loc[mask]
+            y_test = y_test.loc[mask]
+            df_test = df_test.loc[mask]
+
+        if balance_mode == "downsample":
+            X_train, y_train = util.downsample_majority(
+                X_train, y_train, random_state=random_state
+            )
         
         if verbose:
             print(f"Training on {len(X_train):,} samples, testing on {len(X_test):,} samples")
@@ -329,6 +347,12 @@ def walk_forward_validate(
         # Train model
         model = model_class(**model_params)
         model.add_evidence(X_train, y_train)
+        feature_importance = None
+        feature_names = None
+        if hasattr(model, "get_feature_importance"):
+            feature_importance = model.get_feature_importance()
+            if isinstance(X_train, pd.DataFrame):
+                feature_names = X_train.columns.tolist()
         
         # Predict
         y_pred = model.query(X_test)
@@ -343,6 +367,8 @@ def walk_forward_validate(
             'df_test': df_test,
             'train_date_range': (gym_df.index[train_idx[0]], gym_df.index[train_idx[-1]]),
             'test_date_range': (df_test.index[0], df_test.index[-1]),
+            'feature_importance': feature_importance,
+            'feature_names': feature_names,
         }
         results.append(fold_result)
         

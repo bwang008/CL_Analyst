@@ -11,7 +11,7 @@ conda activate trader
 ## Quick Start
 
 ```bash
-# Process raw data into ML-ready features
+# Process raw data into ML-ready features (default: set_03)
 python main.py process
 
 # Force reprocess even if output exists
@@ -21,14 +21,45 @@ python main.py process --force
 python main.py train
 
 # Train with a specific processed file
-python main.py train data/processed/CL_set_01.parquet
+python main.py train data/processed/CL_set_03.parquet
 
 # Train with a specific target
-python main.py train --target TARGET_SQUEEZE
+python main.py train --target TARGET_SQZ_4PCT_LONG
+
+# Train multiple targets sequentially (logs to reports/train_runs.log)
+python main.py train --targets TARGET_SQZ_8PCT_LONG,TARGET_SQZ_4PCT_LONG
+
+# Train with downsampled balance (binary targets only)
+python main.py train --balance_mode downsample --target TARGET_SQZ_4PCT_LONG
+
+# Run a batch config
+python main.py --config experiments.json
 
 # Simple 85/15 split sanity check (no walk-forward)
 python main.py train --method simple
 ```
+
+## Architecture Overview
+
+**Data Flow**
+1. **Raw OHLCV** (`data/raw/*.csv`)
+2. **Processing** (`src/data_processor.py`)  
+   - Time features
+   - AlphaFactory features
+   - Target construction
+   - Cleanup and save
+3. **Training** (`main.py train`)  
+   - Walk-forward split
+   - Model training/evaluation
+   - Reports + artifacts
+
+**Key Modules**
+- `src/data_processor.py`: orchestrates feature generation + targets.
+- `src/features/alpha_factory.py`: core feature engine (vol/liq/structure/trend/macro).
+- `src/walk_forward.py`: time-series split + validation.
+- `src/evaluator.py`: metrics + move analysis.
+- `src/visualizer.py`: plots + summaries.
+- `main.py`: CLI for processing/training.
 
 ## Run data_processor.py Directly
 
@@ -93,6 +124,7 @@ CL_Analyst/
 |---------|---------------|----------|
 | `set_01` | Cyclical (Time_Sin, Time_Cos) | Linear models, Neural networks |
 | `set_02` | Raw (Hour, Minute) | Tree-based models (XGBoost, LightGBM) |
+| `set_03` | Cyclical + Master squeeze targets | Target A/B testing (4% vs 8%) |
 
 ### Common Features (both datasets)
 - **AlphaFactory**: multi-window volatility, liquidity, structure, trend, volume-flow
@@ -100,8 +132,11 @@ CL_Analyst/
 - **Macro**: resampled 1M/3M Donchian width & position
 - **Volume**: Volume_Log
 - **Targets**:
-  - `TARGET_Direction`: 0=Hold, 1=Buy (8%+ up), 2=Sell (8%+ down) within 48 hours
-  - `TARGET_SQUEEZE`: 0=No trade, 1=Long squeeze, 2=Short squeeze
+  - `TARGET_DIR_8PCT_MULTI`: 0=Hold, 1=Buy (8%+ up), 2=Sell (8%+ down) within 48 hours
+  - `TARGET_DIR_8PCT_LONG` / `TARGET_DIR_8PCT_SHORT`
+  - `TARGET_DIR_4PCT_MULTI`, `TARGET_DIR_4PCT_LONG`, `TARGET_DIR_4PCT_SHORT`
+  - `TARGET_SQUEEZE_*`: squeeze targets with multi/long/short splits
+  - `TARGET_SQZ_8PCT_*` and `TARGET_SQZ_4PCT_*` for set_03
 
 ## Usage in Code
 
@@ -119,7 +154,7 @@ df = get_processed_cl_df(dataset_version="set_01", force_reprocess=True)
 
 # Run walk-forward training and evaluation
 results = train_and_evaluate(
-    data_path="data/processed/CL_set_01.parquet",
+    data_path="data/processed/CL_set_03.parquet",
     holdout_pct=0.15,
     purge_bars=576,
     min_train_bars=8640,
@@ -127,7 +162,7 @@ results = train_and_evaluate(
     threshold=0.08,
     output_dir="reports",
     model_dir="models",
-    target_name="TARGET_Direction",
+    target_name="TARGET_DIR_8PCT_MULTI",
 )
 ```
 
@@ -137,7 +172,25 @@ Default processing parameters:
 - **threshold**: 0.08 (8% price move triggers Buy/Sell signal)
 - **horizon**: 576 bars (48 hours of 5-min data)
 Default training parameter:
-- **target_name**: `TARGET_Direction`
+- **target_name**: `TARGET_DIR_8PCT_MULTI`
+- **balance_mode**: `weight` (default) or `downsample` (binary only)
+
+### Batch Experiments
+
+Create a JSON file (e.g., `experiments.json`) with a list of runs:
+
+```json
+[
+  {"dataset_version": "set_03", "target": "TARGET_SQZ_8PCT_LONG", "balance_mode": "weight"},
+  {"dataset_version": "set_03", "target": "TARGET_SQZ_4PCT_LONG", "balance_mode": "downsample"}
+]
+```
+
+Run with:
+
+```bash
+python main.py --config experiments.json
+```
 
 To customize:
 ```python
@@ -166,7 +219,7 @@ Generated files are saved to:
 
 ## Dataset Documentation
 
-See `data/DATASETS.json` for detailed column descriptions and calculations.
+See `data/DATASETS.json` for dataset summaries and target columns.
 
 ## Tests
 
