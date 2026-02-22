@@ -1,54 +1,78 @@
 # Handoff Summary
 
-## What we just finished building
-- Walk-forward training pipeline in `main.py` (`train_and_evaluate`) that:
-  - Loads processed data
-  - Splits into gym/vault
-  - Runs walk-forward validation
-  - Evaluates folds and holdout
-  - Saves metrics, predictions, plots, and final model
-- Evaluation layer in `src/evaluator.py` that computes classification metrics and actual move magnitude analysis using `RAW_` columns.
-- Visualization utilities in `src/visualizer.py` (signals, fold summary, actual move distribution, and confusion matrix).
-- Confusion matrix plot output added to the report outputs.
-- Wall-clock timing output added to the train command.
-- Class-imbalance mitigation added via `class_weight="balanced"` in `src/LGBMLearner.py`.
-- Tests added for `walk_forward`, `evaluator`, and `visualizer` modules under `tests/`.
-- README updated to reflect new process/train commands and outputs.
+## Current project state (updated 2026-02-22)
 
-## Current state of the code
-### What works
-- `python main.py process` generates processed datasets with `RAW_` and `TARGET_` columns.
-- `python main.py train`:
-  - Trains LightGBM models via walk-forward validation.
-  - Evaluates each fold and a final holdout (vault).
-  - Writes outputs to `reports/` and `models/`.
-  - Saves `vault_confusion_matrix.png`.
-  - Prints wall-clock runtime.
-- `src/LGBMLearner.py` now applies `class_weight="balanced"` by default to combat class imbalance.
-- Tests exist for the new modules and should run under pytest.
+### Model Improvement Research — Active
+An agentic experiment framework is running to improve model performance. Key files:
+- **`agent/experiment_log.json`** — Structured log of all experiments with metrics and verdicts. **Read this first.**
+- **`agent/strategy_queue.json`** — 8 strategies ordered by priority with status tracking.
+- **`agent/experiment_runner.py`** — Orchestrates experiments end-to-end (run, measure, log).
+- **`.agent/workflows/run-experiment.md`** — Step-by-step workflow for running experiments.
 
-### What doesn’t work / gaps
-- Model performance remains poor on Buy/Sell (likely still imbalanced/noisy); class weighting is applied but no follow-up metrics have been captured yet.
-- `reports/` and `models/` are only created when running training; they will not exist until you run `python main.py train`.
-- Visualizer tests assume a headless matplotlib backend; if your environment lacks it, plot tests may fail.
+### Experiment Results So Far (3 complete)
 
-## Prioritized next steps
-1. **Re-run training and review metrics**
-   - Validate whether `class_weight="balanced"` materially improves Buy/Sell recall.
-   - Compare `reports/metrics.json` vs `reports/vault_metrics.json`.
-2. **Add fold-level confusion matrices (optional but useful)**
-   - Save per-fold confusion matrices to `reports/fold_{n}_confusion_matrix.png`.
-3. **Tune LightGBM hyperparameters for imbalance**
-   - Consider `scale_pos_weight` or explicit `class_weight` dicts.
-   - Increase `num_leaves`, adjust `min_child_samples`, and consider `max_depth`.
-4. **Add sampling strategy**
-   - Explore undersampling Hold or oversampling Buy/Sell.
-   - Evaluate with the same walk-forward structure.
-5. **Revisit feature set / target density**
-   - Check label distribution and consider alternative thresholds/horizons.
+| ID | Target | Balance | Buy Precision | Buy Recall | Buy F1 | Verdict |
+|----|--------|---------|---------------|------------|--------|---------|
+| EXP-001 | DIR_2PCT_24H_LONG (set_04) | downsample | **25.6%** | **69.7%** | **37.5%** 🏆 | promising |
+| EXP-002 | DIR_2PCT_24H_LONG (set_04) | weight | 30.0% | 5.0% | 8.5% | improvement |
+| EXP-003 | DIR_3PCT_24H_LONG (set_04) | downsample | 12.6% | 61.1% | 20.9% | promising |
 
-## Known bugs and pending decisions
-- **Class imbalance remains the core issue.** Class weighting is applied but there’s no confirmation yet that it improves Buy/Sell recall meaningfully.
-- **Reports/models directories** are created at runtime only; if users expect them pre-existing, add a setup step or CLI command.
-- **Pending: fold-level confusion matrix outputs**. Only the vault confusion matrix is currently saved.
-- **Pending: documentation of label mapping**. The label mapping is: `0 = Hold`, `1 = Buy`, `2 = Sell`.
+**Key finding:** Lowering threshold from 8%→2% and horizon from 48h→24h was the single biggest improvement. Downsample vastly outperforms weight mode for recall.
+
+### Next Experiment to Run
+**EXP-004:** Triple Barrier target on `set_05` — `TARGET_TRIPLE_2x1_24H_LONG` with downsample. The dataset is already processed at `data/processed/CL_set_05.parquet`.
+
+```bash
+conda activate trader
+python -c "
+import json
+from agent.experiment_runner import run_experiment, load_experiment_log, generate_experiment_id
+log = load_experiment_log()
+exp_id = generate_experiment_id(log)
+result = run_experiment(
+    experiment_id=exp_id, strategy_id='S1b',
+    hypothesis='Dynamic Triple Barrier (2xATR TP, 1xATR SL, 24h) should produce better class balance and more trainable signal',
+    changes={'target': 'TARGET_TRIPLE_2x1_24H_LONG', 'tp_atr_mult': 2.0, 'sl_atr_mult': 1.0, 'max_horizon': 288},
+    data_path='data/processed/CL_set_05.parquet',
+    target_name='TARGET_TRIPLE_2x1_24H_LONG',
+    method='walk_forward', balance_mode='downsample', threshold=0.02,
+)
+print(json.dumps(result, indent=2, default=str))
+"
+```
+
+### Remaining Strategy Queue (after Triple Barrier)
+1. **S2a**: Volatility rate-of-change features (vol compression → expansion)
+2. **S2b**: Bar microstructure + MACD/ADX features
+3. **S3a**: Probability threshold sweep [0.05-0.90]
+4. **S3b**: Optuna hyperparameter search (constrained: num_leaves≤31, min_child_samples 50-200, avg across all WF folds)
+5. **S4a**: Focal loss + class weighting
+6. **S5a**: Profitability backtest (termination criterion: Sharpe>1.0, Profit Factor>1.5)
+
+---
+
+## Datasets Available
+- `set_03` — Original (8%/4% thresholds, 48h horizon) — baseline
+- `set_04` — Lower thresholds (2%/3%) with shorter horizons (12h/24h) + continuous returns
+- `set_05` — Dynamic Triple Barrier targets (ATR-based barriers)
+
+## Data pipeline
+`DataProcessor` -> `AlphaFactory` -> targets -> cleanup -> save.
+
+### Targets available
+- `TARGET_DIR_8PCT_*` / `TARGET_DIR_4PCT_*` (set_03)
+- `TARGET_SQZ_8PCT_*` / `TARGET_SQZ_4PCT_*` (set_03)
+- `TARGET_DIR_2PCT_12H_*` / `TARGET_DIR_2PCT_24H_*` / `TARGET_DIR_3PCT_12H_*` / `TARGET_DIR_3PCT_24H_*` (set_04)
+- `TARGET_RET_144` / `TARGET_RET_288` / `TARGET_RET_576` (set_04, continuous)
+- `TARGET_TRIPLE_2x1_12H_*` / `TARGET_TRIPLE_2x1_24H_*` / `TARGET_TRIPLE_3x1_24H_*` (set_05)
+
+## How to run
+- Process dataset: `python -c "from src.data_processor import DataProcessor; DataProcessor(input_path='data/raw/CL.csv', dataset_version='set_04').process()"`
+- Train: `python main.py train --target TARGET_DIR_2PCT_24H_LONG --balance_mode downsample`
+- Run experiment: `python agent/experiment_runner.py --quick-test`
+- Batch config: `python main.py --config experiments.json`
+
+## Known issues / watch-outs
+- **Long runtime** — AlphaFactory 35-day window (10080 bars) takes ~20min with Numba.
+- **TARGET_RET_* columns** are floats — `cleanup()` now skips Int64 conversion for them.
+- **Sell class** never predicted — all current binary targets are LONG-only. SHORT experiments pending.

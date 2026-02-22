@@ -48,7 +48,7 @@ class OilDatasetVerifier:
         'Time_Sin', 'Time_Cos', 'RSI', 'MACD', 'MACD_Signal', 'MACD_Hist',
         'VOL_3D', 'VOL_7D', 'VOL_30D', 'Parkinson_Vol_24H',
         'Return_Skew_24H', 'Return_Kurt_24H', 'SMA_20_Dist', 'SMA_30d_Dist',
-        'Volume_Log', 'TARGET_Direction'
+        'Volume_Log', 'TARGET_DIR_8PCT_MULTI'
     ]
     
     # Columns that must be non-negative

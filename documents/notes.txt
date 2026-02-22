@@ -1,3 +1,11 @@
+Idea: Maybe these breakouts happen in a cycle so certain patterns work for a period then disappear and reappear later on sort of like the seasons.
+
+So we take the target breakouts, then try to use clusters to put them into groups of signals, then we will create a model for each cluster to try to learn that signal. 
+
+This might be more efficient than the model attempting to learn every single signal at once. 
+
+--------
+
 I was previously building the model using a target looking ahead 48 hours and if the price was greater than 8 percent delta, it took that as a signal to buy or sell.
 
 I did some research on the indicators I was creating and I think that the research I commissioned is not appropriate for the actual strategy I want to employ, so I determined that the term I actually want to use is volatility compression where I am aiming to purchase a position 12-24 hours ahead of a big market move, but not aiming to buy right when the market move is happening. My analogy for this is setting rain traps or fish nets ahead of a storm arriving, not while the storm is out and happening. 

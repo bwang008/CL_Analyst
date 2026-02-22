@@ -17,8 +17,11 @@ Author: CL Analyst
 import os
 import sys
 import time
+import json
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import re
 import src.util as util
 import src.indicatorBuilder as ind
 from src.data_processor import DataProcessor
@@ -53,7 +56,7 @@ def get_cl_df(cl_test_data="data/raw/test100k.csv"):
 
 def get_processed_cl_df(input_path="data/raw/test100k.csv", 
                         output_path=None,
-                        dataset_version="set_01",
+                        dataset_version="set_03",
                         threshold=0.08, 
                         horizon=576,
                         force_reprocess=False):
@@ -98,7 +101,7 @@ def get_processed_cl_df(input_path="data/raw/test100k.csv",
 
 
 def train_and_evaluate(
-    data_path: str = "data/processed/CL_set_01.parquet",
+    data_path: str = "data/processed/CL_set_03.parquet",
     holdout_pct: float = 0.15,
     purge_bars: int = 576,
     min_train_bars: int = 8640,
@@ -109,7 +112,9 @@ def train_and_evaluate(
     model_params: dict = None,
     verbose: bool = True,
     method: str = "walk_forward",
-    target_name: str = "TARGET_Direction",
+    target_name: str = "TARGET_DIR_8PCT_MULTI",
+    balance_mode: str = "weight",
+    random_state: int | None = None,
 ):
     """
     Train and evaluate an LightGBM model using walk-forward validation.
@@ -216,6 +221,16 @@ def train_and_evaluate(
             'num_leaves': 31,
             'verbose': -1,
         }
+
+    is_binary_target = target_name.endswith("_LONG") or target_name.endswith("_SHORT")
+    if balance_mode == "downsample" and not is_binary_target:
+        raise ValueError("downsample balance_mode requires a binary target (_LONG/_SHORT).")
+    if is_binary_target:
+        model_params["objective"] = "binary"
+        model_params["metric"] = "binary_logloss"
+        model_params.pop("num_class", None)
+    if balance_mode == "downsample":
+        model_params["class_weight"] = None
     
     if method == "simple":
         split_idx = int(len(df) * (1 - holdout_pct))
@@ -231,6 +246,20 @@ def train_and_evaluate(
 
         X_train, y_train = util.get_X_y(train_df, target_name=target_name)
         X_test, y_test = util.get_X_y(test_df, target_name=target_name)
+        if y_train.isna().any():
+            mask = ~y_train.isna()
+            X_train = X_train.loc[mask]
+            y_train = y_train.loc[mask]
+        if y_test.isna().any():
+            mask = ~y_test.isna()
+            X_test = X_test.loc[mask]
+            y_test = y_test.loc[mask]
+            test_df = test_df.loc[mask]
+
+        if balance_mode == "downsample":
+            X_train, y_train = util.downsample_majority(
+                X_train, y_train, random_state=random_state
+            )
 
         model = LGBMLearner(**model_params)
         model.add_evidence(X_train, y_train)
@@ -258,6 +287,8 @@ def train_and_evaluate(
             splitter=splitter,
             verbose=verbose,
             target_name=target_name,
+            balance_mode=balance_mode,
+            random_state=random_state,
         )
     
     # -------------------------------------------------------------------------
@@ -300,17 +331,31 @@ def train_and_evaluate(
     else:
         # Train final model on entire gym set
         X_gym, y_gym = util.get_X_y(gym_df, target_name=target_name)
+        if y_gym.isna().any():
+            mask = ~y_gym.isna()
+            X_gym = X_gym.loc[mask]
+            y_gym = y_gym.loc[mask]
+        if balance_mode == "downsample":
+            X_gym, y_gym = util.downsample_majority(
+                X_gym, y_gym, random_state=random_state
+            )
         final_model = LGBMLearner(**model_params)
         final_model.add_evidence(X_gym, y_gym)
 
         # Predict on vault
         X_vault, y_vault = util.get_X_y(vault_df, target_name=target_name)
+        vault_eval_df = vault_df
+        if y_vault.isna().any():
+            mask = ~y_vault.isna()
+            X_vault = X_vault.loc[mask]
+            y_vault = y_vault.loc[mask]
+            vault_eval_df = vault_df.loc[mask]
         y_vault_pred = final_model.query(X_vault)
 
         vault_eval = evaluator.evaluate_fold(
             y_true=y_vault.values,
             y_pred=y_vault_pred,
-            df_test=vault_df,
+            df_test=vault_eval_df,
         )
 
         print(f"\n  Vault Results:")
@@ -381,8 +426,10 @@ def train_and_evaluate(
     else:
         signals_path = os.path.join(output_dir, "vault_signals.png")
         visualizer.plot_signals(
-            vault_df, y_vault_pred, signals_path,
-            title="Vault Set: Model Signals"
+            vault_eval_df,
+            y_vault_pred,
+            signals_path,
+            title="Vault Set: Model Signals",
         )
     
     # Actual moves distribution
@@ -409,11 +456,56 @@ def train_and_evaluate(
             title="Vault Confusion Matrix",
         )
 
-    # Feature importance (simple split only)
+    # Feature importance
     if method == "simple":
         importance_path = os.path.join(output_dir, "simple_feature_importance.png")
         feature_names = util.get_feature_columns(df)
         visualizer.plot_feature_importance(final_model, feature_names, importance_path)
+    else:
+        importances = [
+            fr["feature_importance"]
+            for fr in fold_results
+            if fr.get("feature_importance") is not None
+        ]
+        feature_names = fold_results[0].get("feature_names") if fold_results else None
+        if feature_names is None:
+            feature_names = util.get_feature_columns(df)
+        if importances:
+            mean_importance = np.mean(importances, axis=0)
+            pairs = list(zip(feature_names, mean_importance))
+            pairs.sort(key=lambda x: x[1], reverse=True)
+            importance_df = pd.DataFrame(pairs, columns=["feature", "mean_importance"])
+            top_pairs = pairs[:20]
+
+            labels = [p[0] for p in top_pairs][::-1]
+            scores = [p[1] for p in top_pairs][::-1]
+
+            safe_target = re.sub(r"[^A-Za-z0-9_]+", "_", target_name)
+            safe_balance = re.sub(r"[^A-Za-z0-9_]+", "_", balance_mode)
+            importance_path = os.path.join(
+                output_dir,
+                f"walk_forward_feature_importance_{safe_target}_{safe_balance}.png",
+            )
+            importance_csv_path = os.path.join(
+                output_dir,
+                f"walk_forward_feature_importance_{safe_target}_{safe_balance}.csv",
+            )
+
+            fig, ax = plt.subplots(figsize=(10, 6))
+            ax.barh(labels, scores, color="steelblue")
+            ax.set_title(
+                f"Walk-Forward Feature Importance: {target_name} ({balance_mode})",
+                fontsize=12,
+                fontweight="bold",
+            )
+            ax.set_xlabel("Mean Importance (Gain)")
+            ax.grid(True, axis="x", alpha=0.3)
+            plt.tight_layout()
+            fig.savefig(importance_path, dpi=100, bbox_inches="tight")
+            plt.close(fig)
+            print(f"Saved walk-forward feature importance to {importance_path}")
+            importance_df.to_csv(importance_csv_path, index=False)
+            print(f"Saved walk-forward feature importance CSV to {importance_csv_path}")
     
     elapsed_seconds = time.perf_counter() - start_time
     elapsed_minutes = elapsed_seconds / 60
@@ -431,7 +523,69 @@ def train_and_evaluate(
         'vault_result': vault_eval,
         'report': report,
         'final_model': final_model,
+        'wall_time_seconds': elapsed_seconds,
     }
+
+
+def log_train_run(
+    report_path: str,
+    target_name: str,
+    method: str,
+    data_path: str,
+    balance_mode: str,
+    results: dict,
+):
+    os.makedirs(os.path.dirname(report_path), exist_ok=True)
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    vault_result = results.get("vault_result") or {}
+    line = (
+        f"{timestamp} | target={target_name} | method={method} | "
+        f"balance_mode={balance_mode} | data={data_path} | "
+        f"vault_accuracy={vault_result.get('accuracy')}\n"
+    )
+    with open(report_path, "a", encoding="utf-8") as f:
+        f.write(line)
+
+    def _metric_scalar(value):
+        if isinstance(value, dict):
+            vals = [v for v in value.values() if v is not None]
+            return float(np.mean(vals)) if vals else None
+        return value
+
+    def _signal_metric(value):
+        if isinstance(value, dict):
+            return value.get("Buy")
+        return None
+
+    batch_path = os.path.join("reports", "batch_results.csv")
+    write_header = not os.path.exists(batch_path)
+    wall_time_seconds = results.get("wall_time_seconds")
+    with open(batch_path, "a", encoding="utf-8") as f:
+        if write_header:
+            f.write(
+                "timestamp,target,method,balance_mode,data_path,"
+                "vault_accuracy,vault_precision,vault_recall,vault_f1,"
+                "signal_precision,signal_recall,signal_f1,"
+                "n_samples,wall_time_seconds\n"
+            )
+        vault_precision = _metric_scalar(vault_result.get("precision"))
+        vault_recall = _metric_scalar(vault_result.get("recall"))
+        vault_f1 = _metric_scalar(vault_result.get("f1"))
+        signal_precision = _signal_metric(vault_result.get("precision"))
+        signal_recall = _signal_metric(vault_result.get("recall"))
+        signal_f1 = _signal_metric(vault_result.get("f1"))
+        f.write(
+            f"{timestamp},{target_name},{method},{balance_mode},{data_path},"
+            f"{vault_result.get('accuracy')},"
+            f"{vault_precision},"
+            f"{vault_recall},"
+            f"{vault_f1},"
+            f"{signal_precision},"
+            f"{signal_recall},"
+            f"{signal_f1},"
+            f"{vault_result.get('n_samples')},"
+            f"{wall_time_seconds}\n"
+        )
 
 
 def print_help():
@@ -443,7 +597,10 @@ Usage:
     python main.py process [--force]           Process raw data to ML-ready features
     python main.py train [data_path]           Train and evaluate model (walk-forward)
     python main.py train [data_path] --method simple  Simple 85/15 split sanity check
-    python main.py train [data_path] --target TARGET_SQUEEZE
+    python main.py train [data_path] --target TARGET_SQZ_4PCT_LONG
+    python main.py train [data_path] --targets TARGET_SQZ_8PCT_LONG,TARGET_SQZ_4PCT_LONG
+    python main.py train --balance_mode downsample
+    python main.py --config experiments.json
     python main.py --help                      Show this help message
 
 Commands:
@@ -451,8 +608,11 @@ Commands:
                 --force: Force reprocessing even if output exists
     
     train       Train model with walk-forward validation
-                data_path: Path to processed data (default: data/processed/CL_set_01.parquet)
-                --target: Target column to train on (default: TARGET_Direction)
+                data_path: Path to processed data (default: data/processed/CL_set_03.parquet)
+                --target: Target column to train on (default: TARGET_DIR_8PCT_MULTI)
+                --targets: Comma-separated targets to train sequentially (logs to reports/train_runs.log)
+                --balance_mode: weight (default) or downsample
+                --config: JSON file with experiment list
 
 Examples:
     python main.py process                     # Process raw data
@@ -460,7 +620,8 @@ Examples:
     python main.py train                       # Train with default data (walk-forward)
     python main.py train data/processed/CL_set_01.csv   # Train with specific file
     python main.py train --method simple       # Simple 85/15 split sanity check
-    python main.py train --target TARGET_SQUEEZE
+    python main.py train --target TARGET_SQZ_4PCT_LONG
+    python main.py train --balance_mode downsample --target TARGET_SQZ_4PCT_LONG
 """)
 
 
@@ -472,6 +633,8 @@ if __name__ == '__main__':
         sys.exit(0)
     
     command = args[0]
+    if command.startswith("--") and "--config" in args:
+        command = "train"
     
     if command == 'process':
         # Data processing mode
@@ -484,7 +647,7 @@ if __name__ == '__main__':
         # Process CL data
         processed_features = get_processed_cl_df(
             input_path="data/raw/CL.csv",
-            dataset_version="set_01",
+            dataset_version="set_03",
             force_reprocess=force_reprocess
         )
         print("\nProcessed data:")
@@ -495,17 +658,33 @@ if __name__ == '__main__':
     elif command == 'train':
         # Training mode
         method = "walk_forward"
-        data_path = "data/processed/CL_set_01.parquet"
-        target_name = "TARGET_Direction"
+        data_path = "data/processed/CL_set_03.parquet"
+        target_name = "TARGET_DIR_8PCT_MULTI"
+        target_list = None
+        balance_mode = "weight"
+        config_path = None
 
         if "--method" in args:
             method_idx = args.index("--method")
             if method_idx + 1 < len(args):
                 method = args[method_idx + 1]
+        if "--balance_mode" in args:
+            balance_idx = args.index("--balance_mode")
+            if balance_idx + 1 < len(args):
+                balance_mode = args[balance_idx + 1]
         if "--target" in args:
             target_idx = args.index("--target")
             if target_idx + 1 < len(args):
                 target_name = args[target_idx + 1]
+        if "--targets" in args:
+            targets_idx = args.index("--targets")
+            if targets_idx + 1 < len(args):
+                raw_targets = args[targets_idx + 1]
+                target_list = [t.strip() for t in raw_targets.split(",") if t.strip()]
+        if "--config" in args:
+            config_idx = args.index("--config")
+            if config_idx + 1 < len(args):
+                config_path = args[config_idx + 1]
 
         # First non-flag arg after "train" is treated as data_path
         skip_next = False
@@ -519,23 +698,129 @@ if __name__ == '__main__':
             if arg == "--target":
                 skip_next = True
                 continue
+            if arg == "--targets":
+                skip_next = True
+                continue
+            if arg == "--balance_mode":
+                skip_next = True
+                continue
+            if arg == "--config":
+                skip_next = True
+                continue
             if not arg.startswith("-"):
                 data_path = arg
                 break
+
+        if config_path:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config_data = json.load(f)
+            if isinstance(config_data, dict):
+                experiments = config_data.get("experiments", config_data)
+            else:
+                experiments = config_data
+            for exp in experiments:
+                exp_target = exp.get("target")
+                exp_targets = exp.get("targets")
+                exp_balance = exp.get("balance_mode", balance_mode)
+                exp_method = exp.get("method", method)
+                exp_data_path = exp.get("data_path", data_path)
+                exp_dataset_version = exp.get("dataset_version")
+                exp_input_path = exp.get("input_path", "data/raw/CL.csv")
+                exp_output_path = exp.get("output_path")
+                exp_force_reprocess = exp.get("force_reprocess", False)
+                exp_threshold = exp.get("threshold", 0.08)
+                exp_horizon = exp.get("horizon", 576)
+                if exp_dataset_version:
+                    processor = DataProcessor(
+                        input_path=exp_input_path,
+                        output_path=exp_output_path,
+                        dataset_version=exp_dataset_version,
+                    )
+                    exp_data_path = processor.output_path
+                    if exp_force_reprocess or not os.path.exists(exp_data_path):
+                        get_processed_cl_df(
+                            input_path=exp_input_path,
+                            output_path=exp_output_path,
+                            dataset_version=exp_dataset_version,
+                            threshold=exp_threshold,
+                            horizon=exp_horizon,
+                            force_reprocess=exp_force_reprocess,
+                        )
+                exp_target_list = exp_targets or ([exp_target] if exp_target else [target_name])
+
+                for target in exp_target_list:
+                    results = train_and_evaluate(
+                        data_path=exp_data_path,
+                        holdout_pct=exp.get("holdout_pct", 0.15),
+                        purge_bars=exp.get("purge_bars", 576),
+                        min_train_bars=exp.get("min_train_bars", 8640),
+                        fold_size_bars=exp.get("fold_size_bars", 8640),
+                        threshold=exp_threshold,
+                        output_dir=exp.get("output_dir", "reports"),
+                        model_dir=exp.get("model_dir", "models"),
+                        verbose=True,
+                        method=exp_method,
+                        target_name=target,
+                        balance_mode=exp_balance,
+                        random_state=exp.get("random_state"),
+                    )
+                    log_train_run(
+                        report_path=os.path.join("reports", "train_runs.log"),
+                        target_name=target,
+                        method=exp_method,
+                        balance_mode=exp_balance,
+                        data_path=exp_data_path,
+                        results=results,
+                    )
+            sys.exit(0)
         
-        results = train_and_evaluate(
-            data_path=data_path,
-            holdout_pct=0.15,
-            purge_bars=576,      # 48 hours
-            min_train_bars=8640,  # ~30 days
-            fold_size_bars=8640,  # ~30 days per fold
-            threshold=0.08,
-            output_dir="reports",
-            model_dir="models",
-            verbose=True,
-            method=method,
-            target_name=target_name,
-        )
+        if target_list:
+            for target in target_list:
+                results = train_and_evaluate(
+                    data_path=data_path,
+                    holdout_pct=0.15,
+                    purge_bars=576,      # 48 hours
+                    min_train_bars=8640,  # ~30 days
+                    fold_size_bars=8640,  # ~30 days per fold
+                    threshold=0.08,
+                    output_dir="reports",
+                    model_dir="models",
+                    verbose=True,
+                    method=method,
+                    target_name=target,
+                    balance_mode=balance_mode,
+                )
+                log_train_run(
+                    report_path=os.path.join("reports", "train_runs.log"),
+                    target_name=target,
+                    method=method,
+                    balance_mode=balance_mode,
+                    data_path=data_path,
+                    results=results,
+                )
+        else:
+            results = train_and_evaluate(
+                data_path=data_path,
+                holdout_pct=0.15,
+                purge_bars=576,      # 48 hours
+                min_train_bars=8640,  # ~30 days
+                fold_size_bars=8640,  # ~30 days per fold
+                threshold=0.08,
+                output_dir="reports",
+                model_dir="models",
+                verbose=True,
+                method=method,
+                target_name=target_name,
+                balance_mode=balance_mode,
+            )
+            log_train_run(
+                report_path=os.path.join("reports", "train_runs.log"),
+                target_name=target_name,
+                method=method,
+                balance_mode=balance_mode,
+                data_path=data_path,
+                results=results,
+            )
     
     else:
         print(f"Unknown command: {command}")
