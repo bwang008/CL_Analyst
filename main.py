@@ -474,6 +474,7 @@ def train_and_evaluate(
             mean_importance = np.mean(importances, axis=0)
             pairs = list(zip(feature_names, mean_importance))
             pairs.sort(key=lambda x: x[1], reverse=True)
+            importance_df = pd.DataFrame(pairs, columns=["feature", "mean_importance"])
             top_pairs = pairs[:20]
 
             labels = [p[0] for p in top_pairs][::-1]
@@ -484,6 +485,10 @@ def train_and_evaluate(
             importance_path = os.path.join(
                 output_dir,
                 f"walk_forward_feature_importance_{safe_target}_{safe_balance}.png",
+            )
+            importance_csv_path = os.path.join(
+                output_dir,
+                f"walk_forward_feature_importance_{safe_target}_{safe_balance}.csv",
             )
 
             fig, ax = plt.subplots(figsize=(10, 6))
@@ -499,6 +504,8 @@ def train_and_evaluate(
             fig.savefig(importance_path, dpi=100, bbox_inches="tight")
             plt.close(fig)
             print(f"Saved walk-forward feature importance to {importance_path}")
+            importance_df.to_csv(importance_csv_path, index=False)
+            print(f"Saved walk-forward feature importance CSV to {importance_csv_path}")
     
     elapsed_seconds = time.perf_counter() - start_time
     elapsed_minutes = elapsed_seconds / 60
