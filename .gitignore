@@ -12,3 +12,5 @@
 *.jsonl.lzma
 *.jsonl.zstd
 *.pkl
+*.joblib
+reports/checkpoints/
