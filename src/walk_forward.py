@@ -14,6 +14,8 @@ Author: CL Analyst
 
 from __future__ import annotations
 
+import os
+import joblib
 import numpy as np
 import pandas as pd
 from typing import Iterator, Tuple, List, Optional
@@ -321,7 +323,7 @@ def walk_forward_validate(
 
     if checkpoint_path and os.path.exists(checkpoint_path):
         try:
-            import joblib
+
             checkpoint_data = joblib.load(checkpoint_path)
             results = checkpoint_data.get('results', [])
             start_fold = len(results) + 1
@@ -401,8 +403,6 @@ def walk_forward_validate(
         # Save checkpoint
         if checkpoint_path:
             try:
-                import joblib
-                import os
                 # Ensure directory exists
                 os.makedirs(os.path.dirname(os.path.abspath(checkpoint_path)), exist_ok=True)
                 joblib.dump({'results': results, 'vault_df': vault_df}, checkpoint_path)
