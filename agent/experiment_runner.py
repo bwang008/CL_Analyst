@@ -101,6 +101,7 @@ def run_experiment(
     # Output config
     output_dir: str = "reports",
     model_dir: str = "models",
+    checkpoint_dir: str = "reports/checkpoints",
 ):
     """
     Run a single experiment and log results.
@@ -149,6 +150,7 @@ def run_experiment(
             target_name=target_name,
             balance_mode=balance_mode,
             random_state=random_state,
+            checkpoint_path=os.path.join(checkpoint_dir, f"{experiment_id}.joblib"),
         )
     except Exception as e:
         error_result = {

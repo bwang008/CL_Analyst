@@ -115,7 +115,8 @@ def train_and_evaluate(
     target_name: str = "TARGET_DIR_8PCT_MULTI",
     balance_mode: str = "weight",
     random_state: int | None = None,
-):
+    checkpoint_path: str | None = None,
+) -> dict:
     """
     Train and evaluate an LightGBM model using walk-forward validation.
     
@@ -280,7 +281,7 @@ def train_and_evaluate(
         ]
         vault_df = None
     else:
-        fold_results, _ = walk_forward_validate(
+        fold_results, vault_df = walk_forward_validate(
             df=gym_df,
             model_class=LGBMLearner,
             model_params=model_params,
@@ -289,6 +290,7 @@ def train_and_evaluate(
             target_name=target_name,
             balance_mode=balance_mode,
             random_state=random_state,
+            checkpoint_path=checkpoint_path,
         )
     
     # -------------------------------------------------------------------------

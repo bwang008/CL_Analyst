@@ -64,14 +64,22 @@ class DataProcessor:
             dataset_version: Version identifier for the dataset (e.g., 'set_01', 'set_02')
         """
         self.input_path = input_path
-        self.dataset_version = dataset_version
-        
-        if output_path is None:
-            # Auto-generate output path based on input filename and dataset version
-            input_name = Path(input_path).stem
-            self.output_path = f"data/processed/{input_name}_{dataset_version}.parquet"
-        else:
-            self.output_path = output_path
+        self._dataset_version = dataset_version
+        self._update_output_path()
+
+    @property
+    def dataset_version(self):
+        return self._dataset_version
+
+    @dataset_version.setter
+    def dataset_version(self, value):
+        self._dataset_version = value
+        self._update_output_path()
+
+    def _update_output_path(self):
+        # Auto-generate output path based on input filename and dataset version
+        input_name = Path(self.input_path).stem
+        self.output_path = f"data/processed/{input_name}_{self._dataset_version}.parquet"
             
         self.df = None
         
@@ -1087,6 +1095,16 @@ class DataProcessor:
 
         self.df = df
         return df
+
+    def process_set_06(self) -> pd.DataFrame:
+        """
+        Ultimate dataset for final model verification.
+        - Strategy 2 features: Microstructure, ROC-Vol, Trends.
+        - Triple Barrier targets.
+        - RAW columns for backtesting.
+        """
+        self.dataset_version = "set_06"
+        return self.process_set_05()
 
 
 def main(dataset_version: str = "set_01"):

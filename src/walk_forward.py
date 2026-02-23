@@ -276,7 +276,8 @@ def walk_forward_validate(
     target_name: str = "TARGET_DIR_8PCT_MULTI",
     balance_mode: str = "weight",
     random_state: int | None = None,
-) -> List[dict]:
+    checkpoint_path: str | None = None,
+) -> Tuple[List[dict], pd.DataFrame]:
     """
     Run walk-forward validation on a dataset.
     
@@ -316,8 +317,26 @@ def walk_forward_validate(
         print(f"Fold size: {splitter.fold_size_bars} bars ({splitter.fold_size_bars / splitter.BARS_PER_DAY:.1f} days)")
     
     results = []
-    
+    start_fold = 1
+
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        try:
+            import joblib
+            checkpoint_data = joblib.load(checkpoint_path)
+            results = checkpoint_data.get('results', [])
+            start_fold = len(results) + 1
+            if verbose:
+                print(f"Resuming from checkpoint: {checkpoint_path}")
+                print(f"Completed folds: {len(results)}. Resuming at Fold {start_fold}...")
+        except Exception as e:
+            if verbose:
+                print(f"Warning: Failed to load checkpoint {checkpoint_path}: {e}")
+                print("Starting from Fold 1.")
+
     for fold_num, (train_idx, test_idx) in enumerate(splitter.split(gym_df), 1):
+        if fold_num < start_fold:
+            continue
+            
         if verbose:
             print(f"\n--- Fold {fold_num} ---")
         
@@ -378,6 +397,18 @@ def walk_forward_validate(
             precision, recall = _precision_recall(y_true, y_pred)
             print(f"Fold {fold_num} accuracy: {accuracy:.4f}")
             print(f"  Precision (macro): {precision:.4f} | Recall (macro): {recall:.4f}")
+            
+        # Save checkpoint
+        if checkpoint_path:
+            try:
+                import joblib
+                import os
+                # Ensure directory exists
+                os.makedirs(os.path.dirname(os.path.abspath(checkpoint_path)), exist_ok=True)
+                joblib.dump({'results': results, 'vault_df': vault_df}, checkpoint_path)
+            except Exception as e:
+                if verbose:
+                    print(f"Warning: Failed to save checkpoint to {checkpoint_path}: {e}")
     
     if verbose:
         print(f"\nWalk-forward validation complete. {len(results)} folds evaluated.")
