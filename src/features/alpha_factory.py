@@ -145,10 +145,10 @@ class AlphaFactory:
     Feature generation engine for OHLCV-based signals.
 
     Current clusters:
-    - Volatility: Parkinson, Rogers-Satchell, Yang-Zhang
+    - Volatility: Parkinson, Rogers-Satchell, Yang-Zhang, Vol-ROC, Vol-of-Vol
     - Liquidity: Amihud illiquidity, Corwin-Schultz spread
-    - Structure: Efficiency ratio (PER)
-    - Momentum: RSI, Bollinger Bands (via pandas_ta)
+    - Structure: Efficiency ratio (PER), candle-microstructure
+    - Momentum: RSI, Bollinger Bands, ADX, MACD (via pandas_ta)
     """
 
     REQUIRED_COLUMNS = {"Open", "High", "Low", "Close", "Volume"}
@@ -191,6 +191,7 @@ class AlphaFactory:
             self.add_volatility_cluster(window=window)
             self.add_liquidity_cluster(window=window)
             self.add_structure_cluster(window=window)
+            self.add_microstructure_cluster()  # Single pass, not window dependent
             self.add_trend_cluster(window=window)
             self.add_volume_flow_cluster(window=window)
             if log_progress:
@@ -221,6 +222,13 @@ class AlphaFactory:
         suffix = f"_{window}"
         self.df[f"VOL_PARK{suffix}"] = np.sqrt(
             const_parkinson * (log_hl**2).rolling(window).mean()
+        )
+
+        # Volatility Second-Order Features
+        self.df[f"VOL_ROC{suffix}"] = self.df[f"VOL_PARK{suffix}"].pct_change(window)
+        self.df[f"VOL_VOLVOL{suffix}"] = (
+            self.df[f"VOL_PARK{suffix}"].rolling(window).std()
+            / self.df[f"VOL_PARK{suffix}"].rolling(window).mean()
         )
 
         log_hc = np.log(self.high / self.close)
@@ -278,6 +286,23 @@ class AlphaFactory:
                 physics_window, min_periods=physics_window
             ).apply(_entropy_numba, raw=True)
 
+        return self.df
+
+    def add_microstructure_cluster(self) -> pd.DataFrame:
+        """Bar microstructure features: body and wick ratios."""
+        if "STRUC_BODY_RATIO" in self.df.columns:
+            return self.df
+
+        candle_range = (self.high - self.low).replace(0, np.nan)
+        body = (self.close - self.open).abs()
+        
+        self.df["STRUC_BODY_RATIO"] = body / candle_range
+        self.df["STRUC_WICK_UP_RATIO"] = (self.high - np.maximum(self.open, self.close)) / candle_range
+        self.df["STRUC_WICK_LOW_RATIO"] = (np.minimum(self.open, self.close) - self.low) / candle_range
+        
+        # Color: 1 for green, 0 for red
+        self.df["STRUC_COLOR"] = (self.close >= self.open).astype(int)
+        
         return self.df
 
     def add_trend_cluster(self, window: int) -> pd.DataFrame:
@@ -378,5 +403,19 @@ class AlphaFactory:
         else:
             self.df["MOM_BB_Width"] = np.nan
             self.df["MOM_BB_PctB"] = np.nan
+
+        # ADX (Trend Strength)
+        adx = self.df.ta.adx(length=14)
+        if adx is not None:
+            self.df["MOM_ADX_14"] = adx.iloc[:, 0]
+            self.df["MOM_DMP_14"] = adx.iloc[:, 1]
+            self.df["MOM_DMN_14"] = adx.iloc[:, 2]
+        
+        # MACD (Trend Intensity)
+        macd = self.df.ta.macd(fast=12, slow=26, signal=9)
+        if macd is not None:
+            self.df["MOM_MACD"] = macd.iloc[:, 0]
+            self.df["MOM_MACD_Signal"] = macd.iloc[:, 1]
+            self.df["MOM_MACD_Hist"] = macd.iloc[:, 2]
 
         return self.df

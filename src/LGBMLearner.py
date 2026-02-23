@@ -71,16 +71,62 @@ class LGBMLearner:
         self.feature_names: Optional[List[str]] = None
         self.n_features_in_: Optional[int] = None
 
+    def _focal_loss_obj(self, preds: np.ndarray, train_data: lgb.Dataset) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Custom Focal Loss objective for both binary and multiclass classification.
+        
+        Args:
+            preds: Raw logits from LightGBM.
+                   - Binary: Shape (n_samples,)
+                   - Multiclass: Shape (n_samples * n_classes,)
+            train_data: LightGBM Dataset with labels
+        """
+        labels = train_data.get_label().astype(int)
+        n_samples = len(labels)
+        gamma = self.params.get("focal_gamma", 2.0)
+        
+        # Binary Case (detected by shape)
+        if preds.size == n_samples:
+            p = 1.0 / (1.0 + np.exp(-preds))
+            # p_t = p if y=1, else 1-p
+            p_t = np.where(labels == 1, p, 1 - p)
+            
+            # Simplified Focal Loss gradient and hessian
+            # These are effective approximations for LightGBM
+            grad = (p - labels) * ((1 - p_t) ** gamma)
+            hess = (p * (1 - p)) * ((1 - p_t) ** gamma)
+            return grad, hess
+            
+        # Multiclass Case
+        else:
+            n_class = self.params.get("num_class", 3)
+            # Reshape preds to (n_samples, n_class)
+            preds = preds.reshape(n_samples, n_class)
+            
+            # Softmax
+            exp_p = np.exp(preds - np.max(preds, axis=1, keepdims=True))
+            p = exp_p / np.sum(exp_p, axis=1, keepdims=True)
+            
+            # Indicator matrix for labels
+            y_true = np.zeros((n_samples, n_class))
+            y_true[np.arange(n_samples), labels] = 1
+            
+            # Focal weights
+            p_t = np.sum(y_true * p, axis=1)
+            weights = (1 - p_t) ** gamma
+            
+            # Gradient and Hessian
+            grad = (weights[:, None] * (p - y_true)).reshape(-1)
+            # Simple Hessian approximation
+            hess = (weights[:, None] * p * (1 - p)).reshape(-1)
+            
+            return grad, hess
+
     def add_evidence(self, X: Union[np.ndarray, pd.DataFrame], y: Any) -> None:
         """
         Train the LightGBM model on the provided data.
-
-        Args:
-            X: Feature matrix of shape (n_samples, n_features). ndarray or DataFrame.
-            y: Target array of shape (n_samples,). 0/1 for binary; 0,1,2 for multiclass.
-
-        Raises:
-            ValueError: If X is empty, or X and y have incompatible shapes.
+        
+        Supports custom focal loss if 'use_focal' is in params.
         """
         y_arr = np.asarray(y)
         if getattr(y_arr, "ndim", 0) > 1:
@@ -117,11 +163,22 @@ class LGBMLearner:
 
         train_data = lgb.Dataset(X_mat, label=y_arr)
         num_boost = int(self.params.get("n_estimators", 100))
-        self.model = lgb.train(
-            lgb_params,
-            train_data,
-            num_boost_round=num_boost,
-        )
+        
+        use_focal = self.params.get("use_focal", False)
+        if use_focal:
+            # In LightGBM 4.x, pass custom objective function as 'objective' in params
+            lgb_params["objective"] = self._focal_loss_obj
+            self.model = lgb.train(
+                lgb_params,
+                train_data,
+                num_boost_round=num_boost,
+            )
+        else:
+            self.model = lgb.train(
+                lgb_params,
+                train_data,
+                num_boost_round=num_boost,
+            )
 
     def query(self, X: Union[np.ndarray, pd.DataFrame]) -> np.ndarray:
         """
