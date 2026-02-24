@@ -71,3 +71,4 @@
 2026-02-22 15:17:21 | target=TARGET_TRIPLE_2x1_24H_LONG | method=walk_forward | balance_mode=downsample | data=data/processed/CL_set_05.parquet | vault_accuracy=0.6838752456958818
 2026-02-22 15:20:57 | target=TARGET_TRIPLE_3x1_24H_LONG | method=walk_forward | balance_mode=downsample | data=data/processed/CL_set_05.parquet | vault_accuracy=0.6875518033485685
 2026-02-22 23:40:49 | target=TARGET_TRIPLE_2x1_24H_LONG | method=walk_forward | balance_mode=downsample | data=data/processed/CL_set_06.parquet | vault_accuracy=0.6942850984236912
+2026-02-23 01:11:41 | target=TARGET_TRIPLE_2x1_24H_LONG | method=walk_forward | balance_mode=downsample | data=data/processed/CL_set_06.parquet | vault_accuracy=0.6941251729628626
