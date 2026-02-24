@@ -217,6 +217,38 @@ Generated files are saved to:
     `simple_feature_importance.png`
 - `models/` for trained models (e.g., `final_model.pkl`)
 
+## Model Registry (Experiment-ID Archiving)
+
+Use the registry to permanently preserve selected model runs by Experiment ID.
+This avoids accidental overwrite and avoids promoting models solely by one metric.
+
+### Registry location
+
+- `models/registry/`
+- Catalog: `models/registry/README.md`
+
+### Archive a model bundle
+
+```bash
+python agent/archive_model.py --experiment-id EXP-017
+```
+
+Optional explicit model artifact:
+
+```bash
+python agent/archive_model.py --experiment-id EXP-017 --model-path models/final_model.pkl
+```
+
+### What gets archived
+
+- The trained model file (`.pkl`)
+- `config.json` with target, thresholds, feature summary, and model params
+- `metrics.json` for classification + backtest summary
+- `backtest.csv` summary row
+
+Each archive writes to:
+- `models/registry/<EXPERIMENT_ID>_<STRATEGY>/`
+
 ## Dataset Documentation
 
 See `data/DATASETS.json` for dataset summaries and target columns.
