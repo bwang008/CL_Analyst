@@ -1,0 +1,36 @@
+PROMPT START
+
+Context:
+We have successfully trained a breakout prediction model (S_Ultimate) that achieved an 87% precision and a 14.22 Profit Factor in a frictionless backtest. We now need to execute a "Reality Check" phase to ensure this edge survives real-world market mechanics and out-of-sample stress.
+
+Instructions:
+I want you to act as the Senior Quantitative Developer and implement the following two tasks sequentially. Do not move to Task 2 until Task 1 is fully coded, executed, and the results are reported.
+
+Task 1.1: Add Market Friction to the Backtester
+
+    Open backtester.py.
+
+    Update the logic to account for commissions, fees, and slippage.
+
+    Add configurable variables for a fixed commission per trade (e.g., $2.50 round trip) and a slippage penalty (e.g., assuming the entry/exit fill is slightly worse than the theoretical close price, such as 1 tick of slippage).
+
+    Run the backtest on the S_Ultimate predictions and report the newly adjusted Profit Factor, Win Rate, and PnL.
+
+Task 1.2: Out-of-Sample (OOS) Regime Testing
+
+    Once Task 1.1 is confirmed working, we need to stress-test the model.
+
+    Configure a script to run the S_Ultimate model and backtester on completely unseen, extreme historical data (e.g., the 2008 Financial Crisis or the 2020 COVID crash periods, assuming we have that data available).
+
+    Report how the logic holds up under these high-volatility stress conditions.
+
+Please begin with Task 1.1. Review backtester.py and let me know your implementation plan for the friction logic.
+
+Specifics for Market Friction:
+
+    Commissions: Deduct a flat $2.50 fee for every contract purchased, and $2.50 for every contract sold ($5.00 round-trip per trade).
+
+    Slippage (Bid/Ask Spread): Assume a highly conservative 6-cent spread. For a Buy order, we fill at the Ask (3 cents worse than the reference price). For a Sell order, we fill at the Bid (3 cents worse than the reference price).
+
+    Important Math: Crude Oil (CL) has a contract multiplier of 1,000. Therefore, a 3-cent ($0.03) slippage on the chart price equates to a $30.00 loss per contract. Ensure the backtester.py PnL logic multiplies the price-based PnL by 1,000 before subtracting the flat $2.50 commission fees.
+PROMPT END
