@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
 import pandas as pd
-from ib_insync import IB, ContFuture, Contract, Future, util
+from ib_insync import (
+    IB, ContFuture, Contract, Future, LimitOrder, MarketOrder,
+    Order, StopOrder, Trade, util,
+)
+
+log = logging.getLogger(__name__)
 
 _PACING_ERROR_CODES = {162}
 _DEFAULT_SOURCE_TZ = "America/New_York"
 _DEFAULT_TARGET_TZ = "UTC"
+
+# Port defaults: IB Gateway paper = 4002, TWS paper = 7497
+_PORT_GATEWAY = 4002
+_PORT_TWS = 7497
 
 
 def build_cl_contract(
@@ -84,10 +94,11 @@ def _standardize_timezone(
 @dataclass
 class IBKRConnectionManager:
     host: str = "127.0.0.1"
-    port: int = 7497
+    port: int = _PORT_GATEWAY
     client_id: int = 1
     readonly: bool = True
     connect_timeout: int = 5
+    fallback_ports: list[int] = field(default_factory=lambda: [_PORT_TWS])
 
     def __post_init__(self) -> None:
         self.ib = IB()
@@ -98,14 +109,41 @@ class IBKRConnectionManager:
         self._last_error = (error_code, error_string)
 
     def connect(self) -> None:
+        """Connect to IBKR, trying the primary port first then fallbacks."""
         if self.ib.isConnected():
             return
-        self.ib.connect(
-            host=self.host,
-            port=self.port,
-            clientId=self.client_id,
-            readonly=self.readonly,
-            timeout=self.connect_timeout,
+
+        ports_to_try = [self.port] + [
+            p for p in self.fallback_ports if p != self.port
+        ]
+        last_exc: Optional[Exception] = None
+
+        for port in ports_to_try:
+            try:
+                log.info("Attempting IBKR connection on %s:%d ...", self.host, port)
+                self.ib.connect(
+                    host=self.host,
+                    port=port,
+                    clientId=self.client_id,
+                    readonly=self.readonly,
+                    timeout=self.connect_timeout,
+                )
+                self.port = port  # remember successful port
+                log.info("Connected to IBKR on port %d", port)
+                return
+            except Exception as exc:
+                last_exc = exc
+                log.warning(
+                    "Connection failed on port %d: %s", port, exc,
+                )
+                # Ensure disconnected state before trying next port
+                try:
+                    self.ib.disconnect()
+                except Exception:
+                    pass
+
+        raise ConnectionError(
+            f"Could not connect to IBKR on any port {ports_to_try}: {last_exc}"
         )
 
     def disconnect(self) -> None:
@@ -218,6 +256,124 @@ class IBKRConnectionManager:
                 time.sleep(sleep_for)
         return []
 
+    # ------------------------------------------------------------------
+    # Position management
+    # ------------------------------------------------------------------
+
+    def get_cl_position(self, symbol: str = "CL") -> int:
+        """
+        Query IBKR portfolio for the current CL position.
+
+        Returns:
+            int: Net position size (0 = flat, positive = long, negative = short).
+        """
+        self.ensure_connected()
+        positions = self.ib.positions()
+        for pos in positions:
+            if pos.contract.symbol == symbol:
+                return int(pos.position)
+        return 0
+
+    # ------------------------------------------------------------------
+    # Live bar subscription
+    # ------------------------------------------------------------------
+
+    def subscribe_live_bars(
+        self,
+        contract: Contract,
+        *,
+        bar_size: str = "5 mins",
+        what_to_show: str = "TRADES",
+        use_rth: bool = False,
+        duration_str: str = "60 S",
+    ):
+        """
+        Subscribe to live-updating historical bars (keepUpToDate=True).
+
+        The returned bars object will be updated in-place by ib_insync
+        whenever a new bar closes. Attach a callback via
+        ``bars.updateEvent += my_handler`` to react to new bars.
+
+        Args:
+            contract: Qualified IBKR contract.
+            bar_size: Bar size setting (default "5 mins").
+            what_to_show: Data type (default "TRADES").
+            use_rth: Regular trading hours only (default False).
+            duration_str: Initial lookback duration (default "60 S").
+
+        Returns:
+            BarDataList with live updates enabled.
+        """
+        self.ensure_connected()
+        bars = self.ib.reqHistoricalData(
+            contract,
+            endDateTime="",
+            durationStr=duration_str,
+            barSizeSetting=bar_size,
+            whatToShow=what_to_show,
+            useRTH=use_rth,
+            formatDate=1,
+            keepUpToDate=True,
+        )
+        return bars
+
+    def cancel_subscription(self, bars) -> None:
+        """Cancel a live bar subscription."""
+        if self.ib.isConnected():
+            self.ib.cancelHistoricalData(bars)
+
+    # ------------------------------------------------------------------
+    # Bracket order execution
+    # ------------------------------------------------------------------
+
+    def place_bracket_order(
+        self,
+        contract: Contract,
+        action: str,
+        quantity: int,
+        limit_price: float,
+        tp_price: float,
+        sl_price: float,
+        *,
+        use_market: bool = True,
+    ) -> list[Trade]:
+        """
+        Create and transmit a bracket order (parent + TP + SL children).
+
+        Args:
+            contract: Qualified IBKR contract.
+            action: 'BUY' or 'SELL'.
+            quantity: Number of contracts.
+            limit_price: Limit price for parent (ignored if use_market=True).
+            tp_price: Take-profit price (limit order).
+            sl_price: Stop-loss price (stop order).
+            use_market: If True, parent is a Market order (default).
+
+        Returns:
+            list[Trade]: [parent_trade, tp_trade, sl_trade].
+        """
+        self.ensure_connected()
+        bracket = self.ib.bracketOrder(
+            action=action,
+            quantity=quantity,
+            limitPrice=limit_price,
+            takeProfitPrice=tp_price,
+            stopLossPrice=sl_price,
+        )
+
+        # If market order requested, convert parent to Market
+        if use_market:
+            parent = bracket[0]
+            parent.orderType = "MKT"
+            parent.lmtPrice = 0
+
+        trades = []
+        for order in bracket:
+            trade = self.ib.placeOrder(contract, order)
+            trades.append(trade)
+
+        return trades
+
 
 def ib_bars_to_dataframe(
     bars: Iterable,
@@ -254,7 +410,7 @@ def fetch_historical_bars(
     continuous: bool = True,
     contract_month: Optional[str] = None,
     host: str = "127.0.0.1",
-    port: int = 7497,
+    port: int = _PORT_GATEWAY,
     client_id: int = 1,
 ) -> pd.DataFrame:
     """
