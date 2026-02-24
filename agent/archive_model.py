@@ -14,6 +14,7 @@ import re
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +28,13 @@ REGISTRY_README = REGISTRY_ROOT / "README.md"
 def _load_json(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+def _load_json_optional(path: Path | None) -> dict | None:
+    if not path:
+        return None
+    if not path.exists():
+        return None
+    return _load_json(path)
 
 
 def _read_text(path: Path) -> str:
@@ -87,6 +95,29 @@ def _extract_features_summary(report_text: str) -> str:
     m = re.search(r"\*\s+\*\*Features:\*\*\s+(.+)", report_text)
     return m.group(1).strip() if m else "Unknown"
 
+def _summarize_backtest(backtest_csv_path: Path | None) -> dict[str, Any] | None:
+    if not backtest_csv_path or not backtest_csv_path.exists():
+        return None
+    import pandas as pd
+
+    df = pd.read_csv(backtest_csv_path)
+    if df.empty or "pnl" not in df.columns:
+        return None
+    win_rate = float((df["pnl"] > 0).mean())
+    gross_profits = float(df.loc[df["pnl"] > 0, "pnl"].sum())
+    gross_losses = float(abs(df.loc[df["pnl"] < 0, "pnl"].sum()))
+    profit_factor = float(gross_profits / gross_losses) if gross_losses > 0 else float("inf")
+    total_net_pnl = float(df["pnl"].sum())
+    return {
+        "total_trades": int(len(df)),
+        "win_rate": win_rate,
+        "profit_factor": profit_factor,
+        "total_net_pnl": total_net_pnl,
+        "tp_hits": int((df.get("reason") == "TP").sum()) if "reason" in df.columns else None,
+        "sl_hits": int((df.get("reason") == "SL").sum()) if "reason" in df.columns else None,
+        "timeouts": int((df.get("reason") == "Timeout").sum()) if "reason" in df.columns else None,
+    }
+
 
 def _ensure_registry_readme() -> None:
     REGISTRY_ROOT.mkdir(parents=True, exist_ok=True)
@@ -130,7 +161,15 @@ def _format_type(target_name: str) -> str:
     return "Multi"
 
 
-def archive_experiment(experiment_id: str, model_path: Path | None = None) -> Path:
+def archive_experiment(
+    experiment_id: str,
+    model_path: Path | None = None,
+    vault_metrics_path: Path | None = None,
+    backtest_results_path: Path | None = None,
+    threshold_sweep_path: Path | None = None,
+    selected_trade_threshold: float | None = None,
+    notes: str | None = None,
+) -> Path:
     log_data = _load_json(EXPERIMENT_LOG)
     exp = _find_experiment(experiment_id, log_data)
 
@@ -155,11 +194,23 @@ def archive_experiment(experiment_id: str, model_path: Path | None = None) -> Pa
     archived_model_path = bundle_dir / selected_model_path.name
     shutil.copy2(selected_model_path, archived_model_path)
 
+    # Optional: copy raw metrics artifacts (so bundle is self-contained)
+    if vault_metrics_path and vault_metrics_path.exists():
+        shutil.copy2(vault_metrics_path, bundle_dir / vault_metrics_path.name)
+    if backtest_results_path and backtest_results_path.exists():
+        shutil.copy2(backtest_results_path, bundle_dir / backtest_results_path.name)
+    if threshold_sweep_path and threshold_sweep_path.exists():
+        shutil.copy2(threshold_sweep_path, bundle_dir / threshold_sweep_path.name)
+
     # 2) Experiment-specific config and metadata
     report_text = _read_text(REPORT_LOG)
-    threshold_data = _load_json(THRESHOLD_SWEEP) if THRESHOLD_SWEEP.exists() else {}
+    threshold_data = _load_json_optional(threshold_sweep_path) or (
+        _load_json(THRESHOLD_SWEEP) if THRESHOLD_SWEEP.exists() else {}
+    )
     features_summary = _extract_features_summary(report_text)
     report_metrics = _extract_report_metrics(report_text, experiment_id=experiment_id)
+    backtest_summary = _summarize_backtest(backtest_results_path)
+    vault_metrics = _load_json_optional(vault_metrics_path)
 
     config_payload = {
         "experiment_id": experiment_id,
@@ -170,6 +221,7 @@ def archive_experiment(experiment_id: str, model_path: Path | None = None) -> Pa
         "dataset_path": (exp.get("config") or {}).get("data_path"),
         "training_threshold": (exp.get("config") or {}).get("threshold"),
         "optimized_probability_threshold": threshold_data.get("best_threshold"),
+        "selected_trade_threshold": selected_trade_threshold,
         "features_summary": features_summary,
         "model_params": (exp.get("config") or {}).get("model_params"),
         "model_file": {
@@ -196,6 +248,8 @@ def archive_experiment(experiment_id: str, model_path: Path | None = None) -> Pa
         "experiment_id": experiment_id,
         "strategy": strategy,
         "classification_metrics": classification_metrics,
+        "vault_metrics_file": vault_metrics,
+        "backtest_summary_from_backtest_csv": backtest_summary,
         "backtest_summary_from_report_log": report_metrics,
     }
     (bundle_dir / "metrics.json").write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
@@ -212,31 +266,39 @@ def archive_experiment(experiment_id: str, model_path: Path | None = None) -> Pa
         "tp_hits",
         "sl_hits",
     ]
+    bt = backtest_summary or {}
     backtest_csv_values = [
         experiment_id,
         strategy,
-        report_metrics.get("win_rate"),
-        report_metrics.get("profit_factor"),
-        report_metrics.get("avg_pnl_per_trade_pct"),
-        report_metrics.get("max_drawdown_pct"),
-        report_metrics.get("total_trades"),
-        report_metrics.get("tp_hits"),
-        report_metrics.get("sl_hits"),
+        f"{(bt.get('win_rate') or 0.0):.1%}" if backtest_summary else (report_metrics.get("win_rate") or ""),
+        f"{(bt.get('profit_factor') or 0.0):.2f}" if backtest_summary else (report_metrics.get("profit_factor") or ""),
+        report_metrics.get("avg_pnl_per_trade_pct") or "",
+        report_metrics.get("max_drawdown_pct") or "",
+        bt.get("total_trades") if backtest_summary else report_metrics.get("total_trades"),
+        bt.get("tp_hits") if backtest_summary else report_metrics.get("tp_hits"),
+        bt.get("sl_hits") if backtest_summary else report_metrics.get("sl_hits"),
     ]
     backtest_csv = ",".join(backtest_csv_headers) + "\n" + ",".join("" if v is None else str(v) for v in backtest_csv_values) + "\n"
     (bundle_dir / "backtest.csv").write_text(backtest_csv, encoding="utf-8")
 
     # 4) Registry catalog row
+    win_rate_for_catalog = (
+        f"{(bt.get('win_rate') or 0.0):.1%}" if backtest_summary else str(report_metrics.get("win_rate") or "N/A")
+    )
+    pf_for_catalog = (
+        f"{(bt.get('profit_factor') or 0.0):.2f}" if backtest_summary else str(report_metrics.get("profit_factor") or "N/A")
+    )
     _append_registry_row(
         date_str=date_str,
         experiment_id=experiment_id,
         target=target,
         trade_type=trade_type,
-        win_rate=str(report_metrics.get("win_rate") or "N/A"),
-        profit_factor=str(report_metrics.get("profit_factor") or "N/A"),
-        notes=(
-            f"{strategy}; features={features_summary}; "
-            "backtest summary sourced from REPORT.log"
+        win_rate=win_rate_for_catalog,
+        profit_factor=pf_for_catalog,
+        notes=notes
+        or (
+            f"{strategy}; trade_threshold={selected_trade_threshold}; "
+            f"features={features_summary}; backtest sourced from {backtest_results_path.name if backtest_results_path else 'N/A'}"
         ),
     )
 
@@ -252,10 +314,26 @@ def main() -> None:
         default=None,
         help="Optional explicit .pkl model artifact path to archive",
     )
+    parser.add_argument("--vault-metrics-path", default=None, help="Optional path to vault_metrics.json to copy into bundle")
+    parser.add_argument("--backtest-results-path", default=None, help="Optional path to backtest_results.csv to copy into bundle")
+    parser.add_argument("--threshold-sweep-path", default=None, help="Optional path to threshold sweep JSON to copy into bundle")
+    parser.add_argument("--selected-trade-threshold", type=float, default=None, help="Threshold actually used for trading/backtest")
+    parser.add_argument("--notes", default=None, help="Optional notes for registry catalog row")
     args = parser.parse_args()
 
     model_path = Path(args.model_path) if args.model_path else None
-    archive_experiment(experiment_id=args.experiment_id, model_path=model_path)
+    vault_metrics_path = Path(args.vault_metrics_path) if args.vault_metrics_path else None
+    backtest_results_path = Path(args.backtest_results_path) if args.backtest_results_path else None
+    threshold_sweep_path = Path(args.threshold_sweep_path) if args.threshold_sweep_path else None
+    archive_experiment(
+        experiment_id=args.experiment_id,
+        model_path=model_path,
+        vault_metrics_path=vault_metrics_path,
+        backtest_results_path=backtest_results_path,
+        threshold_sweep_path=threshold_sweep_path,
+        selected_trade_threshold=args.selected_trade_threshold,
+        notes=args.notes,
+    )
 
 
 if __name__ == "__main__":

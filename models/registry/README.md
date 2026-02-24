@@ -33,3 +33,4 @@ python agent/archive_model.py --experiment-id EXP-017 --model-path models/final_
 | Date | Experiment ID | Target | Type (Long/Short) | Win Rate | Profit Factor | Notes |
 |------|---------------|--------|-------------------|----------|---------------|-------|
 | 2026-02-22 | EXP-017 | TARGET_TRIPLE_2x1_24H_LONG | Long | 86.8% | 14.22 | S_Ultimate; features=MACD, ADX, Microstructure, Volatility Regime + all original features; backtest summary sourced from REPORT.log |
+| 2026-02-23 | EXP-020 | TARGET_TRIPLE_2x1_24H_SHORT | Short | 70.0% | 2.39 | Short Sniper (panic-selling). Friction: commission 2.50/side, slippage 0.03/side, multiplier 1000. Backtest on inner vault window. |
