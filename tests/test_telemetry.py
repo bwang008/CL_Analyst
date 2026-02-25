@@ -128,3 +128,45 @@ class TestTelemetryDB:
         assert len(bars) == 2
         # Most recent first
         assert bars[0]["close"] == 72.5
+
+    # ------------------------------------------------------------------
+    # Raw front-month bars (training ledger)
+    # ------------------------------------------------------------------
+
+    def test_log_raw_bar(self, tmp_db):
+        """Logging a raw front-month bar should increment the raw bar count."""
+        assert tmp_db.raw_bar_count() == 0
+        tmp_db.log_raw_bar(
+            timestamp="2026-02-23T10:00:00",
+            open_=70.50, high=70.80, low=70.30,
+            close=70.60, volume=1234.0,
+            contract_month="202604",
+        )
+        assert tmp_db.raw_bar_count() == 1
+
+    def test_log_raw_bar_with_contract_month(self, tmp_db):
+        """Raw bar should record the contract_month field."""
+        tmp_db.log_raw_bar(
+            timestamp="2026-02-23T10:05:00",
+            open_=71.00, high=71.20, low=70.80,
+            close=71.10, volume=500.0,
+            contract_month="202604",
+        )
+        bars = tmp_db.recent_raw_bars(1)
+        assert len(bars) == 1
+        assert bars[0]["contract_month"] == "202604"
+
+    def test_recent_raw_bars_ordering(self, tmp_db):
+        """recent_raw_bars should return entries most-recent-first."""
+        for i in range(3):
+            tmp_db.log_raw_bar(
+                timestamp=f"2026-02-23T10:{i*5:02d}:00",
+                open_=70.0 + i, high=71.0 + i, low=69.0 + i,
+                close=70.5 + i, volume=1000.0 + i,
+                contract_month="202604",
+            )
+        bars = tmp_db.recent_raw_bars(2)
+        assert len(bars) == 2
+        # Most recent first
+        assert bars[0]["close"] == 72.5
+

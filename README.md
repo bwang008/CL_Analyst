@@ -52,14 +52,16 @@ python main.py train
 ## Live Execution (Paper Trading)
 
 ### Overview
-The live execution engine connects to IBKR (TWS or IB Gateway), monitors real-time CL futures data, runs inference using the S_Ultimate model, and executes bracket orders when buy signals are generated.
+The live execution engine connects to IBKR (TWS or IB Gateway), uses a **Three-Tier** data architecture for warm-start initialization, and runs a **Two-Stream** architecture separating signal generation from order execution.
 
 ### Files
 | File | Purpose |
 |------|---------|
-| `src/live_execution/ibkr_client.py` | IBKR connection manager, historical data, position queries, bracket orders |
-| `src/live_execution/live_trader.py` | Main execution loop: cold start → live bars → features → inference → orders |
+| `src/live_execution/data_manager.py` | Three-Tier data manager: Seed CSV → Parquet cache → IBKR backfill → live append |
+| `src/live_execution/ibkr_client.py` | IBKR connection manager, historical data, front-month resolution, bracket orders |
+| `src/live_execution/live_trader.py` | Main execution loop: warm start → Two-Stream bars → features → inference → orders |
 | `src/live_execution/telemetry.py` | SQLite telemetry backend (`data/live_telemetry.db`) |
+| `src/live_execution/utils/time_utils.py` | `timedelta` → IBKR duration string converter |
 
 ### Prerequisites
 1. Install and start **TWS** or **IB Gateway** in Paper Trading mode
@@ -70,28 +72,37 @@ The live execution engine connects to IBKR (TWS or IB Gateway), monitors real-ti
 ### Running
 ```bash
 # Dry run (no real orders, logs signals only)
-conda run -n trader python -m src.live_execution.live_trader --dry-run
+conda activate trader
+python -m src.live_execution.live_trader --dry-run
 
-# Live paper trading
-conda run -n trader python -m src.live_execution.live_trader
+# Live paper trading (IB Gateway, default port 4002)
+python -m src.live_execution.live_trader
 
-# Custom port (IB Gateway)
-conda run -n trader python -m src.live_execution.live_trader --port 4002
+# Custom port (TWS)
+python -m src.live_execution.live_trader --port 7497
+
+# Custom seed/cache paths
+python -m src.live_execution.live_trader --seed-path data/raw/cl-5m_bk.csv --cache-path data/processed/warm_start_cache.parquet
 ```
 
 ### Execution Loop
-1. **Cold start**: Fetches 5 days of historical 5-min bars
-2. **Subscribe**: Registers for live 5-min bar updates (`keepUpToDate=True`)
-3. **On each new bar**:
-   - Appends to rolling window (capped at ~11,000 bars)
+1. **Warm start**: `DataManager` loads last 60 days from seed CSV (`cl-5m_bk.csv`), creates/loads a Parquet cache, and backfills any gap from IBKR
+2. **Two-Stream subscribe**:
+   - **Brain stream**: Continuous contract live 5-min bars for signal generation
+   - **Hands stream**: Front-month contract live 5-min bars for execution + raw data logging
+3. **On each new bar** (Brain stream):
+   - Appends to rolling window (capped at ~11,000 bars) + warm-start cache
    - Runs `AlphaFactory` to generate 80 features
    - Runs model inference (sigmoid on focal loss logits → probability)
    - If probability ≥ 0.45 and position is flat → places bracket order
-4. **Bracket order**: Market buy + Limit TP (price + 2×ATR) + Stop SL (price − 1×ATR)
+4. **On each new bar** (Hands stream):
+   - Logs raw front-month OHLCV + `contract_month` to `raw_front_month_bars` for future retraining
+5. **Bracket order**: Market buy + Limit TP (price + 2×ATR) + Stop SL (price − 1×ATR)
 
 ### Telemetry
 All bars and signals are logged to `data/live_telemetry.db`:
-- **`market_bars`** — every closed 5-min bar
+- **`market_bars`** — smoothed continuous contract bars (used for training)
+- **`raw_front_month_bars`** — raw front-month bars with `contract_month` (for retraining)
 - **`trade_ledger`** — every signal (Hold/Buy), confidence %, action taken, order details
 
 ## Project Structure
@@ -107,18 +118,21 @@ CL_Analyst/
 │   ├── features/
 │   │   └── alpha_factory.py   # Feature generation engine (80 features)
 │   └── live_execution/
-│       ├── ibkr_client.py     # IBKR connection, data, orders
-│       ├── live_trader.py     # Live execution engine
-│       └── telemetry.py       # SQLite logging
+│       ├── data_manager.py    # Three-Tier data manager (seed → cache → backfill)
+│       ├── ibkr_client.py     # IBKR connection, data, front-month, orders
+│       ├── live_trader.py     # Live execution engine (Two-Stream)
+│       ├── telemetry.py       # SQLite logging (smoothed + raw front-month)
+│       └── utils/
+│           └── time_utils.py  # IBKR duration string utilities
 ├── models/
 │   ├── registry/              # Archived model bundles
 │   │   ├── EXP-017_S_Ultimate/
 │   │   └── EXP-020_S_Ultimate_Short/
 │   └── final_model.pkl        # Current production model
 ├── data/
-│   ├── raw/                   # Source OHLCV CSVs
-│   └── processed/             # ML-ready parquet files
+│   ├── raw/                   # Source OHLCV CSVs (cl-5m_bk.csv = immutable seed)
+│   └── processed/             # ML-ready parquet + warm_start_cache.parquet
 ├── agent/                     # Automation scripts (backtester, sweeps, etc.)
-├── tests/                     # Pytest test suite
+├── tests/                     # Pytest test suite (174 tests)
 └── reports/                   # Evaluation outputs
 ```
