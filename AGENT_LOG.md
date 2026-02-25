@@ -2,6 +2,35 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
+## 2026-02-24 — Track 4.4: Smart Backfill & Dual-Ledger (Live Execution Engine)
+
+- **Goal**: Solve the "Pipeline Parity Problem" — ensure live trading environment mirrors training environment.
+- **Problem**: 5-day cold start was insufficient for indicators with 35-day (10,080 bar) lookback windows.
+
+### New modules
+- `src/live_execution/data_manager.py` — Three-Tier data architecture:
+  - Tier 1: Immutable seed (reads last 60 days from `data/raw/cl-5m_bk.csv`)
+  - Tier 2: Warm-start Parquet cache (`data/processed/warm_start_cache.parquet`)
+  - Tier 3: IBKR backfill (gap-fills missing bars) + live append
+- `src/live_execution/utils/time_utils.py` — `timedelta_to_ib_duration()` and `split_duration_into_chunks()`
+
+### Modified modules
+- `telemetry.py`: Added `raw_front_month_bars` table + `log_raw_bar()`/`raw_bar_count()`/`recent_raw_bars()`
+- `ibkr_client.py`: Added `get_front_month_contract()` (resolves CLJ6) + `fetch_historical_bars_by_duration()`
+- `live_trader.py`: Replaced `_cold_start()` with `_warm_start()` via DataManager; added Two-Stream architecture:
+  - **Brain stream**: Continuous contract → AlphaFactory → model inference → signals
+  - **Hands stream**: Front-month contract → bracket orders + raw bar logging to telemetry
+
+### IBKR connectivity verified
+- Paper account: `DU1899929`, port `4002` (IB Gateway)
+- Front-month: `CLJ6` (conId=304037436, expiry 2026-03-20)
+- Mock order: limit buy CL @ $5.00 → Submitted → Cancelled ✓
+
+### Test results
+- **174 passed, 0 failed** (44s)
+- New tests: `test_data_manager.py` (14), `test_time_utils.py` (15), `test_telemetry.py` (+3 raw bar tests)
+
+
 ## 2026-02-23 — Track 2.1: Short Sniper (panic-selling)
 
 - **Target**: `TARGET_TRIPLE_2x1_24H_SHORT` (binary short label)

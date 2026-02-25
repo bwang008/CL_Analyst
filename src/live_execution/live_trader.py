@@ -2,12 +2,14 @@
 Live Event-Driven Execution Engine for CL Futures.
 
 This module implements the live trading loop that:
-1. Fetches historical bars on startup (cold start)
-2. Subscribes to live 5-minute bars from IBKR
+1. Uses DataManager for warm-start initialization (seed CSV + IBKR backfill)
+2. Subscribes to live 5-minute bars from IBKR (Two-Stream architecture)
+   - Brain stream: Continuous contract for signal generation
+   - Hands stream: Front-month contract for execution + raw data logging
 3. Maintains a rolling window and generates features via AlphaFactory
 4. Runs inference using the S_Ultimate (EXP-017) model
 5. Executes bracket orders on IBKR Paper Trading
-6. Logs all activity to SQLite telemetry
+6. Logs all activity to SQLite telemetry (smoothed + raw front-month)
 
 Usage:
     conda run -n trader python -m src.live_execution.live_trader
@@ -34,6 +36,7 @@ import pandas as pd
 # Project imports
 from src.features.alpha_factory import AlphaFactory
 from src.LGBMLearner import LGBMLearner
+from src.live_execution.data_manager import DataManager
 from src.live_execution.ibkr_client import (
     IBKRConnectionManager,
     build_cl_contract,
@@ -66,11 +69,14 @@ _DEFAULT_QUANTITY = 1  # 1 CL contract
 _TP_ATR_MULT = 2.0
 _SL_ATR_MULT = 1.0
 
-# How many days of history to fetch on cold start
-_COLD_START_DAYS = 5
-
 # Polling interval in seconds (ib.sleep)
 _POLL_INTERVAL = 5.0
+
+# Default paths for DataManager
+_DEFAULT_SEED_PATH = str(_PROJECT_ROOT / "data" / "raw" / "cl-5m_bk.csv")
+_DEFAULT_CACHE_PATH = str(
+    _PROJECT_ROOT / "data" / "processed" / "warm_start_cache.parquet"
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -201,6 +207,8 @@ class LiveTrader:
         model_path: str = _DEFAULT_MODEL_PATH,
         config_path: str = _DEFAULT_CONFIG_PATH,
         db_path: str = _DEFAULT_DB_PATH,
+        seed_path: str = _DEFAULT_SEED_PATH,
+        cache_path: str = _DEFAULT_CACHE_PATH,
         quantity: int = _DEFAULT_QUANTITY,
         dry_run: bool = False,
     ) -> None:
@@ -237,10 +245,20 @@ class LiveTrader:
             readonly=dry_run,  # readonly in dry-run mode
         )
 
+        # DataManager for warm-start
+        self.data_manager = DataManager(
+            seed_path=seed_path,
+            cache_path=cache_path,
+            ibkr_manager=self.manager,
+        )
+
         # State
         self.rolling_df: Optional[pd.DataFrame] = None
         self._live_bars = None
+        self._front_month_bars = None  # Two-Stream: raw front-month
         self._contract = None
+        self._front_month_contract = None
+        self._front_month_str: Optional[str] = None
         self._running = False
         self._last_bar_time: Optional[pd.Timestamp] = None
 
@@ -249,7 +267,7 @@ class LiveTrader:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Connect to IBKR, do cold start, and enter the event loop."""
+        """Connect to IBKR, warm-start via DataManager, and enter the event loop."""
         log.info("=" * 60)
         log.info("LiveTrader starting (dry_run=%s)", self.dry_run)
         log.info("=" * 60)
@@ -264,18 +282,39 @@ class LiveTrader:
             self.manager.connect()
             log.info("Connected to IBKR")
 
-            # Step 2: Qualify contract
+            # Step 2: Qualify continuous contract (Brain stream)
             self._contract = build_cl_contract(continuous=True)
             self._contract = self.manager.qualify_contract(self._contract)
-            log.info("Qualified CL contract: %s", self._contract)
+            log.info("Qualified CL continuous contract: %s", self._contract)
 
-            # Step 3: Cold start — fetch historical bars
-            self._cold_start()
+            # Step 3: Resolve front-month contract (Hands stream)
+            try:
+                self._front_month_contract, self._front_month_str = (
+                    self.manager.get_front_month_contract()
+                )
+                log.info(
+                    "Front-month contract: %s (month=%s)",
+                    self._front_month_contract.localSymbol,
+                    self._front_month_str,
+                )
+            except Exception as exc:
+                log.warning(
+                    "Could not resolve front-month contract: %s. "
+                    "Raw front-month logging will be disabled.",
+                    exc,
+                )
 
-            # Step 4: Subscribe to live bars
+            # Step 4: Warm-start via DataManager
+            self._warm_start()
+
+            # Step 5: Subscribe to live bars (Brain stream)
             self._subscribe()
 
-            # Step 5: Enter event loop
+            # Step 6: Subscribe to front-month bars (Hands stream)
+            if self._front_month_contract is not None:
+                self._subscribe_front_month()
+
+            # Step 7: Enter event loop
             self._running = True
             self._event_loop()
 
@@ -296,73 +335,101 @@ class LiveTrader:
                 self.manager.cancel_subscription(self._live_bars)
             except Exception:
                 pass
+        if self._front_month_bars is not None:
+            try:
+                self.manager.cancel_subscription(self._front_month_bars)
+            except Exception:
+                pass
+        # Save warm-start cache on shutdown
+        try:
+            self.data_manager.save_cache()
+        except Exception:
+            log.warning("Failed to save warm-start cache on shutdown.")
         self.manager.disconnect()
         self.telemetry.close()
         log.info("Shutdown complete.")
 
     # ------------------------------------------------------------------
-    # Cold start
+    # Warm start (replaces old _cold_start)
     # ------------------------------------------------------------------
 
-    def _cold_start(self) -> None:
-        """Fetch historical bars to populate the rolling window."""
-        log.info(
-            "Cold start: fetching %d days of 5-min bars...",
-            _COLD_START_DAYS,
-        )
-        df = self.manager.fetch_historical_bars(
-            days_back=_COLD_START_DAYS,
-            continuous=True,
-        )
-        n_bars = len(df)
-        log.info("Cold start: received %d bars", n_bars)
+    def _warm_start(self) -> None:
+        """Initialize rolling window via DataManager (seed + backfill)."""
+        log.info("Warm-start: initializing via DataManager...")
+        self.rolling_df = self.data_manager.initialize()
 
-        if n_bars == 0:
+        if len(self.rolling_df) == 0:
             raise RuntimeError(
-                "Cold start failed: no historical bars received from IBKR."
+                "Warm-start failed: no data available from seed or IBKR."
             )
 
         # Ensure DateTime index
-        if "DateTime" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
-            df = df.set_index("DateTime", drop=False)
+        if "DateTime" in self.rolling_df.columns and not isinstance(
+            self.rolling_df.index, pd.DatetimeIndex
+        ):
+            self.rolling_df = self.rolling_df.set_index("DateTime", drop=False)
 
-        self.rolling_df = df
-        self._last_bar_time = df.index[-1]
+        self._last_bar_time = self.rolling_df.index[-1]
         log.info(
             "Rolling window initialized: %d bars, latest=%s",
             len(self.rolling_df), self._last_bar_time,
         )
-
-        # Log all cold-start bars to telemetry
-        for _, row in df.iterrows():
-            ts = row.get("DateTime", row.name)
-            self.telemetry.log_bar(
-                timestamp=ts,
-                open_=row["Open"],
-                high=row["High"],
-                low=row["Low"],
-                close=row["Close"],
-                volume=row["Volume"],
-            )
-        log.info("Logged %d cold-start bars to telemetry", n_bars)
 
     # ------------------------------------------------------------------
     # Live bar subscription
     # ------------------------------------------------------------------
 
     def _subscribe(self) -> None:
-        """Subscribe to live 5-min bars with keepUpToDate."""
-        log.info("Subscribing to live 5-min bars...")
+        """Subscribe to live 5-min bars (Brain stream: continuous contract)."""
+        log.info("Subscribing to live 5-min bars (Brain stream)...")
         self._live_bars = self.manager.subscribe_live_bars(
             self._contract,
             bar_size="5 mins",
             duration_str="60 S",
         )
         self._live_bars.updateEvent += self._on_bar_update
-        log.info("Subscribed to live bars")
+        log.info("Subscribed to continuous contract live bars")
+
+    def _subscribe_front_month(self) -> None:
+        """Subscribe to live 5-min bars (Hands stream: front-month contract)."""
+        log.info(
+            "Subscribing to front-month bars (Hands stream: %s)...",
+            self._front_month_str,
+        )
+        self._front_month_bars = self.manager.subscribe_live_bars(
+            self._front_month_contract,
+            bar_size="5 mins",
+            duration_str="60 S",
+        )
+        self._front_month_bars.updateEvent += self._on_front_month_bar_update
+        log.info("Subscribed to front-month live bars")
+
+    def _on_front_month_bar_update(self, bars, has_new_bar) -> None:
+        """Callback for front-month bars — log raw data to telemetry."""
+        if not has_new_bar or not bars:
+            return
+
+        new_bar = bars[-1]
+        bar_time = pd.Timestamp(new_bar.date)
+
+        self.telemetry.log_raw_bar(
+            timestamp=bar_time,
+            open_=new_bar.open,
+            high=new_bar.high,
+            low=new_bar.low,
+            close=new_bar.close,
+            volume=float(new_bar.volume),
+            contract_month=self._front_month_str or "UNKNOWN",
+        )
+        log.debug(
+            "RAW BAR [%s]: %s O=%.2f H=%.2f L=%.2f C=%.2f V=%.0f",
+            self._front_month_str, bar_time,
+            new_bar.open, new_bar.high, new_bar.low,
+            new_bar.close, float(new_bar.volume),
+        )
 
     def _on_bar_update(self, bars, has_new_bar) -> None:
-        """Callback fired by ib_insync when bars are updated."""
+        """Callback fired by ib_insync when continuous bars are updated."""
         if not has_new_bar or not bars:
             return
 
@@ -405,7 +472,10 @@ class LiveTrader:
         if len(self.rolling_df) > _MAX_ROLLING_BARS:
             self.rolling_df = self.rolling_df.iloc[-_MAX_ROLLING_BARS:]
 
-        # Log bar to telemetry
+        # Append to warm-start cache (DataManager)
+        self.data_manager.append_bar(new_row)
+
+        # Log bar to telemetry (smoothed continuous data)
         self.telemetry.log_bar(
             timestamp=bar_time,
             open_=new_row["Open"].iloc[0],
@@ -630,6 +700,14 @@ def main() -> None:
         "--dry-run", action="store_true",
         help="Run without placing real orders (log signals only)",
     )
+    parser.add_argument(
+        "--seed-path", default=_DEFAULT_SEED_PATH,
+        help="Path to the immutable seed CSV (cl-5m_bk.csv)",
+    )
+    parser.add_argument(
+        "--cache-path", default=_DEFAULT_CACHE_PATH,
+        help="Path to the warm-start Parquet cache",
+    )
 
     args = parser.parse_args()
 
@@ -640,6 +718,8 @@ def main() -> None:
         model_path=args.model_path,
         config_path=args.config_path,
         db_path=args.db_path,
+        seed_path=args.seed_path,
+        cache_path=args.cache_path,
         quantity=args.quantity,
         dry_run=args.dry_run,
     )
