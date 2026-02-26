@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import signal
 import sys
 import time
@@ -87,12 +88,41 @@ _DEFAULT_CACHE_PATH = str(
 # Logging
 # ---------------------------------------------------------------------------
 
+
+class CLOnlyLogFilter(logging.Filter):
+    """Suppress ib_insync log messages about non-CL positions/trades.
+
+    IBKR reports historical positions, portfolio updates, executions,
+    and commission reports for ALL symbols in the account, even those
+    with 0 position (closed-out stocks like XOM, MSFT, V, COP).
+    ib_insync logs every one of these at INFO level, cluttering the
+    live trader output.  This filter drops those messages so only
+    CL-related (and generic connection/warning) events get through.
+    """
+
+    _NON_CL_RE = re.compile(
+        r"(?:"
+        r"Stock\("
+        r"|symbol='(?!CL\b)\w+"
+        r")",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if self._NON_CL_RE.search(msg):
+            return False  # suppress non-CL message
+        return True
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("LiveTrader")
+
+# Suppress non-CL noise from ib_insync internal logging
+logging.getLogger("ib_insync").addFilter(CLOnlyLogFilter())
 
 
 def _sigmoid(x: float) -> float:
