@@ -274,6 +274,138 @@ class IBKRConnectionManager:
                 return int(pos.position)
         return 0
 
+    def get_account_summary(self, symbol: str = "CL") -> dict:
+        """
+        Query IBKR for CL-only account summary.
+
+        Returns a dict with:
+            account: str — account ID
+            net_liquidation: float
+            available_funds: float
+            cl_position: int — net CL contracts
+            cl_unrealized_pnl: float — CL unrealized PnL
+            cl_realized_pnl: float — CL realized PnL
+            cl_market_value: float — CL market value
+            cl_avg_cost: float — CL average cost per contract
+        """
+        self.ensure_connected()
+
+        # Account values
+        summary: dict = {
+            "account": "",
+            "net_liquidation": 0.0,
+            "available_funds": 0.0,
+            "cl_position": 0,
+            "cl_unrealized_pnl": 0.0,
+            "cl_realized_pnl": 0.0,
+            "cl_market_value": 0.0,
+            "cl_avg_cost": 0.0,
+        }
+
+        # Account summary tags
+        acct_values = self.ib.accountSummary()
+        for av in acct_values:
+            if av.tag == "NetLiquidation" and av.currency == "USD":
+                summary["net_liquidation"] = float(av.value)
+                summary["account"] = av.account
+            elif av.tag == "AvailableFunds" and av.currency == "USD":
+                summary["available_funds"] = float(av.value)
+
+        # CL-only portfolio items
+        portfolio = self.ib.portfolio()
+        for item in portfolio:
+            if item.contract.symbol == symbol:
+                summary["cl_position"] = int(item.position)
+                summary["cl_unrealized_pnl"] = float(item.unrealizedPNL)
+                summary["cl_realized_pnl"] = float(item.realizedPNL)
+                summary["cl_market_value"] = float(item.marketValue)
+                summary["cl_avg_cost"] = float(item.averageCost)
+
+        return summary
+
+    def get_front_month_contract(self) -> tuple[Contract, str]:
+        """
+        Resolve the current front-month CL futures contract.
+
+        Uses reqContractDetails to find the nearest-expiry CL contract
+        that is still tradable.
+
+        Returns:
+            tuple: (qualified Contract, contract_month string e.g. '202504')
+        """
+        self.ensure_connected()
+        # Use a generic CL Future to search for available contracts
+        search = Future(symbol="CL", exchange="NYMEX", currency="USD")
+        details = self.ib.reqContractDetails(search)
+
+        if not details:
+            raise RuntimeError(
+                "Could not retrieve CL contract details from IBKR."
+            )
+
+        # Sort by expiry and pick the nearest one
+        details.sort(key=lambda d: d.contract.lastTradeDateOrContractMonth)
+        front = details[0]
+        contract = front.contract
+        month_str = contract.lastTradeDateOrContractMonth[:6]  # YYYYMM
+
+        log.info(
+            "Front-month CL contract: %s (conId=%d, month=%s)",
+            contract.localSymbol, contract.conId, month_str,
+        )
+        return contract, month_str
+
+    def fetch_historical_bars_by_duration(
+        self,
+        *,
+        duration_str: str,
+        continuous: bool = True,
+        contract_month: Optional[str] = None,
+        bar_size: str = "5 mins",
+        what_to_show: str = "TRADES",
+        use_rth: bool = False,
+        end_datetime: str = "",
+        max_retries: int = 5,
+        backoff_seconds: float = 2.0,
+        throttle_seconds: float = 0.5,
+        source_tz: str = _DEFAULT_SOURCE_TZ,
+        target_tz: str = _DEFAULT_TARGET_TZ,
+        make_naive: bool = True,
+        set_index: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Fetch historical bars using a raw duration string.
+
+        Unlike fetch_historical_bars (which takes days_back), this accepts
+        the IBKR duration string directly (e.g. '5 D', '2 W').
+        Used by DataManager for precise backfill requests.
+        """
+        self.ensure_connected()
+        contract = build_cl_contract(
+            continuous=continuous,
+            contract_month=contract_month,
+        )
+        contract = self.qualify_contract(contract)
+
+        bars = self._request_historical_data(
+            contract=contract,
+            duration_str=duration_str,
+            bar_size=bar_size,
+            what_to_show=what_to_show,
+            use_rth=use_rth,
+            end_datetime=end_datetime,
+            max_retries=max_retries,
+            backoff_seconds=backoff_seconds,
+            throttle_seconds=throttle_seconds,
+        )
+        return ib_bars_to_dataframe(
+            bars,
+            source_tz=source_tz,
+            target_tz=target_tz,
+            make_naive=make_naive,
+            set_index=set_index,
+        )
+
     # ------------------------------------------------------------------
     # Live bar subscription
     # ------------------------------------------------------------------

@@ -2,12 +2,14 @@
 Live Event-Driven Execution Engine for CL Futures.
 
 This module implements the live trading loop that:
-1. Fetches historical bars on startup (cold start)
-2. Subscribes to live 5-minute bars from IBKR
+1. Uses DataManager for warm-start initialization (seed CSV + IBKR backfill)
+2. Subscribes to live 5-minute bars from IBKR (Two-Stream architecture)
+   - Brain stream: Continuous contract for signal generation
+   - Hands stream: Front-month contract for execution + raw data logging
 3. Maintains a rolling window and generates features via AlphaFactory
 4. Runs inference using the S_Ultimate (EXP-017) model
 5. Executes bracket orders on IBKR Paper Trading
-6. Logs all activity to SQLite telemetry
+6. Logs all activity to SQLite telemetry (smoothed + raw front-month)
 
 Usage:
     conda run -n trader python -m src.live_execution.live_trader
@@ -21,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import signal
 import sys
 import time
@@ -34,6 +37,7 @@ import pandas as pd
 # Project imports
 from src.features.alpha_factory import AlphaFactory
 from src.LGBMLearner import LGBMLearner
+from src.live_execution.data_manager import DataManager
 from src.live_execution.ibkr_client import (
     IBKRConnectionManager,
     build_cl_contract,
@@ -66,15 +70,49 @@ _DEFAULT_QUANTITY = 1  # 1 CL contract
 _TP_ATR_MULT = 2.0
 _SL_ATR_MULT = 1.0
 
-# How many days of history to fetch on cold start
-_COLD_START_DAYS = 5
-
 # Polling interval in seconds (ib.sleep)
 _POLL_INTERVAL = 5.0
+
+# Reconnection parameters
+_RECONNECT_BASE_DELAY = 5.0      # Initial delay before reconnect attempt (seconds)
+_RECONNECT_MAX_DELAY = 300.0     # Max backoff delay (5 minutes)
+_RECONNECT_MAX_ATTEMPTS = 50     # Max retry attempts (~2+ hours of retries)
+
+# Default paths for DataManager
+_DEFAULT_SEED_PATH = str(_PROJECT_ROOT / "data" / "raw" / "cl-5m_bk.csv")
+_DEFAULT_CACHE_PATH = str(
+    _PROJECT_ROOT / "data" / "processed" / "warm_start_cache.parquet"
+)
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+
+
+class CLOnlyLogFilter(logging.Filter):
+    """Suppress ib_insync log messages about non-CL positions/trades.
+
+    IBKR reports historical positions, portfolio updates, executions,
+    and commission reports for ALL symbols in the account, even those
+    with 0 position (closed-out stocks like XOM, MSFT, V, COP).
+    ib_insync logs every one of these at INFO level, cluttering the
+    live trader output.  This filter drops those messages so only
+    CL-related (and generic connection/warning) events get through.
+    """
+
+    _NON_CL_RE = re.compile(
+        r"(?:"
+        r"Stock\("
+        r"|symbol='(?!CL\b)\w+"
+        r")",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if self._NON_CL_RE.search(msg):
+            return False  # suppress non-CL message
+        return True
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -82,6 +120,9 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("LiveTrader")
+
+# Suppress non-CL noise from ib_insync internal logging
+logging.getLogger("ib_insync").addFilter(CLOnlyLogFilter())
 
 
 def _sigmoid(x: float) -> float:
@@ -201,6 +242,8 @@ class LiveTrader:
         model_path: str = _DEFAULT_MODEL_PATH,
         config_path: str = _DEFAULT_CONFIG_PATH,
         db_path: str = _DEFAULT_DB_PATH,
+        seed_path: str = _DEFAULT_SEED_PATH,
+        cache_path: str = _DEFAULT_CACHE_PATH,
         quantity: int = _DEFAULT_QUANTITY,
         dry_run: bool = False,
     ) -> None:
@@ -237,19 +280,30 @@ class LiveTrader:
             readonly=dry_run,  # readonly in dry-run mode
         )
 
+        # DataManager for warm-start
+        self.data_manager = DataManager(
+            seed_path=seed_path,
+            cache_path=cache_path,
+            ibkr_manager=self.manager,
+        )
+
         # State
         self.rolling_df: Optional[pd.DataFrame] = None
         self._live_bars = None
+        self._front_month_bars = None  # Two-Stream: raw front-month
         self._contract = None
+        self._front_month_contract = None
+        self._front_month_str: Optional[str] = None
         self._running = False
         self._last_bar_time: Optional[pd.Timestamp] = None
+        self._subscriptions_lost = False  # Track connectivity drops
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Connect to IBKR, do cold start, and enter the event loop."""
+        """Connect to IBKR, warm-start via DataManager, and enter the event loop."""
         log.info("=" * 60)
         log.info("LiveTrader starting (dry_run=%s)", self.dry_run)
         log.info("=" * 60)
@@ -264,18 +318,45 @@ class LiveTrader:
             self.manager.connect()
             log.info("Connected to IBKR")
 
-            # Step 2: Qualify contract
+            # Step 2: Register error handler for reconnection
+            self.manager.ib.errorEvent += self._on_ib_error
+
+            # Step 3: Qualify continuous contract (Brain stream)
             self._contract = build_cl_contract(continuous=True)
             self._contract = self.manager.qualify_contract(self._contract)
-            log.info("Qualified CL contract: %s", self._contract)
+            log.info("Qualified CL continuous contract: %s", self._contract)
 
-            # Step 3: Cold start — fetch historical bars
-            self._cold_start()
+            # Step 4: Resolve front-month contract (Hands stream)
+            try:
+                self._front_month_contract, self._front_month_str = (
+                    self.manager.get_front_month_contract()
+                )
+                log.info(
+                    "Front-month contract: %s (month=%s)",
+                    self._front_month_contract.localSymbol,
+                    self._front_month_str,
+                )
+            except Exception as exc:
+                log.warning(
+                    "Could not resolve front-month contract: %s. "
+                    "Raw front-month logging will be disabled.",
+                    exc,
+                )
 
-            # Step 4: Subscribe to live bars
+            # Step 5: Print CL-only account summary
+            self._print_account_summary()
+
+            # Step 6: Warm-start via DataManager
+            self._warm_start()
+
+            # Step 7: Subscribe to live bars (Brain stream)
             self._subscribe()
 
-            # Step 5: Enter event loop
+            # Step 8: Subscribe to front-month bars (Hands stream)
+            if self._front_month_contract is not None:
+                self._subscribe_front_month()
+
+            # Step 9: Enter event loop
             self._running = True
             self._event_loop()
 
@@ -296,81 +377,254 @@ class LiveTrader:
                 self.manager.cancel_subscription(self._live_bars)
             except Exception:
                 pass
+        if self._front_month_bars is not None:
+            try:
+                self.manager.cancel_subscription(self._front_month_bars)
+            except Exception:
+                pass
+        # Save warm-start cache on shutdown
+        try:
+            self.data_manager.save_cache()
+        except Exception:
+            log.warning("Failed to save warm-start cache on shutdown.")
         self.manager.disconnect()
         self.telemetry.close()
         log.info("Shutdown complete.")
 
     # ------------------------------------------------------------------
-    # Cold start
+    # Account summary
     # ------------------------------------------------------------------
 
-    def _cold_start(self) -> None:
-        """Fetch historical bars to populate the rolling window."""
-        log.info(
-            "Cold start: fetching %d days of 5-min bars...",
-            _COLD_START_DAYS,
-        )
-        df = self.manager.fetch_historical_bars(
-            days_back=_COLD_START_DAYS,
-            continuous=True,
-        )
-        n_bars = len(df)
-        log.info("Cold start: received %d bars", n_bars)
+    def _print_account_summary(self) -> None:
+        """Print a CL-only account summary at startup."""
+        w = 60  # box width
+        try:
+            acct = self.manager.get_account_summary()
+            ts = self.telemetry.trade_summary()
+        except Exception:
+            log.warning("Could not retrieve account summary — skipping.")
+            return
 
-        if n_bars == 0:
+        # Position description
+        pos = acct["cl_position"]
+        if pos == 0:
+            pos_str = "FLAT (0 contracts)"
+        elif pos > 0:
+            pos_str = f"LONG ({pos} contract{'s' if abs(pos)!=1 else ''})"
+        else:
+            pos_str = f"SHORT ({pos} contract{'s' if abs(pos)!=1 else ''})"
+
+        # Date range
+        if ts["first_signal"] and ts["last_signal"]:
+            first = ts["first_signal"][:10]  # YYYY-MM-DD
+            last = ts["last_signal"][:10]
+            date_range = f"{first} → {last}"
+        else:
+            date_range = "No signals recorded"
+
+        lines = [
+            "=" * w,
+            "ACCOUNT SUMMARY (CL Only)".center(w),
+            "=" * w,
+            f"  Account:           {acct['account'] or 'N/A'}",
+            f"  Net Liquidation:   ${acct['net_liquidation']:>14,.2f}",
+            f"  Available Funds:   ${acct['available_funds']:>14,.2f}",
+            "-" * w,
+            f"  CL Position:       {pos_str}",
+            f"  CL Market Value:   ${acct['cl_market_value']:>14,.2f}",
+            f"  CL Avg Cost:       ${acct['cl_avg_cost']:>14,.2f}",
+            f"  CL Unrealized PnL: ${acct['cl_unrealized_pnl']:>14,.2f}",
+            f"  CL Realized PnL:   ${acct['cl_realized_pnl']:>14,.2f}",
+            "-" * w,
+            "  Trade History (telemetry):",
+            f"    Total Signals:     {ts['total_signals']}",
+            f"    Executed Trades:   {ts['executed_trades']}",
+            f"    Bars Recorded:     {ts['total_bars']}",
+            f"    Date Range:        {date_range}",
+            "=" * w,
+        ]
+        for line in lines:
+            log.info(line)
+
+    # ------------------------------------------------------------------
+    # Warm start (replaces old _cold_start)
+    # ------------------------------------------------------------------
+
+    def _warm_start(self) -> None:
+        """Initialize rolling window via DataManager (seed + backfill)."""
+        log.info("Warm-start: initializing via DataManager...")
+        self.rolling_df = self.data_manager.initialize()
+
+        if len(self.rolling_df) == 0:
             raise RuntimeError(
-                "Cold start failed: no historical bars received from IBKR."
+                "Warm-start failed: no data available from seed or IBKR."
             )
 
         # Ensure DateTime index
-        if "DateTime" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
-            df = df.set_index("DateTime", drop=False)
+        if "DateTime" in self.rolling_df.columns and not isinstance(
+            self.rolling_df.index, pd.DatetimeIndex
+        ):
+            self.rolling_df = self.rolling_df.set_index("DateTime", drop=False)
 
-        self.rolling_df = df
-        self._last_bar_time = df.index[-1]
+        self._last_bar_time = self.rolling_df.index[-1]
         log.info(
             "Rolling window initialized: %d bars, latest=%s",
             len(self.rolling_df), self._last_bar_time,
         )
-
-        # Log all cold-start bars to telemetry
-        for _, row in df.iterrows():
-            ts = row.get("DateTime", row.name)
-            self.telemetry.log_bar(
-                timestamp=ts,
-                open_=row["Open"],
-                high=row["High"],
-                low=row["Low"],
-                close=row["Close"],
-                volume=row["Volume"],
-            )
-        log.info("Logged %d cold-start bars to telemetry", n_bars)
 
     # ------------------------------------------------------------------
     # Live bar subscription
     # ------------------------------------------------------------------
 
     def _subscribe(self) -> None:
-        """Subscribe to live 5-min bars with keepUpToDate."""
-        log.info("Subscribing to live 5-min bars...")
+        """Subscribe to live 5-min bars (Brain stream: continuous contract)."""
+        log.info("Subscribing to live 5-min bars (Brain stream)...")
         self._live_bars = self.manager.subscribe_live_bars(
             self._contract,
             bar_size="5 mins",
             duration_str="60 S",
         )
         self._live_bars.updateEvent += self._on_bar_update
-        log.info("Subscribed to live bars")
+        log.info("Subscribed to continuous contract live bars")
+
+    def _subscribe_front_month(self) -> None:
+        """Subscribe to live 5-min bars (Hands stream: front-month contract)."""
+        log.info(
+            "Subscribing to front-month bars (Hands stream: %s)...",
+            self._front_month_str,
+        )
+        self._front_month_bars = self.manager.subscribe_live_bars(
+            self._front_month_contract,
+            bar_size="5 mins",
+            duration_str="60 S",
+        )
+        self._front_month_bars.updateEvent += self._on_front_month_bar_update
+        log.info("Subscribed to front-month live bars")
+
+    # ------------------------------------------------------------------
+    # Reconnection & Gap Backfill
+    # ------------------------------------------------------------------
+
+    def _on_ib_error(self, reqId, errorCode, errorString, contract) -> None:
+        """Handle IBKR error events for reconnection detection."""
+        # Error 10182: keepUpToDate subscriptions lost
+        if errorCode == 10182:
+            log.warning("SUBSCRIPTIONS LOST (Error 10182) — will resubscribe on reconnect")
+            self._subscriptions_lost = True
+
+        # Error 1102: connectivity restored, data maintained
+        # Error 1101: connectivity restored, data lost
+        if errorCode in (1101, 1102) and self._subscriptions_lost:
+            log.info("CONNECTIVITY RESTORED (Error %d) — resubscribing...", errorCode)
+            self._resubscribe_and_backfill()
+
+    def _resubscribe_and_backfill(self) -> None:
+        """Re-subscribe to live bars after connectivity drop and backfill gaps."""
+        try:
+            # 1. Backfill any missed bars during the gap
+            if self._last_bar_time is not None:
+                now_utc = pd.Timestamp.utcnow()
+                gap = now_utc - self._last_bar_time
+                gap_minutes = gap.total_seconds() / 60
+
+                if gap_minutes > 5:  # At least one bar could have been missed
+                    log.info(
+                        "Backfilling gap: %s → %s (%.1f minutes)",
+                        self._last_bar_time, now_utc, gap_minutes,
+                    )
+                    try:
+                        gap_days = max(int(gap.total_seconds() / 86400) + 1, 1)
+                        duration_str = f"{gap_days} D"
+                        bars = self.manager.fetch_historical_bars_by_duration(
+                            duration_str=duration_str,
+                            contract=self._contract,
+                        )
+                        if bars is not None and len(bars) > 0:
+                            # Filter to only bars newer than _last_bar_time
+                            new_bars = bars[bars.index > self._last_bar_time]
+                            if len(new_bars) > 0:
+                                self.rolling_df = pd.concat(
+                                    [self.rolling_df, new_bars]
+                                ).drop_duplicates(subset=["DateTime"], keep="last")
+                                self.rolling_df = self.rolling_df.sort_index()
+                                if len(self.rolling_df) > _MAX_ROLLING_BARS:
+                                    self.rolling_df = self.rolling_df.iloc[
+                                        -_MAX_ROLLING_BARS:
+                                    ]
+                                self._last_bar_time = self.rolling_df.index[-1]
+                                # Append to warm-start cache too
+                                self.data_manager.append_bar(new_bars)
+                                log.info(
+                                    "Backfilled %d bars, latest=%s",
+                                    len(new_bars), self._last_bar_time,
+                                )
+                    except Exception:
+                        log.exception("Gap backfill failed — continuing without")
+
+            # 2. Cancel stale subscriptions
+            if self._live_bars is not None:
+                try:
+                    self.manager.cancel_subscription(self._live_bars)
+                except Exception:
+                    pass
+            if self._front_month_bars is not None:
+                try:
+                    self.manager.cancel_subscription(self._front_month_bars)
+                except Exception:
+                    pass
+
+            # 3. Re-subscribe
+            self._subscribe()
+            if self._front_month_contract is not None:
+                self._subscribe_front_month()
+
+            self._subscriptions_lost = False
+            log.info("Reconnection complete — live bars flowing again")
+
+        except Exception:
+            log.exception("Resubscription failed — will retry on next reconnect")
+
+    def _on_front_month_bar_update(self, bars, has_new_bar) -> None:
+        """Callback for front-month bars — log raw data to telemetry."""
+        if not has_new_bar or not bars:
+            return
+
+        new_bar = bars[-1]
+        bar_time = pd.Timestamp(new_bar.date)
+        # Normalize tz-aware timestamps to tz-naive UTC
+        if bar_time.tzinfo is not None:
+            bar_time = bar_time.tz_convert("UTC").tz_localize(None)
+
+        self.telemetry.log_raw_bar(
+            timestamp=bar_time,
+            open_=new_bar.open,
+            high=new_bar.high,
+            low=new_bar.low,
+            close=new_bar.close,
+            volume=float(new_bar.volume),
+            contract_month=self._front_month_str or "UNKNOWN",
+        )
+        log.debug(
+            "RAW BAR [%s]: %s O=%.2f H=%.2f L=%.2f C=%.2f V=%.0f",
+            self._front_month_str, bar_time,
+            new_bar.open, new_bar.high, new_bar.low,
+            new_bar.close, float(new_bar.volume),
+        )
 
     def _on_bar_update(self, bars, has_new_bar) -> None:
-        """Callback fired by ib_insync when bars are updated."""
+        """Callback fired by ib_insync when continuous bars are updated."""
         if not has_new_bar or not bars:
             return
 
         # Convert the latest bar to a row
         new_bar = bars[-1]
+        # Normalize tz-aware timestamps (IBKR sends US/Eastern) to tz-naive UTC
+        raw_ts = pd.Timestamp(new_bar.date)
+        if raw_ts.tzinfo is not None:
+            raw_ts = raw_ts.tz_convert("UTC").tz_localize(None)
         new_row = pd.DataFrame(
             [{
-                "DateTime": pd.Timestamp(new_bar.date),
+                "DateTime": raw_ts,
                 "Open": new_bar.open,
                 "High": new_bar.high,
                 "Low": new_bar.low,
@@ -405,7 +659,10 @@ class LiveTrader:
         if len(self.rolling_df) > _MAX_ROLLING_BARS:
             self.rolling_df = self.rolling_df.iloc[-_MAX_ROLLING_BARS:]
 
-        # Log bar to telemetry
+        # Append to warm-start cache (DataManager)
+        self.data_manager.append_bar(new_row)
+
+        # Log bar to telemetry (smoothed continuous data)
         self.telemetry.log_bar(
             timestamp=bar_time,
             open_=new_row["Open"].iloc[0],
@@ -570,6 +827,44 @@ class LiveTrader:
             )
 
     # ------------------------------------------------------------------
+    # Reconnection
+    # ------------------------------------------------------------------
+
+    def _reconnect(self) -> bool:
+        """Reconnect to IB Gateway with exponential backoff.
+
+        Returns True if reconnection + resubscription succeeded.
+        """
+        delay = _RECONNECT_BASE_DELAY
+        for attempt in range(1, _RECONNECT_MAX_ATTEMPTS + 1):
+            if not self._running:
+                return False
+            log.info(
+                "Reconnect attempt %d/%d (waiting %.0fs)...",
+                attempt, _RECONNECT_MAX_ATTEMPTS, delay,
+            )
+            time.sleep(delay)
+            try:
+                # Ensure clean disconnect state
+                try:
+                    self.manager.ib.disconnect()
+                except Exception:
+                    pass
+                # Reconnect
+                self.manager.connect()
+                # Re-register error handler (lost on disconnect)
+                self.manager.ib.errorEvent += self._on_ib_error
+                # Resubscribe + backfill gaps
+                self._subscriptions_lost = True
+                self._resubscribe_and_backfill()
+                log.info("Reconnected successfully on attempt %d", attempt)
+                return True
+            except Exception as exc:
+                log.warning("Reconnect attempt %d failed: %s", attempt, exc)
+                delay = min(delay * 2, _RECONNECT_MAX_DELAY)
+        return False
+
+    # ------------------------------------------------------------------
     # Event loop
     # ------------------------------------------------------------------
 
@@ -583,6 +878,11 @@ class LiveTrader:
                 self.manager.ib.sleep(_POLL_INTERVAL)
             except KeyboardInterrupt:
                 self._running = False
+            except (ConnectionError, OSError) as exc:
+                log.error("Connection lost: %s — attempting reconnect...", exc)
+                if not self._reconnect():
+                    log.error("Reconnection failed after %d attempts — shutting down.", _RECONNECT_MAX_ATTEMPTS)
+                    self._running = False
             except Exception:
                 log.exception("Error in event loop iteration")
                 time.sleep(_POLL_INTERVAL)
@@ -630,6 +930,14 @@ def main() -> None:
         "--dry-run", action="store_true",
         help="Run without placing real orders (log signals only)",
     )
+    parser.add_argument(
+        "--seed-path", default=_DEFAULT_SEED_PATH,
+        help="Path to the immutable seed CSV (cl-5m_bk.csv)",
+    )
+    parser.add_argument(
+        "--cache-path", default=_DEFAULT_CACHE_PATH,
+        help="Path to the warm-start Parquet cache",
+    )
 
     args = parser.parse_args()
 
@@ -640,6 +948,8 @@ def main() -> None:
         model_path=args.model_path,
         config_path=args.config_path,
         db_path=args.db_path,
+        seed_path=args.seed_path,
+        cache_path=args.cache_path,
         quantity=args.quantity,
         dry_run=args.dry_run,
     )
