@@ -1,0 +1,300 @@
+# CL_Analyst — Deep Research Briefing for Sell-Signal Model Development
+
+> **For**: AI Research Agent  
+> **From**: CL_Analyst project owner  
+> **Date**: 2026-02-26  
+> **Purpose**: Provide enough context for deep research on methods to build, test, and tune new sell-signal models for Crude Oil futures, whose outputs will be built, tested, and logged by a separate implementation agent in the CL_Analyst project.
+
+---
+
+## 1. Project Objective
+
+**CL_Analyst** is an ML pipeline for predicting significant price movements in **Crude Oil (CL) futures** using **5-minute OHLCV bar data** going back to ~2009. The goal is to produce **high-precision trading signals** (buy or sell) that can be executed via bracket orders on IBKR (Interactive Brokers).
+
+### What Already Exists
+- A **Long signal model** (EXP-017 "S_Ultimate") — 87% precision, 12% recall, profit factor 7.76, 84% win rate under friction.
+- A **Short signal model** (EXP-020 "S_Ultimate_Short") — 87% precision, 11% recall. Profitable only at high-confidence thresholds (≥0.60), where win rate = 70%, profit factor = 2.39.
+
+### What We Want from This Research
+**Research methods to build and test new *sell-signal* models** (and potentially improved buy-signal models) using techniques, approaches, or data transformations that could boost model performance. The research report will be handed to an **implementation agent** who will:
+
+1. **Build** each researched method inside the CL_Analyst codebase
+2. **Test** with walk-forward validation and friction-aware backtesting
+3. **Tune** hyperparameters, thresholds, and feature sets
+4. **Log** all experiments in the existing experiment log framework
+5. **Save the best model(s) from each distinct method** to the model registry
+
+### Why Save Multiple Models Instead of Just the Best?
+The long-term goal is to **combine all high-performing models into an ensemble** and then:
+- Test how the group performs together
+- Experiment with **weighting schemes** (equal weight, performance-weighted, Bayesian stacking, etc.)
+- Run much longer-horizon experiments into the future
+- Evaluate whether diversity of methods improves robustness across regimes
+
+**Each distinct method that produces a viable model is valuable**, even if it isn't the single best performer in isolation.
+
+---
+
+## 2. Current Architecture Summary
+
+### 2.1 Data Pipeline
+
+| Stage | File | Description |
+|-------|------|-------------|
+| Raw Data | `data/raw/CL.csv` / `cl-5m_bk.csv` | 5-min OHLCV bars, semicolon-separated, ~1M+ rows from 2009–present |
+| Processing | `src/data_processor.py` (1160 lines) | ETL: loads CSV → adds time features → runs AlphaFactory → constructs targets → normalizes → cleans up → saves parquet |
+| Processed Data | `data/processed/CL_set_06.parquet` | Current champion dataset with ~80 features + Triple Barrier targets |
+
+**Data columns after processing**: DateTime index, ~80 AlphaFactory features, time features (sin/cos encoding), target columns, and RAW_ columns preserved for evaluation.
+
+### 2.2 Feature Engineering — AlphaFactory
+
+`src/features/alpha_factory.py` generates **~80 features** across multiple rolling windows (default: 24, 288, 1440 bars = 2hr, 1day, 5day). Features are organized into **clusters**:
+
+| Cluster | Features | Description |
+|---------|----------|-------------|
+| **Volatility** | `VOL_PARK`, `VOL_RS`, `VOL_YZ`, `VOL_ROC`, `VOL_VOLVOL` | Parkinson, Rogers-Satchell, Yang-Zhang estimators; volatility rate-of-change; vol-of-vol |
+| **Liquidity** | `LIQ_AMIHUD`, `LIQ_CORWIN` | Amihud illiquidity ratio, Corwin-Schultz bid-ask spread estimator |
+| **Market Structure** | `STRUC_EFFICIENCY`, `STRUC_HURST_100`, `STRUC_ENTROPY_100` | Price efficiency ratio (PER), Hurst exponent (R/S method), return entropy |
+| **Microstructure** | `STRUC_BODY_RATIO`, `STRUC_WICK_UP_RATIO`, `STRUC_WICK_LOW_RATIO`, `STRUC_COLOR` | Candle body/wick decomposition |
+| **Trend** | `TREND_DONCHIAN_POS`, `TREND_LR_SLOPE`, `TREND_LR_R2` | Donchian channel position, linear regression slope + R² |
+| **Volume Flow** | `VOLFLOW_OBV_SLOPE`, `VOLFLOW_DIVERGENCE`, `VOLFLOW_VWAP_DIST` | OBV slope, price/volume divergence, VWAP distance |
+| **Macro Context** | `MACRO_WIDTH_1M/3M`, `MACRO_POS_1M/3M` | Donchian width and position on hourly resampled data (1-month and 3-month windows) |
+| **Momentum** | `MOM_RSI_14`, `MOM_BB_Width`, `MOM_BB_PctB`, `MOM_ADX_14`, `MOM_DMP_14`, `MOM_DMN_14`, `MOM_MACD`, `MOM_MACD_Signal`, `MOM_MACD_Hist` | RSI, Bollinger Bands, ADX/DI, MACD via pandas_ta |
+
+**Normalization** (in `data_processor.py`):
+- OHLC prices → log returns (then dropped; used only for regime features)
+- Moving averages → percent distance from Close
+- Volume → `log1p(Volume)`
+
+### 2.3 Target Construction
+
+The project has iterated through several target types. The current champion uses **Triple Barrier**:
+
+| Target Type | Method | Status |
+|-------------|--------|--------|
+| **Direction (fixed %)** | Label=1 if future price moves >X% over N bars | Explored (set_03, set_04). Low precision. |
+| **Squeeze (fixed %)** | Multiclass (Hold/Long/Short) with symmetric thresholds | Explored (set_03). Overwhelmingly predicts Hold. |
+| **Triple Barrier (ATR-dynamic)** | TP = +2×ATR, SL = −1×ATR, max horizon 288 bars (24h). Binary: 1 if TP hit first, 0 otherwise. | **Current champion.** Adapts to volatility regime. |
+| **Return (continuous)** | Raw future returns over N bars | Available in code but not deeply explored. |
+
+**Key insight from experimentation**: The Triple Barrier target with 2:1 reward/risk using ATR-based dynamic barriers dramatically outperformed fixed-percentage targets. The ATR adaptation to volatility regimes was the breakthrough.
+
+### 2.4 Model — LightGBM
+
+`src/LGBMLearner.py` wraps LightGBM with:
+
+- **Objective**: Binary classification with optional **Focal Loss** (custom objective that down-weights easy examples)
+- **Champion hyperparameters** (found via 30-trial Optuna search):
+  - `num_leaves=31`, `max_depth=4`, `learning_rate≈0.052`
+  - `min_child_samples=166`, `n_estimators=1000`
+  - `feature_fraction≈0.69`, `bagging_fraction≈0.65`, `bagging_freq=1`
+  - `reg_alpha≈2.74`, `reg_lambda≈7.38`, `min_gain_to_split≈0.99`
+- **Class balancing**: Downsample majority class during training
+- **Inference**: Sigmoid transform on focal loss logits → probability → threshold at 0.45
+
+### 2.5 Validation Framework
+
+`src/walk_forward.py` implements:
+
+- **Holdout "vault"**: Final 15% of data reserved for production evaluation (never touched during training)
+- **Walk-forward expanding window**:
+  - Minimum training window: 8,640 bars (~30 days)
+  - Fold size: 8,640 bars
+  - Purge gap: 576 bars (48 hours) between train end and test start to prevent label leakage
+- **Vault evaluation**: Train on all gym data → predict on vault → final metrics + friction backtest
+
+### 2.6 Backtesting
+
+`agent/backtester.py` runs event-driven friction-aware backtesting:
+- Commission: $2.50/side
+- Slippage: $0.03/side (direction-aware — fills at worse price)
+- CL contract multiplier: 1,000
+- Bracket order simulation: market entry → limit TP (2×ATR) → stop SL (1×ATR)
+
+### 2.7 Experiment Infrastructure
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| Experiment Runner | `agent/experiment_runner.py` | Orchestrates end-to-end experiment: config → dataset → train → metrics → log |
+| Experiment Log | `agent/experiment_log.json` | Structured JSON log of all 20+ experiments with metrics, configs, verdicts |
+| Strategy Queue | `agent/strategy_queue.json` | Ordered queue of experiment strategies with status tracking |
+| Optuna Search | `agent/optuna_search.py` | Hyperparameter optimization using walk-forward CV |
+| Threshold Sweep | `agent/threshold_sweep.py` / `threshold_sweep_binary.py` | Probability threshold optimization for precision-recall tradeoff |
+| Model Registry | `models/registry/` | Archived model bundles with configs, metrics, and artifacts |
+| Model Archiver | `agent/archive_model.py` | CLI tool to archive models with full metadata |
+
+### 2.8 Test Suite
+- **174 passing tests** across `tests/` directory covering data processing, features, model training, evaluation, walk-forward, backtesting, data management, and live execution.
+
+---
+
+## 3. Current Performance Benchmarks
+
+### Long Model (EXP-017 "S_Ultimate") — The Champion
+
+| Metric | Value |
+|--------|-------|
+| Vault Accuracy | 69.4% |
+| Signal Precision (Buy) | **87.2%** |
+| Signal Recall (Buy) | 12.2% |
+| Signal F1 (Buy) | 0.214 |
+| Friction Profit Factor | **7.76** |
+| Friction Win Rate | **84.4%** |
+| Friction Net PnL | +$1,277,168 |
+
+### Short Model (EXP-020 "S_Ultimate_Short")
+
+| Metric | Value |
+|--------|-------|
+| Vault Accuracy | 69.5% |
+| Signal Precision (Buy→Short) | **86.5%** |
+| Signal Recall | 10.8% |
+| At threshold 0.60: Win Rate | **70.0%** |
+| At threshold 0.60: Profit Factor | **2.39** |
+| At threshold 0.60: Net PnL | +$1,071,745 |
+
+**Key observation**: Both models achieve high precision but very low recall. They are highly selective — they trade rarely but win when they do. The F1-optimal threshold (0.45) produces too many trades and destroys profitability under friction. Profitable thresholds are ≥0.45 for long, ≥0.60 for short.
+
+---
+
+## 4. Research Areas for Deep Investigation
+
+The following areas should be researched for methods, academic papers, industry practices, and concrete approaches that the implementation agent can build and test. Each viable method should produce a **separately saved model** for future ensembling.
+
+### 4.1 Alternative Model Architectures
+- **XGBoost / CatBoost** — How do they compare to LightGBM on this type of imbalanced time-series classification? What parameter spaces to explore?
+- **TabNet / Neural Oblivious Decision Ensembles (NODE)** — Tabular deep learning alternatives
+- **Temporal Fusion Transformer (TFT)** — Attention-based time-series model
+- **LSTM / GRU with attention** — Sequential models that might capture temporal dependencies LightGBM misses
+- **1D-CNN** — Convolutional approach on the time-series windows
+- **Random Forest / Extra Trees** — As diversity candidates for ensemble
+
+### 4.2 Feature Engineering Approaches
+- **Wavelet transforms** on price series — multi-scale decomposition
+- **Fourier features** — cyclical market patterns
+- **Order flow imbalance** proxies from OHLCV (e.g., VPIN-like features)
+- **Cross-asset features** — VIX-like implied vol proxies, yield curve proxies, USD index
+- **Regime detection features** — Hidden Markov Model states, change-point detection
+- **Fractal dimension** features beyond Hurst exponent
+- **Information-theoretic features** — mutual information, transfer entropy between price and volume
+- **Market microstructure** — Kyle's lambda, Roll's spread, additional bid-ask estimators
+- **Temporal aggregation variety** — features at 15-min, 30-min, 1-hour, 4-hour in addition to 5-min
+- **Lag features** — autocorrelation structure, partial autocorrelation features
+- **Feature interaction engineering** — ratio features, difference features between time scales
+
+### 4.3 Target Engineering
+- **Different Triple Barrier parameterizations** — 3:1, 1.5:1, 1:1 reward/risk ratios
+- **Multi-horizon targets** — models for 1h, 4h, 12h, 24h, 48h horizons
+- **Meta-labeling** — train a secondary model to predict *whether the primary signal will be correct*
+- **Continuous targets** — regression on future returns, then threshold post-hoc
+- **Trend-following targets** — label based on sustained directional moves rather than barrier-hitting
+- **Drawdown-based targets** — label based on max adverse excursion
+- **Side-aware targets** — explicit sell/short signals (the current target only has Buy/Hold)
+
+### 4.4 Data Modifications & Augmentation
+- **Synthetic minority oversampling (SMOTE)** on time-series — how to do it without leaking future info
+- **Data augmentation** — jittering, magnitude warping, window slicing
+- **Denoising** — Kalman filter, wavelet denoising, or EMD on price before feature generation
+- **Alternative class balancing** — beyond downsample and weight: undersampling + ensemble (EasyEnsemble, BalancedBagging)
+- **Sample weighting** by recency, volatility regime, or prediction difficulty
+- **Purge-embargo variations** — testing different gap sizes for label leakage prevention
+- **Rolling vs. expanding window** trade-offs
+- **Walk-forward with retraining frequency experiments** — how often to retrain?
+
+### 4.5 Loss Functions & Training Techniques
+- **Focal loss gamma tuning** — what gamma values work best for this imbalance ratio?
+- **Asymmetric loss functions** — penalize false positives (bad trades) more than false negatives (missed trades)
+- **Cost-sensitive learning** — incorporate actual PnL impact into loss
+- **Multi-objective optimization** — Pareto-optimal precision-recall tradeoff
+- **Knowledge distillation** — train a student model from ensemble teacher
+- **Calibration** — Platt scaling, isotonic regression, temperature scaling for better probability estimates
+
+### 4.6 Ensemble Methods to Research for Future Use
+- **Stacking** — using vault predictions from multiple models as meta-features
+- **Bayesian model averaging**
+- **Weighted voting** — performance-weighted, recency-weighted
+- **Diverse model selection** — methods to ensure models contribute orthogonal signals
+- **Signal agreement thresholds** — only trade when N out of M models agree
+- **Regime-conditional ensembling** — different model weights per detected market regime
+
+### 4.7 Evaluation & Robustness
+- **Combinatorial Purged Cross-Validation (CPCV)** — more robust than standard walk-forward
+- **Monte Carlo permutation tests** for statistical significance
+- **Walk-forward vs. blocked time-series split** — which is more appropriate?
+- **Regime-aware evaluation** — how does performance vary across vol regimes, trend/range regimes?
+- **Stability metrics** — how much do predictions change with small data perturbations?
+- **Out-of-sample decay analysis** — how quickly does model edge decay after training cutoff?
+
+---
+
+## 5. Constraints & Guidelines for the Implementation Agent
+
+When the research report is handed off for implementation, the agent should:
+
+1. **Work within the existing codebase** at `c:\Users\bwang\Documents\GitHub\CL_Analyst`
+2. **Use the existing experiment infrastructure**: `experiment_runner.py`, `experiment_log.json`, strategy queue
+3. **Follow the existing workflow**: `/run-experiment` for running experiments, `/commit` for committing changes
+4. **Validate with walk-forward** — no simple train/test split; use `WalkForwardSplitter` with purge/embargo
+5. **Backtest under friction** — every promising model must survive the friction-aware backtest ($2.50 + $0.03 + CL multiplier)
+6. **Archive each viable model** using `agent/archive_model.py` into `models/registry/`
+7. **Log everything** to `agent/experiment_log.json` and `AGENT_LOG.md`
+8. **Run the test suite** (`pytest`) after any code changes — must maintain 174+ passing tests
+9. **Prioritize precision over recall** — a model that trades rarely but wins is more valuable than one that trades often but has low precision
+10. **Python environment**: `conda activate trader`, key dependencies: `lightgbm`, `pandas`, `numpy`, `pandas_ta`, `optuna`, `joblib`, `numba` (optional)
+
+---
+
+## 6. File Reference Map
+
+```
+CL_Analyst/
+├── main.py                          # Entry point: `python main.py process` or `python main.py train`
+├── src/
+│   ├── data_processor.py            # ETL pipeline (1160 lines)
+│   ├── features/
+│   │   └── alpha_factory.py         # Feature engine (~80 features, 422 lines)
+│   ├── LGBMLearner.py               # LightGBM wrapper with focal loss (290 lines)
+│   ├── evaluator.py                 # Metrics and reporting (463 lines)
+│   ├── walk_forward.py              # Walk-forward validation (417 lines)
+│   ├── util.py                      # Utilities (feature column extraction, X/y splitting)
+│   └── live_execution/              # Live trading subsystem (not relevant to model research)
+├── agent/
+│   ├── experiment_runner.py          # Experiment orchestration (343 lines)
+│   ├── experiment_log.json           # All experiment results (812 lines)
+│   ├── strategy_queue.json           # Strategy queue with status tracking
+│   ├── backtester.py                 # Friction-aware backtesting (260 lines)
+│   ├── optuna_search.py              # Hyperparameter optimization (317 lines)
+│   ├── threshold_sweep.py            # Probability threshold sweep
+│   ├── threshold_sweep_binary.py     # Binary (sigmoid-aware) threshold sweep
+│   ├── archive_model.py              # Model registry archival tool
+│   └── oos_regime_test.py            # Out-of-sample regime testing
+├── models/
+│   ├── final_model.pkl               # Current production model
+│   └── registry/
+│       ├── EXP-017_S_Ultimate/       # Archived long model bundle
+│       └── EXP-020_S_Ultimate_Short/ # Archived short model bundle
+├── data/
+│   ├── raw/CL.csv                    # Source OHLCV data
+│   └── processed/CL_set_06.parquet   # Current champion dataset
+├── tests/                            # 174 passing tests
+├── HANDOFF.md                        # Current state handoff document
+├── AGENT_LOG.md                      # Historical progress log
+└── README.md                         # Project documentation
+```
+
+---
+
+## 7. Summary for the Research Agent
+
+**You are researching methods that will be used to build sell-signal models (and potentially improved buy-signal models) for trading Crude Oil futures.** The current pipeline uses LightGBM with 80 hand-crafted features and Triple Barrier targets. The existing models are high-precision / low-recall.
+
+**Your research report should include**:
+1. **Concrete, actionable methods** — not vague suggestions. Each method should have enough detail that an implementation agent can build it.
+2. **Academic references** where applicable — papers, known techniques, documented approaches.
+3. **Expected impact** — what kind of improvement each method might bring and why.
+4. **Implementation complexity** — rank methods by difficulty so the implementation agent can prioritize.
+5. **Potential pitfalls** — common mistakes, look-ahead bias risks, overfitting traps.
+6. **Specific configurations to try** — parameter ranges, architecture sizes, feature combinations.
+
+**Priority areas**: Feature engineering modifications, alternative indicator combinations, target engineering variations, data augmentation/modification techniques, alternative model architectures, and advanced loss functions. The goal is to produce **a diverse set of viable models** that can later be ensembled.
