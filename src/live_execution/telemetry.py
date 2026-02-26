@@ -49,9 +49,24 @@ CREATE TABLE IF NOT EXISTS trade_ledger (
 );
 """
 
+_CREATE_RAW_FRONT_MONTH_BARS = """
+CREATE TABLE IF NOT EXISTS raw_front_month_bars (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp       TEXT    NOT NULL,
+    open            REAL    NOT NULL,
+    high            REAL    NOT NULL,
+    low             REAL    NOT NULL,
+    close           REAL    NOT NULL,
+    volume          REAL    NOT NULL,
+    contract_month  TEXT    NOT NULL,
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
 _CREATE_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_bars_ts ON market_bars(timestamp);
 CREATE INDEX IF NOT EXISTS idx_ledger_ts ON trade_ledger(timestamp);
+CREATE INDEX IF NOT EXISTS idx_raw_bars_ts ON raw_front_month_bars(timestamp);
 """
 
 
@@ -72,7 +87,10 @@ class TelemetryDB:
         """Create tables and indexes if they don't exist."""
         conn = self._get_conn()
         conn.executescript(
-            _CREATE_MARKET_BARS + _CREATE_TRADE_LEDGER + _CREATE_INDEXES
+            _CREATE_MARKET_BARS
+            + _CREATE_TRADE_LEDGER
+            + _CREATE_RAW_FRONT_MONTH_BARS
+            + _CREATE_INDEXES
         )
         conn.commit()
 
@@ -171,6 +189,44 @@ class TelemetryDB:
         )
         return cur.fetchone()[0]
 
+    def trade_summary(self) -> dict:
+        """Return aggregate trade history summary for startup report.
+
+        Returns a dict with:
+            total_signals: int — all signals logged
+            executed_trades: int — trades with action_taken='EXECUTE'
+            first_signal: str | None — timestamp of earliest signal
+            last_signal: str | None — timestamp of most recent signal
+            total_bars: int — total bars recorded
+        """
+        conn = self._get_conn()
+
+        total_signals = conn.execute(
+            "SELECT COUNT(*) FROM trade_ledger"
+        ).fetchone()[0]
+
+        executed_trades = conn.execute(
+            "SELECT COUNT(*) FROM trade_ledger WHERE action_taken = 'EXECUTE'"
+        ).fetchone()[0]
+
+        row = conn.execute(
+            "SELECT MIN(timestamp), MAX(timestamp) FROM trade_ledger"
+        ).fetchone()
+        first_signal = row[0] if row else None
+        last_signal = row[1] if row else None
+
+        total_bars = conn.execute(
+            "SELECT COUNT(*) FROM market_bars"
+        ).fetchone()[0]
+
+        return {
+            "total_signals": total_signals,
+            "executed_trades": executed_trades,
+            "first_signal": first_signal,
+            "last_signal": last_signal,
+            "total_bars": total_bars,
+        }
+
     # ------------------------------------------------------------------
     # Queries (for dashboarding / analysis)
     # ------------------------------------------------------------------
@@ -191,6 +247,49 @@ class TelemetryDB:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT * FROM market_bars ORDER BY id DESC LIMIT ?", (n,)
+        ).fetchall()
+        conn.row_factory = None
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Raw front-month bars (training ledger)
+    # ------------------------------------------------------------------
+
+    def log_raw_bar(
+        self,
+        timestamp: str | datetime,
+        open_: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+        contract_month: str,
+    ) -> None:
+        """Record a raw front-month 5-minute bar for future training."""
+        ts = timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp)
+        conn = self._get_conn()
+        conn.execute(
+            "INSERT INTO raw_front_month_bars "
+            "(timestamp, open, high, low, close, volume, contract_month) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ts, open_, high, low, close, volume, contract_month),
+        )
+        conn.commit()
+
+    def raw_bar_count(self) -> int:
+        """Return total number of recorded raw front-month bars."""
+        cur = self._get_conn().execute(
+            "SELECT COUNT(*) FROM raw_front_month_bars"
+        )
+        return cur.fetchone()[0]
+
+    def recent_raw_bars(self, n: int = 20) -> list[dict]:
+        """Return the N most recent raw front-month bar entries."""
+        conn = self._get_conn()
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM raw_front_month_bars ORDER BY id DESC LIMIT ?",
+            (n,),
         ).fetchall()
         conn.row_factory = None
         return [dict(r) for r in rows]

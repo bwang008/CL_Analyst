@@ -20,13 +20,19 @@
   - Explicit pacing error detection (IB error code 162 + message checks).
   - Throttle sleep after successful request.
 
-## Next steps for Task 4.2 (live streamer & DB)
-- Use `ib_insync` live tick subscription for CL and aggregate into 5-minute bars.
-- Persist to SQLite or append to parquet with the same `DateTime` + OHLCV schema.
-- Ensure bar aggregation uses exchange time in `America/New_York`, then standardize to UTC (or keep consistent with Task 4.1).
+## Next steps for Task 4.2 (live streamer & DB) — ✅ COMPLETE
+- Live bar subscription implemented via `ib_insync` `reqHistoricalData(keepUpToDate=True)`.
+- Bars persisted to SQLite (`market_bars` + `raw_front_month_bars`) and Parquet warm-start cache.
+- Bar aggregation uses exchange time, standardized to UTC.
 
-## Next steps for Task 4.3 (paper execution engine)
-- Flow: latest bar batch -> `AlphaFactory.add_all_features` -> `util.get_feature_columns` -> `LGBMLearner.load` -> predict.
-- Threshold buy-probabilities to generate signals (see `agent/backtester.py` for logic and default thresholds).
-- Use existing triple-barrier config conventions (TP 2x ATR, SL 1x ATR, 24h horizon) from `src/data_processor.py` and `agent/backtester.py`.
-- Build bracket order with TP/SL prices derived from ATR at entry bar.
+## Next steps for Task 4.3 (paper execution engine) — ✅ COMPLETE
+- Flow: DataManager warm-start → `AlphaFactory.add_all_features` → `LGBMLearner.load` → predict.
+- Threshold buy-probabilities generate signals (default 0.45).
+- Bracket order with TP/SL prices derived from ATR at entry bar.
+
+## Task 4.4 — Smart Backfill & Dual-Ledger — ✅ COMPLETE (2026-02-24)
+- `DataManager` (Three-Tier: seed CSV → Parquet cache → IBKR backfill → live append).
+- Two-Stream architecture: Brain (continuous) for signals, Hands (front-month) for execution.
+- `raw_front_month_bars` table in telemetry for training data.
+- `get_front_month_contract()` resolves current front-month (CLJ6 verified).
+- `timedelta_to_ib_duration()` + `split_duration_into_chunks()` for backfill requests.

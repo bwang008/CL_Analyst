@@ -15,3 +15,9 @@
 *.joblib
 *.png
 reports/checkpoints/
+
+# Runtime artifacts (live execution)
+*.db
+*.db-shm
+*.db-wal
+data/processed/warm_start_cache.parquet
