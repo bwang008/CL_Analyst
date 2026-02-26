@@ -274,6 +274,55 @@ class IBKRConnectionManager:
                 return int(pos.position)
         return 0
 
+    def get_account_summary(self, symbol: str = "CL") -> dict:
+        """
+        Query IBKR for CL-only account summary.
+
+        Returns a dict with:
+            account: str — account ID
+            net_liquidation: float
+            available_funds: float
+            cl_position: int — net CL contracts
+            cl_unrealized_pnl: float — CL unrealized PnL
+            cl_realized_pnl: float — CL realized PnL
+            cl_market_value: float — CL market value
+            cl_avg_cost: float — CL average cost per contract
+        """
+        self.ensure_connected()
+
+        # Account values
+        summary: dict = {
+            "account": "",
+            "net_liquidation": 0.0,
+            "available_funds": 0.0,
+            "cl_position": 0,
+            "cl_unrealized_pnl": 0.0,
+            "cl_realized_pnl": 0.0,
+            "cl_market_value": 0.0,
+            "cl_avg_cost": 0.0,
+        }
+
+        # Account summary tags
+        acct_values = self.ib.accountSummary()
+        for av in acct_values:
+            if av.tag == "NetLiquidation" and av.currency == "USD":
+                summary["net_liquidation"] = float(av.value)
+                summary["account"] = av.account
+            elif av.tag == "AvailableFunds" and av.currency == "USD":
+                summary["available_funds"] = float(av.value)
+
+        # CL-only portfolio items
+        portfolio = self.ib.portfolio()
+        for item in portfolio:
+            if item.contract.symbol == symbol:
+                summary["cl_position"] = int(item.position)
+                summary["cl_unrealized_pnl"] = float(item.unrealizedPNL)
+                summary["cl_realized_pnl"] = float(item.realizedPNL)
+                summary["cl_market_value"] = float(item.marketValue)
+                summary["cl_avg_cost"] = float(item.averageCost)
+
+        return summary
+
     def get_front_month_contract(self) -> tuple[Contract, str]:
         """
         Resolve the current front-month CL futures contract.

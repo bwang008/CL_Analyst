@@ -343,17 +343,20 @@ class LiveTrader:
                     exc,
                 )
 
-            # Step 5: Warm-start via DataManager
+            # Step 5: Print CL-only account summary
+            self._print_account_summary()
+
+            # Step 6: Warm-start via DataManager
             self._warm_start()
 
-            # Step 6: Subscribe to live bars (Brain stream)
+            # Step 7: Subscribe to live bars (Brain stream)
             self._subscribe()
 
-            # Step 7: Subscribe to front-month bars (Hands stream)
+            # Step 8: Subscribe to front-month bars (Hands stream)
             if self._front_month_contract is not None:
                 self._subscribe_front_month()
 
-            # Step 8: Enter event loop
+            # Step 9: Enter event loop
             self._running = True
             self._event_loop()
 
@@ -387,6 +390,61 @@ class LiveTrader:
         self.manager.disconnect()
         self.telemetry.close()
         log.info("Shutdown complete.")
+
+    # ------------------------------------------------------------------
+    # Account summary
+    # ------------------------------------------------------------------
+
+    def _print_account_summary(self) -> None:
+        """Print a CL-only account summary at startup."""
+        w = 60  # box width
+        try:
+            acct = self.manager.get_account_summary()
+            ts = self.telemetry.trade_summary()
+        except Exception:
+            log.warning("Could not retrieve account summary — skipping.")
+            return
+
+        # Position description
+        pos = acct["cl_position"]
+        if pos == 0:
+            pos_str = "FLAT (0 contracts)"
+        elif pos > 0:
+            pos_str = f"LONG ({pos} contract{'s' if abs(pos)!=1 else ''})"
+        else:
+            pos_str = f"SHORT ({pos} contract{'s' if abs(pos)!=1 else ''})"
+
+        # Date range
+        if ts["first_signal"] and ts["last_signal"]:
+            first = ts["first_signal"][:10]  # YYYY-MM-DD
+            last = ts["last_signal"][:10]
+            date_range = f"{first} → {last}"
+        else:
+            date_range = "No signals recorded"
+
+        lines = [
+            "=" * w,
+            "ACCOUNT SUMMARY (CL Only)".center(w),
+            "=" * w,
+            f"  Account:           {acct['account'] or 'N/A'}",
+            f"  Net Liquidation:   ${acct['net_liquidation']:>14,.2f}",
+            f"  Available Funds:   ${acct['available_funds']:>14,.2f}",
+            "-" * w,
+            f"  CL Position:       {pos_str}",
+            f"  CL Market Value:   ${acct['cl_market_value']:>14,.2f}",
+            f"  CL Avg Cost:       ${acct['cl_avg_cost']:>14,.2f}",
+            f"  CL Unrealized PnL: ${acct['cl_unrealized_pnl']:>14,.2f}",
+            f"  CL Realized PnL:   ${acct['cl_realized_pnl']:>14,.2f}",
+            "-" * w,
+            "  Trade History (telemetry):",
+            f"    Total Signals:     {ts['total_signals']}",
+            f"    Executed Trades:   {ts['executed_trades']}",
+            f"    Bars Recorded:     {ts['total_bars']}",
+            f"    Date Range:        {date_range}",
+            "=" * w,
+        ]
+        for line in lines:
+            log.info(line)
 
     # ------------------------------------------------------------------
     # Warm start (replaces old _cold_start)

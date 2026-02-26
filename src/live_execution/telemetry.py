@@ -189,6 +189,44 @@ class TelemetryDB:
         )
         return cur.fetchone()[0]
 
+    def trade_summary(self) -> dict:
+        """Return aggregate trade history summary for startup report.
+
+        Returns a dict with:
+            total_signals: int — all signals logged
+            executed_trades: int — trades with action_taken='EXECUTE'
+            first_signal: str | None — timestamp of earliest signal
+            last_signal: str | None — timestamp of most recent signal
+            total_bars: int — total bars recorded
+        """
+        conn = self._get_conn()
+
+        total_signals = conn.execute(
+            "SELECT COUNT(*) FROM trade_ledger"
+        ).fetchone()[0]
+
+        executed_trades = conn.execute(
+            "SELECT COUNT(*) FROM trade_ledger WHERE action_taken = 'EXECUTE'"
+        ).fetchone()[0]
+
+        row = conn.execute(
+            "SELECT MIN(timestamp), MAX(timestamp) FROM trade_ledger"
+        ).fetchone()
+        first_signal = row[0] if row else None
+        last_signal = row[1] if row else None
+
+        total_bars = conn.execute(
+            "SELECT COUNT(*) FROM market_bars"
+        ).fetchone()[0]
+
+        return {
+            "total_signals": total_signals,
+            "executed_trades": executed_trades,
+            "first_signal": first_signal,
+            "last_signal": last_signal,
+            "total_bars": total_bars,
+        }
+
     # ------------------------------------------------------------------
     # Queries (for dashboarding / analysis)
     # ------------------------------------------------------------------
