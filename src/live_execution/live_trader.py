@@ -261,6 +261,7 @@ class LiveTrader:
         self._front_month_str: Optional[str] = None
         self._running = False
         self._last_bar_time: Optional[pd.Timestamp] = None
+        self._subscriptions_lost = False  # Track connectivity drops
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -282,12 +283,15 @@ class LiveTrader:
             self.manager.connect()
             log.info("Connected to IBKR")
 
-            # Step 2: Qualify continuous contract (Brain stream)
+            # Step 2: Register error handler for reconnection
+            self.manager.ib.errorEvent += self._on_ib_error
+
+            # Step 3: Qualify continuous contract (Brain stream)
             self._contract = build_cl_contract(continuous=True)
             self._contract = self.manager.qualify_contract(self._contract)
             log.info("Qualified CL continuous contract: %s", self._contract)
 
-            # Step 3: Resolve front-month contract (Hands stream)
+            # Step 4: Resolve front-month contract (Hands stream)
             try:
                 self._front_month_contract, self._front_month_str = (
                     self.manager.get_front_month_contract()
@@ -304,17 +308,17 @@ class LiveTrader:
                     exc,
                 )
 
-            # Step 4: Warm-start via DataManager
+            # Step 5: Warm-start via DataManager
             self._warm_start()
 
-            # Step 5: Subscribe to live bars (Brain stream)
+            # Step 6: Subscribe to live bars (Brain stream)
             self._subscribe()
 
-            # Step 6: Subscribe to front-month bars (Hands stream)
+            # Step 7: Subscribe to front-month bars (Hands stream)
             if self._front_month_contract is not None:
                 self._subscribe_front_month()
 
-            # Step 7: Enter event loop
+            # Step 8: Enter event loop
             self._running = True
             self._event_loop()
 
@@ -404,6 +408,89 @@ class LiveTrader:
         self._front_month_bars.updateEvent += self._on_front_month_bar_update
         log.info("Subscribed to front-month live bars")
 
+    # ------------------------------------------------------------------
+    # Reconnection & Gap Backfill
+    # ------------------------------------------------------------------
+
+    def _on_ib_error(self, reqId, errorCode, errorString, contract) -> None:
+        """Handle IBKR error events for reconnection detection."""
+        # Error 10182: keepUpToDate subscriptions lost
+        if errorCode == 10182:
+            log.warning("SUBSCRIPTIONS LOST (Error 10182) — will resubscribe on reconnect")
+            self._subscriptions_lost = True
+
+        # Error 1102: connectivity restored, data maintained
+        # Error 1101: connectivity restored, data lost
+        if errorCode in (1101, 1102) and self._subscriptions_lost:
+            log.info("CONNECTIVITY RESTORED (Error %d) — resubscribing...", errorCode)
+            self._resubscribe_and_backfill()
+
+    def _resubscribe_and_backfill(self) -> None:
+        """Re-subscribe to live bars after connectivity drop and backfill gaps."""
+        try:
+            # 1. Backfill any missed bars during the gap
+            if self._last_bar_time is not None:
+                now_utc = pd.Timestamp.utcnow()
+                gap = now_utc - self._last_bar_time
+                gap_minutes = gap.total_seconds() / 60
+
+                if gap_minutes > 5:  # At least one bar could have been missed
+                    log.info(
+                        "Backfilling gap: %s → %s (%.1f minutes)",
+                        self._last_bar_time, now_utc, gap_minutes,
+                    )
+                    try:
+                        gap_days = max(int(gap.total_seconds() / 86400) + 1, 1)
+                        duration_str = f"{gap_days} D"
+                        bars = self.manager.fetch_historical_bars_by_duration(
+                            duration_str=duration_str,
+                            contract=self._contract,
+                        )
+                        if bars is not None and len(bars) > 0:
+                            # Filter to only bars newer than _last_bar_time
+                            new_bars = bars[bars.index > self._last_bar_time]
+                            if len(new_bars) > 0:
+                                self.rolling_df = pd.concat(
+                                    [self.rolling_df, new_bars]
+                                ).drop_duplicates(subset=["DateTime"], keep="last")
+                                self.rolling_df = self.rolling_df.sort_index()
+                                if len(self.rolling_df) > _MAX_ROLLING_BARS:
+                                    self.rolling_df = self.rolling_df.iloc[
+                                        -_MAX_ROLLING_BARS:
+                                    ]
+                                self._last_bar_time = self.rolling_df.index[-1]
+                                # Append to warm-start cache too
+                                self.data_manager.append_bar(new_bars)
+                                log.info(
+                                    "Backfilled %d bars, latest=%s",
+                                    len(new_bars), self._last_bar_time,
+                                )
+                    except Exception:
+                        log.exception("Gap backfill failed — continuing without")
+
+            # 2. Cancel stale subscriptions
+            if self._live_bars is not None:
+                try:
+                    self.manager.cancel_subscription(self._live_bars)
+                except Exception:
+                    pass
+            if self._front_month_bars is not None:
+                try:
+                    self.manager.cancel_subscription(self._front_month_bars)
+                except Exception:
+                    pass
+
+            # 3. Re-subscribe
+            self._subscribe()
+            if self._front_month_contract is not None:
+                self._subscribe_front_month()
+
+            self._subscriptions_lost = False
+            log.info("Reconnection complete — live bars flowing again")
+
+        except Exception:
+            log.exception("Resubscription failed — will retry on next reconnect")
+
     def _on_front_month_bar_update(self, bars, has_new_bar) -> None:
         """Callback for front-month bars — log raw data to telemetry."""
         if not has_new_bar or not bars:
@@ -411,6 +498,9 @@ class LiveTrader:
 
         new_bar = bars[-1]
         bar_time = pd.Timestamp(new_bar.date)
+        # Normalize tz-aware timestamps to tz-naive UTC
+        if bar_time.tzinfo is not None:
+            bar_time = bar_time.tz_convert("UTC").tz_localize(None)
 
         self.telemetry.log_raw_bar(
             timestamp=bar_time,
@@ -435,9 +525,13 @@ class LiveTrader:
 
         # Convert the latest bar to a row
         new_bar = bars[-1]
+        # Normalize tz-aware timestamps (IBKR sends US/Eastern) to tz-naive UTC
+        raw_ts = pd.Timestamp(new_bar.date)
+        if raw_ts.tzinfo is not None:
+            raw_ts = raw_ts.tz_convert("UTC").tz_localize(None)
         new_row = pd.DataFrame(
             [{
-                "DateTime": pd.Timestamp(new_bar.date),
+                "DateTime": raw_ts,
                 "Open": new_bar.open,
                 "High": new_bar.high,
                 "Low": new_bar.low,
