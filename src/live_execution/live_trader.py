@@ -72,6 +72,11 @@ _SL_ATR_MULT = 1.0
 # Polling interval in seconds (ib.sleep)
 _POLL_INTERVAL = 5.0
 
+# Reconnection parameters
+_RECONNECT_BASE_DELAY = 5.0      # Initial delay before reconnect attempt (seconds)
+_RECONNECT_MAX_DELAY = 300.0     # Max backoff delay (5 minutes)
+_RECONNECT_MAX_ATTEMPTS = 50     # Max retry attempts (~2+ hours of retries)
+
 # Default paths for DataManager
 _DEFAULT_SEED_PATH = str(_PROJECT_ROOT / "data" / "raw" / "cl-5m_bk.csv")
 _DEFAULT_CACHE_PATH = str(
@@ -734,6 +739,44 @@ class LiveTrader:
             )
 
     # ------------------------------------------------------------------
+    # Reconnection
+    # ------------------------------------------------------------------
+
+    def _reconnect(self) -> bool:
+        """Reconnect to IB Gateway with exponential backoff.
+
+        Returns True if reconnection + resubscription succeeded.
+        """
+        delay = _RECONNECT_BASE_DELAY
+        for attempt in range(1, _RECONNECT_MAX_ATTEMPTS + 1):
+            if not self._running:
+                return False
+            log.info(
+                "Reconnect attempt %d/%d (waiting %.0fs)...",
+                attempt, _RECONNECT_MAX_ATTEMPTS, delay,
+            )
+            time.sleep(delay)
+            try:
+                # Ensure clean disconnect state
+                try:
+                    self.manager.ib.disconnect()
+                except Exception:
+                    pass
+                # Reconnect
+                self.manager.connect()
+                # Re-register error handler (lost on disconnect)
+                self.manager.ib.errorEvent += self._on_ib_error
+                # Resubscribe + backfill gaps
+                self._subscriptions_lost = True
+                self._resubscribe_and_backfill()
+                log.info("Reconnected successfully on attempt %d", attempt)
+                return True
+            except Exception as exc:
+                log.warning("Reconnect attempt %d failed: %s", attempt, exc)
+                delay = min(delay * 2, _RECONNECT_MAX_DELAY)
+        return False
+
+    # ------------------------------------------------------------------
     # Event loop
     # ------------------------------------------------------------------
 
@@ -747,6 +790,11 @@ class LiveTrader:
                 self.manager.ib.sleep(_POLL_INTERVAL)
             except KeyboardInterrupt:
                 self._running = False
+            except (ConnectionError, OSError) as exc:
+                log.error("Connection lost: %s — attempting reconnect...", exc)
+                if not self._reconnect():
+                    log.error("Reconnection failed after %d attempts — shutting down.", _RECONNECT_MAX_ATTEMPTS)
+                    self._running = False
             except Exception:
                 log.exception("Error in event loop iteration")
                 time.sleep(_POLL_INTERVAL)
