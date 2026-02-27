@@ -4,20 +4,23 @@ DataManager — Three-Tier data architecture for Live Execution.
 Tier 1: Immutable Seed  (data/raw/cl-5m_bk.csv — read-only)
 Tier 2: Warm-Start Cache (data/processed/warm_start_cache.parquet — working data)
 Tier 3: Live Append      (in-memory + periodic flush to cache)
+Tier 4: Master Training Ledger (data/processed/cl_continuous_master.parquet)
 
 Startup sequence:
     1. If cache exists → load it
     2. Else → seed from CSV (last 60 days)
-    3. Calculate gap between cache.max(DateTime) and now()
+    3. Detect rollover → if rolled, validate cache → rebuild if stale
     4. Backfill missing bars from IBKR continuous contract
     5. Append, dedup, sort, validate monotonicity
-    6. Return ready-to-use rolling DataFrame
+    6. Update master training ledger with new bars
+    7. Return ready-to-use rolling DataFrame
 
 Author: CL Analyst
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import tempfile
@@ -46,6 +49,12 @@ _DEFAULT_SEED_PATH = str(_PROJECT_ROOT / "data" / "raw" / "cl-5m_bk.csv")
 _DEFAULT_CACHE_PATH = str(
     _PROJECT_ROOT / "data" / "processed" / "warm_start_cache.parquet"
 )
+_DEFAULT_MASTER_LEDGER_PATH = str(
+    _PROJECT_ROOT / "data" / "processed" / "cl_continuous_master.parquet"
+)
+_ROLL_METADATA_PATH = str(
+    _PROJECT_ROOT / "data" / "processed" / ".roll_metadata.json"
+)
 
 # How many days of seed data to load into the initial cache.
 _SEED_LOOKBACK_DAYS = 60
@@ -58,6 +67,12 @@ _FLUSH_INTERVAL_BARS = 12  # every hour (12 × 5 min)
 
 # Max single IBKR request for 5-min bars.
 _MAX_IB_REQUEST_DAYS = 30
+
+# Number of bars to sample when validating cache after rollover.
+_ROLL_VALIDATION_BARS = 50
+
+# Maximum price difference ($) before considering cache stale.
+_ROLL_PRICE_TOLERANCE = 0.01
 
 
 class DataManager:
@@ -76,14 +91,19 @@ class DataManager:
         *,
         seed_path: str = _DEFAULT_SEED_PATH,
         cache_path: str = _DEFAULT_CACHE_PATH,
+        master_ledger_path: str = _DEFAULT_MASTER_LEDGER_PATH,
         ibkr_manager: Optional["IBKRConnectionManager"] = None,
+        front_month_id: Optional[str] = None,
     ) -> None:
         self.seed_path = Path(seed_path)
         self.cache_path = Path(cache_path)
+        self.master_ledger_path = Path(master_ledger_path)
         self.ibkr_manager = ibkr_manager
+        self.front_month_id = front_month_id  # e.g. "CLJ6"
 
         self._df: Optional[pd.DataFrame] = None
         self._bars_since_flush: int = 0
+        self._roll_detected: bool = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -118,7 +138,22 @@ class DataManager:
                 self._df.index.max(),
             )
 
-        # Step 2: Backfill any gap from IBKR
+        # Step 2: Detect rollover and validate cache
+        if self.ibkr_manager is not None and self.front_month_id is not None:
+            self._roll_detected = self._detect_rollover()
+            if self._roll_detected:
+                log.warning(
+                    "CONTRACT ROLLOVER DETECTED — validating cache..."
+                )
+                if self._validate_cache_after_roll():
+                    log.info("Cache prices match IBKR — no rebuild needed.")
+                else:
+                    log.warning(
+                        "Cache prices are STALE after rollover — rebuilding..."
+                    )
+                    self._rebuild_cache()
+
+        # Step 3: Backfill any gap from IBKR
         if self.ibkr_manager is not None:
             self._backfill()
         else:
@@ -126,6 +161,14 @@ class DataManager:
                 "No IBKR manager provided — skipping backfill. "
                 "Cache may have stale data."
             )
+
+        # Step 4: Update master training ledger
+        if self.ibkr_manager is not None:
+            self._update_training_ledger()
+
+        # Step 5: Save rollover metadata
+        if self.front_month_id is not None:
+            self._save_roll_metadata()
 
         return self._df
 
@@ -382,6 +425,355 @@ class DataManager:
             self.save_cache()
         else:
             log.info("Backfill: no new bars stitched (cache was up-to-date).")
+
+    # ------------------------------------------------------------------
+    # Private: Rollover detection & cache validation
+    # ------------------------------------------------------------------
+
+    def _load_roll_metadata(self) -> dict:
+        """Load the last known front-month ID from metadata file."""
+        meta_path = Path(_ROLL_METADATA_PATH)
+        if meta_path.exists():
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError) as exc:
+                log.warning("Could not read roll metadata: %s", exc)
+        return {}
+
+    def _save_roll_metadata(self) -> None:
+        """Save the current front-month ID to metadata file."""
+        meta_path = Path(_ROLL_METADATA_PATH)
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        meta = {
+            "last_front_month": self.front_month_id,
+            "updated_at": datetime.now().isoformat(),
+        }
+        try:
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2)
+            log.info(
+                "Roll metadata saved: front_month=%s", self.front_month_id
+            )
+        except OSError as exc:
+            log.warning("Could not save roll metadata: %s", exc)
+
+    def _detect_rollover(self) -> bool:
+        """
+        Compare current front-month contract with the last known one.
+
+        Returns True if a rollover has occurred since the last run.
+        """
+        meta = self._load_roll_metadata()
+        last_fm = meta.get("last_front_month")
+
+        if last_fm is None:
+            log.info(
+                "No previous front-month recorded — first run. "
+                "Current: %s", self.front_month_id,
+            )
+            return False
+
+        if last_fm == self.front_month_id:
+            log.info(
+                "Front-month unchanged: %s — no rollover.", last_fm,
+            )
+            return False
+
+        log.warning(
+            "ROLLOVER: %s → %s", last_fm, self.front_month_id,
+        )
+        return True
+
+    def _validate_cache_after_roll(self) -> bool:
+        """
+        After a rollover, check if cached prices match IBKR continuous data.
+
+        Fetches the most recent bars from IBKR and compares Close prices
+        with the cache at matching timestamps.
+
+        Returns True if prices match (cache is still valid).
+        """
+        if self._df is None or len(self._df) == 0:
+            log.warning("Cannot validate empty cache.")
+            return False
+
+        from src.live_execution.ibkr_client import (
+            build_cl_contract,
+            ib_bars_to_dataframe,
+        )
+
+        contract = build_cl_contract(continuous=True)
+        contract = self.ibkr_manager.qualify_contract(contract)
+
+        # Request recent bars from IBKR
+        bars = self.ibkr_manager._request_historical_data(
+            contract=contract,
+            duration_str="3 D",
+            bar_size="5 mins",
+            what_to_show="TRADES",
+            use_rth=False,
+            end_datetime="",
+            max_retries=3,
+            backoff_seconds=2.0,
+            throttle_seconds=0.5,
+        )
+        if not bars:
+            log.warning(
+                "No bars returned from IBKR for validation — "
+                "assuming cache is stale."
+            )
+            return False
+
+        ibkr_df = ib_bars_to_dataframe(bars)
+
+        # Find overlapping timestamps
+        overlap = self._df.index.intersection(ibkr_df.index)
+        if len(overlap) == 0:
+            log.warning(
+                "No overlapping timestamps between cache and IBKR — "
+                "assuming cache is stale."
+            )
+            return False
+
+        # Compare up to _ROLL_VALIDATION_BARS of overlapping bars
+        sample = overlap[-_ROLL_VALIDATION_BARS:]
+        cache_close = self._df.loc[sample, "Close"].values
+        ibkr_close = ibkr_df.loc[sample, "Close"].values
+
+        max_diff = abs(cache_close - ibkr_close).max()
+        log.info(
+            "Roll validation: compared %d bars, max price diff = $%.4f "
+            "(tolerance = $%.4f)",
+            len(sample), max_diff, _ROLL_PRICE_TOLERANCE,
+        )
+
+        return max_diff <= _ROLL_PRICE_TOLERANCE
+
+    def _rebuild_cache(self) -> None:
+        """
+        Delete the stale cache and rebuild from seed + full IBKR backfill.
+        """
+        log.warning("REBUILDING cache from seed + IBKR backfill...")
+
+        # Delete stale cache
+        if self.cache_path.exists():
+            self.cache_path.unlink()
+            log.info("Deleted stale cache: %s", self.cache_path)
+
+        # Re-seed from CSV
+        self._df = self._seed_from_csv()
+        self.save_cache()
+
+        # Full backfill will happen in the next step (Step 3 of initialize)
+        log.info(
+            "Cache rebuilt from seed: %d bars, range %s → %s. "
+            "Backfill will follow.",
+            len(self._df),
+            self._df.index.min(),
+            self._df.index.max(),
+        )
+
+    # ------------------------------------------------------------------
+    # Private: Master training ledger
+    # ------------------------------------------------------------------
+
+    def _update_training_ledger(self) -> None:
+        """
+        Maintain a growing master ledger of back-adjusted continuous data.
+
+        - On first run: create from seed CSV + IBKR backfill of full history
+        - On normal startup: append any new bars since the ledger's last timestamp
+        - After rollover: re-fetch the IBKR portion to get back-adjusted prices
+
+        The original seed file is never modified.
+        """
+        from src.live_execution.ibkr_client import (
+            build_cl_contract,
+            ib_bars_to_dataframe,
+        )
+
+        if self.master_ledger_path.exists():
+            ledger = pd.read_parquet(
+                self.master_ledger_path, engine="pyarrow"
+            )
+            if "DateTime" in ledger.columns:
+                ledger["DateTime"] = pd.to_datetime(ledger["DateTime"])
+                ledger = ledger.set_index("DateTime", drop=False)
+                ledger.index.name = "DateTime"
+            ledger = ledger.sort_index()
+            log.info(
+                "Master ledger loaded: %d bars, range %s → %s",
+                len(ledger), ledger.index.min(), ledger.index.max(),
+            )
+        else:
+            # First run: create from seed CSV (full history)
+            log.info("Creating master ledger from seed CSV (full file)...")
+            ledger = self._load_full_seed()
+            log.info(
+                "Seed loaded for ledger: %d bars, range %s → %s",
+                len(ledger), ledger.index.min(), ledger.index.max(),
+            )
+
+        if self._roll_detected:
+            # After rollover: re-fetch the IBKR-sourced portion with
+            # updated back-adjusted prices.
+            log.warning(
+                "Re-fetching IBKR portion of ledger for back-adjustment..."
+            )
+            # Find where the seed data ends (approximately)
+            seed_end = self._get_seed_end_timestamp(ledger)
+            # Keep the seed portion (before IBKR data started)
+            seed_portion = ledger.loc[ledger.index <= seed_end]
+            # Re-fetch everything from seed_end to now from IBKR
+            ibkr_portion = self._fetch_ibkr_range(seed_end)
+            if ibkr_portion is not None and len(ibkr_portion) > 0:
+                ledger = pd.concat([seed_portion, ibkr_portion])
+                ledger = ledger[
+                    ~ledger.index.duplicated(keep="last")
+                ].sort_index()
+                log.info(
+                    "Ledger re-adjusted: %d seed bars + %d IBKR bars = %d total",
+                    len(seed_portion), len(ibkr_portion), len(ledger),
+                )
+        else:
+            # Normal startup: just append new bars
+            ibkr_new = self._fetch_ibkr_range(ledger.index.max())
+            if ibkr_new is not None and len(ibkr_new) > 0:
+                n_before = len(ledger)
+                ledger = pd.concat([ledger, ibkr_new])
+                ledger = ledger[
+                    ~ledger.index.duplicated(keep="last")
+                ].sort_index()
+                n_new = len(ledger) - n_before
+                log.info(
+                    "Ledger appended: %d new bars (total: %d)",
+                    n_new, len(ledger),
+                )
+
+        # Save the ledger
+        self._save_ledger(ledger)
+
+    def _load_full_seed(self) -> pd.DataFrame:
+        """Load the entire seed CSV (not just the last N days)."""
+        if not self.seed_path.exists():
+            raise FileNotFoundError(
+                f"Seed file not found: {self.seed_path}"
+            )
+
+        df = pd.read_csv(
+            self.seed_path,
+            sep=";",
+            header=None,
+            names=["Date", "Time", "Open", "High", "Low", "Close", "Volume"],
+        )
+        df["DateTime"] = pd.to_datetime(
+            df["Date"] + " " + df["Time"],
+            format="%d/%m/%Y %H:%M",
+        )
+        df = df[["DateTime", "Open", "High", "Low", "Close", "Volume"]]
+        df = df.set_index("DateTime", drop=False)
+        df.index.name = "DateTime"
+        return df.sort_index()
+
+    def _get_seed_end_timestamp(self, ledger: pd.DataFrame) -> pd.Timestamp:
+        """
+        Estimate where the original seed data ends in the ledger.
+
+        Uses the max timestamp from the seed CSV as the boundary.
+        """
+        try:
+            seed_df = self._load_full_seed()
+            return seed_df.index.max()
+        except Exception:
+            # Fallback: assume seed ends 2 years ago (IBKR's max range)
+            return pd.Timestamp.now() - timedelta(days=730)
+
+    def _fetch_ibkr_range(
+        self, start_ts: pd.Timestamp
+    ) -> Optional[pd.DataFrame]:
+        """
+        Fetch continuous contract bars from IBKR covering start_ts to now.
+
+        Handles chunking for requests longer than _MAX_IB_REQUEST_DAYS.
+        """
+        from src.live_execution.ibkr_client import (
+            build_cl_contract,
+            ib_bars_to_dataframe,
+        )
+
+        now = pd.Timestamp.now()
+        gap = now - start_ts
+        if gap.total_seconds() < 600:
+            log.info("Ledger gap < 10 minutes — no IBKR fetch needed.")
+            return None
+
+        gap_td = timedelta(seconds=gap.total_seconds())
+        chunks = split_duration_into_chunks(
+            gap_td, max_chunk_days=_MAX_IB_REQUEST_DAYS
+        )
+
+        contract = build_cl_contract(continuous=True)
+        contract = self.ibkr_manager.qualify_contract(contract)
+
+        all_dfs = []
+        for i, duration_str in enumerate(chunks):
+            log.info(
+                "Ledger fetch chunk %d/%d: %s",
+                i + 1, len(chunks), duration_str,
+            )
+            bars = self.ibkr_manager._request_historical_data(
+                contract=contract,
+                duration_str=duration_str,
+                bar_size="5 mins",
+                what_to_show="TRADES",
+                use_rth=False,
+                end_datetime="",
+                max_retries=5,
+                backoff_seconds=2.0,
+                throttle_seconds=0.5,
+            )
+            if bars:
+                all_dfs.append(ib_bars_to_dataframe(bars))
+
+        if not all_dfs:
+            return None
+
+        result = pd.concat(all_dfs)
+        result = result[~result.index.duplicated(keep="last")].sort_index()
+        # Only keep bars after start_ts
+        result = result.loc[result.index > start_ts]
+        return result
+
+    def _save_ledger(self, ledger: pd.DataFrame) -> None:
+        """Persist the master training ledger to Parquet."""
+        self.master_ledger_path.parent.mkdir(parents=True, exist_ok=True)
+
+        save_df = ledger.copy()
+        if save_df.index.name == "DateTime":
+            save_df = save_df.reset_index(drop=True)
+
+        fd, tmp_path = tempfile.mkstemp(
+            suffix=".parquet",
+            dir=str(self.master_ledger_path.parent),
+        )
+        os.close(fd)
+
+        try:
+            save_df.to_parquet(tmp_path, index=False, engine="pyarrow")
+            if self.master_ledger_path.exists():
+                self.master_ledger_path.unlink()
+            Path(tmp_path).rename(self.master_ledger_path)
+            log.info(
+                "Master ledger saved: %d bars → %s",
+                len(ledger), self.master_ledger_path,
+            )
+        except Exception:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
 
     # ------------------------------------------------------------------
     # Private: Dedup & validation
