@@ -784,9 +784,14 @@ class LiveTrader:
             return
 
         # Place real bracket order
+        if self._front_month_contract is None:
+            log.error("Cannot place order: front-month contract not resolved")
+            return
         try:
+            # HOTFIX: Route execution to front-month contract, not continuous,
+            # to prevent IBKR auto-resolution errors.
             trades = self.manager.place_bracket_order(
-                contract=self._contract,
+                contract=self._front_month_contract,
                 action="BUY",
                 quantity=self.quantity,
                 limit_price=current_price,

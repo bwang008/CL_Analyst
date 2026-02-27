@@ -499,6 +499,19 @@ class IBKRConnectionManager:
             parent.orderType = "MKT"
             parent.lmtPrice = 0
 
+        # Configure all orders: GTC + outside-RTH to avoid DAY-order
+        # expiry and ensure triggers work during overnight sessions.
+        for order in bracket:
+            order.outsideRth = True
+            order.tif = "GTC"
+
+        # Stop-loss (bracket[2]): use native exchange trigger via
+        # triggerMethod=1 (double bid/ask) instead of IB-simulated stop.
+        # Simulated stops (PreSubmitted + whyHeld='trigger') can fail to
+        # fire during low-liquidity overnight sessions.
+        sl_order = bracket[2]
+        sl_order.triggerMethod = 1
+
         trades = []
         for order in bracket:
             trade = self.ib.placeOrder(contract, order)
