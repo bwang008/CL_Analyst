@@ -170,3 +170,81 @@ class TestTelemetryDB:
         # Most recent first
         assert bars[0]["close"] == 72.5
 
+    # ------------------------------------------------------------------
+    # Tradebook events (execution lifecycle)
+    # ------------------------------------------------------------------
+
+    def test_log_tradebook_event_and_reader(self, tmp_db):
+        """Tradebook should store normalized event rows and be queryable."""
+        inserted = tmp_db.log_tradebook_event(
+            event_id="evt-1",
+            event_type="EXECUTION_FILL",
+            event_timestamp_utc="2026-02-23T10:05:01.123000",
+            decision_timestamp_utc="2026-02-23T10:05:00.000000",
+            signal_id="sig-1",
+            decision_id="dec-1",
+            order_id=123,
+            broker_execution_id="000abc",
+            symbol="CL",
+            local_symbol="CLH6",
+            contract_month="202603",
+            fill_qty=1.0,
+            last_fill_price=70.52,
+            slippage_estimate=0.02,
+        )
+        assert inserted is True
+        rows = tmp_db.read_tradebook(order_id=123, limit=10)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["signal_id"] == "sig-1"
+        assert row["decision_id"] == "dec-1"
+        assert row["contract_month"] == "202603"
+        assert row["local_symbol"] == "CLH6"
+        assert row["event_type"] == "EXECUTION_FILL"
+
+    def test_tradebook_event_idempotency(self, tmp_db):
+        """Duplicate event_id should be ignored (append-only idempotency)."""
+        first = tmp_db.log_tradebook_event(
+            event_id="evt-dup",
+            event_type="ORDER_STATUS",
+            event_timestamp_utc="2026-02-23T10:05:00.000000",
+            status="Submitted",
+            order_id=77,
+        )
+        second = tmp_db.log_tradebook_event(
+            event_id="evt-dup",
+            event_type="ORDER_STATUS",
+            event_timestamp_utc="2026-02-23T10:05:00.000000",
+            status="Submitted",
+            order_id=77,
+        )
+        assert first is True
+        assert second is False
+        rows = tmp_db.read_tradebook(order_id=77, limit=10)
+        assert len(rows) == 1
+
+    def test_commission_async_rows(self, tmp_db):
+        """Commission can be logged after fill as a separate event."""
+        tmp_db.log_tradebook_event(
+            event_id="evt-fill",
+            event_type="EXECUTION_FILL",
+            event_timestamp_utc="2026-02-23T10:05:01.100000",
+            order_id=88,
+            broker_execution_id="exec-88",
+            fill_qty=0.5,
+            last_fill_price=70.40,
+        )
+        tmp_db.log_tradebook_event(
+            event_id="evt-comm",
+            event_type="COMMISSION",
+            event_timestamp_utc="2026-02-23T10:05:01.900000",
+            order_id=88,
+            broker_execution_id="exec-88",
+            commission=2.34,
+            fees=2.34,
+        )
+        rows = tmp_db.read_tradebook(order_id=88, limit=10)
+        assert len(rows) == 2
+        assert rows[0]["event_type"] == "EXECUTION_FILL"
+        assert rows[1]["event_type"] == "COMMISSION"
+

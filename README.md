@@ -104,6 +104,22 @@ All bars and signals are logged to `data/live_telemetry.db`:
 - **`market_bars`** — smoothed continuous contract bars (used for training)
 - **`raw_front_month_bars`** — raw front-month bars with `contract_month` (for retraining)
 - **`trade_ledger`** — every signal (Hold/Buy), confidence %, action taken, order details
+- **`tradebook_events`** — append-only normalized execution lifecycle events (order submit/status/fills/commissions)
+
+Tradebook normalization notes:
+- `tradebook_events` keeps execution facts and join keys only (`signal_id` / `decision_id`).
+- strategy/model diagnostics remain in `trade_ledger` and are joined when needed.
+- futures identity includes `local_symbol` and `contract_month` for contract-level auditability.
+- `decision_timestamp_utc` is stored so latency to execution can be measured.
+
+Quick reader path:
+```python
+from src.live_execution.telemetry import TelemetryDB
+
+db = TelemetryDB("data/live_telemetry.db")
+rows = db.read_tradebook(limit=1000)  # list[dict], oldest-first
+db.close()
+```
 
 ## Project Structure
 
