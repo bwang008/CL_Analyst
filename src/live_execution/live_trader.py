@@ -21,13 +21,17 @@ Author: CL Analyst
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
+import os
 import re
 import signal
+import socket
 import sys
 import time
-from datetime import datetime
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -297,6 +301,16 @@ class LiveTrader:
         self._running = False
         self._last_bar_time: Optional[pd.Timestamp] = None
         self._subscriptions_lost = False  # Track connectivity drops
+        self._callbacks_registered = False
+        self._last_decision_context_by_order_id: dict[int, dict] = {}
+        self._run_id = (
+            f"live-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}-"
+            f"{uuid.uuid4().hex[:8]}"
+        )
+        self._session_id = uuid.uuid4().hex
+        self._hostname = socket.gethostname()
+        self._process_id = os.getpid()
+        self._environment = "paper" if self.port in (4002, 7497) else "live"
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -320,6 +334,7 @@ class LiveTrader:
 
             # Step 2: Register error handler for reconnection
             self.manager.ib.errorEvent += self._on_ib_error
+            self._register_execution_callbacks()
 
             # Step 3: Qualify continuous contract (Brain stream)
             self._contract = build_cl_contract(continuous=True)
@@ -390,6 +405,231 @@ class LiveTrader:
         self.manager.disconnect()
         self.telemetry.close()
         log.info("Shutdown complete.")
+
+    def _register_execution_callbacks(self) -> None:
+        """Register IBKR execution callbacks once per connection lifecycle."""
+        if self._callbacks_registered:
+            return
+        self.manager.ib.orderStatusEvent += self._on_order_status
+        self.manager.ib.execDetailsEvent += self._on_exec_details
+        self.manager.ib.commissionReportEvent += self._on_commission_report
+        self._callbacks_registered = True
+
+    def _extract_contract_month(self, contract) -> Optional[str]:
+        month = getattr(contract, "lastTradeDateOrContractMonth", None)
+        if not month:
+            return self._front_month_str
+        month_str = str(month)
+        return month_str[:6] if len(month_str) >= 6 else None
+
+    def _build_event_id(
+        self,
+        *,
+        event_type: str,
+        event_ts: str,
+        order_id: Optional[int] = None,
+        exec_id: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> str:
+        raw = "|".join(
+            [
+                event_type,
+                event_ts,
+                str(order_id or ""),
+                str(exec_id or ""),
+                str(status or ""),
+            ]
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+    def _utc_iso_now(self) -> str:
+        return datetime.now(UTC).replace(tzinfo=None).isoformat()
+
+    def _base_tradebook_fields(
+        self,
+        *,
+        decision_ctx: Optional[dict] = None,
+    ) -> dict:
+        ctx = decision_ctx or {}
+        return {
+            "signal_id": ctx.get("signal_id"),
+            "decision_id": ctx.get("decision_id"),
+            "decision_timestamp_utc": ctx.get("decision_timestamp_utc"),
+            "run_id": self._run_id,
+            "session_id": self._session_id,
+            "hostname": self._hostname,
+            "process_id": self._process_id,
+            "environment": self._environment,
+        }
+
+    def _on_order_status(self, trade) -> None:
+        """Log order status transitions as append-only tradebook events."""
+        try:
+            order = getattr(trade, "order", None)
+            status = getattr(trade, "orderStatus", None)
+            contract = getattr(trade, "contract", None)
+            if order is None or status is None:
+                return
+            order_id = getattr(order, "orderId", None)
+            ctx = self._last_decision_context_by_order_id.get(order_id)
+            event_ts = self._utc_iso_now()
+            event_id = self._build_event_id(
+                event_type="ORDER_STATUS",
+                event_ts=event_ts,
+                order_id=order_id,
+                status=getattr(status, "status", None),
+            )
+            self.telemetry.log_tradebook_event(
+                event_id=event_id,
+                event_type="ORDER_STATUS",
+                event_timestamp_utc=event_ts,
+                order_id=order_id,
+                perm_id=getattr(order, "permId", None),
+                parent_order_id=getattr(order, "parentId", None),
+                account=getattr(order, "account", None),
+                symbol=getattr(contract, "symbol", None),
+                local_symbol=getattr(contract, "localSymbol", None),
+                contract_month=self._extract_contract_month(contract),
+                side=getattr(order, "action", None),
+                action=getattr(order, "action", None),
+                order_type=getattr(order, "orderType", None),
+                time_in_force=getattr(order, "tif", None),
+                status=getattr(status, "status", None),
+                order_qty=float(getattr(order, "totalQuantity", 0) or 0),
+                cum_fill_qty=float(getattr(status, "filled", 0) or 0),
+                remaining_qty=float(getattr(status, "remaining", 0) or 0),
+                avg_fill_price=float(getattr(status, "avgFillPrice", 0) or 0),
+                limit_price=float(getattr(order, "lmtPrice", 0) or 0),
+                stop_price=float(getattr(order, "auxPrice", 0) or 0),
+                **self._base_tradebook_fields(decision_ctx=ctx),
+            )
+        except Exception:
+            log.exception("Failed to log ORDER_STATUS tradebook event")
+
+    def _on_exec_details(self, trade, fill) -> None:
+        """Log execution fills; supports partial fills as independent events."""
+        try:
+            order = getattr(trade, "order", None)
+            status = getattr(trade, "orderStatus", None)
+            contract = getattr(trade, "contract", None)
+            execution = getattr(fill, "execution", None)
+            if order is None or execution is None:
+                return
+            order_id = getattr(order, "orderId", None)
+            exec_id = getattr(execution, "execId", None)
+            event_dt = getattr(execution, "time", None)
+            if event_dt is not None:
+                ts_obj = pd.Timestamp(event_dt)
+                if ts_obj.tzinfo is not None:
+                    ts_obj = ts_obj.tz_convert("UTC").tz_localize(None)
+                event_ts = ts_obj.isoformat()
+            else:
+                event_ts = self._utc_iso_now()
+            ctx = self._last_decision_context_by_order_id.get(order_id)
+            expected_price = None if ctx is None else ctx.get("current_price")
+            fill_price = float(getattr(execution, "price", 0) or 0)
+            slippage = None
+            if expected_price is not None and fill_price > 0:
+                slippage = fill_price - float(expected_price)
+            event_id = self._build_event_id(
+                event_type="EXECUTION_FILL",
+                event_ts=event_ts,
+                order_id=order_id,
+                exec_id=exec_id,
+            )
+            self.telemetry.log_tradebook_event(
+                event_id=event_id,
+                event_type="EXECUTION_FILL",
+                event_timestamp_utc=event_ts,
+                order_id=order_id,
+                perm_id=getattr(order, "permId", None),
+                parent_order_id=getattr(order, "parentId", None),
+                broker_execution_id=exec_id,
+                account=getattr(execution, "acctNumber", None)
+                or getattr(order, "account", None),
+                symbol=getattr(contract, "symbol", None),
+                local_symbol=getattr(contract, "localSymbol", None),
+                contract_month=self._extract_contract_month(contract),
+                side=getattr(execution, "side", None)
+                or getattr(order, "action", None),
+                action=getattr(order, "action", None),
+                order_type=getattr(order, "orderType", None),
+                time_in_force=getattr(order, "tif", None),
+                status=getattr(status, "status", None) if status else None,
+                order_qty=float(getattr(order, "totalQuantity", 0) or 0),
+                fill_qty=float(getattr(execution, "shares", 0) or 0),
+                cum_fill_qty=float(getattr(status, "filled", 0) or 0)
+                if status
+                else None,
+                remaining_qty=float(getattr(status, "remaining", 0) or 0)
+                if status
+                else None,
+                avg_fill_price=float(getattr(status, "avgFillPrice", 0) or 0)
+                if status
+                else None,
+                last_fill_price=fill_price,
+                limit_price=float(getattr(order, "lmtPrice", 0) or 0),
+                stop_price=float(getattr(order, "auxPrice", 0) or 0),
+                slippage_estimate=slippage,
+                realized_pnl=float(getattr(execution, "realizedPNL", 0) or 0),
+                **self._base_tradebook_fields(decision_ctx=ctx),
+            )
+        except Exception:
+            log.exception("Failed to log EXECUTION_FILL tradebook event")
+
+    def _on_commission_report(self, trade, fill, report) -> None:
+        """Log commission events that can arrive after fill events."""
+        try:
+            order = getattr(trade, "order", None)
+            contract = getattr(trade, "contract", None)
+            execution = getattr(fill, "execution", None)
+            order_id = getattr(order, "orderId", None) if order is not None else None
+            exec_id = getattr(execution, "execId", None) if execution is not None else None
+            event_ts = self._utc_iso_now()
+            ctx = self._last_decision_context_by_order_id.get(order_id)
+            event_id = self._build_event_id(
+                event_type="COMMISSION",
+                event_ts=event_ts,
+                order_id=order_id,
+                exec_id=exec_id,
+            )
+            self.telemetry.log_tradebook_event(
+                event_id=event_id,
+                event_type="COMMISSION",
+                event_timestamp_utc=event_ts,
+                order_id=order_id,
+                perm_id=getattr(order, "permId", None) if order is not None else None,
+                parent_order_id=getattr(order, "parentId", None)
+                if order is not None
+                else None,
+                broker_execution_id=exec_id,
+                account=getattr(report, "acctNumber", None),
+                symbol=getattr(contract, "symbol", None)
+                if contract is not None
+                else None,
+                local_symbol=getattr(contract, "localSymbol", None)
+                if contract is not None
+                else None,
+                contract_month=self._extract_contract_month(contract)
+                if contract is not None
+                else self._front_month_str,
+                side=getattr(execution, "side", None)
+                if execution is not None
+                else None,
+                action=getattr(order, "action", None) if order is not None else None,
+                order_type=getattr(order, "orderType", None)
+                if order is not None
+                else None,
+                time_in_force=getattr(order, "tif", None)
+                if order is not None
+                else None,
+                commission=float(getattr(report, "commission", 0) or 0),
+                fees=float(getattr(report, "commission", 0) or 0),
+                realized_pnl=float(getattr(report, "realizedPNL", 0) or 0),
+                **self._base_tradebook_fields(decision_ctx=ctx),
+            )
+        except Exception:
+            log.exception("Failed to log COMMISSION tradebook event")
 
     # ------------------------------------------------------------------
     # Account summary
@@ -767,6 +1007,10 @@ class LiveTrader:
             sl_price, _SL_ATR_MULT * atr_value, atr_value,
         )
 
+        decision_timestamp_utc = bar_time.isoformat()
+        signal_id = uuid.uuid4().hex
+        decision_id = uuid.uuid4().hex
+
         # 5. Execute or dry-run
         if self.dry_run:
             log.info("DRY RUN — would place bracket order BUY %d CL", self.quantity)
@@ -780,6 +1024,9 @@ class LiveTrader:
                 tp_price=tp_price,
                 sl_price=sl_price,
                 direction="BUY",
+                signal_id=signal_id,
+                decision_id=decision_id,
+                decision_timestamp_utc=decision_timestamp_utc,
             )
             return
 
@@ -816,7 +1063,51 @@ class LiveTrader:
                 sl_price=sl_price,
                 order_id=order_id,
                 direction="BUY",
+                signal_id=signal_id,
+                decision_id=decision_id,
+                decision_timestamp_utc=decision_timestamp_utc,
             )
+            decision_ctx = {
+                "signal_id": signal_id,
+                "decision_id": decision_id,
+                "decision_timestamp_utc": decision_timestamp_utc,
+                "current_price": current_price,
+            }
+            for trade in trades:
+                order = getattr(trade, "order", None)
+                contract = getattr(trade, "contract", None)
+                if order is None:
+                    continue
+                child_order_id = getattr(order, "orderId", None)
+                if child_order_id is not None:
+                    self._last_decision_context_by_order_id[child_order_id] = decision_ctx
+                event_ts = self._utc_iso_now()
+                event_id = self._build_event_id(
+                    event_type="ORDER_SUBMITTED",
+                    event_ts=event_ts,
+                    order_id=child_order_id,
+                )
+                self.telemetry.log_tradebook_event(
+                    event_id=event_id,
+                    event_type="ORDER_SUBMITTED",
+                    event_timestamp_utc=event_ts,
+                    order_id=child_order_id,
+                    perm_id=getattr(order, "permId", None),
+                    parent_order_id=getattr(order, "parentId", None),
+                    account=getattr(order, "account", None),
+                    symbol=getattr(contract, "symbol", None),
+                    local_symbol=getattr(contract, "localSymbol", None),
+                    contract_month=self._extract_contract_month(contract),
+                    side=getattr(order, "action", None),
+                    action=getattr(order, "action", None),
+                    order_type=getattr(order, "orderType", None),
+                    time_in_force=getattr(order, "tif", None),
+                    status="SUBMITTED",
+                    order_qty=float(getattr(order, "totalQuantity", 0) or 0),
+                    limit_price=float(getattr(order, "lmtPrice", 0) or 0),
+                    stop_price=float(getattr(order, "auxPrice", 0) or 0),
+                    **self._base_tradebook_fields(decision_ctx=decision_ctx),
+                )
         except Exception as exc:
             log.error("Failed to place bracket order: %s", exc)
             self.telemetry.log_signal(
@@ -829,6 +1120,9 @@ class LiveTrader:
                 tp_price=tp_price,
                 sl_price=sl_price,
                 direction="BUY",
+                signal_id=signal_id,
+                decision_id=decision_id,
+                decision_timestamp_utc=decision_timestamp_utc,
             )
 
     # ------------------------------------------------------------------
@@ -859,6 +1153,8 @@ class LiveTrader:
                 self.manager.connect()
                 # Re-register error handler (lost on disconnect)
                 self.manager.ib.errorEvent += self._on_ib_error
+                self._callbacks_registered = False
+                self._register_execution_callbacks()
                 # Resubscribe + backfill gaps
                 self._subscriptions_lost = True
                 self._resubscribe_and_backfill()
