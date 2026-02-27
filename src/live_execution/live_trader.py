@@ -384,7 +384,13 @@ class LiveTrader:
             # Step 5: Print CL-only account summary
             self._print_account_summary()
 
-            # Step 6: Warm-start via DataManager
+            # Step 6: Pass front-month ID to DataManager for rollover detection
+            if self._front_month_contract is not None:
+                self.data_manager.front_month_id = (
+                    self._front_month_contract.localSymbol
+                )
+
+            # Step 7: Warm-start via DataManager
             self._warm_start()
 
             # Step 7: Subscribe to live bars (Brain stream)
