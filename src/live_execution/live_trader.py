@@ -31,7 +31,7 @@ import socket
 import sys
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -71,7 +71,7 @@ _MAX_ROLLING_BARS = 11_000
 
 # Trade parameters
 _DEFAULT_QUANTITY = 1  # 1 CL contract
-_TP_ATR_MULT = 2.0
+_TP_ATR_MULT = 7.0   # Optimized via backtest sweep (was 2.0) — PF 2.99 at t=0.70
 _SL_ATR_MULT = 1.0
 
 # Polling interval in seconds (ib.sleep)
@@ -443,7 +443,7 @@ class LiveTrader:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
     def _utc_iso_now(self) -> str:
-        return datetime.now(UTC).replace(tzinfo=None).isoformat()
+        return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
 
     def _base_tradebook_fields(
         self,
