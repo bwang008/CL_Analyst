@@ -1,0 +1,131 @@
+# Live Trading System — Gap Analysis & Recommendations
+
+Based on deep review of today's trading session, the codebase, and comparison with professional algorithmic trading systems.
+
+---
+
+## 1. The Stop-Loss Tolerance Question
+
+**Today's trade**: Entered long at $65.62, SL at $65.56 (1×ATR = $0.06), TP at $65.73 (2×ATR = $0.11). Stopped out at $64.17. Price later rallied to $66.63.
+
+### Should you widen the stop?
+
+**My recommendation: collect more data first, but recognize the underlying structural issue.**
+
+The stop wasn't the real problem today — the *simulated stop bug* was (now fixed). With a native exchange stop, the fill would have been much closer to $65.56. But even with a correct fill, the trade would still have lost — and the rally back above $66 means a wider stop *could* have saved the trade.
+
+However:
+
+| Consideration | Details |
+|---|---|
+| **Your model was trained with TP=2×ATR, SL=1×ATR** | The triple barrier labels in training assume exactly these ratios. Changing them in live *without retraining* breaks parity between what the model learned and what happens in production. |
+| **Wider stop = larger max loss per trade** | Going from 1×ATR to 1.5×ATR increases max loss by 50%. With CL's $1,000 multiplier, this compounds fast. |
+| **The model's 84% win rate accounts for the current ratio** | Widening stops might save some trades but isn't guaranteed to improve net P&L without re-optimizing the threshold. |
+
+> [!IMPORTANT]
+> **Before adjusting stops**: Run a parameter sweep in the backtester with different SL multipliers (1.0, 1.25, 1.5, 2.0) and retrain the model with matching triple barrier targets. Comparing the friction-adjusted P&L across configurations will give you a data-driven answer.
+
+---
+
+## 2. Gaps vs. Professional Trading Systems
+
+### Gap A: Fire-and-Forget Position Management (Critical)
+
+**Current behavior**: Place bracket order → walk away. The bot does not monitor or manage the position after entry. It has no awareness of whether its bracket orders are still active, partially filled, or cancelled.
+
+**Professional systems**: Actively monitor position state on every bar tick. They implement:
+
+- **Position state tracking** — know if you're long/flat/short and *why*
+- **Order status monitoring** — detect if child orders (TP/SL) are cancelled by the exchange (e.g., DAY order expiry, contract settlement)
+- **Orphan order detection** — if the stop or TP is cancelled but the position remains, immediately re-protect
+
+**Impact today**: After the stop fired at 06:29 UTC and the position went flat, the bot correctly detected flatness (`position=0.0`). But it had no logic to enter a *new* trade after being stopped out. The model generated a BUY signal at 05:05 (prob=0.4503) but it was ignored because the old position was still open. After flat, probabilities stayed below 0.45, so no re-entry occurred — even though CL rallied from $64.17 back to $66.63.
+
+### Gap B: No Re-Entry After Stop-Out
+
+**Current behavior** (line 731–746 in [live_trader.py](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/src/live_execution/live_trader.py)):
+```python
+current_position = self.manager.get_cl_position()
+if current_position != 0:
+    # BUY signal ignored
+```
+
+This is correct for avoiding double-entry, but there's no **cooldown** or **re-entry** logic. After being stopped out, the bot can theoretically re-enter on the very next bar if the probability exceeds threshold. But in practice, the model's probability after a sharp sell-off tends to stay low because the features (momentum, trend, volatility) all turn bearish. The model correctly says "don't buy during a sell-off" — but it never gets bullish enough during the subsequent recovery either.
+
+**Professional systems** often have:
+- **Cooldown periods** after stop-outs (avoid revenge trading)
+- **Re-entry signals** that are distinct from initial entry signals
+- **Scale-in logic** — partial position on initial signal, add on confirmation
+
+### Gap C: Orders Placed on Continuous Contract (Bug)
+
+**Current code** (line 789):
+```python
+trades = self.manager.place_bracket_order(
+    contract=self._contract,  # ← continuous contract!
+    ...
+)
+```
+
+This places the bracket order on the **continuous contract** (`self._contract`) instead of the **front-month contract** (`self._front_month_contract`). The Two-Stream architecture was designed specifically to separate signal generation (continuous) from execution (front-month), but the execution is currently using the wrong stream.
+
+> [!CAUTION]
+> This is a live bug. IBKR accepted the order because it auto-resolves `ContFuture` to the front-month, but this is fragile and could cause issues during contract roll periods.
+
+### Gap D: No Trailing Stop or Active Exit Logic
+
+**Current behavior**: Fixed TP and SL set at entry. No modification during the trade's lifetime.
+
+**Professional systems** use:
+- **Trailing stops** — lock in profit as price moves in your favor
+- **Time-based exits** — close position if neither TP nor SL hit within N bars (matching the 288-bar horizon the model was trained with)
+- **Signal-based exits** — if the model probability drops below a certain level *while holding*, exit early rather than waiting for stop
+- **Volatility-adjusted stop tightening** — as ATR increases mid-trade, tighten the stop to reduce exposure
+
+### Gap E: No Session Awareness
+
+**Current behavior**: The bot trades 24/7 as long as bars flow.
+
+**Professional CL systems** know that:
+- **Overnight sessions** (18:00–09:00 ET) have thinner liquidity and wider spreads
+- **Major inventory reports** (EIA Wednesday 10:30 ET) cause extreme volatility
+- Some firms won't hold positions through inventory or add session filters
+
+---
+
+## 3. Prioritized Recommendations
+
+### Tier 1 — Fix Before Next Live Session
+
+| # | Fix | Effort | File |
+|---|-----|--------|------|
+| 1 | ~~Stop order config (GTC + outsideRth + triggerMethod)~~ | ✅ Done | [ibkr_client.py](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/src/live_execution/ibkr_client.py) |
+| 2 | **Fix continuous→front-month contract in bracket order** | ~5 min | [live_trader.py](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/src/live_execution/live_trader.py) L789 |
+| 3 | **Add position state tracking** — after each bar, verify the bracket orders are still active. If orphaned (position open but no SL/TP), re-protect immediately. | ~2 hours | [live_trader.py](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/src/live_execution/live_trader.py) |
+
+### Tier 2 — Execution Logic Improvements (Research + Implement)
+
+| # | Improvement | Impact | Area |
+|---|-------------|--------|------|
+| 4 | **Time-based exit** — if the position has been held for 288 bars (24h, matching training horizon) without hitting TP or SL, close at market. The model has no predictive power beyond its horizon. | High | Trade execution |
+| 5 | **Trailing stop** — once price moves +1×ATR in your favor, trail the stop to breakeven. This turns a potential loss into a zero. | High | Trade execution |
+| 6 | **Backtest SL parameter sweep** — run the existing backtester with SL multipliers [0.75, 1.0, 1.25, 1.5, 2.0] and compare net P&L. | Medium | Research |
+
+### Tier 3 — Model & Pipeline Improvements (Longer-Term Research)
+
+| # | Improvement | Rationale |
+|---|-------------|-----------|
+| 7 | **Exit model** — train a separate model to predict *when to close an open position* (rather than relying purely on fixed bracket levels). This is the single biggest gap between your system and professional quant firms. | The buy model predicts entries. Nobody predicts exits. Today's scenario (stopped out before rally) is a textbook case for an intelligent exit model. |
+| 8 | **Sell-signal model integration** — your EXP-020 short model exists but isn't used in live. A sell signal while holding long could serve as an early exit trigger. | Immediate value from existing work. |
+| 9 | **Regime filter** — add a macro-level regime detector (trending vs ranging vs high-vol) and only trade in regimes where the model has historically performed well. | Many losing trades cluster in specific regimes. |
+| 10 | **Re-entry logic** — after a stop-out, if the model probability exceeds a *higher* threshold (e.g., 0.55 instead of 0.45), allow re-entry. | Prevents most revenge trades while allowing high-conviction re-entries. |
+
+### Where to Focus
+
+**The biggest bang for your buck is in trade execution logic (Tiers 1–2), not the model itself.** Your model has 87% precision and 84% win rate in backtesting — that's excellent. The gap is between *what the model predicts* and *how the live system acts on it*. Specifically:
+
+1. **The model was trained assuming exact bracket execution** → the live system needs to enforce that contract (time exits, position monitoring, order health checks)
+2. **The model has no exit intelligence** → the bracket is a crude proxy. An exit model or trailing stop would capture much of the value the fixed bracket leaves on the table
+3. **The model ignores context after entry** → professional systems continuously re-evaluate the position. If post-entry features turn strongly bearish, they exit early rather than waiting for the stop
+
+The model and feature engineering are already strong. The live execution pipeline is where the production gap is widest.

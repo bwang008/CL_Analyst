@@ -31,7 +31,7 @@ import socket
 import sys
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -70,9 +70,18 @@ _ALPHA_WINDOWS = [864, 2016, 4032, 10080]  # 3d, 7d, 14d, 35d in 5-min bars
 _MAX_ROLLING_BARS = 11_000
 
 # Trade parameters
-_DEFAULT_QUANTITY = 1  # 1 CL contract
-_TP_ATR_MULT = 2.0
+_DEFAULT_QUANTITY = 1  # 1 CL contract (base lot)
+_TP_ATR_MULT = 7.0   # Optimized via backtest sweep (was 2.0) — PF 2.99 at t=0.70
 _SL_ATR_MULT = 1.0
+
+# Probability-based position sizing tiers (highest first)
+# Maps model probability to lot count for the bracket order.
+_SIZING_TIERS: list[tuple[float, int]] = [
+    (0.80, 3),  # 80%+ confidence → 3 lots
+    (0.70, 2),  # 70%+ confidence → 2 lots
+    (0.60, 2),  # 60%+ confidence → 2 lots
+    (0.50, 1),  # 50%+ confidence → 1 lot
+]
 
 # Polling interval in seconds (ib.sleep)
 _POLL_INTERVAL = 5.0
@@ -304,13 +313,27 @@ class LiveTrader:
         self._callbacks_registered = False
         self._last_decision_context_by_order_id: dict[int, dict] = {}
         self._run_id = (
-            f"live-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}-"
+            f"live-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}-"
             f"{uuid.uuid4().hex[:8]}"
         )
         self._session_id = uuid.uuid4().hex
         self._hostname = socket.gethostname()
         self._process_id = os.getpid()
         self._environment = "paper" if self.port in (4002, 7497) else "live"
+
+    # ------------------------------------------------------------------
+    # Position sizing
+    # ------------------------------------------------------------------
+
+    def _prob_to_lots(self, probability: float) -> int:
+        """Map model probability to lot count using sizing tiers.
+
+        Returns the base quantity for probabilities below all tiers.
+        """
+        for min_prob, lots in _SIZING_TIERS:
+            if probability >= min_prob:
+                return lots
+        return self.quantity  # fallback to base quantity
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -443,7 +466,7 @@ class LiveTrader:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
     def _utc_iso_now(self) -> str:
-        return datetime.now(UTC).replace(tzinfo=None).isoformat()
+        return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
 
     def _base_tradebook_fields(
         self,
@@ -1013,7 +1036,8 @@ class LiveTrader:
 
         # 5. Execute or dry-run
         if self.dry_run:
-            log.info("DRY RUN — would place bracket order BUY %d CL", self.quantity)
+            sized_qty = self._prob_to_lots(probability)
+            log.info("DRY RUN — would place bracket order BUY %d CL (prob=%.2f)", sized_qty, probability)
             self.telemetry.log_signal(
                 timestamp=bar_time,
                 signal="Buy",
@@ -1031,11 +1055,17 @@ class LiveTrader:
             return
 
         # Place real bracket order
+        if self._front_month_contract is None:
+            log.error("Cannot place order: front-month contract not resolved")
+            return
         try:
+            # HOTFIX: Route execution to front-month contract, not continuous,
+            # to prevent IBKR auto-resolution errors.
+            sized_qty = self._prob_to_lots(probability)
             trades = self.manager.place_bracket_order(
-                contract=self._contract,
+                contract=self._front_month_contract,
                 action="BUY",
-                quantity=self.quantity,
+                quantity=sized_qty,
                 limit_price=current_price,
                 tp_price=tp_price,
                 sl_price=sl_price,
@@ -1044,8 +1074,8 @@ class LiveTrader:
             parent_trade = trades[0]
             order_id = parent_trade.order.orderId
             log.info(
-                "ORDER PLACED: orderId=%d  BUY %d CL @ MKT  TP=%.2f  SL=%.2f",
-                order_id, self.quantity, tp_price, sl_price,
+                "ORDER PLACED: orderId=%d  BUY %d CL @ MKT  TP=%.2f  SL=%.2f  (prob=%.2f)",
+                order_id, sized_qty, tp_price, sl_price, probability,
             )
             self.telemetry.log_signal(
                 timestamp=bar_time,
