@@ -52,7 +52,8 @@ def main() -> None:
 
     learner = LGBMLearner()
     learner.load(args.model_path)
-    raw_pred = learner.query(X)
+    # Use raw model prediction to preserve probabilities
+    raw_pred = learner.model.predict(X)
     probs = _to_probability(raw_pred)
 
     out = pd.DataFrame(index=df.index)

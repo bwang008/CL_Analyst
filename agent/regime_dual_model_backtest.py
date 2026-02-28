@@ -83,6 +83,8 @@ def run_regime_backtests(
         RegimeWindow("gfc_aftershock_2009", "2009-01-01", "2009-06-30"),
         RegimeWindow("bull_2017", "2017-01-01", "2017-12-31"),
         RegimeWindow("covid_crash_2020", "2020-02-01", "2020-06-30"),
+        RegimeWindow("russia_ukraine_2022", "2022-02-01", "2022-12-31"),
+        RegimeWindow("calm_market_2019", "2019-01-01", "2019-12-31"),
     ]
 
     rows: list[dict] = []

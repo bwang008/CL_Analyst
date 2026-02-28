@@ -34,6 +34,31 @@ python main.py train
 4. **Backtesting**: `agent/backtester.py`
    - friction-aware PnL, long/short compatible (commission + slippage + CL multiplier)
 
+### Prediction + backtest file conventions
+This is the shared contract so prediction files can be used across backtesters.
+
+**Prediction CSV schema (model output):**
+- Index: `DateTime` (timestamp index)
+- Columns: `prob_Buy` and/or `prob_Sell` (float probabilities in [0,1])
+- Optional: `Predicted` (legacy), but prefer probability columns
+
+**OHLCV parquet schema (backtest input):**
+- Index: `DateTime` (timestamp index)
+- Required columns: `Open`, `High`, `Low`, `Close`, `Volume`
+
+**Alignment rules:**
+- Predictions and OHLCV must share the same `DateTime` index for exact alignment.
+- Do not rely on raw CSV fallback for backtests; use processed parquets that retain OHLCV.
+- Use `data/processed/CL_set_06_shortfix.parquet` for aligned OHLCV backtests.
+
+**Backtester expectations:**
+- `agent/backtest_cl_concurrent.py` and `agent/backtest_cl_advanced.py` assume the schemas above.
+- `agent/backtester.py` and `agent/oos_regime_test.py` can fallback to raw CSV if OHLCV is missing; avoid this by using aligned parquets.
+
+**Dual-model regime tests:**
+- `agent/regime_dual_model_backtest.py` merges `prob_Buy` + `prob_Sell` into a single signal stream.
+- Outputs go to `reports/oos_regimes/` (summary CSV + per-regime predictions).
+
 ### Champion model configuration
 - **Experiment ID**: `EXP-017` (`S_Ultimate`)
 - **Target**: `TARGET_TRIPLE_2x1_24H_LONG`
