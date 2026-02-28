@@ -56,7 +56,7 @@ class DataProcessor:
     
     def __init__(
         self,
-        input_path: str = "data/raw/test100k.csv",
+        input_path: str = None,
         output_path: str = None,
         dataset_version: str = "set_03",
         keep_ohlcv: bool = True,
@@ -65,11 +65,20 @@ class DataProcessor:
         Initialize the DataProcessor.
         
         Args:
-            input_path: Path to the input CSV file (semicolon-separated, no headers)
+            input_path: Path to the input CSV file (semicolon-separated, no headers).
+                        If None, checks CL_DATA_ROOT env var for shared data,
+                        falling back to data/raw/test100k.csv.
             output_path: Path for processed output. If None, auto-generates based on input name.
             dataset_version: Version identifier for the dataset (e.g., 'set_01', 'set_02')
             keep_ohlcv: If True, retain Open/High/Low/Close/Volume/DateTime columns.
         """
+        if input_path is None:
+            _cl_root = os.environ.get("CL_DATA_ROOT", "")
+            input_path = (
+                str(Path(_cl_root) / "cl-5m_bk.csv")
+                if _cl_root
+                else "data/raw/test100k.csv"
+            )
         self.input_path = input_path
         self._dataset_version = dataset_version
         self.keep_ohlcv = keep_ohlcv
@@ -108,6 +117,16 @@ class DataProcessor:
             pd.DataFrame: Loaded data with DateTime index
         """
         print(f"Loading data from {self.input_path}...")
+
+        if not os.path.exists(self.input_path):
+            raise FileNotFoundError(
+                f"Input data file not found: {self.input_path}\n"
+                f"The raw data CSV must exist in one of:\n"
+                f"  1. CL_DATA_ROOT env var location: "
+                f"{os.environ.get('CL_DATA_ROOT', '(not set)')}\n"
+                f"  2. Project-relative path: data/raw/\n"
+                f"Set CL_DATA_ROOT or copy the file to fix this."
+            )
         
         # Try different separators in order of likelihood
         separators = [';', ',', '\t']

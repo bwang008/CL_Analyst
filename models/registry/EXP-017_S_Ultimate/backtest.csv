@@ -1,0 +1,2 @@
+experiment_id,strategy,win_rate,profit_factor,avg_pnl_per_trade_pct,max_drawdown_pct,total_trades,tp_hits,sl_hits
+EXP-017,S_Ultimate,86.8%,14.22,+0.38%,3.95%,6853,5951,902

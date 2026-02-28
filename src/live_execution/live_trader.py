@@ -84,7 +84,13 @@ _RECONNECT_MAX_DELAY = 300.0     # Max backoff delay (5 minutes)
 _RECONNECT_MAX_ATTEMPTS = 50     # Max retry attempts (~2+ hours of retries)
 
 # Default paths for DataManager
-_DEFAULT_SEED_PATH = str(_PROJECT_ROOT / "data" / "raw" / "cl-5m_bk.csv")
+# Shared data root (set CL_DATA_ROOT env var to share raw data across worktrees)
+_CL_DATA_ROOT = os.environ.get("CL_DATA_ROOT", "")
+_DEFAULT_SEED_PATH = (
+    str(Path(_CL_DATA_ROOT) / "cl-5m_bk.csv")
+    if _CL_DATA_ROOT
+    else str(_PROJECT_ROOT / "data" / "raw" / "cl-5m_bk.csv")
+)
 _DEFAULT_CACHE_PATH = str(
     _PROJECT_ROOT / "data" / "processed" / "warm_start_cache.parquet"
 )

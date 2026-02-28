@@ -1,0 +1,193 @@
+{
+  "target": "TARGET_TRIPLE_2x1_24H_SHORT",
+  "data_path": "data/processed/CL_set_06_shortfix.parquet",
+  "balance_mode": "downsample",
+  "n_vault_samples": 143780,
+  "n_actual_positive": 48352,
+  "prob_col_name": "prob_Sell",
+  "best_threshold": 0.45,
+  "best_f1": 0.5801,
+  "wall_time_seconds": 54.3,
+  "results": [
+    {
+      "threshold": 0.05,
+      "precision": 0.3363,
+      "recall": 1.0,
+      "f1": 0.5033,
+      "n_predictions": 143780,
+      "pct_predictions": 1.0,
+      "tp": 48352,
+      "fp": 95428
+    },
+    {
+      "threshold": 0.1,
+      "precision": 0.3363,
+      "recall": 1.0,
+      "f1": 0.5034,
+      "n_predictions": 143768,
+      "pct_predictions": 0.9999,
+      "tp": 48352,
+      "fp": 95416
+    },
+    {
+      "threshold": 0.15,
+      "precision": 0.3365,
+      "recall": 1.0,
+      "f1": 0.5035,
+      "n_predictions": 143693,
+      "pct_predictions": 0.9994,
+      "tp": 48351,
+      "fp": 95342
+    },
+    {
+      "threshold": 0.2,
+      "precision": 0.3371,
+      "recall": 0.9993,
+      "f1": 0.5041,
+      "n_predictions": 143343,
+      "pct_predictions": 0.997,
+      "tp": 48318,
+      "fp": 95025
+    },
+    {
+      "threshold": 0.25,
+      "precision": 0.3397,
+      "recall": 0.9982,
+      "f1": 0.5069,
+      "n_predictions": 142057,
+      "pct_predictions": 0.988,
+      "tp": 48263,
+      "fp": 93794
+    },
+    {
+      "threshold": 0.3,
+      "precision": 0.3465,
+      "recall": 0.9925,
+      "f1": 0.5136,
+      "n_predictions": 138511,
+      "pct_predictions": 0.9634,
+      "tp": 47988,
+      "fp": 90523
+    },
+    {
+      "threshold": 0.35,
+      "precision": 0.3631,
+      "recall": 0.9776,
+      "f1": 0.5296,
+      "n_predictions": 130170,
+      "pct_predictions": 0.9053,
+      "tp": 47270,
+      "fp": 82900
+    },
+    {
+      "threshold": 0.4,
+      "precision": 0.4027,
+      "recall": 0.9226,
+      "f1": 0.5607,
+      "n_predictions": 110774,
+      "pct_predictions": 0.7704,
+      "tp": 44611,
+      "fp": 66163
+    },
+    {
+      "threshold": 0.45,
+      "precision": 0.4653,
+      "recall": 0.77,
+      "f1": 0.5801,
+      "n_predictions": 80019,
+      "pct_predictions": 0.5565,
+      "tp": 37233,
+      "fp": 42786
+    },
+    {
+      "threshold": 0.5,
+      "precision": 0.546,
+      "recall": 0.5425,
+      "f1": 0.5442,
+      "n_predictions": 48039,
+      "pct_predictions": 0.3341,
+      "tp": 26230,
+      "fp": 21809
+    },
+    {
+      "threshold": 0.55,
+      "precision": 0.6284,
+      "recall": 0.2964,
+      "f1": 0.4028,
+      "n_predictions": 22805,
+      "pct_predictions": 0.1586,
+      "tp": 14330,
+      "fp": 8475
+    },
+    {
+      "threshold": 0.6,
+      "precision": 0.7069,
+      "recall": 0.1153,
+      "f1": 0.1983,
+      "n_predictions": 7889,
+      "pct_predictions": 0.0549,
+      "tp": 5577,
+      "fp": 2312
+    },
+    {
+      "threshold": 0.65,
+      "precision": 0.7108,
+      "recall": 0.0375,
+      "f1": 0.0713,
+      "n_predictions": 2552,
+      "pct_predictions": 0.0177,
+      "tp": 1814,
+      "fp": 738
+    },
+    {
+      "threshold": 0.7,
+      "precision": 0.6474,
+      "recall": 0.0129,
+      "f1": 0.0254,
+      "n_predictions": 967,
+      "pct_predictions": 0.0067,
+      "tp": 626,
+      "fp": 341
+    },
+    {
+      "threshold": 0.75,
+      "precision": 0.7842,
+      "recall": 0.0045,
+      "f1": 0.009,
+      "n_predictions": 278,
+      "pct_predictions": 0.0019,
+      "tp": 218,
+      "fp": 60
+    },
+    {
+      "threshold": 0.8,
+      "precision": 0.8491,
+      "recall": 0.0009,
+      "f1": 0.0019,
+      "n_predictions": 53,
+      "pct_predictions": 0.0004,
+      "tp": 45,
+      "fp": 8
+    },
+    {
+      "threshold": 0.85,
+      "precision": 0.8571,
+      "recall": 0.0001,
+      "f1": 0.0002,
+      "n_predictions": 7,
+      "pct_predictions": 0.0,
+      "tp": 6,
+      "fp": 1
+    },
+    {
+      "threshold": 0.9,
+      "precision": 1.0,
+      "recall": 0.0001,
+      "f1": 0.0002,
+      "n_predictions": 5,
+      "pct_predictions": 0.0,
+      "tp": 5,
+      "fp": 0
+    }
+  ]
+}

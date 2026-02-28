@@ -45,7 +45,14 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-_DEFAULT_SEED_PATH = str(_PROJECT_ROOT / "data" / "raw" / "cl-5m_bk.csv")
+
+# Shared data root (set CL_DATA_ROOT env var to share raw data across worktrees)
+_CL_DATA_ROOT = os.environ.get("CL_DATA_ROOT", "")
+_DEFAULT_SEED_PATH = (
+    str(Path(_CL_DATA_ROOT) / "cl-5m_bk.csv")
+    if _CL_DATA_ROOT
+    else str(_PROJECT_ROOT / "data" / "raw" / "cl-5m_bk.csv")
+)
 _DEFAULT_CACHE_PATH = str(
     _PROJECT_ROOT / "data" / "processed" / "warm_start_cache.parquet"
 )
@@ -275,8 +282,14 @@ class DataManager:
             pd.DataFrame with DateTime index and OHLCV columns.
         """
         if not self.seed_path.exists():
+            _alt = _PROJECT_ROOT / "data" / "raw" / "cl-5m_bk.csv"
             raise FileNotFoundError(
-                f"Seed file not found: {self.seed_path}"
+                f"Seed file not found: {self.seed_path}\n"
+                f"The CL seed CSV (cl-5m_bk.csv) must exist in one of:\n"
+                f"  1. CL_DATA_ROOT env var location: "
+                f"{os.environ.get('CL_DATA_ROOT', '(not set)')}\n"
+                f"  2. Project-relative path: {_alt}\n"
+                f"Set CL_DATA_ROOT or copy the file to fix this."
             )
 
         log.info("Reading seed file: %s", self.seed_path)
@@ -657,8 +670,14 @@ class DataManager:
     def _load_full_seed(self) -> pd.DataFrame:
         """Load the entire seed CSV (not just the last N days)."""
         if not self.seed_path.exists():
+            _alt = _PROJECT_ROOT / "data" / "raw" / "cl-5m_bk.csv"
             raise FileNotFoundError(
-                f"Seed file not found: {self.seed_path}"
+                f"Seed file not found: {self.seed_path}\n"
+                f"The CL seed CSV (cl-5m_bk.csv) must exist in one of:\n"
+                f"  1. CL_DATA_ROOT env var location: "
+                f"{os.environ.get('CL_DATA_ROOT', '(not set)')}\n"
+                f"  2. Project-relative path: {_alt}\n"
+                f"Set CL_DATA_ROOT or copy the file to fix this."
             )
 
         df = pd.read_csv(

@@ -1,0 +1,82 @@
+[
+  {
+    "dataset_version": "set_03",
+    "target": "TARGET_DIR_8PCT_LONG",
+    "balance_mode": "weight"
+  },
+  {
+    "dataset_version": "set_03",
+    "target": "TARGET_DIR_8PCT_LONG",
+    "balance_mode": "downsample"
+  },
+  {
+    "dataset_version": "set_03",
+    "target": "TARGET_DIR_8PCT_SHORT",
+    "balance_mode": "weight"
+  },
+  {
+    "dataset_version": "set_03",
+    "target": "TARGET_DIR_8PCT_SHORT",
+    "balance_mode": "downsample"
+  },
+  {
+    "dataset_version": "set_03",
+    "target": "TARGET_DIR_4PCT_LONG",
+    "balance_mode": "weight"
+  },
+  {
+    "dataset_version": "set_03",
+    "target": "TARGET_DIR_4PCT_LONG",
+    "balance_mode": "downsample"
+  },
+  {
+    "dataset_version": "set_03",
+    "target": "TARGET_DIR_4PCT_SHORT",
+    "balance_mode": "weight"
+  },
+  {
+    "dataset_version": "set_03",
+    "target": "TARGET_DIR_4PCT_SHORT",
+    "balance_mode": "downsample"
+  },
+  {
+    "dataset_version": "set_03",
+    "target": "TARGET_SQZ_8PCT_LONG",
+    "balance_mode": "weight"
+  },
+  {
+    "dataset_version": "set_03",
+    "target": "TARGET_SQZ_8PCT_LONG",
+    "balance_mode": "downsample"
+  },
+  {
+    "dataset_version": "set_03",
+    "target": "TARGET_SQZ_8PCT_SHORT",
+    "balance_mode": "weight"
+  },
+  {
+    "dataset_version": "set_03",
+    "target": "TARGET_SQZ_8PCT_SHORT",
+    "balance_mode": "downsample"
+  },
+  {
+    "dataset_version": "set_03",
+    "target": "TARGET_SQZ_4PCT_LONG",
+    "balance_mode": "weight"
+  },
+  {
+    "dataset_version": "set_03",
+    "target": "TARGET_SQZ_4PCT_LONG",
+    "balance_mode": "downsample"
+  },
+  {
+    "dataset_version": "set_03",
+    "target": "TARGET_SQZ_4PCT_SHORT",
+    "balance_mode": "weight"
+  },
+  {
+    "dataset_version": "set_03",
+    "target": "TARGET_SQZ_4PCT_SHORT",
+    "balance_mode": "downsample"
+  }
+]

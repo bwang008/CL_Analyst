@@ -1,0 +1,2 @@
+threshold,tp_mult,sl_mult,trade_count,win_rate,profit_factor,total_pnl,max_drawdown,pnl_to_drawdown_ratio,max_concurrent
+0.6,5.0,0.75,7889.0,0.2916719482824185,2.2611440252742256,962957.7167321236,-67112.5115357138,14.348408287770418,23.0
