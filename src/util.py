@@ -158,7 +158,7 @@ def get_cl_data(data_file='data/raw/test10k.csv'):
 EXCLUDED_PREFIXES = ('RAW_', 'TARGET_', 'META_')
 
 # Explicit column names to exclude from ML features (legacy or non-feature cols)
-EXCLUDED_COLUMNS = {'Target'}
+EXCLUDED_COLUMNS = {'Target', 'Open', 'High', 'Low', 'Close', 'Volume', 'DateTime'}
 
 
 def get_feature_columns(df: pd.DataFrame) -> list:
