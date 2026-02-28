@@ -43,12 +43,56 @@ python agent/regime_dual_model_backtest.py --buy-predictions reports/exp017_long
 - `reports/oos_regimes/<regime>_predictions.csv`
 - Grid results from concurrent backtester: `reports/*_grid_*.csv`
 
+### 5) Advanced backtest (single-model, A/B historical vs live)
+```bash
+python agent/backtest_cl_advanced.py --predictions reports/exp017_long_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --threshold 0.60 --tp-mult 5.0 --sl-mult 0.75
+```
+
+Optional live-session comparison:
+```bash
+python agent/backtest_cl_advanced.py --predictions reports/exp017_long_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --live-data data/processed/warm_start_cache.parquet --threshold 0.60 --tp-mult 5.0 --sl-mult 0.75
+```
+
 ### Backtester file roles
 - `agent/backtester.py`: legacy, single-position event-driven backtest with raw CSV fallback.
 - `agent/backtest_cl_concurrent.py`: unlimited concurrent positions, TP/SL/ATR logic, grid sweeps.
+- `agent/backtest_cl_advanced.py`: single-model FSM backtest with optional live session comparison.
 - `agent/regime_dual_model_backtest.py`: merges buy/sell prediction files and runs regime windows using the concurrent backtester.
 
 ### File format expectations
 - Prediction CSVs: `DateTime` index + `prob_Buy` / `prob_Sell` columns
 - OHLCV parquet: `Open/High/Low/Close/Volume` + `DateTime` index
 - Use `data/processed/CL_set_06_shortfix.parquet` for aligned OHLCV backtests
+
+## Pipeline entrypoint (main.py)
+`main.py` orchestrates data processing and model training/evaluation.
+
+```bash
+# Process raw data into a processed parquet
+python main.py process
+
+# Train + evaluate (walk-forward), writes reports/ + models/
+python main.py train
+```
+
+## Standalone modules (direct CLI)
+
+### Data processing
+```bash
+# Build a processed dataset (set_06 example)
+python -c "from src.data_processor import DataProcessor; p=DataProcessor(input_path='data/raw/cl-5m_bk.csv', dataset_version='set_06'); p.process()"
+```
+
+### Threshold sweep (binary model)
+```bash
+python agent/threshold_sweep_binary.py --target TARGET_TRIPLE_2x1_24H_SHORT --data-path data/processed/CL_set_06_shortfix.parquet --output-predictions reports/short_sniper_predictions.csv
+```
+
+Live-session data source:
+- `data/processed/warm_start_cache.parquet` is maintained by `src/live_execution/data_manager.py`
+- It is updated during live runs (or when the live pipeline initializes and backfills)
+
+### OOS regime test (single-model, long-only baseline)
+```bash
+python agent/oos_regime_test.py --data-path data/processed/CL_set_06_shortfix.parquet --target-name TARGET_TRIPLE_2x1_24H_LONG --threshold 0.60
+```
