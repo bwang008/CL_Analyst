@@ -328,7 +328,7 @@ class TestFullPipeline:
         df = processor.load_data()
         df = processor.add_time_features(df)
         df = processor.normalize_features(df)
-        df = processor.cleanup(df, drop_raw_returns=True, warmup_rows=0)
+        df = processor.cleanup(df, drop_raw_returns=True, warmup_rows=0, keep_ohlcv=False)
 
         for col in ['Open', 'High', 'Low', 'Close']:
             assert col not in df.columns, f"Raw column {col} should be dropped"
