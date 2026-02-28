@@ -102,6 +102,8 @@ class BacktestResult:
     label: str = ""
     max_concurrent: int = 0
     concurrent_histogram: dict[int, int] = field(default_factory=dict)
+    start_dt: pd.Timestamp | None = None
+    end_dt: pd.Timestamp | None = None
 
     @property
     def total_pnl(self) -> float:
@@ -595,6 +597,8 @@ class CLConcurrentPositionBacktester:
             label=label,
             max_concurrent=max_concurrent,
             concurrent_histogram=concurrent_hist,
+            start_dt=ohlcv.index.min() if not ohlcv.empty else None,
+            end_dt=ohlcv.index.max() if not ohlcv.empty else None,
         )
 
 
@@ -624,6 +628,8 @@ def format_report(r: BacktestResult) -> str:
     lines.append(f"  Total Lots:         {total_lots:,}")
     lines.append(f"  Total Commission:   ${total_commission:>14,.2f}")
     lines.append(f"  Total Slippage:     ${total_slippage:>14,.2f}")
+    if r.start_dt is not None and r.end_dt is not None:
+        lines.append(f"  Date Range:         {r.start_dt} → {r.end_dt}")
     lines.append(f"  Win Rate:           {r.win_rate:.1%}")
     lines.append(f"  Profit Factor:      {r.profit_factor:.2f}")
     lines.append(f"  Total Net PnL:      ${r.total_pnl:>14,.2f}")

@@ -42,7 +42,7 @@ _SIZING_TIERS: list[tuple[float, int]] = [
 ]
 
 # Default paths
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _DEFAULT_MODEL_PATH = str(
     _PROJECT_ROOT / "models" / "registry" / "EXP-017_S_Ultimate" / "final_model.pkl"
 )

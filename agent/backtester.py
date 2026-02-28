@@ -19,7 +19,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 def run_backtest(
     predictions_path,
-    data_path="data/processed/CL_set_05.parquet",
+    data_path="data/processed/CL_set_06_shortfix.parquet",
     tp_mult=2.0,
     sl_mult=1.0,
     max_horizon=288,
@@ -51,33 +51,33 @@ def run_backtest(
     
     print(f"Loading price data from {data_path} for simulation...")
     full_df = pd.read_parquet(data_path)
-    
-    # Feature columns for ATR (need 'Close', 'High', 'Low')
-    # If the parquet doesn't have 'High'/'Low', we'll need the raw CSV.
-    # But set_05 should have them if we didn't drop them in cleanup.
-    # Actually cleanup drops raw columns. We need the raw data.
-    
-    raw_path = os.path.join(PROJECT_ROOT, "data", "raw", "CL.csv")
-    from src.data_processor import DataProcessor
-    dp = DataProcessor(input_path=raw_path)
-    try:
-        raw = dp.load_data()
-    except ValueError:
-        fallback_path = os.path.join(PROJECT_ROOT, "data", "raw", "cl-5m_bk.csv")
-        if not os.path.exists(fallback_path):
-            raise
-        print(f"Falling back to raw CSV: {fallback_path}")
-        raw = pd.read_csv(
-            fallback_path,
-            sep=";",
-            header=None,
-            names=["Date", "Time", "Open", "High", "Low", "Close", "Volume"],
-        )
-        raw["DateTime"] = pd.to_datetime(
-            raw["Date"] + " " + raw["Time"],
-            dayfirst=True,
-        )
-        raw = raw.set_index("DateTime").drop(columns=["Date", "Time"])
+
+    required_cols = {"Open", "High", "Low", "Close", "Volume"}
+    if required_cols.issubset(full_df.columns):
+        raw = full_df
+    else:
+        # Legacy fallback to raw CSV if OHLCV not present
+        raw_path = os.path.join(PROJECT_ROOT, "data", "raw", "CL.csv")
+        from src.data_processor import DataProcessor
+        dp = DataProcessor(input_path=raw_path)
+        try:
+            raw = dp.load_data()
+        except (ValueError, FileNotFoundError):
+            fallback_path = os.path.join(PROJECT_ROOT, "data", "raw", "cl-5m_bk.csv")
+            if not os.path.exists(fallback_path):
+                raise
+            print(f"Falling back to raw CSV: {fallback_path}")
+            raw = pd.read_csv(
+                fallback_path,
+                sep=";",
+                header=None,
+                names=["Date", "Time", "Open", "High", "Low", "Close", "Volume"],
+            )
+            raw["DateTime"] = pd.to_datetime(
+                raw["Date"] + " " + raw["Time"],
+                dayfirst=True,
+            )
+            raw = raw.set_index("DateTime").drop(columns=["Date", "Time"])
     
     # Align indices
     common_idx = preds.index.intersection(raw.index)
@@ -128,6 +128,8 @@ def run_backtest(
     n_long = int((signals['side'] == 1).sum())
     n_short = int((signals['side'] == -1).sum())
     print(f"Found {len(signals)} signals out of {len(preds)} bars ({n_long} long, {n_short} short).")
+    if len(common_idx) > 0:
+        print(f"Date Range: {common_idx.min()} → {common_idx.max()}")
     
     trades = []
     
