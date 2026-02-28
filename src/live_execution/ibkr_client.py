@@ -274,6 +274,40 @@ class IBKRConnectionManager:
                 return int(pos.position)
         return 0
 
+    def cancel_open_cl_orders(self, symbol: str = "CL") -> int:
+        """Cancel all open orders for CL to support time-barrier exits."""
+        self.ensure_connected()
+        cancelled = 0
+        for trade in self.ib.openTrades():
+            contract = getattr(trade, "contract", None)
+            order = getattr(trade, "order", None)
+            if contract is None or order is None:
+                continue
+            if getattr(contract, "symbol", None) != symbol:
+                continue
+            try:
+                self.ib.cancelOrder(order)
+                cancelled += 1
+            except Exception as exc:
+                log.warning("Failed to cancel CL order %s: %s", order, exc)
+        return cancelled
+
+    def close_cl_position_market(self, symbol: str = "CL") -> Optional[Trade]:
+        """Close any open CL position using a market order."""
+        self.ensure_connected()
+        for pos in self.ib.positions():
+            if pos.contract.symbol != symbol:
+                continue
+            if int(pos.position) == 0:
+                continue
+            action = "SELL" if pos.position > 0 else "BUY"
+            qty = abs(int(pos.position))
+            order = MarketOrder(action, qty)
+            order.tif = "GTC"
+            order.outsideRth = True
+            return self.ib.placeOrder(pos.contract, order)
+        return None
+
     def get_account_summary(self, symbol: str = "CL") -> dict:
         """
         Query IBKR for CL-only account summary.

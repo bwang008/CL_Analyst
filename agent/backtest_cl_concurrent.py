@@ -89,6 +89,8 @@ class TradeRecord:
     duration_bars: int
     lots: int  # Position size
     net_pnl_dollars: float
+    commission_dollars: float
+    slippage_dollars: float
     concurrent_positions: int  # How many other positions were open at entry
 
 
@@ -503,10 +505,12 @@ class CLConcurrentPositionBacktester:
                     exit_side = "Sell" if pos.side == 1 else "Buy"
                     exit_fill = self._slippage(exit_price, exit_side)
                     pnl_price = pos.side * (exit_fill - pos.entry_fill)
+                    commission_dollars = 2 * self.commission_per_side * pos.lots
+                    slippage_dollars = 2 * self.slippage_per_side * self.contract_multiplier * pos.lots
                     # Scale P&L and commission by lot count
                     net_pnl = (
                         pnl_price * self.contract_multiplier * pos.lots
-                        - 2 * self.commission_per_side * pos.lots
+                        - commission_dollars
                     )
 
                     completed.append(TradeRecord(
@@ -523,6 +527,8 @@ class CLConcurrentPositionBacktester:
                         duration_bars=pos.bars_held,
                         lots=pos.lots,
                         net_pnl_dollars=net_pnl,
+                        commission_dollars=commission_dollars,
+                        slippage_dollars=slippage_dollars,
                         concurrent_positions=0,  # Filled below
                     ))
                 else:
@@ -612,8 +618,12 @@ def format_report(r: BacktestResult) -> str:
         return "\n".join(lines)
 
     total_lots = sum(t.lots for t in r.trades)
+    total_commission = sum(t.commission_dollars for t in r.trades)
+    total_slippage = sum(t.slippage_dollars for t in r.trades)
     lines.append(f"  Total Trades:       {r.trade_count:,}")
     lines.append(f"  Total Lots:         {total_lots:,}")
+    lines.append(f"  Total Commission:   ${total_commission:>14,.2f}")
+    lines.append(f"  Total Slippage:     ${total_slippage:>14,.2f}")
     lines.append(f"  Win Rate:           {r.win_rate:.1%}")
     lines.append(f"  Profit Factor:      {r.profit_factor:.2f}")
     lines.append(f"  Total Net PnL:      ${r.total_pnl:>14,.2f}")

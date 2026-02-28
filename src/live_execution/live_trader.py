@@ -73,6 +73,7 @@ _MAX_ROLLING_BARS = 11_000
 _DEFAULT_QUANTITY = 1  # 1 CL contract (base lot)
 _TP_ATR_MULT = 7.0   # Optimized via backtest sweep (was 2.0) — PF 2.99 at t=0.70
 _SL_ATR_MULT = 1.0
+_MAX_HOLD_BARS = 288  # 24 hours on 5-min bars
 
 # Probability-based position sizing tiers (highest first)
 # Maps model probability to lot count for the bracket order.
@@ -312,6 +313,8 @@ class LiveTrader:
         self._subscriptions_lost = False  # Track connectivity drops
         self._callbacks_registered = False
         self._last_decision_context_by_order_id: dict[int, dict] = {}
+        self._position_entry_bar_time: Optional[pd.Timestamp] = None
+        self._position_bars_held: int = 0
         self._run_id = (
             f"live-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}-"
             f"{uuid.uuid4().hex[:8]}"
@@ -490,6 +493,54 @@ class LiveTrader:
             "process_id": self._process_id,
             "environment": self._environment,
         }
+
+    def _reset_position_state(self) -> None:
+        self._position_entry_bar_time = None
+        self._position_bars_held = 0
+
+    def _check_time_barrier(
+        self,
+        *,
+        bar_time: pd.Timestamp,
+        current_price: float,
+        atr_value: Optional[float],
+    ) -> bool:
+        """Enforce 24-hour (288-bar) exit to match backtests."""
+        current_position = self.manager.get_cl_position()
+        if current_position == 0:
+            self._reset_position_state()
+            return False
+
+        if self._position_entry_bar_time is None:
+            # First bar after detecting a position.
+            self._position_entry_bar_time = bar_time
+            self._position_bars_held = 0
+            return False
+
+        self._position_bars_held += 1
+        if self._position_bars_held <= _MAX_HOLD_BARS:
+            return False
+
+        cancelled = self.manager.cancel_open_cl_orders()
+        trade = self.manager.close_cl_position_market()
+        log.info(
+            "TIME BARRIER EXIT: held_bars=%d, cancelled_orders=%d, position=%d",
+            self._position_bars_held, cancelled, current_position,
+        )
+        self.telemetry.log_signal(
+            timestamp=bar_time,
+            signal="Timeout",
+            confidence_pct=0.0,
+            action_taken="TIME_BARRIER_EXIT",
+            current_price=current_price,
+            atr_value=atr_value,
+            exit_reason="REASON_TIMEOUT",
+            order_id=getattr(getattr(trade, "order", None), "orderId", None)
+            if trade is not None
+            else None,
+        )
+        self._reset_position_state()
+        return True
 
     def _on_order_status(self, trade) -> None:
         """Log order status transitions as append-only tradebook events."""
@@ -978,6 +1029,14 @@ class LiveTrader:
         if "ATR_14" in features.columns:
             atr_value = float(features["ATR_14"].iloc[0])
 
+        # Enforce 24-hour time barrier on any open position
+        if self._check_time_barrier(
+            bar_time=bar_time,
+            current_price=current_price,
+            atr_value=atr_value,
+        ):
+            return
+
         log.info(
             "INFERENCE: prob=%.4f (%.1f%%)  threshold=%.2f  signal=%s",
             probability, confidence_pct,
@@ -1079,6 +1138,8 @@ class LiveTrader:
             )
             parent_trade = trades[0]
             order_id = parent_trade.order.orderId
+            self._position_entry_bar_time = bar_time
+            self._position_bars_held = 0
             log.info(
                 "ORDER PLACED: orderId=%d  BUY %d CL @ MKT  TP=%.2f  SL=%.2f  (prob=%.2f)",
                 order_id, sized_qty, tp_price, sl_price, probability,
