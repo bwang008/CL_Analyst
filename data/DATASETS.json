@@ -1,0 +1,56 @@
+{
+  "description": "Documentation for processed datasets in the CL Analyst ML pipeline",
+  "last_updated": "2026-01-25",
+  "datasets": {
+    "set_01": {
+      "name": "Cyclical Time Feature Set",
+      "summary": "AlphaFactory features with cyclical time (Time_Sin, Time_Cos).",
+      "targets": [
+        "TARGET_DIR_8PCT_MULTI",
+        "TARGET_DIR_8PCT_LONG",
+        "TARGET_DIR_8PCT_SHORT",
+        "TARGET_DIR_4PCT_MULTI",
+        "TARGET_DIR_4PCT_LONG",
+        "TARGET_DIR_4PCT_SHORT",
+        "TARGET_SQUEEZE",
+        "TARGET_SQUEEZE_MULTI",
+        "TARGET_SQUEEZE_LONG",
+        "TARGET_SQUEEZE_SHORT"
+      ]
+    },
+    "set_02": {
+      "name": "Raw Time Feature Set",
+      "summary": "AlphaFactory features with raw time (Hour, Minute).",
+      "targets": [
+        "TARGET_DIR_8PCT_MULTI",
+        "TARGET_DIR_8PCT_LONG",
+        "TARGET_DIR_8PCT_SHORT",
+        "TARGET_DIR_4PCT_MULTI",
+        "TARGET_DIR_4PCT_LONG",
+        "TARGET_DIR_4PCT_SHORT",
+        "TARGET_SQUEEZE",
+        "TARGET_SQUEEZE_MULTI",
+        "TARGET_SQUEEZE_LONG",
+        "TARGET_SQUEEZE_SHORT"
+      ]
+    },
+    "set_03": {
+      "name": "Master Squeeze Targets",
+      "summary": "Master Squeeze Dataset containing both Strict (8%) and Relaxed (4%) targets, with pre-split Binary Long/Short columns for specialist training.",
+      "targets": [
+        "TARGET_DIR_8PCT_MULTI",
+        "TARGET_DIR_8PCT_LONG",
+        "TARGET_DIR_8PCT_SHORT",
+        "TARGET_DIR_4PCT_MULTI",
+        "TARGET_DIR_4PCT_LONG",
+        "TARGET_DIR_4PCT_SHORT",
+        "TARGET_SQZ_8PCT_MULTI",
+        "TARGET_SQZ_8PCT_LONG",
+        "TARGET_SQZ_8PCT_SHORT",
+        "TARGET_SQZ_4PCT_MULTI",
+        "TARGET_SQZ_4PCT_LONG",
+        "TARGET_SQZ_4PCT_SHORT"
+      ]
+    }
+  }
+}

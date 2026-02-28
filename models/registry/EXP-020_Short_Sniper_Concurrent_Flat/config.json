@@ -1,0 +1,19 @@
+{
+  "model_id": "EXP-020",
+  "model_name": "Short Sniper Concurrent Flat",
+  "target": "TARGET_TRIPLE_2x1_24H_SHORT",
+  "signal_side": "short",
+  "signal_col": "prob_Sell",
+  "threshold": 0.6,
+  "tp_atr_mult": 5.0,
+  "sl_atr_mult": 0.75,
+  "position_sizing": false,
+  "data_path": "data/processed/CL_set_06_shortfix.parquet",
+  "predictions_path": "reports/short_sniper_predictions.csv",
+  "friction": {
+    "commission_per_side": 2.5,
+    "slippage_per_side": 0.03,
+    "contract_multiplier": 1000
+  },
+  "created_at": "2026-02-27T20:29:21"
+}

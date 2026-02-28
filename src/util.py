@@ -107,7 +107,7 @@ def get_robot_world_file(basefilename):
     )  		  	   		 	 	 			  		 			     			  	 
 
 
-def get_cl_data(data_file='data/raw/test10k.csv'):
+def get_cl_data(data_file=None):
     """
     Read OHLCV intraday data from CSV file which has no header row.
     Automatically detects separator (semicolon, comma, or tab) and applies appropriate formatting.
@@ -116,8 +116,18 @@ def get_cl_data(data_file='data/raw/test10k.csv'):
       - assign columns: ['Date','Time','Open','High','Low','Close','Volume']
     - Creates proper datetime index for time-based operations
 
+    If data_file is None, checks CL_DATA_ROOT env var for shared data,
+    falling back to data/raw/test10k.csv.
+
     Returns a pandas DataFrame containing the CSV contents with datetime index.
     """
+    if data_file is None:
+        _cl_root = os.environ.get("CL_DATA_ROOT", "")
+        data_file = (
+            os.path.join(_cl_root, "cl-5m_bk.csv")
+            if _cl_root
+            else "data/raw/test10k.csv"
+        )
     # Try different separators in order of likelihood
     separators = [';', ',', '\t']
     

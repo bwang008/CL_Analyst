@@ -1,0 +1,103 @@
+{
+  "experiment_id": "EXP-017",
+  "strategy": "S_Ultimate",
+  "timestamp": "2026-02-22T23:04:39",
+  "target_name": "TARGET_TRIPLE_2x1_24H_LONG",
+  "type": "Long",
+  "dataset_path": "data/processed/CL_set_06.parquet",
+  "training_threshold": 0.02,
+  "optimized_probability_threshold": 0.70,
+  "features_summary": "MACD, ADX, Microstructure, Volatility Regime + all original features",
+  "model_params": {
+    "num_leaves": 31,
+    "min_child_samples": 166,
+    "learning_rate": 0.05242702195760322,
+    "feature_fraction": 0.6940065346564026,
+    "bagging_fraction": 0.6483459770074159,
+    "bagging_freq": 1,
+    "reg_alpha": 2.737488884954343,
+    "reg_lambda": 7.378557513409711,
+    "max_depth": 4,
+    "min_gain_to_split": 0.9901794009928347,
+    "n_estimators": 1000,
+    "objective": "binary",
+    "use_focal": true,
+    "metric": "binary_logloss",
+    "class_weight": null
+  },
+  "model_file": {
+    "archived_name": "final_model.pkl",
+    "source_path": "C:\\Users\\bwang\\Documents\\GitHub\\CL_Analyst\\models\\final_model.pkl",
+    "source_modified_utc": "2026-02-23T09:11:38Z"
+  },
+  "source_experiment_record": {
+    "id": "EXP-017",
+    "timestamp": "2026-02-22T23:04:39",
+    "strategy": "S_Ultimate",
+    "hypothesis": "Combining Triple Barrier 2x1 24h + S2 Features + Optuna Params + Focal Loss produces the best model",
+    "changes": {
+      "target_name": "TARGET_TRIPLE_2x1_24H_LONG",
+      "data_path": "data/processed/CL_set_06.parquet",
+      "method": "walk_forward",
+      "balance_mode": "downsample",
+      "threshold": 0.02,
+      "model_params": {
+        "num_leaves": 31,
+        "min_child_samples": 166,
+        "learning_rate": 0.05242702195760322,
+        "feature_fraction": 0.6940065346564026,
+        "bagging_fraction": 0.6483459770074159,
+        "bagging_freq": 1,
+        "reg_alpha": 2.737488884954343,
+        "reg_lambda": 7.378557513409711,
+        "max_depth": 4,
+        "min_gain_to_split": 0.9901794009928347,
+        "n_estimators": 1000,
+        "objective": "binary",
+        "use_focal": true,
+        "metric": "binary_logloss",
+        "class_weight": null
+      }
+    },
+    "config": {
+      "data_path": "data/processed/CL_set_06.parquet",
+      "target_name": "TARGET_TRIPLE_2x1_24H_LONG",
+      "threshold": 0.02,
+      "horizon": 576,
+      "method": "walk_forward",
+      "balance_mode": "downsample",
+      "model_params": {
+        "num_leaves": 31,
+        "min_child_samples": 166,
+        "learning_rate": 0.05242702195760322,
+        "feature_fraction": 0.6940065346564026,
+        "bagging_fraction": 0.6483459770074159,
+        "bagging_freq": 1,
+        "reg_alpha": 2.737488884954343,
+        "reg_lambda": 7.378557513409711,
+        "max_depth": 4,
+        "min_gain_to_split": 0.9901794009928347,
+        "n_estimators": 1000,
+        "objective": "binary",
+        "use_focal": true,
+        "metric": "binary_logloss",
+        "class_weight": null
+      }
+    },
+    "metrics": {
+      "vault_accuracy": 0.6942850984236912,
+      "signal_precision_buy": 0.8715890850722311,
+      "signal_recall_buy": 0.12174887892376682,
+      "signal_f1_buy": 0.21365335431831595,
+      "signal_precision_sell": 0.0,
+      "signal_recall_sell": 0.0,
+      "signal_f1_sell": 0.0,
+      "hold_precision": 0.6854136853479746,
+      "hold_recall": 0.9907130871597877,
+      "hold_f1": 0.8102588889224542,
+      "n_samples": 143817,
+      "wall_time_seconds": 2170.2673876000335
+    },
+    "verdict": "promising"
+  }
+}

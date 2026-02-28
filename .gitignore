@@ -16,6 +16,14 @@
 *.png
 reports/checkpoints/
 
+# ----- Keep these in git -----
+# Model registry (configs + trained models, ~5 MB total)
+!models/registry/**
+# Project config files
+!experiments.json
+!data/DATASETS.json
+!.cursor/worktrees.json
+
 # Runtime artifacts (live execution)
 *.db
 *.db-shm
