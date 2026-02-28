@@ -96,3 +96,22 @@ Live-session data source:
 ```bash
 python agent/oos_regime_test.py --data-path data/processed/CL_set_06_shortfix.parquet --target-name TARGET_TRIPLE_2x1_24H_LONG --threshold 0.60
 ```
+
+## Live trader (paper trading)
+
+```bash
+# Dry run (no orders, logs signals only)
+python -m src.live_execution.live_trader --dry-run
+
+# Live paper trading (IB Gateway default port 4002)
+python -m src.live_execution.live_trader
+
+# TWS port override
+python -m src.live_execution.live_trader --port 7497
+
+# Custom seed/cache paths
+python -m src.live_execution.live_trader --seed-path data/raw/cl-5m_bk.csv --cache-path data/processed/warm_start_cache.parquet
+```
+
+Live data is maintained by `src/live_execution/data_manager.py` and written to:
+- `data/processed/warm_start_cache.parquet` (rolling cache)

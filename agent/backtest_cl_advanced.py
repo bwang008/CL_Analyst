@@ -90,6 +90,8 @@ class BacktestResult:
 
     trades: list[TradeRecord] = field(default_factory=list)
     label: str = ""
+    start_dt: pd.Timestamp | None = None
+    end_dt: pd.Timestamp | None = None
 
     @property
     def total_pnl(self) -> float:
@@ -521,7 +523,12 @@ class CLAdvancedExecutionBacktester:
             elif self._state == TradeState.COOLDOWN:
                 self._on_cooldown()
 
-        return BacktestResult(trades=self._trades, label=label)
+        return BacktestResult(
+            trades=self._trades,
+            label=label,
+            start_dt=ohlcv.index.min() if not ohlcv.empty else None,
+            end_dt=ohlcv.index.max() if not ohlcv.empty else None,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -544,6 +551,8 @@ def format_report(result: BacktestResult) -> str:
         return "\n".join(lines)
 
     lines.append(f"  Total Trades:     {result.trade_count}")
+    if result.start_dt is not None and result.end_dt is not None:
+        lines.append(f"  Date Range:       {result.start_dt} → {result.end_dt}")
     lines.append(f"  Win Rate:         {result.win_rate:.1%}")
     lines.append(f"  Profit Factor:    {result.profit_factor:.2f}")
     lines.append(f"  Total Net PnL:    ${result.total_pnl:>14,.2f}")
