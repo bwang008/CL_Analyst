@@ -7,13 +7,14 @@ This module implements the live trading loop that:
    - Brain stream: Continuous contract for signal generation
    - Hands stream: Front-month contract for execution + raw data logging
 3. Maintains a rolling window and generates features via AlphaFactory
-4. Runs inference using the S_Ultimate (EXP-017) model
+4. Delegates trade decisions to a pluggable Strategy object
 5. Executes bracket orders on IBKR Paper Trading
 6. Logs all activity to SQLite telemetry (smoothed + raw front-month)
 
 Usage:
     conda run -n trader python -m src.live_execution.live_trader
     conda run -n trader python -m src.live_execution.live_trader --dry-run
+    conda run -n trader python -m src.live_execution.live_trader --strategy BUY70_SIZED_MANATEE
 
 Author: CL Analyst
 """
@@ -40,7 +41,8 @@ import pandas as pd
 
 # Project imports
 from src.features.alpha_factory import AlphaFactory
-from src.LGBMLearner import LGBMLearner
+from src.live_execution.strategy import Strategy, TradeSignal
+from src.live_execution.strategies.buy70_sized_manatee import Buy70SizedManatee
 from src.live_execution.data_manager import DataManager
 from src.live_execution.ibkr_client import (
     IBKRConnectionManager,
@@ -55,12 +57,6 @@ from src.live_execution.telemetry import TelemetryDB
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
-_DEFAULT_MODEL_PATH = str(
-    _PROJECT_ROOT / "models" / "registry" / "EXP-017_S_Ultimate" / "final_model.pkl"
-)
-_DEFAULT_CONFIG_PATH = str(
-    _PROJECT_ROOT / "models" / "registry" / "EXP-017_S_Ultimate" / "config.json"
-)
 _DEFAULT_DB_PATH = str(_PROJECT_ROOT / "data" / "live_telemetry.db")
 
 # AlphaFactory windows used during training (set_05/set_06)
@@ -69,20 +65,15 @@ _ALPHA_WINDOWS = [864, 2016, 4032, 10080]  # 3d, 7d, 14d, 35d in 5-min bars
 # Rolling window size — must be >= largest alpha window + safety margin
 _MAX_ROLLING_BARS = 11_000
 
-# Trade parameters
+# Trade parameters (engine-level safety rails)
 _DEFAULT_QUANTITY = 1  # 1 CL contract (base lot)
-_TP_ATR_MULT = 7.0   # Optimized via backtest sweep (was 2.0) — PF 2.99 at t=0.70
-_SL_ATR_MULT = 1.0
 _MAX_HOLD_BARS = 288  # 24 hours on 5-min bars
 
-# Probability-based position sizing tiers (highest first)
-# Maps model probability to lot count for the bracket order.
-_SIZING_TIERS: list[tuple[float, int]] = [
-    (0.80, 3),  # 80%+ confidence → 3 lots
-    (0.70, 2),  # 70%+ confidence → 2 lots
-    (0.60, 2),  # 60%+ confidence → 2 lots
-    (0.50, 1),  # 50%+ confidence → 1 lot
-]
+# Strategy registry — maps CLI names to strategy classes
+_STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
+    "BUY70_SIZED_MANATEE": Buy70SizedManatee,
+}
+_DEFAULT_STRATEGY = "BUY70_SIZED_MANATEE"
 
 # Polling interval in seconds (ib.sleep)
 _POLL_INTERVAL = 5.0
@@ -240,11 +231,15 @@ def build_live_features(
 
 class LiveTrader:
     """
-    Event-driven live execution engine for the S_Ultimate CL model.
+    Event-driven live execution engine for CL futures.
 
     Architecture:
         IBKR → 5-min bars → rolling DataFrame → AlphaFactory →
-        LGBMLearner inference → bracket order → telemetry logging
+        Strategy.evaluate() → bracket order → telemetry logging
+
+    The engine is strategy-agnostic — all trade decision logic
+    (model inference, threshold, bracket direction, sizing) is
+    delegated to a pluggable Strategy object.
     """
 
     def __init__(
@@ -253,8 +248,7 @@ class LiveTrader:
         host: str = "127.0.0.1",
         port: int = 4002,
         client_id: int = 10,
-        model_path: str = _DEFAULT_MODEL_PATH,
-        config_path: str = _DEFAULT_CONFIG_PATH,
+        strategy: Strategy,
         db_path: str = _DEFAULT_DB_PATH,
         seed_path: str = _DEFAULT_SEED_PATH,
         cache_path: str = _DEFAULT_CACHE_PATH,
@@ -267,20 +261,10 @@ class LiveTrader:
         self.quantity = quantity
         self.dry_run = dry_run
 
-        # Load model
-        log.info("Loading model from %s", model_path)
-        self.learner = LGBMLearner.__new__(LGBMLearner)
-        self.learner.load(model_path)
-        self.feature_names: list[str] = self.learner.feature_names
-        log.info("Model loaded: %d features", len(self.feature_names))
-
-        # Load config for threshold
-        with open(config_path) as f:
-            config = json.load(f)
-        self.probability_threshold: float = config.get(
-            "optimized_probability_threshold", 0.45
-        )
-        log.info("Probability threshold: %.2f", self.probability_threshold)
+        # Strategy (owns model, config, threshold, sizing, bracket math)
+        self.strategy = strategy
+        self.feature_names: list[str] = strategy.feature_names
+        log.info("Strategy: %s  direction=%s", strategy.name, strategy.direction)
 
         # Telemetry
         self.telemetry = TelemetryDB(db_path)
@@ -324,19 +308,7 @@ class LiveTrader:
         self._process_id = os.getpid()
         self._environment = "paper" if self.port in (4002, 7497) else "live"
 
-    # ------------------------------------------------------------------
-    # Position sizing
-    # ------------------------------------------------------------------
-
-    def _prob_to_lots(self, probability: float) -> int:
-        """Map model probability to lot count using sizing tiers.
-
-        Returns the base quantity for probabilities below all tiers.
-        """
-        for min_prob, lots in _SIZING_TIERS:
-            if probability >= min_prob:
-                return lots
-        return self.quantity  # fallback to base quantity
+    # (_prob_to_lots moved to Strategy subclasses)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1000,27 +972,12 @@ class LiveTrader:
     # ------------------------------------------------------------------
 
     def _on_new_bar(self, bar_time: pd.Timestamp) -> None:
-        """Run feature generation, inference, and potentially execute a trade."""
+        """Run feature generation, strategy evaluation, and potentially execute a trade."""
         # 1. Generate features
         features = build_live_features(self.rolling_df, self.feature_names)
         if features is None:
             log.info("Feature generation skipped (insufficient data or NaN)")
             return
-
-        # 2. Run inference
-        #    For binary models with focal loss, predict() returns logits.
-        #    Apply sigmoid to get calibrated probability.
-        raw_pred = self.learner.model.predict(features)
-        raw_val = float(np.asarray(raw_pred).ravel()[0])
-
-        # Determine if output is logit or probability
-        if raw_val < 0 or raw_val > 1:
-            probability = _sigmoid(raw_val)
-        else:
-            probability = raw_val
-
-        confidence_pct = probability * 100.0
-        is_buy_signal = probability >= self.probability_threshold
 
         current_price = float(self.rolling_df["Close"].iloc[-1])
 
@@ -1029,7 +986,7 @@ class LiveTrader:
         if "ATR_14" in features.columns:
             atr_value = float(features["ATR_14"].iloc[0])
 
-        # Enforce 24-hour time barrier on any open position
+        # Enforce 24-hour time barrier on any open position (engine safety rail)
         if self._check_time_barrier(
             bar_time=bar_time,
             current_price=current_price,
@@ -1037,62 +994,50 @@ class LiveTrader:
         ):
             return
 
-        log.info(
-            "INFERENCE: prob=%.4f (%.1f%%)  threshold=%.2f  signal=%s",
-            probability, confidence_pct,
-            self.probability_threshold,
-            "BUY" if is_buy_signal else "HOLD",
+        # 2. Delegate decision to strategy
+        current_position = self.manager.get_cl_position()
+        signal: TradeSignal = self.strategy.evaluate(
+            features=features,
+            current_price=current_price,
+            atr_value=atr_value,
+            current_position=current_position,
         )
 
-        if not is_buy_signal:
-            # Log hold signal
-            self.telemetry.log_signal(
-                timestamp=bar_time,
-                signal="Hold",
-                confidence_pct=confidence_pct,
-                action_taken="HOLD",
-                current_price=current_price,
-                atr_value=atr_value,
-            )
-            return
-
-        # 3. Check position — only enter if flat
-        current_position = self.manager.get_cl_position()
-        if current_position != 0:
-            log.info(
-                "BUY signal ignored: already holding position (%d contracts)",
-                current_position,
-            )
-            self.telemetry.log_signal(
-                timestamp=bar_time,
-                signal="Buy",
-                confidence_pct=confidence_pct,
-                action_taken="SKIP_POSITION",
-                current_price=current_price,
-                atr_value=atr_value,
-            )
-            return
-
-        # 4. Calculate bracket levels
-        if atr_value is None or atr_value <= 0:
-            log.warning("ATR is invalid (%.4f) — cannot calculate bracket levels", atr_value or 0)
-            self.telemetry.log_signal(
-                timestamp=bar_time,
-                signal="Buy",
-                confidence_pct=confidence_pct,
-                action_taken="SKIP_ATR_INVALID",
-                current_price=current_price,
-                atr_value=atr_value,
-            )
-            return
-
-        tp_price = round(current_price + _TP_ATR_MULT * atr_value, 2)
-        sl_price = round(current_price - _SL_ATR_MULT * atr_value, 2)
-
         log.info(
-            "BRACKET: price=%.2f  TP=%.2f (+%.2f)  SL=%.2f (-%.2f)  ATR=%.4f",
-            current_price, tp_price, _TP_ATR_MULT * atr_value,
-            sl_price, _SL_ATR_MULT * atr_value, atr_value,
+            "INFERENCE [%s]: prob=%.4f (%.1f%%)  signal=%s  action=%s%s",
+            self.strategy.name,
+            signal.probability, signal.confidence_pct,
+            signal.signal_label, signal.action,
+            f"  skip={signal.skip_reason}" if signal.skip_reason else "",
+        )
+
+        # 3. Handle HOLD signals
+        if signal.action == "HOLD":
+            action_taken = signal.skip_reason or "HOLD"
+            if signal.skip_reason == "POSITION_OPEN":
+                log.info(
+                    "%s signal ignored: already holding position (%d contracts)",
+                    signal.signal_label, current_position,
+                )
+                action_taken = "SKIP_POSITION"
+            elif signal.skip_reason == "ATR_INVALID":
+                log.warning("ATR is invalid — cannot calculate bracket levels")
+                action_taken = "SKIP_ATR_INVALID"
+            self.telemetry.log_signal(
+                timestamp=bar_time,
+                signal=signal.signal_label,
+                confidence_pct=signal.confidence_pct,
+                action_taken=action_taken,
+                current_price=current_price,
+                atr_value=atr_value,
+            )
+            return
+
+        # 4. Active signal (BUY or SELL) — prepare bracket order
+        log.info(
+            "BRACKET: price=%.2f  TP=%.2f  SL=%.2f  lots=%d  ATR=%.4f",
+            current_price, signal.tp_price, signal.sl_price,
+            signal.lots, atr_value or 0,
         )
 
         decision_timestamp_utc = bar_time.isoformat()
@@ -1101,18 +1046,20 @@ class LiveTrader:
 
         # 5. Execute or dry-run
         if self.dry_run:
-            sized_qty = self._prob_to_lots(probability)
-            log.info("DRY RUN — would place bracket order BUY %d CL (prob=%.2f)", sized_qty, probability)
+            log.info(
+                "DRY RUN — would place bracket order %s %d CL (prob=%.2f)",
+                signal.action, signal.lots, signal.probability,
+            )
             self.telemetry.log_signal(
                 timestamp=bar_time,
-                signal="Buy",
-                confidence_pct=confidence_pct,
+                signal=signal.signal_label,
+                confidence_pct=signal.confidence_pct,
                 action_taken="DRY_RUN",
                 current_price=current_price,
                 atr_value=atr_value,
-                tp_price=tp_price,
-                sl_price=sl_price,
-                direction="BUY",
+                tp_price=signal.tp_price,
+                sl_price=signal.sl_price,
+                direction=signal.action,
                 signal_id=signal_id,
                 decision_id=decision_id,
                 decision_timestamp_utc=decision_timestamp_utc,
@@ -1126,14 +1073,13 @@ class LiveTrader:
         try:
             # HOTFIX: Route execution to front-month contract, not continuous,
             # to prevent IBKR auto-resolution errors.
-            sized_qty = self._prob_to_lots(probability)
             trades = self.manager.place_bracket_order(
                 contract=self._front_month_contract,
-                action="BUY",
-                quantity=sized_qty,
+                action=signal.action,
+                quantity=signal.lots,
                 limit_price=current_price,
-                tp_price=tp_price,
-                sl_price=sl_price,
+                tp_price=signal.tp_price,
+                sl_price=signal.sl_price,
                 use_market=True,
             )
             parent_trade = trades[0]
@@ -1141,20 +1087,21 @@ class LiveTrader:
             self._position_entry_bar_time = bar_time
             self._position_bars_held = 0
             log.info(
-                "ORDER PLACED: orderId=%d  BUY %d CL @ MKT  TP=%.2f  SL=%.2f  (prob=%.2f)",
-                order_id, sized_qty, tp_price, sl_price, probability,
+                "ORDER PLACED: orderId=%d  %s %d CL @ MKT  TP=%.2f  SL=%.2f  (prob=%.2f)",
+                order_id, signal.action, signal.lots,
+                signal.tp_price, signal.sl_price, signal.probability,
             )
             self.telemetry.log_signal(
                 timestamp=bar_time,
-                signal="Buy",
-                confidence_pct=confidence_pct,
+                signal=signal.signal_label,
+                confidence_pct=signal.confidence_pct,
                 action_taken="EXECUTE",
                 current_price=current_price,
                 atr_value=atr_value,
-                tp_price=tp_price,
-                sl_price=sl_price,
+                tp_price=signal.tp_price,
+                sl_price=signal.sl_price,
                 order_id=order_id,
-                direction="BUY",
+                direction=signal.action,
                 signal_id=signal_id,
                 decision_id=decision_id,
                 decision_timestamp_utc=decision_timestamp_utc,
@@ -1204,14 +1151,14 @@ class LiveTrader:
             log.error("Failed to place bracket order: %s", exc)
             self.telemetry.log_signal(
                 timestamp=bar_time,
-                signal="Buy",
-                confidence_pct=confidence_pct,
+                signal=signal.signal_label,
+                confidence_pct=signal.confidence_pct,
                 action_taken=f"ERROR: {exc}",
                 current_price=current_price,
                 atr_value=atr_value,
-                tp_price=tp_price,
-                sl_price=sl_price,
-                direction="BUY",
+                tp_price=signal.tp_price,
+                sl_price=signal.sl_price,
+                direction=signal.action,
                 signal_id=signal_id,
                 decision_id=decision_id,
                 decision_timestamp_utc=decision_timestamp_utc,
@@ -1288,8 +1235,9 @@ class LiveTrader:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    available = ", ".join(sorted(_STRATEGY_REGISTRY.keys()))
     parser = argparse.ArgumentParser(
-        description="CL Analyst — Live Execution Engine (S_Ultimate)"
+        description="CL Analyst — Live Execution Engine"
     )
     parser.add_argument(
         "--host", default="127.0.0.1",
@@ -1304,12 +1252,8 @@ def main() -> None:
         help="IBKR client ID (default: 10)",
     )
     parser.add_argument(
-        "--model-path", default=_DEFAULT_MODEL_PATH,
-        help="Path to the saved model .pkl file",
-    )
-    parser.add_argument(
-        "--config-path", default=_DEFAULT_CONFIG_PATH,
-        help="Path to the model config.json",
+        "--strategy", default=_DEFAULT_STRATEGY,
+        help=f"Strategy to use (available: {available}; default: {_DEFAULT_STRATEGY})",
     )
     parser.add_argument(
         "--db-path", default=_DEFAULT_DB_PATH,
@@ -1334,12 +1278,21 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Resolve strategy
+    strategy_key = args.strategy.upper()
+    if strategy_key not in _STRATEGY_REGISTRY:
+        parser.error(
+            f"Unknown strategy '{args.strategy}'. "
+            f"Available: {available}"
+        )
+    strategy_cls = _STRATEGY_REGISTRY[strategy_key]
+    strategy = strategy_cls(base_quantity=args.quantity)
+
     trader = LiveTrader(
         host=args.host,
         port=args.port,
         client_id=args.client_id,
-        model_path=args.model_path,
-        config_path=args.config_path,
+        strategy=strategy,
         db_path=args.db_path,
         seed_path=args.seed_path,
         cache_path=args.cache_path,
