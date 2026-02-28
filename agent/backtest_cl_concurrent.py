@@ -234,7 +234,7 @@ class CLConcurrentPositionBacktester:
     def __init__(
         self,
         *,
-        tp_atr_mult: float = 2.0,
+        tp_atr_mult: float = 7.0,
         sl_atr_mult: float = 1.0,
         max_horizon: int = 288,
         trailing_atr_mult: float = 1.0,
@@ -290,6 +290,8 @@ class CLConcurrentPositionBacktester:
         ohlcv_df: pd.DataFrame,
         *,
         label: str = "",
+        signal_side: str = "auto",
+        signal_col: Optional[str] = None,
     ) -> BacktestResult:
         """Run the concurrent-positions backtest.
 
@@ -312,18 +314,116 @@ class CLConcurrentPositionBacktester:
         )
         ohlcv["_atr"] = tr.rolling(self.atr_period).mean()
 
-        # Build signal lookup: timestamp → probability
-        signal_probs: dict[pd.Timestamp, float] = {}
-        if "prob_Buy" in signals_df.columns:
-            mask = signals_df["prob_Buy"] >= self.prob_threshold
+        # Build signal lookup: timestamp → (probability, side)
+        signal_data: dict[pd.Timestamp, tuple[float, int]] = {}
+        side_map = {"long": 1, "short": -1, "auto": 0}
+        if signal_side not in side_map:
+            raise ValueError(f"signal_side must be one of {list(side_map)}")
+
+        def _infer_side_from_col(col_name: str) -> Optional[int]:
+            if col_name == "prob_Buy":
+                return 1
+            if col_name == "prob_Sell":
+                return -1
+            return None
+
+        if signal_col:
+            if signal_col not in signals_df.columns:
+                raise ValueError(f"Signal column '{signal_col}' not found in predictions.")
+            inferred = _infer_side_from_col(signal_col)
+            if signal_side == "auto":
+                if inferred is None:
+                    raise ValueError(
+                        "signal_side=auto requires prob_Buy/prob_Sell or explicit --signal-side."
+                    )
+                chosen_side = inferred
+            else:
+                chosen_side = side_map[signal_side]
+            mask = signals_df[signal_col] >= self.prob_threshold
             for dt_idx in signals_df[mask].index:
-                signal_probs[pd.Timestamp(dt_idx)] = float(
-                    signals_df.at[dt_idx, "prob_Buy"]
+                signal_data[pd.Timestamp(dt_idx)] = (
+                    float(signals_df.at[dt_idx, signal_col]),
+                    chosen_side,
                 )
+        elif "prob_Buy" in signals_df.columns or "prob_Sell" in signals_df.columns:
+            has_buy = "prob_Buy" in signals_df.columns
+            has_sell = "prob_Sell" in signals_df.columns
+            buy_mask = signals_df["prob_Buy"] >= self.prob_threshold if has_buy else None
+            sell_mask = signals_df["prob_Sell"] >= self.prob_threshold if has_sell else None
+
+            if signal_side == "long":
+                if not has_buy:
+                    raise ValueError("prob_Buy column required for signal_side=long.")
+                for dt_idx in signals_df[buy_mask].index:
+                    signal_data[pd.Timestamp(dt_idx)] = (
+                        float(signals_df.at[dt_idx, "prob_Buy"]),
+                        1,
+                    )
+            elif signal_side == "short":
+                if not has_sell:
+                    raise ValueError("prob_Sell column required for signal_side=short.")
+                for dt_idx in signals_df[sell_mask].index:
+                    signal_data[pd.Timestamp(dt_idx)] = (
+                        float(signals_df.at[dt_idx, "prob_Sell"]),
+                        -1,
+                    )
+            else:
+                # auto: if both present, choose higher prob on conflicts
+                if has_buy and has_sell:
+                    idx = signals_df.index[buy_mask | sell_mask]
+                    for dt_idx in idx:
+                        buy_ok = bool(buy_mask.at[dt_idx])
+                        sell_ok = bool(sell_mask.at[dt_idx])
+                        if buy_ok and sell_ok:
+                            buy_prob = float(signals_df.at[dt_idx, "prob_Buy"])
+                            sell_prob = float(signals_df.at[dt_idx, "prob_Sell"])
+                            if buy_prob >= sell_prob:
+                                signal_data[pd.Timestamp(dt_idx)] = (buy_prob, 1)
+                            else:
+                                signal_data[pd.Timestamp(dt_idx)] = (sell_prob, -1)
+                        elif buy_ok:
+                            signal_data[pd.Timestamp(dt_idx)] = (
+                                float(signals_df.at[dt_idx, "prob_Buy"]),
+                                1,
+                            )
+                        elif sell_ok:
+                            signal_data[pd.Timestamp(dt_idx)] = (
+                                float(signals_df.at[dt_idx, "prob_Sell"]),
+                                -1,
+                            )
+                elif has_buy:
+                    for dt_idx in signals_df[buy_mask].index:
+                        signal_data[pd.Timestamp(dt_idx)] = (
+                            float(signals_df.at[dt_idx, "prob_Buy"]),
+                            1,
+                        )
+                elif has_sell:
+                    for dt_idx in signals_df[sell_mask].index:
+                        signal_data[pd.Timestamp(dt_idx)] = (
+                            float(signals_df.at[dt_idx, "prob_Sell"]),
+                            -1,
+                        )
         elif "Predicted" in signals_df.columns:
-            mask = signals_df["Predicted"] == 1
-            for dt_idx in signals_df[mask].index:
-                signal_probs[pd.Timestamp(dt_idx)] = 0.50  # No prob available
+            preds = signals_df["Predicted"]
+            if preds.dtype == object:
+                pred_lower = preds.astype(str).str.lower()
+                if signal_side in ("auto", "long"):
+                    buy_mask = pred_lower == "buy"
+                    for dt_idx in signals_df[buy_mask].index:
+                        signal_data[pd.Timestamp(dt_idx)] = (0.50, 1)
+                if signal_side in ("auto", "short"):
+                    sell_mask = pred_lower == "sell"
+                    for dt_idx in signals_df[sell_mask].index:
+                        signal_data[pd.Timestamp(dt_idx)] = (0.50, -1)
+            else:
+                if signal_side in ("auto", "long"):
+                    buy_mask = preds == 1
+                    for dt_idx in signals_df[buy_mask].index:
+                        signal_data[pd.Timestamp(dt_idx)] = (0.50, 1)
+                if signal_side in ("auto", "short"):
+                    sell_mask = preds == -1
+                    for dt_idx in signals_df[sell_mask].index:
+                        signal_data[pd.Timestamp(dt_idx)] = (0.50, -1)
 
         # Bar-by-bar simulation
         open_positions: list[OpenPosition] = []
@@ -431,19 +531,24 @@ class CLConcurrentPositionBacktester:
             open_positions = still_open
 
             # --- Open new position on signal ---
-            if ts in signal_probs and not np.isnan(atr) and atr > 0:
-                prob = signal_probs[ts]
+            if ts in signal_data and not np.isnan(atr) and atr > 0:
+                prob, side = signal_data[ts]
                 lots = self._prob_to_lots(prob)
-                entry_fill = self._slippage(bar_close, "Buy")
-                tp = bar_close + self.tp_atr_mult * atr
-                sl = bar_close - self.sl_atr_mult * atr
+                if side == 1:
+                    entry_fill = self._slippage(bar_close, "Buy")
+                    tp = bar_close + self.tp_atr_mult * atr
+                    sl = bar_close - self.sl_atr_mult * atr
+                else:
+                    entry_fill = self._slippage(bar_close, "Sell")
+                    tp = bar_close - self.tp_atr_mult * atr
+                    sl = bar_close + self.sl_atr_mult * atr
 
                 new_pos = OpenPosition(
                     entry_dt=ts,
                     entry_price=bar_close,
                     entry_fill=entry_fill,
                     entry_prob=prob,
-                    side=1,
+                    side=side,
                     atr=atr,
                     tp_price=tp,
                     sl_price=sl,
@@ -561,7 +666,7 @@ def format_report(r: BacktestResult) -> str:
 
 
 def load_predictions(path: str) -> pd.DataFrame:
-    """Load vault predictions CSV."""
+    """Load predictions CSV."""
     return pd.read_csv(path, index_col=0, parse_dates=True, on_bad_lines="warn")
 
 
@@ -610,37 +715,173 @@ def load_ohlcv(path: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
+def _parse_float_list(raw: str, *, name: str) -> list[float]:
+    if raw is None:
+        return []
+    values = []
+    for chunk in raw.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            values.append(float(chunk))
+        except ValueError as exc:
+            raise ValueError(f"Invalid {name} value: '{chunk}'") from exc
+    return values
+
+
+def _pnl_to_drawdown_ratio(total_pnl: float, max_drawdown: float) -> float:
+    if max_drawdown == 0:
+        return float("inf") if total_pnl > 0 else 0.0
+    return total_pnl / abs(max_drawdown)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="CL Concurrent Positions Backtester"
     )
-    parser.add_argument("--predictions", default="reports/vault_predictions_exp017.csv")
-    parser.add_argument("--data", default="data/processed/CL_set_06.parquet")
+    parser.add_argument(
+        "--predictions",
+        default=os.getenv("CL_PREDICTIONS_PATH", "reports/vault_predictions_exp017.csv"),
+    )
+    parser.add_argument(
+        "--data",
+        default=os.getenv("CL_OHLCV_PATH", "data/processed/CL_set_06.parquet"),
+    )
     parser.add_argument("--threshold", type=float, default=0.50)
-    parser.add_argument("--tp-mult", type=float, default=2.0)
+    parser.add_argument("--tp-mult", type=float, default=7.0)
     parser.add_argument("--sl-mult", type=float, default=1.0)
     parser.add_argument("--commission-per-side", type=float, default=2.50)
     parser.add_argument("--slippage-per-side", type=float, default=0.03)
     parser.add_argument("--contract-multiplier", type=float, default=1000.0)
     parser.add_argument(
+        "--signal-side",
+        choices=["long", "short", "auto"],
+        default="auto",
+        help="Signal side selection for prob columns.",
+    )
+    parser.add_argument(
+        "--signal-col",
+        default=None,
+        help="Optional explicit signal column (e.g., prob_Sell).",
+    )
+    parser.add_argument(
         "--position-sizing", action="store_true",
-        help="Scale lot size by probability (0.50→1, 0.60→2, 0.70→2, 0.80→3)",
+        help="Scale lot size by probability (0.50->1, 0.60->2, 0.70->2, 0.80->3)",
     )
     parser.add_argument(
         "--sweep", action="store_true",
         help="Run threshold sweep from 0.45 to 0.80",
+    )
+    parser.add_argument(
+        "--grid", action="store_true",
+        help="Run grid sweep over threshold x TP x SL",
+    )
+    parser.add_argument(
+        "--grid-thresholds",
+        default="0.45,0.50,0.55,0.60,0.65,0.70,0.75,0.80",
+        help="Comma-separated thresholds for grid mode.",
+    )
+    parser.add_argument(
+        "--grid-tp-mults",
+        default="5,7,9",
+        help="Comma-separated TP ATR multipliers for grid mode.",
+    )
+    parser.add_argument(
+        "--grid-sl-mults",
+        default="0.75,1.0,1.25",
+        help="Comma-separated SL ATR multipliers for grid mode.",
+    )
+    parser.add_argument(
+        "--grid-output",
+        default=os.path.join("reports", "concurrent_grid_results.csv"),
+        help="CSV output path for grid results.",
+    )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=10,
+        help="Top K configurations to print in grid mode.",
     )
     args = parser.parse_args()
 
     preds = load_predictions(args.predictions)
     ohlcv = load_ohlcv(args.data)
 
-    if args.sweep:
+    if args.grid:
+        thresholds = _parse_float_list(args.grid_thresholds, name="grid-thresholds")
+        tp_mults = _parse_float_list(args.grid_tp_mults, name="grid-tp-mults")
+        sl_mults = _parse_float_list(args.grid_sl_mults, name="grid-sl-mults")
+
+        w = 120
+        print("=" * w)
+        print("GRID SWEEP - CONCURRENT POSITIONS".center(w))
+        print("=" * w)
+        print(
+            f"  {'Thresh':>6s} {'TP':>5s} {'SL':>5s} "
+            f"{'Trades':>7s} {'Win%':>6s} {'PF':>7s} "
+            f"{'Net PnL':>14s} {'MaxDD':>14s} {'PnL/DD':>8s} {'MaxConc':>8s}"
+        )
+        print("-" * w)
+
+        rows: list[dict] = []
+        for thresh in thresholds:
+            for tp_mult in tp_mults:
+                for sl_mult in sl_mults:
+                    bt = CLConcurrentPositionBacktester(
+                        tp_atr_mult=tp_mult,
+                        sl_atr_mult=sl_mult,
+                        prob_threshold=thresh,
+                        commission_per_side=args.commission_per_side,
+                        slippage_per_side=args.slippage_per_side,
+                        contract_multiplier=args.contract_multiplier,
+                        position_sizing=args.position_sizing,
+                    )
+                    result = bt.run(
+                        preds,
+                        ohlcv,
+                        label=f"t={thresh:.2f}|tp={tp_mult:.2f}|sl={sl_mult:.2f}",
+                        signal_side=args.signal_side,
+                        signal_col=args.signal_col,
+                    )
+                    ratio = _pnl_to_drawdown_ratio(result.total_pnl, result.max_drawdown)
+                    rows.append(
+                        {
+                            "threshold": round(float(thresh), 4),
+                            "tp_mult": round(float(tp_mult), 4),
+                            "sl_mult": round(float(sl_mult), 4),
+                            "trade_count": result.trade_count,
+                            "win_rate": result.win_rate,
+                            "profit_factor": result.profit_factor,
+                            "total_pnl": result.total_pnl,
+                            "max_drawdown": result.max_drawdown,
+                            "pnl_to_drawdown_ratio": ratio,
+                            "max_concurrent": result.max_concurrent,
+                        }
+                    )
+
+        df = pd.DataFrame(rows)
+        df = df.sort_values(by="pnl_to_drawdown_ratio", ascending=False)
+        os.makedirs(os.path.dirname(args.grid_output) or ".", exist_ok=True)
+        df.to_csv(args.grid_output, index=False)
+
+        top_k = min(args.top_k, len(df))
+        for _, row in df.head(top_k).iterrows():
+            print(
+                f"  {row['threshold']:>6.2f} {row['tp_mult']:>5.2f} {row['sl_mult']:>5.2f} "
+                f"{int(row['trade_count']):>7,} {row['win_rate']:>5.1%} "
+                f"{row['profit_factor']:>7.2f} ${row['total_pnl']:>13,.2f} "
+                f"${row['max_drawdown']:>13,.2f} {row['pnl_to_drawdown_ratio']:>8.2f} "
+                f"{int(row['max_concurrent']):>8}"
+            )
+        print("=" * w)
+        print(f"Saved grid results to {args.grid_output}")
+    elif args.sweep:
         # Threshold sweep
         thresholds = [0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80]
         w = 100
         print("=" * w)
-        print("THRESHOLD SWEEP — CONCURRENT POSITIONS".center(w))
+        print("THRESHOLD SWEEP - CONCURRENT POSITIONS".center(w))
         print("=" * w)
         print(
             f"  {'Thresh':>6s} {'Trades':>7s} {'Win%':>6s} "
@@ -659,7 +900,13 @@ def main() -> None:
                 contract_multiplier=args.contract_multiplier,
                 position_sizing=args.position_sizing,
             )
-            result = bt.run(preds, ohlcv, label=f"t={thresh:.2f}")
+            result = bt.run(
+                preds,
+                ohlcv,
+                label=f"t={thresh:.2f}",
+                signal_side=args.signal_side,
+                signal_col=args.signal_col,
+            )
             dist = result.exit_distribution
             tp_pct = dist.get("TP", {}).get("pct", 0.0)
             sl_pct = dist.get("SL", {}).get("pct", 0.0)
@@ -692,7 +939,13 @@ def main() -> None:
         )
 
         print("Running backtest...")
-        result = bt.run(preds, ohlcv, label=f"Concurrent (t={args.threshold})")
+        result = bt.run(
+            preds,
+            ohlcv,
+            label=f"Concurrent (t={args.threshold})",
+            signal_side=args.signal_side,
+            signal_col=args.signal_col,
+        )
         print()
         print(format_report(result))
 

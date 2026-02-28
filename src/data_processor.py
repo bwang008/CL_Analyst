@@ -21,6 +21,7 @@ import json
 import numpy as np
 import pandas as pd
 import pandas_ta as ta  # noqa: F401
+from typing import Optional
 from pathlib import Path
 from datetime import datetime
 
@@ -34,6 +35,7 @@ DATASET_VERSIONS = {
     'set_03': 'Master squeeze targets (4% and 8%) with binary splits',
     'set_04': 'Lower thresholds (2%/3%) with shorter horizons (12h/24h)',
     'set_05': 'Dynamic Triple Barrier targets with ATR-based barriers',
+    'set_06': 'Ultimate dataset (set_05 features + targets)',
 }
 
 
@@ -52,9 +54,13 @@ class DataProcessor:
     BARS_PER_DAY = 288
     MINUTES_PER_DAY = 1440
     
-    def __init__(self, input_path: str = "data/raw/test100k.csv", 
-                 output_path: str = None,
-                 dataset_version: str = "set_03"):
+    def __init__(
+        self,
+        input_path: str = "data/raw/test100k.csv",
+        output_path: str = None,
+        dataset_version: str = "set_03",
+        keep_ohlcv: bool = True,
+    ):
         """
         Initialize the DataProcessor.
         
@@ -62,10 +68,16 @@ class DataProcessor:
             input_path: Path to the input CSV file (semicolon-separated, no headers)
             output_path: Path for processed output. If None, auto-generates based on input name.
             dataset_version: Version identifier for the dataset (e.g., 'set_01', 'set_02')
+            keep_ohlcv: If True, retain Open/High/Low/Close/Volume/DateTime columns.
         """
         self.input_path = input_path
         self._dataset_version = dataset_version
-        self._update_output_path()
+        self.keep_ohlcv = keep_ohlcv
+        self._explicit_output_path = output_path is not None
+        if output_path is not None:
+            self.output_path = output_path
+        else:
+            self._update_output_path()
 
     @property
     def dataset_version(self):
@@ -74,7 +86,8 @@ class DataProcessor:
     @dataset_version.setter
     def dataset_version(self, value):
         self._dataset_version = value
-        self._update_output_path()
+        if not self._explicit_output_path:
+            self._update_output_path()
 
     def _update_output_path(self):
         # Auto-generate output path based on input filename and dataset version
@@ -476,6 +489,7 @@ class DataProcessor:
         df: pd.DataFrame,
         drop_raw_returns: bool = True,
         warmup_rows: int = 10500,
+        keep_ohlcv: Optional[bool] = None,
     ) -> pd.DataFrame:
         """
         Clean up the DataFrame by removing raw columns and NaN rows.
@@ -497,6 +511,7 @@ class DataProcessor:
             drop_raw_returns: If True, drop the raw *_Return columns (default True)
                              These are "noise" for 48-hour predictions but were
                              needed to calculate regime features.
+            keep_ohlcv: If True, keep Open/High/Low/Close/Volume and add DateTime column.
             
         Returns:
             pd.DataFrame: Cleaned DataFrame ready for training
@@ -505,9 +520,20 @@ class DataProcessor:
         
         rows_before = len(df)
         
+        if keep_ohlcv is None:
+            keep_ohlcv = self.keep_ohlcv
+
+        if keep_ohlcv and "DateTime" not in df.columns:
+            df["DateTime"] = df.index
+
         # Columns to drop (raw values that have been normalized)
         # Note: RAW_ prefixed columns are NOT dropped - they are needed for evaluation
         cols_to_drop = ['Open', 'High', 'Low', 'Close', 'Volume', 'SMA_20', 'SMA_30d']
+        if keep_ohlcv:
+            cols_to_drop = [
+                c for c in cols_to_drop
+                if c not in {'Open', 'High', 'Low', 'Close', 'Volume'}
+            ]
         
         # Also drop raw return columns - they are "ingredients" not "features"
         # We've extracted the signal (volatility, skew, kurtosis); discard the noise
@@ -631,6 +657,8 @@ class DataProcessor:
             return self.process_set_04(threshold=threshold, horizon=horizon)
         elif self.dataset_version == "set_05":
             return self.process_set_05(threshold=threshold, horizon=horizon)
+        elif self.dataset_version == "set_06":
+            return self.process_set_06()
         else:
             raise ValueError(f"Unknown dataset version: {self.dataset_version}. "
                            f"Available: {list(DATASET_VERSIONS.keys())}")
@@ -707,7 +735,7 @@ class DataProcessor:
         df = self.normalize_features(df)
 
         # Step 6: Cleanup (drops raw columns AND raw returns - they're "noise")
-        df = self.cleanup(df, drop_raw_returns=True)
+        df = self.cleanup(df, drop_raw_returns=True, keep_ohlcv=self.keep_ohlcv)
 
         # Step 7: Save
         saved_path = self.save(df)
@@ -800,7 +828,7 @@ class DataProcessor:
         df = self.normalize_features(df)
 
         # Step 6: Cleanup (drops raw columns AND raw returns - they're "noise")
-        df = self.cleanup(df, drop_raw_returns=True)
+        df = self.cleanup(df, drop_raw_returns=True, keep_ohlcv=self.keep_ohlcv)
 
         # Step 7: Save
         saved_path = self.save(df)
@@ -887,7 +915,7 @@ class DataProcessor:
         df = self.normalize_features(df)
 
         # Step 6: Cleanup (drops raw columns AND raw returns - they're "noise")
-        df = self.cleanup(df, drop_raw_returns=True)
+        df = self.cleanup(df, drop_raw_returns=True, keep_ohlcv=self.keep_ohlcv)
 
         # Step 7: Save
         saved_path = self.save(df)
@@ -979,7 +1007,7 @@ class DataProcessor:
         df = self.normalize_features(df)
 
         # Step 6: Cleanup
-        df = self.cleanup(df, drop_raw_returns=True)
+        df = self.cleanup(df, drop_raw_returns=True, keep_ohlcv=self.keep_ohlcv)
 
         # Step 7: Save
         saved_path = self.save(df)
@@ -1078,7 +1106,7 @@ class DataProcessor:
         df = self.normalize_features(df)
 
         # Step 6: Cleanup — keep ATR columns (useful features)
-        df = self.cleanup(df, drop_raw_returns=True)
+        df = self.cleanup(df, drop_raw_returns=True, keep_ohlcv=self.keep_ohlcv)
 
         # Step 7: Save
         saved_path = self.save(df)

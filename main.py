@@ -54,12 +54,15 @@ def get_cl_df(cl_test_data="data/raw/test100k.csv"):
     return features
 
 
-def get_processed_cl_df(input_path="data/raw/test100k.csv", 
-                        output_path=None,
-                        dataset_version="set_03",
-                        threshold=0.08, 
-                        horizon=576,
-                        force_reprocess=False):
+def get_processed_cl_df(
+    input_path="data/raw/test100k.csv",
+    output_path=None,
+    dataset_version="set_03",
+    threshold=0.08,
+    horizon=576,
+    force_reprocess=False,
+    keep_ohlcv=True,
+):
     """
     Get processed CL data using DataProcessor.
     
@@ -80,9 +83,10 @@ def get_processed_cl_df(input_path="data/raw/test100k.csv",
     """
     # Create processor instance with dataset version
     processor = DataProcessor(
-        input_path=input_path, 
+        input_path=input_path,
         output_path=output_path,
-        dataset_version=dataset_version
+        dataset_version=dataset_version,
+        keep_ohlcv=keep_ohlcv,
     )
     
     # Check if processed file already exists
