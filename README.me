@@ -6,4 +6,49 @@ The repo now uses a “Three-File System” for documentation:
 - `HANDOFF.md`: current state only (branch, last task, known issues, immediate next steps)
 - `AGENT_LOG.md`: historical progress (reverse-chronological)
 
-Start here: `README.md`
+
+## Backtesting Guide (Quick Reference)
+
+### 1) Generate prediction files
+Use the saved model artifacts to produce probability CSVs:
+
+# EXP-017 is the best buy model, EXP-020 is the best short model created after we got to 17.
+# 
+
+```bash
+python agent/generate_model_predictions.py --model-path models/registry/EXP-017_S_Ultimate/final_model.pkl --data-path data/processed/CL_set_06_shortfix.parquet --output reports/exp017_long_full_predictions.csv --prob-col prob_Buy
+python agent/generate_model_predictions.py --model-path models/registry/EXP-020_S_Ultimate_Short/final_model.pkl --data-path data/processed/CL_set_06_shortfix.parquet --output reports/exp020_short_full_predictions.csv --prob-col prob_Sell
+```
+
+### 2) Single-model concurrent backtest
+```bash
+python agent/backtest_cl_concurrent.py --predictions reports/exp020_short_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --signal-side short --signal-col prob_Sell --threshold 0.60 --tp-mult 5.0 --sl-mult 0.75 --commission-per-side 2.5 --slippage-per-side 0.03 --contract-multiplier 1000
+python agent/backtest_cl_concurrent.py --predictions reports/exp017_long_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --signal-side long --signal-col prob_Buy --threshold 0.60 --tp-mult 5.0 --sl-mult 0.75 --commission-per-side 2.5 --slippage-per-side 0.03 --contract-multiplier 1000
+
+```
+
+### 2b) Single-model backtester.py (legacy)
+```bash
+python agent/backtester.py --predictions reports/exp020_short_full_predictions.csv --threshold 0.60 --commission-per-side 2.5 --slippage-per-side 0.03 --contract-multiplier 1000
+python agent/backtester.py --predictions reports/exp017_long_full_predictions.csv --threshold 0.60 --commission-per-side 2.5 --slippage-per-side 0.03 --contract-multiplier 1000
+```
+
+### 3) Dual-model regime backtest (long + short)
+```bash
+python agent/regime_dual_model_backtest.py --buy-predictions reports/exp017_long_full_predictions.csv --sell-predictions reports/exp020_short_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --buy-threshold 0.60 --sell-threshold 0.60 --tp-mult 5.0 --sl-mult 0.75 --commission-per-side 2.5 --slippage-per-side 0.03 --contract-multiplier 1000 --output-dir reports/oos_regimes
+```
+
+### 4) Key outputs
+- `reports/oos_regimes/dual_model_regime_summary.csv`
+- `reports/oos_regimes/<regime>_predictions.csv`
+- Grid results from concurrent backtester: `reports/*_grid_*.csv`
+
+### Backtester file roles
+- `agent/backtester.py`: legacy, single-position event-driven backtest with raw CSV fallback.
+- `agent/backtest_cl_concurrent.py`: unlimited concurrent positions, TP/SL/ATR logic, grid sweeps.
+- `agent/regime_dual_model_backtest.py`: merges buy/sell prediction files and runs regime windows using the concurrent backtester.
+
+### File format expectations
+- Prediction CSVs: `DateTime` index + `prob_Buy` / `prob_Sell` columns
+- OHLCV parquet: `Open/High/Low/Close/Volume` + `DateTime` index
+- Use `data/processed/CL_set_06_shortfix.parquet` for aligned OHLCV backtests
