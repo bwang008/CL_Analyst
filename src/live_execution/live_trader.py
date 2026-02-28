@@ -534,6 +534,7 @@ class LiveTrader:
             action_taken="TIME_BARRIER_EXIT",
             current_price=current_price,
             atr_value=atr_value,
+            exit_reason="REASON_TIMEOUT",
             order_id=getattr(getattr(trade, "order", None), "orderId", None)
             if trade is not None
             else None,
