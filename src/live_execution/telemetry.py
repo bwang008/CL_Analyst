@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS trade_ledger (
     signal_id       TEXT,                     -- stable signal ID for joins
     decision_id     TEXT,                     -- stable decision ID for joins
     decision_timestamp_utc TEXT,              -- decision timestamp for latency analysis
+    exit_reason     TEXT,                     -- REASON_TIMEOUT / REASON_TP / REASON_SL
     created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 """
@@ -165,6 +166,8 @@ class TelemetryDB:
             conn.execute(
                 "ALTER TABLE trade_ledger ADD COLUMN decision_timestamp_utc TEXT"
             )
+        if "exit_reason" not in cols:
+            conn.execute("ALTER TABLE trade_ledger ADD COLUMN exit_reason TEXT")
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -226,6 +229,7 @@ class TelemetryDB:
         signal_id: Optional[str] = None,
         decision_id: Optional[str] = None,
         decision_timestamp_utc: Optional[str] = None,
+        exit_reason: Optional[str] = None,
     ) -> None:
         """Record a generated signal and any resulting action."""
         ts = timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp)
@@ -234,13 +238,14 @@ class TelemetryDB:
             "INSERT INTO trade_ledger "
             "(timestamp, signal, confidence_pct, action_taken, order_id, "
             " fill_price, direction, tp_price, sl_price, atr_value, current_price, "
-            " signal_id, decision_id, decision_timestamp_utc) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " signal_id, decision_id, decision_timestamp_utc, exit_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 ts, signal, confidence_pct, action_taken,
                 order_id, fill_price, direction,
                 tp_price, sl_price, atr_value, current_price,
                 signal_id, decision_id, decision_timestamp_utc,
+                exit_reason,
             ),
         )
         conn.commit()
