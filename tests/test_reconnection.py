@@ -31,6 +31,10 @@ def _make_trader_stub():
     trader.manager.ib = MagicMock()
     trader.manager.connect = MagicMock()
 
+    # Strategy (not used by reconnection tests, but must exist)
+    trader.strategy = MagicMock()
+    trader.strategy.name = "MockStrategy"
+
     # State flags
     trader._running = True
     trader._subscriptions_lost = False
