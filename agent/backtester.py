@@ -27,6 +27,8 @@ def run_backtest(
     commission_per_side=2.50,
     slippage_per_side=0.03,
     contract_multiplier=1000,
+    position_sizing=False,
+    sizing_tiers=None,
 ):
     """
     Run backtest on predictions.
@@ -38,9 +40,11 @@ def run_backtest(
         sl_mult: Stop loss ATR multiplier.
         max_horizon: Max bars to hold.
         prob_threshold: Minimum probability to take a signal.
-        commission_per_side: Flat commission per side, in dollars.
+        commission_per_side: Commission per side, in dollars (per contract).
         slippage_per_side: Slippage penalty per side, in price units.
         contract_multiplier: Dollar value multiplier per 1.0 price move.
+        position_sizing: If True, scale lots by probability tier.
+        sizing_tiers: Optional list of (min_prob, lots) tiers.
     """
     print(f"Loading predictions from {predictions_path}...")
     preds = pd.read_csv(predictions_path, index_col=0, parse_dates=True)
@@ -56,7 +60,24 @@ def run_backtest(
     raw_path = os.path.join(PROJECT_ROOT, "data", "raw", "CL.csv")
     from src.data_processor import DataProcessor
     dp = DataProcessor(input_path=raw_path)
-    raw = dp.load_data()
+    try:
+        raw = dp.load_data()
+    except ValueError:
+        fallback_path = os.path.join(PROJECT_ROOT, "data", "raw", "cl-5m_bk.csv")
+        if not os.path.exists(fallback_path):
+            raise
+        print(f"Falling back to raw CSV: {fallback_path}")
+        raw = pd.read_csv(
+            fallback_path,
+            sep=";",
+            header=None,
+            names=["Date", "Time", "Open", "High", "Low", "Close", "Volume"],
+        )
+        raw["DateTime"] = pd.to_datetime(
+            raw["Date"] + " " + raw["Time"],
+            dayfirst=True,
+        )
+        raw = raw.set_index("DateTime").drop(columns=["Date", "Time"])
     
     # Align indices
     common_idx = preds.index.intersection(raw.index)
@@ -64,31 +85,45 @@ def run_backtest(
     
     # Identify signals and map each to a trade side (+1 long, -1 short)
     signal_sides = pd.Series(index=preds.index, dtype="float64")
+    signal_probs = pd.Series(index=preds.index, dtype="float64")
     if 'prob_Buy' in preds.columns and 'prob_Sell' in preds.columns:
         buy_mask = preds['prob_Buy'] >= prob_threshold
         sell_mask = preds['prob_Sell'] >= prob_threshold
         signal_sides[buy_mask] = 1
         signal_sides[sell_mask] = -1
+        signal_probs[buy_mask] = preds.loc[buy_mask, 'prob_Buy']
+        signal_probs[sell_mask] = preds.loc[sell_mask, 'prob_Sell']
         conflict_mask = buy_mask & sell_mask
         if conflict_mask.any():
             buy_dominates = preds.loc[conflict_mask, 'prob_Buy'] >= preds.loc[conflict_mask, 'prob_Sell']
             signal_sides.loc[conflict_mask] = np.where(buy_dominates, 1, -1)
+            signal_probs.loc[conflict_mask] = np.where(
+                buy_dominates,
+                preds.loc[conflict_mask, 'prob_Buy'],
+                preds.loc[conflict_mask, 'prob_Sell'],
+            )
     elif 'prob_Buy' in preds.columns:
         signal_sides[preds['prob_Buy'] >= prob_threshold] = 1
+        signal_probs[preds['prob_Buy'] >= prob_threshold] = preds.loc[preds['prob_Buy'] >= prob_threshold, 'prob_Buy']
     elif 'prob_Sell' in preds.columns:
         signal_sides[preds['prob_Sell'] >= prob_threshold] = -1
+        signal_probs[preds['prob_Sell'] >= prob_threshold] = preds.loc[preds['prob_Sell'] >= prob_threshold, 'prob_Sell']
     elif 'Predicted' in preds.columns:
         if preds['Predicted'].dtype == object:
             pred_lower = preds['Predicted'].astype(str).str.lower()
             signal_sides[pred_lower == 'buy'] = 1
             signal_sides[pred_lower == 'sell'] = -1
+            signal_probs[pred_lower.isin(['buy', 'sell'])] = 0.50
         else:
             signal_sides[preds['Predicted'] == 1] = 1
             signal_sides[preds['Predicted'] == -1] = -1
+            signal_probs[preds['Predicted'].isin([1, -1])] = 0.50
 
     signal_sides = signal_sides.dropna().astype(int)
+    signal_probs = signal_probs.loc[signal_sides.index].fillna(0.50)
     signals = preds.loc[signal_sides.index].copy()
     signals['side'] = signal_sides
+    signals['probability'] = signal_probs
     
     n_long = int((signals['side'] == 1).sum())
     n_short = int((signals['side'] == -1).sum())
@@ -113,8 +148,19 @@ def run_backtest(
             return price + slippage_per_side
         return price - slippage_per_side
 
+    def prob_to_lots(probability):
+        if not position_sizing:
+            return 1
+        tiers = sizing_tiers or [(0.80, 3), (0.70, 2), (0.60, 2), (0.50, 1)]
+        for min_prob, lots in tiers:
+            if probability >= min_prob:
+                return lots
+        return 1
+
     for dt, signal in signals.iterrows():
         side = int(signal['side'])
+        prob = float(signal['probability'])
+        lots = int(prob_to_lots(prob))
         entry_price = raw.at[dt, 'Close']
         atr = raw_copy.at[dt, 'atr']
         
@@ -172,8 +218,9 @@ def run_backtest(
             entry_fill = apply_slippage(entry_price, entry_order_side)
             exit_fill = apply_slippage(exit_price, exit_order_side)
             gross_pnl_price = side * (exit_fill - entry_fill)
-            gross_pnl_dollars = gross_pnl_price * contract_multiplier
-            commission_dollars = 2 * commission_per_side
+            gross_pnl_dollars = gross_pnl_price * contract_multiplier * lots
+            commission_dollars = 2 * commission_per_side * lots
+            slippage_dollars = 2 * slippage_per_side * contract_multiplier * lots
             net_pnl_dollars = gross_pnl_dollars - commission_dollars
             trades.append({
                 'entry_dt': dt,
@@ -182,12 +229,15 @@ def run_backtest(
                 'exit_price': exit_price,
                 'entry_fill': entry_fill,
                 'exit_fill': exit_fill,
+                'probability': prob,
+                'lots': lots,
                 'side': side,
                 'gross_pnl_price': gross_pnl_price,
                 'gross_pnl_dollars': gross_pnl_dollars,
                 'commission_dollars': commission_dollars,
+                'slippage_dollars': slippage_dollars,
                 'pnl': net_pnl_dollars,
-                'pnl_pct': net_pnl_dollars / (entry_fill * contract_multiplier),
+                'pnl_pct': net_pnl_dollars / (entry_fill * contract_multiplier * lots),
                 'reason': reason,
                 'duration': (exit_dt - dt).total_seconds() / 300, # bars
             })
@@ -204,6 +254,7 @@ def run_backtest(
     gross_losses = abs(trades_df[trades_df['pnl'] < 0]['pnl'].sum())
     profit_factor = gross_profits / gross_losses if gross_losses > 0 else np.inf
     total_net_pnl = trades_df['pnl'].sum()
+    total_lots = int(trades_df['lots'].sum())
     
     # Cumulative PNL
     trades_df['cum_pnl'] = trades_df['pnl'].cumsum()
@@ -212,7 +263,12 @@ def run_backtest(
     print("BACKTEST RESULTS")
     print("="*40)
     print(f"Total Trades:   {len(trades_df)}")
-    print(f"Friction:       commission=${commission_per_side:.2f}/side, slippage=${slippage_per_side:.2f}/side")
+    print(f"Total Lots:     {total_lots}")
+    print(
+        "Friction:       "
+        f"commission=${commission_per_side:.2f}/side/contract, "
+        f"slippage=${slippage_per_side:.2f}/side"
+    )
     print(f"Win Rate:       {win_rate:.1%}")
     print(f"Avg PnL %:      {avg_pnl:.2%}")    
     print(f"Profit Factor:  {profit_factor:.2f}")
@@ -248,6 +304,11 @@ if __name__ == "__main__":
     parser.add_argument("--commission-per-side", type=float, default=2.50)
     parser.add_argument("--slippage-per-side", type=float, default=0.03)
     parser.add_argument("--contract-multiplier", type=float, default=1000.0)
+    parser.add_argument(
+        "--position-sizing",
+        action="store_true",
+        help="Scale lot size by probability (0.50->1, 0.60->2, 0.70->2, 0.80->3)",
+    )
     args = parser.parse_args()
     
     run_backtest(
@@ -256,4 +317,5 @@ if __name__ == "__main__":
         commission_per_side=args.commission_per_side,
         slippage_per_side=args.slippage_per_side,
         contract_multiplier=args.contract_multiplier,
+        position_sizing=args.position_sizing,
     )
