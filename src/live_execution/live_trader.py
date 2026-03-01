@@ -15,6 +15,7 @@ Usage:
     conda run -n trader python -m src.live_execution.live_trader
     conda run -n trader python -m src.live_execution.live_trader --dry-run
     conda run -n trader python -m src.live_execution.live_trader --strategy BUY70_SIZED_MANATEE
+    conda run -n trader python -m src.live_execution.live_trader --config configs/strategies/manatee.json
 
 Author: CL Analyst
 """
@@ -39,10 +40,15 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+# Load .env file (CL_DATA_ROOT, etc.) before reading env-based constants
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
+
 # Project imports
 from src.features.alpha_factory import AlphaFactory
 from src.live_execution.strategy import Strategy, TradeSignal
 from src.live_execution.strategies.buy70_sized_manatee import Buy70SizedManatee
+from src.live_execution.strategies.configurable_strategy import ConfigurableStrategy
 from src.live_execution.data_manager import DataManager
 from src.live_execution.ibkr_client import (
     IBKRConnectionManager,
@@ -1262,6 +1268,10 @@ def main() -> None:
         help=f"Strategy to use (available: {available}; default: {_DEFAULT_STRATEGY})",
     )
     parser.add_argument(
+        "--config", default=None,
+        help="Path to a strategy JSON config file (overrides --strategy)",
+    )
+    parser.add_argument(
         "--db-path", default=_DEFAULT_DB_PATH,
         help="Path to the telemetry SQLite database",
     )
@@ -1284,15 +1294,21 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Resolve strategy
-    strategy_key = args.strategy.upper()
-    if strategy_key not in _STRATEGY_REGISTRY:
-        parser.error(
-            f"Unknown strategy '{args.strategy}'. "
-            f"Available: {available}"
+    # Resolve strategy: --config takes priority over --strategy
+    if args.config is not None:
+        strategy = ConfigurableStrategy(
+            config_path=args.config,
+            base_quantity=args.quantity,
         )
-    strategy_cls = _STRATEGY_REGISTRY[strategy_key]
-    strategy = strategy_cls(base_quantity=args.quantity)
+    else:
+        strategy_key = args.strategy.upper()
+        if strategy_key not in _STRATEGY_REGISTRY:
+            parser.error(
+                f"Unknown strategy '{args.strategy}'. "
+                f"Available: {available}"
+            )
+        strategy_cls = _STRATEGY_REGISTRY[strategy_key]
+        strategy = strategy_cls(base_quantity=args.quantity)
 
     trader = LiveTrader(
         host=args.host,
