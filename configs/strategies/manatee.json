@@ -1,0 +1,15 @@
+{
+    "nickname": "Manatee",
+    "experiment_id": "EXP-017_S_Ultimate",
+    "direction": "LONG",
+    "allow_concurrent": false,
+    "entry_threshold": 0.70,
+    "tp_atr_mult": 7.0,
+    "sl_atr_mult": 1.0,
+    "sizing_tiers": {
+        "0.80": 3,
+        "0.70": 2,
+        "0.60": 2,
+        "0.50": 1
+    }
+}
