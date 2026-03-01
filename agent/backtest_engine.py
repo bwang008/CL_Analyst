@@ -92,6 +92,7 @@ class BacktestResult:
     """Aggregate results from a backtest run."""
 
     trades: list[TradeRecord] = field(default_factory=list)
+    equity_curve: list[float] = field(default_factory=list)
     label: str = ""
     start_dt: pd.Timestamp | None = None
     end_dt: pd.Timestamp | None = None
@@ -125,6 +126,16 @@ class BacktestResult:
 
     @property
     def max_drawdown(self) -> float:
+        """Peak-to-trough drawdown from the bar-by-bar equity curve.
+
+        Uses the full equity curve (realized + floating PnL) when
+        available, falling back to closed-trade PnL when it is not.
+        """
+        if self.equity_curve:
+            curve = np.array(self.equity_curve)
+            running_max = np.maximum.accumulate(curve)
+            drawdowns = curve - running_max
+            return float(np.min(drawdowns))
         if not self.trades:
             return 0.0
         cum_pnl = np.cumsum([t.net_pnl_dollars for t in self.trades])
@@ -293,6 +304,8 @@ class BacktestEngine:
         self._lowest_low = float("inf")
         self._cooldown_remaining = 0
         self._trades = []
+        self._realized_pnl: float = 0.0
+        self._equity_curve: list[float] = []
         self._open_positions = []
 
     def _apply_slippage(self, price: float, order_side: str) -> float:
@@ -380,6 +393,7 @@ class BacktestEngine:
             net_pnl_dollars=net_pnl,
         )
         self._trades.append(record)
+        self._realized_pnl += net_pnl
 
         # FSM transition: SL → COOLDOWN, everything else → FLAT
         if exit_reason == ExitReason.SL:
@@ -408,7 +422,7 @@ class BacktestEngine:
 
         self._state = TradeState.IN_POSITION
         self._entry_dt = dt
-        self._entry_price = bar["Close"]
+        self._entry_price = bar.Close
         self._atr_at_entry = atr
         self._side = signal_side
         self._bars_held = 0
@@ -420,50 +434,60 @@ class BacktestEngine:
         if signal_side == 1:
             self._tp_price = self._entry_price + self.tp_atr_mult * atr
             self._sl_price = self._entry_price - self.sl_atr_mult * atr
-            self._highest_high = bar["High"]
-            self._lowest_low = bar["Low"]
+            self._highest_high = bar.High
+            self._lowest_low = bar.Low
         else:
             self._tp_price = self._entry_price - self.tp_atr_mult * atr
             self._sl_price = self._entry_price + self.sl_atr_mult * atr
-            self._highest_high = bar["High"]
-            self._lowest_low = bar["Low"]
+            self._highest_high = bar.High
+            self._lowest_low = bar.Low
 
         self._original_sl_price = self._sl_price
 
-    def _on_in_position(self, dt: pd.Timestamp, bar: pd.Series) -> None:
-        """IN_POSITION state: manage an active trade.
+    def _on_in_position(self, dt: pd.Timestamp, bar_open: float,
+                        bar_high: float, bar_low: float) -> None:
+        """IN_POSITION state: manage an active trade (pessimistic).
 
-        Checks (in order):
-        1. Time-barrier exit (288 bars)
-        2. TP hit (with gap awareness)
-        3. SL hit (with gap awareness)
-        4. Trailing stop upgrade to breakeven
-
-        Args:
-            dt: Bar timestamp.
-            bar: OHLCV bar data.
+        Checks:
+        1. Time-barrier exit
+        2. Evaluate both TP and SL — if BOTH breach, SL wins
+        3. Trailing stop upgrade to breakeven
         """
         self._bars_held += 1
-        bar_open = bar["Open"]
-        bar_high = bar["High"]
-        bar_low = bar["Low"]
 
         # Track extremes since entry
         self._highest_high = max(self._highest_high, bar_high)
         self._lowest_low = min(self._lowest_low, bar_low)
 
-        # 1. Time-barrier exit — force close after max_horizon bars
+        # 1. Time-barrier exit
         if self._bars_held > self.max_horizon:
-            exit_price = bar_open  # Exit at open of the 289th bar
-            self._close_trade(dt, exit_price, ExitReason.TIME_BARRIER)
+            self._close_trade(dt, bar_open, ExitReason.TIME_BARRIER)
             return
 
-        # 2. Check TP hit
-        tp_hit = False
+        # 2. Evaluate BOTH TP and SL — pessimistic: SL wins on same-bar
         if self._side == 1:
             tp_hit = bar_high >= self._tp_price
+            sl_hit = bar_low <= self._sl_price
         else:
             tp_hit = bar_low <= self._tp_price
+            sl_hit = bar_high >= self._sl_price
+
+        if tp_hit and sl_hit:
+            # Both barriers breached — assume worst case (SL)
+            exit_price = self._gap_fill_price(
+                bar_open, self._sl_price, self._side, is_tp=False
+            )
+            reason = ExitReason.TRAILING_BE if self._trailing_activated else ExitReason.SL
+            self._close_trade(dt, exit_price, reason)
+            return
+
+        if sl_hit:
+            exit_price = self._gap_fill_price(
+                bar_open, self._sl_price, self._side, is_tp=False
+            )
+            reason = ExitReason.TRAILING_BE if self._trailing_activated else ExitReason.SL
+            self._close_trade(dt, exit_price, reason)
+            return
 
         if tp_hit:
             exit_price = self._gap_fill_price(
@@ -472,39 +496,19 @@ class BacktestEngine:
             self._close_trade(dt, exit_price, ExitReason.TP)
             return
 
-        # 3. Check SL hit (current SL level — may have been trailed)
-        sl_hit = False
-        if self._side == 1:
-            sl_hit = bar_low <= self._sl_price
-        else:
-            sl_hit = bar_high >= self._sl_price
-
-        if sl_hit:
-            exit_price = self._gap_fill_price(
-                bar_open, self._sl_price, self._side, is_tp=False
-            )
-            # Determine exit reason based on whether trailing was activated
-            if self._trailing_activated:
-                self._close_trade(dt, exit_price, ExitReason.TRAILING_BE)
-            else:
-                self._close_trade(dt, exit_price, ExitReason.SL)
-            return
-
-        # 4. Trailing stop upgrade: move SL to breakeven after +1×ATR
+        # 3. Trailing stop upgrade: move SL to breakeven after +N×ATR
         if not self._trailing_activated:
             if self._side == 1:
-                # Long: if highest high reached entry + trailing_atr_mult * ATR
                 if self._highest_high >= (
                     self._entry_price + self.trailing_atr_mult * self._atr_at_entry
                 ):
-                    self._sl_price = self._entry_price  # Move to breakeven
+                    self._sl_price = self._entry_price
                     self._trailing_activated = True
             else:
-                # Short: if lowest low reached entry - trailing_atr_mult * ATR
                 if self._lowest_low <= (
                     self._entry_price - self.trailing_atr_mult * self._atr_at_entry
                 ):
-                    self._sl_price = self._entry_price  # Move to breakeven
+                    self._sl_price = self._entry_price
                     self._trailing_activated = True
 
     def _on_cooldown(self) -> None:
@@ -528,7 +532,7 @@ class BacktestEngine:
         atr: float,
     ) -> None:
         """Open a new position and add it to the open-positions list."""
-        entry_price = bar["Close"]
+        entry_price = bar.Close
         entry_order_side = "Buy" if signal_side == 1 else "Sell"
         entry_fill = self._apply_slippage(entry_price, entry_order_side)
 
@@ -548,8 +552,8 @@ class BacktestEngine:
             tp_price=tp_price,
             sl_price=sl_price,
             original_sl_price=sl_price,
-            highest_high=bar["High"],
-            lowest_low=bar["Low"],
+            highest_high=bar.High,
+            lowest_low=bar.Low,
         )
         self._open_positions.append(pos)
 
@@ -557,16 +561,16 @@ class BacktestEngine:
         self,
         pos: _OpenPosition,
         dt: pd.Timestamp,
-        bar: pd.Series,
+        bar_open: float,
+        bar_high: float,
+        bar_low: float,
     ) -> Optional[TradeRecord]:
-        """Check an open position for exit conditions.
+        """Check an open position for exit conditions (pessimistic).
 
+        If both TP and SL breach on the same bar, SL wins.
         Returns a TradeRecord if the position closed, else None.
         """
         pos.bars_held += 1
-        bar_open = bar["Open"]
-        bar_high = bar["High"]
-        bar_low = bar["Low"]
 
         pos.highest_high = max(pos.highest_high, bar_high)
         pos.lowest_low = min(pos.lowest_low, bar_low)
@@ -579,22 +583,16 @@ class BacktestEngine:
             exit_price = bar_open
             exit_reason = ExitReason.TIME_BARRIER
 
-        # 2. TP
+        # 2. Evaluate BOTH TP and SL — pessimistic: SL wins on conflict
         if exit_reason is None:
-            if pos.side == 1 and bar_high >= pos.tp_price:
-                exit_price = self._gap_fill_price(
-                    bar_open, pos.tp_price, pos.side, is_tp=True
-                )
-                exit_reason = ExitReason.TP
-            elif pos.side == -1 and bar_low <= pos.tp_price:
-                exit_price = self._gap_fill_price(
-                    bar_open, pos.tp_price, pos.side, is_tp=True
-                )
-                exit_reason = ExitReason.TP
+            if pos.side == 1:
+                tp_hit = bar_high >= pos.tp_price
+                sl_hit = bar_low <= pos.sl_price
+            else:
+                tp_hit = bar_low <= pos.tp_price
+                sl_hit = bar_high >= pos.sl_price
 
-        # 3. SL
-        if exit_reason is None:
-            if pos.side == 1 and bar_low <= pos.sl_price:
+            if tp_hit and sl_hit:
                 exit_price = self._gap_fill_price(
                     bar_open, pos.sl_price, pos.side, is_tp=False
                 )
@@ -602,7 +600,7 @@ class BacktestEngine:
                     ExitReason.TRAILING_BE if pos.trailing_activated
                     else ExitReason.SL
                 )
-            elif pos.side == -1 and bar_high >= pos.sl_price:
+            elif sl_hit:
                 exit_price = self._gap_fill_price(
                     bar_open, pos.sl_price, pos.side, is_tp=False
                 )
@@ -610,8 +608,13 @@ class BacktestEngine:
                     ExitReason.TRAILING_BE if pos.trailing_activated
                     else ExitReason.SL
                 )
+            elif tp_hit:
+                exit_price = self._gap_fill_price(
+                    bar_open, pos.tp_price, pos.side, is_tp=True
+                )
+                exit_reason = ExitReason.TP
 
-        # 4. Trailing stop upgrade
+        # 3. Trailing stop upgrade
         if exit_reason is None and not pos.trailing_activated:
             if pos.side == 1:
                 if pos.highest_high >= (
@@ -690,7 +693,7 @@ class BacktestEngine:
                 (ohlcv["Low"] - ohlcv["Close"].shift(1)).abs(),
             ),
         )
-        ohlcv["_atr"] = tr.rolling(self.atr_period).mean()
+        ohlcv["atr_"] = tr.rolling(self.atr_period).mean()
 
         # Build signal lookup — which bars have a trade signal
         signal_sides: dict[pd.Timestamp, int] = {}
@@ -715,52 +718,73 @@ class BacktestEngine:
 
         return BacktestResult(
             trades=self._trades,
+            equity_curve=self._equity_curve,
             label=label,
             start_dt=ohlcv.index.min() if not ohlcv.empty else None,
             end_dt=ohlcv.index.max() if not ohlcv.empty else None,
         )
+
+    def _floating_pnl_single(self, close: float) -> float:
+        """Floating PnL of the single open position."""
+        if self._state != TradeState.IN_POSITION:
+            return 0.0
+        return self._side * (close - self._entry_fill) * self.contract_multiplier
+
+    def _floating_pnl_concurrent(self, close: float) -> float:
+        """Total floating PnL of all open concurrent positions."""
+        total = 0.0
+        for pos in self._open_positions:
+            total += pos.side * (close - pos.entry_fill) * self.contract_multiplier
+        return total
 
     def _run_single(
         self,
         ohlcv: pd.DataFrame,
         signal_sides: dict[pd.Timestamp, int],
     ) -> None:
-        """Single-position FSM loop (original behaviour)."""
-        for dt, bar in ohlcv.iterrows():
-            ts = pd.Timestamp(dt)
-            atr = bar["_atr"]
+        """Single-position FSM loop using itertuples for speed."""
+        for row in ohlcv.itertuples():
+            ts = pd.Timestamp(row.Index)
+            atr = row.atr_
 
             if self._state == TradeState.FLAT:
                 sig = signal_sides.get(ts)
-                self._on_flat(ts, bar, sig, atr)
+                self._on_flat(ts, row, sig, atr)
 
             elif self._state == TradeState.IN_POSITION:
-                self._on_in_position(ts, bar)
+                self._on_in_position(ts, row.Open, row.High, row.Low)
 
             elif self._state == TradeState.COOLDOWN:
                 self._on_cooldown()
+
+            # Record equity: realized + floating
+            self._equity_curve.append(
+                self._realized_pnl + self._floating_pnl_single(row.Close)
+            )
 
     def _run_concurrent(
         self,
         ohlcv: pd.DataFrame,
         signal_sides: dict[pd.Timestamp, int],
     ) -> None:
-        """Concurrent multi-position loop.
+        """Concurrent multi-position loop using itertuples for speed.
 
         On each bar:
         1. Check all open positions for exits (TP/SL/trailing/time)
         2. If a signal is present and we haven't hit max_concurrent, open new
+        3. Record equity (realized + floating)
         """
-        for dt, bar in ohlcv.iterrows():
-            ts = pd.Timestamp(dt)
-            atr = bar["_atr"]
+        for row in ohlcv.itertuples():
+            ts = pd.Timestamp(row.Index)
+            atr = row.atr_
 
             # 1. Check existing positions for exits
             surviving: list[_OpenPosition] = []
             for pos in self._open_positions:
-                record = self._check_position(pos, ts, bar)
+                record = self._check_position(pos, ts, row.Open, row.High, row.Low)
                 if record is not None:
                     self._trades.append(record)
+                    self._realized_pnl += record.net_pnl_dollars
                 else:
                     surviving.append(pos)
             self._open_positions = surviving
@@ -773,7 +797,12 @@ class BacktestEngine:
                 and atr > 0
                 and len(self._open_positions) < self.max_concurrent
             ):
-                self._open_new_position(ts, bar, sig, atr)
+                self._open_new_position(ts, row, sig, atr)
+
+            # 3. Record equity: realized + floating
+            self._equity_curve.append(
+                self._realized_pnl + self._floating_pnl_concurrent(row.Close)
+            )
 
 
 # ---------------------------------------------------------------------------
