@@ -269,15 +269,16 @@ class DataProcessor:
         Dynamic Triple Barrier Method target.
 
         Barriers are set using rolling ATR (not fixed percentages):
-        - Take-profit: +tp_atr_mult * ATR above entry
-        - Stop-loss:   -sl_atr_mult * ATR below entry
-        - Vertical:     max_horizon bars time limit
+        - LONG: TP = entry + tp_atr_mult * ATR (price goes UP to profit)
+                SL = entry - sl_atr_mult * ATR (price goes DOWN to loss)
+        - SHORT: TP = entry - tp_atr_mult * ATR (price goes DOWN to profit)
+                 SL = entry + sl_atr_mult * ATR (price goes UP to loss)
+        - Vertical: max_horizon bars time limit
 
         Target values:
-        - {prefix}_MULTI: 0=Hold (time expired), 1=Long (TP hit first going up),
-                          2=Short (SL hit first going down)
-        - {prefix}_LONG:  Binary 0/1
-        - {prefix}_SHORT: Binary 0/1
+        - {prefix}_MULTI: 0=Hold (time expired), 1=Long, 2=Short
+        - {prefix}_LONG:  Binary 0/1 (TP hit first from long perspective)
+        - {prefix}_SHORT: Binary 0/1 (TP hit first from short perspective)
 
         Args:
             df: DataFrame with OHLCV columns
@@ -303,49 +304,60 @@ class DataProcessor:
         atr = df[atr_col].values
         n = len(df)
 
-        labels = np.zeros(n, dtype=np.float64)
-
+        # --- Pass 1: LONG labels (TP above entry, SL below) ---
+        long_labels = np.zeros(n, dtype=np.float64)
         for i in range(n - 1):
             if np.isnan(atr[i]) or atr[i] <= 0:
-                labels[i] = 0
                 continue
-
             entry = close[i]
             tp_barrier = entry + tp_atr_mult * atr[i]
             sl_barrier = entry - sl_atr_mult * atr[i]
             end_idx = min(i + max_horizon, n)
-
-            hit_tp = False
-            hit_sl = False
             for j in range(i + 1, end_idx):
                 if high_all[j] >= tp_barrier:
-                    hit_tp = True
+                    long_labels[i] = 1
                     break
                 if low_all[j] <= sl_barrier:
-                    hit_sl = True
                     break
 
-            if hit_tp:
-                labels[i] = 1  # Long signal
-            elif hit_sl:
-                labels[i] = 2  # Short signal
-            else:
-                labels[i] = 0  # Hold (time expired)
+        # --- Pass 2: SHORT labels (TP below entry, SL above) ---
+        short_labels = np.zeros(n, dtype=np.float64)
+        for i in range(n - 1):
+            if np.isnan(atr[i]) or atr[i] <= 0:
+                continue
+            entry = close[i]
+            tp_barrier = entry - tp_atr_mult * atr[i]  # TP below entry
+            sl_barrier = entry + sl_atr_mult * atr[i]  # SL above entry
+            end_idx = min(i + max_horizon, n)
+            for j in range(i + 1, end_idx):
+                if low_all[j] <= tp_barrier:
+                    short_labels[i] = 1
+                    break
+                if high_all[j] >= sl_barrier:
+                    break
 
         # Mark final bars as NaN (insufficient look-ahead)
-        labels[-max_horizon:] = np.nan
+        long_labels[-max_horizon:] = np.nan
+        short_labels[-max_horizon:] = np.nan
+
+        # Build MULTI column: 0=Hold, 1=Long, 2=Short
+        # If both fire for the same bar, keep both flagged (MULTI uses Long priority)
+        multi_labels = np.where(long_labels == 1, 1.0,
+                                np.where(short_labels == 1, 2.0, 0.0))
+        multi_labels[-max_horizon:] = np.nan
 
         multi_col = f"{prefix}_MULTI"
         long_col = f"{prefix}_LONG"
         short_col = f"{prefix}_SHORT"
 
-        df[multi_col] = pd.array(labels, dtype='Int64')
-        df[long_col] = (df[multi_col] == 1).astype('Int64')
-        df[short_col] = (df[multi_col] == 2).astype('Int64')
-        df.loc[df[multi_col].isna(), [long_col, short_col]] = pd.NA
+        df[multi_col] = pd.array(multi_labels, dtype='Int64')
+        df[long_col] = pd.array(long_labels, dtype='Int64')
+        df[short_col] = pd.array(short_labels, dtype='Int64')
 
-        counts = df[multi_col].value_counts(dropna=False)
-        print(f"  - {multi_col} distribution: {dict(counts)}")
+        counts_long = df[long_col].value_counts(dropna=False)
+        counts_short = df[short_col].value_counts(dropna=False)
+        print(f"  - {long_col} distribution: {dict(counts_long)}")
+        print(f"  - {short_col} distribution: {dict(counts_short)}")
 
         return df
 
