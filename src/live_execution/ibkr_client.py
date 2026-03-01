@@ -108,8 +108,19 @@ class IBKRConnectionManager:
     def _on_error(self, req_id: int, error_code: int, error_string: str, contract: Contract) -> None:
         self._last_error = (error_code, error_string)
 
+    # Error 326 = "client id already in use"
+    _CLIENT_ID_IN_USE_CODE = 326
+    _MAX_CLIENT_ID = 31  # IB allows client IDs 0-31
+
     def connect(self) -> None:
-        """Connect to IBKR, trying the primary port first then fallbacks."""
+        """Connect to IBKR, trying the primary port first then fallbacks.
+
+        If the connection fails because the client ID is already in use
+        (IBKR Error 326), the method automatically increments the client ID
+        and retries.  IB Gateway supports up to 32 concurrent connections
+        (client IDs 0-31).  For any other connection error (gateway down,
+        network refused), it fails fast after trying all ports once.
+        """
         if self.ib.isConnected():
             return
 
@@ -118,29 +129,67 @@ class IBKRConnectionManager:
         ]
         last_exc: Optional[Exception] = None
 
-        for port in ports_to_try:
-            try:
-                log.info("Attempting IBKR connection on %s:%d ...", self.host, port)
-                self.ib.connect(
-                    host=self.host,
-                    port=port,
-                    clientId=self.client_id,
-                    readonly=self.readonly,
-                    timeout=self.connect_timeout,
-                )
-                self.port = port  # remember successful port
-                log.info("Connected to IBKR on port %d", port)
-                return
-            except Exception as exc:
-                last_exc = exc
-                log.warning(
-                    "Connection failed on port %d: %s", port, exc,
-                )
-                # Ensure disconnected state before trying next port
+        # Try client IDs from the initial value up to 31
+        start_id = self.client_id
+        cid = start_id
+
+        while cid <= self._MAX_CLIENT_ID:
+            self._last_error = None
+            got_client_id_error = False
+
+            for port in ports_to_try:
                 try:
-                    self.ib.disconnect()
-                except Exception:
-                    pass
+                    log.info(
+                        "Attempting IBKR connection on %s:%d (clientId=%d) ...",
+                        self.host, port, cid,
+                    )
+                    self.ib.connect(
+                        host=self.host,
+                        port=port,
+                        clientId=cid,
+                        readonly=self.readonly,
+                        timeout=self.connect_timeout,
+                    )
+                    self.client_id = cid  # remember successful client ID
+                    self.port = port      # remember successful port
+                    log.info(
+                        "Connected to IBKR on port %d with clientId %d",
+                        port, cid,
+                    )
+                    return
+                except Exception as exc:
+                    last_exc = exc
+                    # Check if the error callback received Error 326
+                    if (
+                        self._last_error
+                        and self._last_error[0] == self._CLIENT_ID_IN_USE_CODE
+                    ):
+                        got_client_id_error = True
+                        log.warning(
+                            "clientId %d already in use on port %d — "
+                            "will try next ID",
+                            cid, port,
+                        )
+                    else:
+                        log.warning(
+                            "Connection failed on port %d: %s", port, exc,
+                        )
+                    # Ensure clean disconnected state before retrying
+                    try:
+                        self.ib.disconnect()
+                    except Exception:
+                        pass
+
+                    # If client ID conflict, skip remaining ports for this ID
+                    if got_client_id_error:
+                        break
+
+            # Only try the next client ID if Error 326 was the reason;
+            # otherwise all ports genuinely failed (gateway down, etc.)
+            if got_client_id_error:
+                cid += 1
+            else:
+                break
 
         raise ConnectionError(
             f"Could not connect to IBKR on any port {ports_to_try}: {last_exc}"

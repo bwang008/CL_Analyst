@@ -97,21 +97,226 @@ Live-session data source:
 python agent/oos_regime_test.py --data-path data/processed/CL_set_06_shortfix.parquet --target-name TARGET_TRIPLE_2x1_24H_LONG --threshold 0.60
 ```
 
-## Live trader (paper trading)
+## Config-Driven Strategy Workflow (End-to-End)
+
+This is the recommended workflow for creating, backtesting, and deploying a new strategy.
+No new Python code is needed — just a JSON config file.
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `configs/strategies/*.json` | Strategy definitions (threshold, TP/SL, sizing) |
+| `src/live_execution/strategies/configurable_strategy.py` | Universal strategy class (reads JSON) |
+| `src/live_execution/live_trader.py` | Live execution engine |
+| `agent/backtest_cl_advanced.py` | FSM backtester |
+| `agent/generate_model_predictions.py` | Generates prediction CSVs from models |
+| `models/registry/EXP-XXX_*/` | Model bundles (model.pkl + config.json) |
+| `.env` | Local env vars (CL_DATA_ROOT for data path) |
+
+---
+
+### Step 1: Train a Model (or use an existing one)
+
+Models live in `models/registry/`. Each experiment folder contains:
+- `final_model.pkl` — trained LightGBM model
+- `config.json` — training metadata (threshold, features, metrics)
+
+To train a new model:
+```bash
+python main.py train
+```
+This runs walk-forward training and auto-archives to `models/registry/EXP-XXX_*/`.
+
+Existing models:
+- `EXP-017_S_Ultimate` — Long strategy (champion buy model)
+- `EXP-020_S_Ultimate_Short` — Short strategy
+
+---
+
+### Step 2: Generate Predictions
 
 ```bash
-# Dry run (no orders, logs signals only)
-python -m src.live_execution.live_trader --dry-run
+# Long predictions
+python agent/generate_model_predictions.py \
+  --model-path models/registry/EXP-017_S_Ultimate/final_model.pkl \
+  --data-path data/processed/CL_set_06_shortfix.parquet \
+  --output reports/exp017_long_predictions.csv \
+  --prob-col prob_Buy
 
-# Live paper trading (IB Gateway default port 4002)
-python -m src.live_execution.live_trader
-
-# TWS port override
-python -m src.live_execution.live_trader --port 7497
-
-# Custom seed/cache paths
-python -m src.live_execution.live_trader --seed-path data/raw/cl-5m_bk.csv --cache-path data/processed/warm_start_cache.parquet
+# Short predictions
+python agent/generate_model_predictions.py \
+  --model-path models/registry/EXP-020_S_Ultimate_Short/final_model.pkl \
+  --data-path data/processed/CL_set_06_shortfix.parquet \
+  --output reports/exp020_short_predictions.csv \
+  --prob-col prob_Sell
 ```
 
-Live data is maintained by `src/live_execution/data_manager.py` and written to:
-- `data/processed/warm_start_cache.parquet` (rolling cache)
+---
+
+### Step 3: Backtest with a Strategy Config
+
+Create a strategy JSON config (or use an existing one):
+
+**`configs/strategies/manatee.json`** (example — Manatee long strategy):
+```json
+{
+    "nickname": "Manatee",
+    "experiment_id": "EXP-017_S_Ultimate",
+    "direction": "LONG",
+    "allow_concurrent": false,
+    "entry_threshold": 0.70,
+    "tp_atr_mult": 7.0,
+    "sl_atr_mult": 1.0,
+    "sizing_tiers": {
+        "0.80": 3,
+        "0.70": 2,
+        "0.60": 2,
+        "0.50": 1
+    }
+}
+```
+
+**Config fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `nickname` | string | Human-readable name (shows in logs) |
+| `experiment_id` | string | Folder name in `models/registry/` |
+| `direction` | string | `LONG`, `SHORT`, or `BOTH` |
+| `allow_concurrent` | bool | Allow entry while a position is open |
+| `entry_threshold` | float | Min probability to trigger entry |
+| `tp_atr_mult` | float | Take-profit = entry ± (this × ATR) |
+| `sl_atr_mult` | float | Stop-loss = entry ∓ (this × ATR) |
+| `sizing_tiers` | dict | `{"min_probability": lots}` — higher prob → more lots |
+
+**Run the backtest:**
+```bash
+# Backtest using the strategy config (loads TP/SL/threshold from JSON)
+python agent/backtest_cl_advanced.py \
+  --config configs/strategies/manatee.json \
+  --predictions reports/exp017_long_predictions.csv \
+  --data data/processed/CL_set_06_shortfix.parquet
+
+# Or manually override parameters
+python agent/backtest_cl_advanced.py \
+  --predictions reports/exp017_long_predictions.csv \
+  --data data/processed/CL_set_06_shortfix.parquet \
+  --threshold 0.70 --tp-mult 7.0 --sl-mult 1.0
+```
+
+---
+
+### Step 4: Deploy to Live Trader
+
+```bash
+# Dry run (no real orders — logs signals only)
+python -m src.live_execution.live_trader \
+  --config configs/strategies/manatee.json \
+  --dry-run
+
+# Live paper trading
+python -m src.live_execution.live_trader \
+  --config configs/strategies/manatee.json
+
+# Legacy strategy registry (still works)
+python -m src.live_execution.live_trader --strategy BUY70_SIZED_MANATEE
+```
+
+**What happens when you run the live trader:**
+1. Loads model from `models/registry/{experiment_id}/final_model.pkl`
+2. Connects to IBKR (auto-increments client ID if another instance is running)
+3. Warm-starts rolling data from seed CSV + IBKR backfill
+4. On each 5-min bar: generates features → model inference → `ConfigurableStrategy.evaluate()` → bracket order
+
+---
+
+### Step 5: Creating a New Strategy (JSON-only)
+
+1. Copy an existing config: `cp configs/strategies/manatee.json configs/strategies/my_strat.json`
+2. Edit the fields (experiment_id, threshold, TP/SL, sizing tiers)
+3. Backtest: `python agent/backtest_cl_advanced.py --config configs/strategies/my_strat.json --predictions <pred.csv> --data <ohlcv.parquet>`
+4. Deploy: `python -m src.live_execution.live_trader --config configs/strategies/my_strat.json --dry-run`
+
+---
+
+### Environment Setup
+
+**`.env` file** (at repo root — gitignored, local to each machine):
+```
+CL_DATA_ROOT=C:\Users\bwang\OneDrive\Documents\Data
+```
+This tells the live trader where to find `cl-5m_bk.csv` for warm-start. Required in worktrees where the `data/` directory doesn't exist.
+
+**IBKR Client ID:** The live trader auto-increments client IDs (1→2→...→31) if another instance is already connected. No manual `--client-id` needed.
+
+---
+
+## Backtesting Guide (Quick Reference)
+
+### 1) Generate prediction files
+```bash
+python agent/generate_model_predictions.py --model-path models/registry/EXP-017_S_Ultimate/final_model.pkl --data-path data/processed/CL_set_06_shortfix.parquet --output reports/exp017_long_full_predictions.csv --prob-col prob_Buy
+python agent/generate_model_predictions.py --model-path models/registry/EXP-020_S_Ultimate_Short/final_model.pkl --data-path data/processed/CL_set_06_shortfix.parquet --output reports/exp020_short_full_predictions.csv --prob-col prob_Sell
+```
+
+### 2) Single-model concurrent backtest
+```bash
+python agent/backtest_cl_concurrent.py --predictions reports/exp020_short_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --signal-side short --signal-col prob_Sell --threshold 0.60 --tp-mult 5.0 --sl-mult 0.75 --commission-per-side 2.5 --slippage-per-side 0.03 --contract-multiplier 1000
+python agent/backtest_cl_concurrent.py --predictions reports/exp017_long_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --signal-side long --signal-col prob_Buy --threshold 0.60 --tp-mult 5.0 --sl-mult 0.75 --commission-per-side 2.5 --slippage-per-side 0.03 --contract-multiplier 1000
+```
+
+### 3) Dual-model regime backtest (long + short)
+```bash
+python agent/regime_dual_model_backtest.py --buy-predictions reports/exp017_long_full_predictions.csv --sell-predictions reports/exp020_short_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --buy-threshold 0.60 --sell-threshold 0.60 --tp-mult 5.0 --sl-mult 0.75 --commission-per-side 2.5 --slippage-per-side 0.03 --contract-multiplier 1000 --output-dir reports/oos_regimes
+```
+
+### 4) Key outputs
+- `reports/oos_regimes/dual_model_regime_summary.csv`
+- `reports/oos_regimes/<regime>_predictions.csv`
+- Grid results from concurrent backtester: `reports/*_grid_*.csv`
+
+### Backtester file roles
+- `agent/backtester.py`: legacy, single-position event-driven backtest with raw CSV fallback.
+- `agent/backtest_cl_concurrent.py`: unlimited concurrent positions, TP/SL/ATR logic, grid sweeps.
+- `agent/backtest_cl_advanced.py`: single-model FSM backtest with `--config` support and optional live session comparison.
+- `agent/regime_dual_model_backtest.py`: merges buy/sell prediction files and runs regime windows using the concurrent backtester.
+
+### File format expectations
+- Prediction CSVs: `DateTime` index + `prob_Buy` / `prob_Sell` columns
+- OHLCV parquet: `Open/High/Low/Close/Volume` + `DateTime` index
+- Use `data/processed/CL_set_06_shortfix.parquet` for aligned OHLCV backtests
+
+## Pipeline entrypoint (main.py)
+`main.py` orchestrates data processing and model training/evaluation.
+
+```bash
+# Process raw data into a processed parquet
+python main.py process
+
+# Train + evaluate (walk-forward), writes reports/ + models/
+python main.py train
+```
+
+## Standalone modules (direct CLI)
+
+### Data processing
+```bash
+# Build a processed dataset (set_06 example)
+python -c "from src.data_processor import DataProcessor; p=DataProcessor(input_path='data/raw/cl-5m_bk.csv', dataset_version='set_06'); p.process()"
+```
+
+### Threshold sweep (binary model)
+```bash
+python agent/threshold_sweep_binary.py --target TARGET_TRIPLE_2x1_24H_SHORT --data-path data/processed/CL_set_06_shortfix.parquet --output-predictions reports/short_sniper_predictions.csv
+```
+
+Live-session data source:
+- `data/processed/warm_start_cache.parquet` is maintained by `src/live_execution/data_manager.py`
+- It is updated during live runs (or when the live pipeline initializes and backfills)
+
+### OOS regime test (single-model, long-only baseline)
+```bash
+python agent/oos_regime_test.py --data-path data/processed/CL_set_06_shortfix.parquet --target-name TARGET_TRIPLE_2x1_24H_LONG --threshold 0.60
+```
+
