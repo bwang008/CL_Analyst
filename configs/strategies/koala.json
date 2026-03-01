@@ -1,0 +1,14 @@
+{
+    "nickname": "Koala",
+    "experiment_id": "EXP-020_S_Ultimate_Short",
+    "direction": "SHORT",
+    "allow_concurrent": false,
+    "entry_threshold": 0.60,
+    "tp_atr_mult": 5.0,
+    "sl_atr_mult": 0.75,
+    "sizing_tiers": {
+        "0.80": 3,
+        "0.70": 2,
+        "0.60": 1
+    }
+}

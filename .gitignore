@@ -23,8 +23,11 @@ reports/checkpoints/
 !experiments.json
 !data/DATASETS.json
 !.cursor/worktrees.json
+# Strategy configs (JSON definitions for config-driven strategies)
+!configs/strategies/**
 
 # Runtime artifacts (live execution)
+.env
 *.db
 *.db-shm
 *.db-wal

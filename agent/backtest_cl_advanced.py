@@ -14,6 +14,7 @@ Usage:
     conda activate trader
     python agent/backtest_cl_advanced.py --predictions reports/vault_predictions.csv
     python agent/backtest_cl_advanced.py --predictions reports/vault_predictions.csv --live-data data/live_session_feed.parquet
+    python agent/backtest_cl_advanced.py --config configs/strategies/manatee.json
 
 Author: CL Analyst
 """
@@ -21,6 +22,7 @@ Author: CL Analyst
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from dataclasses import dataclass, field
@@ -737,6 +739,11 @@ def main() -> None:
         help="Optional path to live session OHLCV parquet for Run B",
     )
     parser.add_argument(
+        "--config",
+        default=None,
+        help="Path to a strategy JSON config (overrides --threshold, --tp-mult, --sl-mult)",
+    )
+    parser.add_argument(
         "--threshold",
         type=float,
         default=0.45,
@@ -759,10 +766,25 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # If --config is provided, load strategy params from JSON for parity
+    tp_mult = args.tp_mult
+    sl_mult = args.sl_mult
+    threshold = args.threshold
+    if args.config is not None:
+        with open(args.config) as f:
+            strategy_cfg = json.load(f)
+        tp_mult = strategy_cfg.get("tp_atr_mult", tp_mult)
+        sl_mult = strategy_cfg.get("sl_atr_mult", sl_mult)
+        threshold = strategy_cfg.get("entry_threshold", threshold)
+        print(
+            f"Loaded strategy config '{strategy_cfg.get('nickname', '?')}': "
+            f"TP={tp_mult}x  SL={sl_mult}x  threshold={threshold}"
+        )
+
     bt = CLAdvancedExecutionBacktester(
-        tp_atr_mult=args.tp_mult,
-        sl_atr_mult=args.sl_mult,
-        prob_threshold=args.threshold,
+        tp_atr_mult=tp_mult,
+        sl_atr_mult=sl_mult,
+        prob_threshold=threshold,
         commission_per_side=args.commission_per_side,
         slippage_per_side=args.slippage_per_side,
         contract_multiplier=args.contract_multiplier,
