@@ -12,7 +12,7 @@ Key output: signal clustering report showing how many positions are open
 simultaneously and whether concurrent signals correlate with probability
 levels — informing whether to scale position size vs. fire multiple orders.
 
-Does NOT mutate backtester.py or backtest_cl_advanced.py.
+Does NOT mutate backtester.py or backtest_engine.py.
 
 Usage:
     conda activate trader

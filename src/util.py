@@ -122,12 +122,16 @@ def get_cl_data(data_file=None):
     Returns a pandas DataFrame containing the CSV contents with datetime index.
     """
     if data_file is None:
+        # Try repo-local path first, fall back to CL_DATA_ROOT
+        _local = "data/raw/test10k.csv"
         _cl_root = os.environ.get("CL_DATA_ROOT", "")
-        data_file = (
-            os.path.join(_cl_root, "cl-5m_bk.csv")
-            if _cl_root
-            else "data/raw/test10k.csv"
-        )
+        if os.path.exists(_local):
+            data_file = _local
+        elif _cl_root:
+            _root = os.path.join(_cl_root, "raw", "cl-5m_bk.csv")
+            data_file = _root if os.path.exists(_root) else _local
+        else:
+            data_file = _local
     # Try different separators in order of likelihood
     separators = [';', ',', '\t']
     

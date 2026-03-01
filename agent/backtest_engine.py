@@ -1,20 +1,21 @@
 """
-CLAdvancedExecutionBacktester — FSM-Based Trade Management Backtester.
+BacktestEngine — Config-Driven Trade Management Backtester.
 
-Simulates active trade management for CL futures bracket orders with:
-- Finite State Machine (FLAT / IN_POSITION / COOLDOWN)
-- Time-barrier exit (288 bars max hold)
-- Trailing stop to breakeven (+1×ATR in favor → SL moves to entry)
-- Post-stop-out cooldown period (10 bars)
+Master backtesting engine for CL futures strategies.  All strategy
+parameters are loaded from a JSON config file (configs/strategies/*.json).
+
+Capabilities:
+- Single-position FSM mode (FLAT / IN_POSITION / COOLDOWN)
+- Concurrent multi-position mode (configurable max open positions)
+- Time-barrier exit (configurable max hold bars)
+- Trailing stop to breakeven (+N×ATR in favor → SL moves to entry)
+- Post-stop-out cooldown period (configurable bars)
 - Gap-aware slippage (fills at Open when bar gaps past stop)
-
-Does NOT mutate the core backtester.py logic.
 
 Usage:
     conda activate trader
-    python agent/backtest_cl_advanced.py --predictions reports/vault_predictions.csv
-    python agent/backtest_cl_advanced.py --predictions reports/vault_predictions.csv --live-data data/live_session_feed.parquet
-    python agent/backtest_cl_advanced.py --config configs/strategies/manatee.json
+    python agent/backtest_engine.py --config configs/strategies/manatee.json --predictions reports/exp017_long_predictions.csv --data data/processed/CL_set_06.parquet
+    python agent/backtest_engine.py --config configs/strategies/manatee.json --predictions ... --live-data data/live_session_feed.parquet
 
 Author: CL Analyst
 """
@@ -148,22 +149,53 @@ class BacktestResult:
 
 
 # ---------------------------------------------------------------------------
-# Advanced Backtester
+# Open Position Tracking (for concurrent mode)
 # ---------------------------------------------------------------------------
 
 
-class CLAdvancedExecutionBacktester:
-    """Bar-by-bar backtester with FSM trade management.
+@dataclass
+class _OpenPosition:
+    """State for a single open position (used in concurrent mode)."""
 
-    Processes OHLCV bars sequentially, managing a single position through
-    FLAT → IN_POSITION → COOLDOWN states. Implements trailing stops,
-    time-barrier exits, and post-stop-out cooldowns.
+    entry_dt: pd.Timestamp
+    entry_price: float
+    entry_fill: float
+    atr_at_entry: float
+    side: int
+    tp_price: float
+    sl_price: float
+    original_sl_price: float
+    trailing_activated: bool = False
+    bars_held: int = 0
+    highest_high: float = 0.0
+    lowest_low: float = float("inf")
+
+
+# ---------------------------------------------------------------------------
+# Backtest Engine
+# ---------------------------------------------------------------------------
+
+
+# Keep old name as alias for backward-compatibility with existing imports
+class BacktestEngine:
+    """Config-driven bar-by-bar backtester with FSM trade management.
+
+    Supports two modes controlled by ``allow_concurrent``:
+
+    **Single-position mode** (default, ``allow_concurrent=False``):
+        FLAT → IN_POSITION → COOLDOWN → FLAT
+        Only one trade at a time.  Matches live trader behaviour.
+
+    **Concurrent mode** (``allow_concurrent=True``):
+        Accepts new signals while positions are open (up to
+        ``max_concurrent``).  Each position is independently managed
+        with TP/SL/trailing/time-barrier.  No cooldown between trades.
 
     Args:
         tp_atr_mult: ATR multiplier for take-profit barrier.
         sl_atr_mult: ATR multiplier for stop-loss barrier.
         max_horizon: Max bars to hold a position (time barrier).
-        cooldown_bars: Bars to wait after a stop-loss exit.
+        cooldown_bars: Bars to wait after a stop-loss exit (single mode).
         trailing_atr_mult: ATR move in favor to trigger trailing stop
                            to breakeven ($entry price).
         atr_period: Period for ATR calculation.
@@ -171,6 +203,8 @@ class CLAdvancedExecutionBacktester:
         slippage_per_side: Slippage penalty per side in price units.
         contract_multiplier: Dollar value per 1.0 price move (CL = 1000).
         prob_threshold: Minimum probability to accept a buy signal.
+        allow_concurrent: If True, allow multiple simultaneous positions.
+        max_concurrent: Max open positions in concurrent mode.
     """
 
     def __init__(
@@ -186,6 +220,8 @@ class CLAdvancedExecutionBacktester:
         slippage_per_side: float = 0.03,
         contract_multiplier: float = 1000.0,
         prob_threshold: float = 0.45,
+        allow_concurrent: bool = False,
+        max_concurrent: int = 1,
     ) -> None:
         self.tp_atr_mult = tp_atr_mult
         self.sl_atr_mult = sl_atr_mult
@@ -197,8 +233,10 @@ class CLAdvancedExecutionBacktester:
         self.slippage_per_side = slippage_per_side
         self.contract_multiplier = contract_multiplier
         self.prob_threshold = prob_threshold
+        self.allow_concurrent = allow_concurrent
+        self.max_concurrent = max(1, max_concurrent)
 
-        # FSM state (reset per run)
+        # FSM state — single-position mode (reset per run)
         self._state: TradeState = TradeState.FLAT
         self._entry_dt: Optional[pd.Timestamp] = None
         self._entry_price: float = 0.0
@@ -214,6 +252,29 @@ class CLAdvancedExecutionBacktester:
         self._lowest_low: float = float("inf")
         self._cooldown_remaining: int = 0
         self._trades: list[TradeRecord] = []
+
+        # Concurrent mode state
+        self._open_positions: list[_OpenPosition] = []
+
+    @classmethod
+    def from_config(cls, cfg: dict, **overrides) -> "BacktestEngine":
+        """Create a BacktestEngine from a strategy config dict.
+
+        Reads all supported fields from the JSON config, with CLI overrides
+        taking precedence.
+        """
+        kwargs = {
+            "tp_atr_mult": cfg.get("tp_atr_mult", 2.0),
+            "sl_atr_mult": cfg.get("sl_atr_mult", 1.0),
+            "prob_threshold": cfg.get("entry_threshold", 0.45),
+            "allow_concurrent": cfg.get("allow_concurrent", False),
+            "max_concurrent": cfg.get("max_concurrent", 1),
+            "cooldown_bars": cfg.get("cooldown_bars", 10),
+            "trailing_atr_mult": cfg.get("trailing_atr_mult", 1.0),
+            "max_horizon": cfg.get("max_hold_bars", 288),
+        }
+        kwargs.update(overrides)
+        return cls(**kwargs)
 
     def _reset_state(self) -> None:
         """Reset all FSM state for a new run."""
@@ -232,6 +293,7 @@ class CLAdvancedExecutionBacktester:
         self._lowest_low = float("inf")
         self._cooldown_remaining = 0
         self._trades = []
+        self._open_positions = []
 
     def _apply_slippage(self, price: float, order_side: str) -> float:
         """Apply 1-tick slippage penalty in the adverse direction.
@@ -454,6 +516,146 @@ class CLAdvancedExecutionBacktester:
         if self._cooldown_remaining <= 0:
             self._state = TradeState.FLAT
 
+    # -------------------------------------------------------------------
+    # Concurrent-mode helpers
+    # -------------------------------------------------------------------
+
+    def _open_new_position(
+        self,
+        dt: pd.Timestamp,
+        bar: pd.Series,
+        signal_side: int,
+        atr: float,
+    ) -> None:
+        """Open a new position and add it to the open-positions list."""
+        entry_price = bar["Close"]
+        entry_order_side = "Buy" if signal_side == 1 else "Sell"
+        entry_fill = self._apply_slippage(entry_price, entry_order_side)
+
+        if signal_side == 1:
+            tp_price = entry_price + self.tp_atr_mult * atr
+            sl_price = entry_price - self.sl_atr_mult * atr
+        else:
+            tp_price = entry_price - self.tp_atr_mult * atr
+            sl_price = entry_price + self.sl_atr_mult * atr
+
+        pos = _OpenPosition(
+            entry_dt=dt,
+            entry_price=entry_price,
+            entry_fill=entry_fill,
+            atr_at_entry=atr,
+            side=signal_side,
+            tp_price=tp_price,
+            sl_price=sl_price,
+            original_sl_price=sl_price,
+            highest_high=bar["High"],
+            lowest_low=bar["Low"],
+        )
+        self._open_positions.append(pos)
+
+    def _check_position(
+        self,
+        pos: _OpenPosition,
+        dt: pd.Timestamp,
+        bar: pd.Series,
+    ) -> Optional[TradeRecord]:
+        """Check an open position for exit conditions.
+
+        Returns a TradeRecord if the position closed, else None.
+        """
+        pos.bars_held += 1
+        bar_open = bar["Open"]
+        bar_high = bar["High"]
+        bar_low = bar["Low"]
+
+        pos.highest_high = max(pos.highest_high, bar_high)
+        pos.lowest_low = min(pos.lowest_low, bar_low)
+
+        exit_price: Optional[float] = None
+        exit_reason: Optional[ExitReason] = None
+
+        # 1. Time barrier
+        if pos.bars_held > self.max_horizon:
+            exit_price = bar_open
+            exit_reason = ExitReason.TIME_BARRIER
+
+        # 2. TP
+        if exit_reason is None:
+            if pos.side == 1 and bar_high >= pos.tp_price:
+                exit_price = self._gap_fill_price(
+                    bar_open, pos.tp_price, pos.side, is_tp=True
+                )
+                exit_reason = ExitReason.TP
+            elif pos.side == -1 and bar_low <= pos.tp_price:
+                exit_price = self._gap_fill_price(
+                    bar_open, pos.tp_price, pos.side, is_tp=True
+                )
+                exit_reason = ExitReason.TP
+
+        # 3. SL
+        if exit_reason is None:
+            if pos.side == 1 and bar_low <= pos.sl_price:
+                exit_price = self._gap_fill_price(
+                    bar_open, pos.sl_price, pos.side, is_tp=False
+                )
+                exit_reason = (
+                    ExitReason.TRAILING_BE if pos.trailing_activated
+                    else ExitReason.SL
+                )
+            elif pos.side == -1 and bar_high >= pos.sl_price:
+                exit_price = self._gap_fill_price(
+                    bar_open, pos.sl_price, pos.side, is_tp=False
+                )
+                exit_reason = (
+                    ExitReason.TRAILING_BE if pos.trailing_activated
+                    else ExitReason.SL
+                )
+
+        # 4. Trailing stop upgrade
+        if exit_reason is None and not pos.trailing_activated:
+            if pos.side == 1:
+                if pos.highest_high >= (
+                    pos.entry_price + self.trailing_atr_mult * pos.atr_at_entry
+                ):
+                    pos.sl_price = pos.entry_price
+                    pos.trailing_activated = True
+            else:
+                if pos.lowest_low <= (
+                    pos.entry_price - self.trailing_atr_mult * pos.atr_at_entry
+                ):
+                    pos.sl_price = pos.entry_price
+                    pos.trailing_activated = True
+
+        if exit_reason is not None and exit_price is not None:
+            exit_order_side = "Sell" if pos.side == 1 else "Buy"
+            exit_fill = self._apply_slippage(exit_price, exit_order_side)
+            gross_pnl_price = pos.side * (exit_fill - pos.entry_fill)
+            gross_pnl_dollars = gross_pnl_price * self.contract_multiplier
+            commission = 2 * self.commission_per_side
+            net_pnl = gross_pnl_dollars - commission
+
+            return TradeRecord(
+                entry_dt=pos.entry_dt,
+                exit_dt=dt,
+                entry_price=pos.entry_price,
+                exit_price=exit_price,
+                entry_fill=pos.entry_fill,
+                exit_fill=exit_fill,
+                side=pos.side,
+                atr_at_entry=pos.atr_at_entry,
+                exit_reason=exit_reason,
+                duration_bars=pos.bars_held,
+                gross_pnl_dollars=gross_pnl_dollars,
+                commission_dollars=commission,
+                net_pnl_dollars=net_pnl,
+            )
+
+        return None
+
+    # -------------------------------------------------------------------
+    # Main run method
+    # -------------------------------------------------------------------
+
     def run(
         self,
         signals_df: pd.DataFrame,
@@ -462,6 +664,9 @@ class CLAdvancedExecutionBacktester:
         label: str = "",
     ) -> BacktestResult:
         """Run the backtest bar-by-bar over the OHLCV data.
+
+        Dispatches to single-position FSM or concurrent mode based on
+        ``self.allow_concurrent``.
 
         Args:
             signals_df: DataFrame indexed by DateTime with signal columns.
@@ -488,29 +693,39 @@ class CLAdvancedExecutionBacktester:
         ohlcv["_atr"] = tr.rolling(self.atr_period).mean()
 
         # Build signal lookup — which bars have a trade signal
-        signal_set: set[pd.Timestamp] = set()
         signal_sides: dict[pd.Timestamp, int] = {}
 
         if "side" in signals_df.columns:
             for dt_idx in signals_df.index:
                 ts = pd.Timestamp(dt_idx)
                 signal_sides[ts] = int(signals_df.at[dt_idx, "side"])
-                signal_set.add(ts)
         elif "prob_Buy" in signals_df.columns:
             mask = signals_df["prob_Buy"] >= self.prob_threshold
             for dt_idx in signals_df[mask].index:
-                ts = pd.Timestamp(dt_idx)
-                signal_sides[ts] = 1  # Long only
-                signal_set.add(ts)
+                signal_sides[pd.Timestamp(dt_idx)] = 1
         elif "Predicted" in signals_df.columns:
-            # Legacy format: Predicted=1 means Buy signal
             mask = signals_df["Predicted"] == 1
             for dt_idx in signals_df[mask].index:
-                ts = pd.Timestamp(dt_idx)
-                signal_sides[ts] = 1  # Long only
-                signal_set.add(ts)
+                signal_sides[pd.Timestamp(dt_idx)] = 1
 
-        # Bar-by-bar simulation
+        if self.allow_concurrent:
+            self._run_concurrent(ohlcv, signal_sides)
+        else:
+            self._run_single(ohlcv, signal_sides)
+
+        return BacktestResult(
+            trades=self._trades,
+            label=label,
+            start_dt=ohlcv.index.min() if not ohlcv.empty else None,
+            end_dt=ohlcv.index.max() if not ohlcv.empty else None,
+        )
+
+    def _run_single(
+        self,
+        ohlcv: pd.DataFrame,
+        signal_sides: dict[pd.Timestamp, int],
+    ) -> None:
+        """Single-position FSM loop (original behaviour)."""
         for dt, bar in ohlcv.iterrows():
             ts = pd.Timestamp(dt)
             atr = bar["_atr"]
@@ -525,12 +740,40 @@ class CLAdvancedExecutionBacktester:
             elif self._state == TradeState.COOLDOWN:
                 self._on_cooldown()
 
-        return BacktestResult(
-            trades=self._trades,
-            label=label,
-            start_dt=ohlcv.index.min() if not ohlcv.empty else None,
-            end_dt=ohlcv.index.max() if not ohlcv.empty else None,
-        )
+    def _run_concurrent(
+        self,
+        ohlcv: pd.DataFrame,
+        signal_sides: dict[pd.Timestamp, int],
+    ) -> None:
+        """Concurrent multi-position loop.
+
+        On each bar:
+        1. Check all open positions for exits (TP/SL/trailing/time)
+        2. If a signal is present and we haven't hit max_concurrent, open new
+        """
+        for dt, bar in ohlcv.iterrows():
+            ts = pd.Timestamp(dt)
+            atr = bar["_atr"]
+
+            # 1. Check existing positions for exits
+            surviving: list[_OpenPosition] = []
+            for pos in self._open_positions:
+                record = self._check_position(pos, ts, bar)
+                if record is not None:
+                    self._trades.append(record)
+                else:
+                    surviving.append(pos)
+            self._open_positions = surviving
+
+            # 2. Accept new signals if room
+            sig = signal_sides.get(ts)
+            if (
+                sig is not None
+                and not (np.isnan(atr) if isinstance(atr, float) else False)
+                and atr > 0
+                and len(self._open_positions) < self.max_concurrent
+            ):
+                self._open_new_position(ts, bar, sig, atr)
 
 
 # ---------------------------------------------------------------------------
@@ -721,7 +964,7 @@ def load_ohlcv(path: str) -> pd.DataFrame:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="CL Advanced Backtester — FSM Trade Management"
+        description="BacktestEngine — Config-Driven Strategy Backtester"
     )
     parser.add_argument(
         "--predictions",
@@ -741,7 +984,7 @@ def main() -> None:
     parser.add_argument(
         "--config",
         default=None,
-        help="Path to a strategy JSON config (overrides --threshold, --tp-mult, --sl-mult)",
+        help="Path to a strategy JSON config (reads all parameters)",
     )
     parser.add_argument(
         "--threshold",
@@ -766,29 +1009,36 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # If --config is provided, load strategy params from JSON for parity
-    tp_mult = args.tp_mult
-    sl_mult = args.sl_mult
-    threshold = args.threshold
+    # If --config is provided, create engine from strategy JSON
     if args.config is not None:
         with open(args.config) as f:
             strategy_cfg = json.load(f)
-        tp_mult = strategy_cfg.get("tp_atr_mult", tp_mult)
-        sl_mult = strategy_cfg.get("sl_atr_mult", sl_mult)
-        threshold = strategy_cfg.get("entry_threshold", threshold)
+
+        bt = BacktestEngine.from_config(
+            strategy_cfg,
+            commission_per_side=args.commission_per_side,
+            slippage_per_side=args.slippage_per_side,
+            contract_multiplier=args.contract_multiplier,
+        )
+        concurrent_str = (
+            f"concurrent={bt.max_concurrent}"
+            if bt.allow_concurrent
+            else "single-position"
+        )
         print(
             f"Loaded strategy config '{strategy_cfg.get('nickname', '?')}': "
-            f"TP={tp_mult}x  SL={sl_mult}x  threshold={threshold}"
+            f"TP={bt.tp_atr_mult}x  SL={bt.sl_atr_mult}x  "
+            f"threshold={bt.prob_threshold}  [{concurrent_str}]"
         )
-
-    bt = CLAdvancedExecutionBacktester(
-        tp_atr_mult=tp_mult,
-        sl_atr_mult=sl_mult,
-        prob_threshold=threshold,
-        commission_per_side=args.commission_per_side,
-        slippage_per_side=args.slippage_per_side,
-        contract_multiplier=args.contract_multiplier,
-    )
+    else:
+        bt = BacktestEngine(
+            tp_atr_mult=args.tp_mult,
+            sl_atr_mult=args.sl_mult,
+            prob_threshold=args.threshold,
+            commission_per_side=args.commission_per_side,
+            slippage_per_side=args.slippage_per_side,
+            contract_multiplier=args.contract_multiplier,
+        )
 
     # Run A: Historical data
     print(f"Loading predictions from {args.predictions}...")
@@ -817,6 +1067,10 @@ def main() -> None:
         print(compare_runs(result_a, result_b))
     elif args.live_data:
         print(f"\nNote: Live data file not found at {args.live_data} — skipping Run B.")
+
+
+# Backward-compatible alias
+CLAdvancedExecutionBacktester = BacktestEngine
 
 
 if __name__ == "__main__":
