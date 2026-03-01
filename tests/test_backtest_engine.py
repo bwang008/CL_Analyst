@@ -1,4 +1,4 @@
-"""Tests for CLAdvancedExecutionBacktester FSM trade management.
+"""Tests for BacktestEngine FSM trade management.
 
 Uses synthetic OHLCV data to validate every FSM transition:
 - TP hit, SL hit, trailing stop to breakeven, time-barrier exit
@@ -12,9 +12,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from agent.backtest_cl_advanced import (
+from agent.backtest_engine import (
     BacktestResult,
-    CLAdvancedExecutionBacktester,
+    BacktestEngine,
     ExitReason,
     TradeRecord,
 )
@@ -71,7 +71,7 @@ def _make_signal(ohlcv: pd.DataFrame, bar_idx: int, side: int = 1) -> pd.DataFra
     return pd.DataFrame({"side": [side]}, index=[dt])
 
 
-def _bt(**kwargs) -> CLAdvancedExecutionBacktester:
+def _bt(**kwargs) -> BacktestEngine:
     """Create a backtester with test-friendly defaults."""
     defaults = {
         "tp_atr_mult": 2.0,
@@ -85,7 +85,7 @@ def _bt(**kwargs) -> CLAdvancedExecutionBacktester:
         "contract_multiplier": 1000.0,
     }
     defaults.update(kwargs)
-    return CLAdvancedExecutionBacktester(**defaults)
+    return BacktestEngine(**defaults)
 
 
 # ---------------------------------------------------------------------------
@@ -378,3 +378,136 @@ class TestExitDistribution:
         assert dist["TP"]["pct"] == pytest.approx(50.0)
         assert dist["SL"]["count"] == 1
         assert dist["SL"]["pct"] == pytest.approx(50.0)
+
+
+# ---------------------------------------------------------------------------
+# Concurrent Mode Tests
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrentMode:
+    """Concurrent multi-position mode allows overlapping trades."""
+
+    def test_concurrent_opens_multiple_positions(self) -> None:
+        """With allow_concurrent=True, two close signals both fire."""
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+
+        # TP hit for both signals at bar 30
+        highs[30] = 65.05
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+
+        # Two signals at bars 20 and 22 — both should be accepted
+        dt1 = ohlcv.index[20]
+        dt2 = ohlcv.index[22]
+        signals = pd.DataFrame({"side": [1, 1]}, index=[dt1, dt2])
+
+        bt = _bt(allow_concurrent=True, max_concurrent=5)
+        result = bt.run(signals, ohlcv)
+
+        # Both trades should execute (not just one)
+        assert result.trade_count == 2
+
+    def test_concurrent_respects_max_concurrent(self) -> None:
+        """Signals beyond max_concurrent are rejected."""
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+
+        highs[30] = 65.05  # TP hit
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+
+        # Three signals — but max_concurrent=2
+        dt1 = ohlcv.index[20]
+        dt2 = ohlcv.index[21]
+        dt3 = ohlcv.index[22]
+        signals = pd.DataFrame({"side": [1, 1, 1]}, index=[dt1, dt2, dt3])
+
+        bt = _bt(allow_concurrent=True, max_concurrent=2)
+        result = bt.run(signals, ohlcv)
+
+        # Only 2 accepted (third signal rejected — at capacity)
+        assert result.trade_count == 2
+
+    def test_single_mode_rejects_second_signal(self) -> None:
+        """With allow_concurrent=False (default), overlapping signal rejected."""
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+
+        highs[30] = 65.05  # TP hit
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+
+        # Two signals at bars 20 and 22 — second should be rejected
+        dt1 = ohlcv.index[20]
+        dt2 = ohlcv.index[22]
+        signals = pd.DataFrame({"side": [1, 1]}, index=[dt1, dt2])
+
+        bt = _bt(allow_concurrent=False)
+        result = bt.run(signals, ohlcv)
+
+        assert result.trade_count == 1  # Only one trade — FSM was IN_POSITION
+
+
+class TestFromConfig:
+    """BacktestEngine.from_config() reads all strategy fields."""
+
+    def test_from_config_reads_all_fields(self) -> None:
+        cfg = {
+            "nickname": "TestStrat",
+            "tp_atr_mult": 5.0,
+            "sl_atr_mult": 0.5,
+            "entry_threshold": 0.70,
+            "allow_concurrent": True,
+            "max_concurrent": 3,
+            "cooldown_bars": 5,
+            "trailing_atr_mult": 2.0,
+            "max_hold_bars": 100,
+        }
+        bt = BacktestEngine.from_config(cfg)
+
+        assert bt.tp_atr_mult == 5.0
+        assert bt.sl_atr_mult == 0.5
+        assert bt.prob_threshold == 0.70
+        assert bt.allow_concurrent is True
+        assert bt.max_concurrent == 3
+        assert bt.cooldown_bars == 5
+        assert bt.trailing_atr_mult == 2.0
+        assert bt.max_horizon == 100
+
+    def test_from_config_defaults(self) -> None:
+        """Missing fields use sensible defaults."""
+        cfg = {"nickname": "Minimal"}
+        bt = BacktestEngine.from_config(cfg)
+
+        assert bt.tp_atr_mult == 2.0
+        assert bt.allow_concurrent is False
+        assert bt.max_concurrent == 1
+        assert bt.max_horizon == 288
+
+    def test_from_config_overrides(self) -> None:
+        """CLI overrides take precedence over config values."""
+        cfg = {"tp_atr_mult": 5.0, "commission_per_side": 999}
+        bt = BacktestEngine.from_config(
+            cfg, commission_per_side=1.00
+        )
+
+        assert bt.tp_atr_mult == 5.0  # from config
+        assert bt.commission_per_side == 1.00  # override wins
+
+
+class TestBackwardCompatAlias:
+    """CLAdvancedExecutionBacktester alias still works."""
+
+    def test_alias_is_same_class(self) -> None:
+        from agent.backtest_engine import CLAdvancedExecutionBacktester
+
+        assert CLAdvancedExecutionBacktester is BacktestEngine
+

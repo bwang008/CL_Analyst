@@ -1,6 +1,6 @@
-# Documentation entrypoint
+﻿# Documentation entrypoint
 
-The repo now uses a “Three-File System” for documentation:
+The repo now uses a â€œThree-File Systemâ€ for documentation:
 
 - `README.md`: high-level project description, setup, and champion model architecture
 - `HANDOFF.md`: current state only (branch, last task, known issues, immediate next steps)
@@ -45,18 +45,18 @@ python agent/regime_dual_model_backtest.py --buy-predictions reports/exp017_long
 
 ### 5) Advanced backtest (single-model, A/B historical vs live)
 ```bash
-python agent/backtest_cl_advanced.py --predictions reports/exp017_long_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --threshold 0.60 --tp-mult 5.0 --sl-mult 0.75
+python agent/backtest_engine.py --predictions reports/exp017_long_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --threshold 0.60 --tp-mult 5.0 --sl-mult 0.75
 ```
 
 Optional live-session comparison:
 ```bash
-python agent/backtest_cl_advanced.py --predictions reports/exp017_long_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --live-data data/processed/warm_start_cache.parquet --threshold 0.60 --tp-mult 5.0 --sl-mult 0.75
+python agent/backtest_engine.py --predictions reports/exp017_long_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --live-data data/processed/warm_start_cache.parquet --threshold 0.60 --tp-mult 5.0 --sl-mult 0.75
 ```
 
 ### Backtester file roles
 - `agent/backtester.py`: legacy, single-position event-driven backtest with raw CSV fallback.
 - `agent/backtest_cl_concurrent.py`: unlimited concurrent positions, TP/SL/ATR logic, grid sweeps.
-- `agent/backtest_cl_advanced.py`: single-model FSM backtest with optional live session comparison.
+- `agent/backtest_engine.py`: single-model FSM backtest with optional live session comparison.
 - `agent/regime_dual_model_backtest.py`: merges buy/sell prediction files and runs regime windows using the concurrent backtester.
 
 ### File format expectations
@@ -100,7 +100,7 @@ python agent/oos_regime_test.py --data-path data/processed/CL_set_06_shortfix.pa
 ## Config-Driven Strategy Workflow (End-to-End)
 
 This is the recommended workflow for creating, backtesting, and deploying a new strategy.
-No new Python code is needed — just a JSON config file.
+No new Python code is needed â€” just a JSON config file.
 
 ### Key Files
 
@@ -109,7 +109,7 @@ No new Python code is needed — just a JSON config file.
 | `configs/strategies/*.json` | Strategy definitions (threshold, TP/SL, sizing) |
 | `src/live_execution/strategies/configurable_strategy.py` | Universal strategy class (reads JSON) |
 | `src/live_execution/live_trader.py` | Live execution engine |
-| `agent/backtest_cl_advanced.py` | FSM backtester |
+| `agent/backtest_engine.py` | FSM backtester |
 | `agent/generate_model_predictions.py` | Generates prediction CSVs from models |
 | `models/registry/EXP-XXX_*/` | Model bundles (model.pkl + config.json) |
 | `.env` | Local env vars (CL_DATA_ROOT for data path) |
@@ -119,8 +119,8 @@ No new Python code is needed — just a JSON config file.
 ### Step 1: Train a Model (or use an existing one)
 
 Models live in `models/registry/`. Each experiment folder contains:
-- `final_model.pkl` — trained LightGBM model
-- `config.json` — training metadata (threshold, features, metrics)
+- `final_model.pkl` â€” trained LightGBM model
+- `config.json` â€” training metadata (threshold, features, metrics)
 
 To train a new model:
 ```bash
@@ -129,8 +129,8 @@ python main.py train
 This runs walk-forward training and auto-archives to `models/registry/EXP-XXX_*/`.
 
 Existing models:
-- `EXP-017_S_Ultimate` — Long strategy (champion buy model)
-- `EXP-020_S_Ultimate_Short` — Short strategy
+- `EXP-017_S_Ultimate` â€” Long strategy (champion buy model)
+- `EXP-020_S_Ultimate_Short` â€” Short strategy
 
 ---
 
@@ -158,7 +158,7 @@ python agent/generate_model_predictions.py \
 
 Create a strategy JSON config (or use an existing one):
 
-**`configs/strategies/manatee.json`** (example — Manatee long strategy):
+**`configs/strategies/manatee.json`** (example â€” Manatee long strategy):
 ```json
 {
     "nickname": "Manatee",
@@ -186,20 +186,20 @@ Create a strategy JSON config (or use an existing one):
 | `direction` | string | `LONG`, `SHORT`, or `BOTH` |
 | `allow_concurrent` | bool | Allow entry while a position is open |
 | `entry_threshold` | float | Min probability to trigger entry |
-| `tp_atr_mult` | float | Take-profit = entry ± (this × ATR) |
-| `sl_atr_mult` | float | Stop-loss = entry ∓ (this × ATR) |
-| `sizing_tiers` | dict | `{"min_probability": lots}` — higher prob → more lots |
+| `tp_atr_mult` | float | Take-profit = entry Â± (this Ã— ATR) |
+| `sl_atr_mult` | float | Stop-loss = entry âˆ“ (this Ã— ATR) |
+| `sizing_tiers` | dict | `{"min_probability": lots}` â€” higher prob â†’ more lots |
 
 **Run the backtest:**
 ```bash
 # Backtest using the strategy config (loads TP/SL/threshold from JSON)
-python agent/backtest_cl_advanced.py \
+python agent/backtest_engine.py \
   --config configs/strategies/manatee.json \
   --predictions reports/exp017_long_predictions.csv \
   --data data/processed/CL_set_06_shortfix.parquet
 
 # Or manually override parameters
-python agent/backtest_cl_advanced.py \
+python agent/backtest_engine.py \
   --predictions reports/exp017_long_predictions.csv \
   --data data/processed/CL_set_06_shortfix.parquet \
   --threshold 0.70 --tp-mult 7.0 --sl-mult 1.0
@@ -210,7 +210,7 @@ python agent/backtest_cl_advanced.py \
 ### Step 4: Deploy to Live Trader
 
 ```bash
-# Dry run (no real orders — logs signals only)
+# Dry run (no real orders â€” logs signals only)
 python -m src.live_execution.live_trader \
   --config configs/strategies/manatee.json \
   --dry-run
@@ -227,7 +227,7 @@ python -m src.live_execution.live_trader --strategy BUY70_SIZED_MANATEE
 1. Loads model from `models/registry/{experiment_id}/final_model.pkl`
 2. Connects to IBKR (auto-increments client ID if another instance is running)
 3. Warm-starts rolling data from seed CSV + IBKR backfill
-4. On each 5-min bar: generates features → model inference → `ConfigurableStrategy.evaluate()` → bracket order
+4. On each 5-min bar: generates features â†’ model inference â†’ `ConfigurableStrategy.evaluate()` â†’ bracket order
 
 ---
 
@@ -235,20 +235,20 @@ python -m src.live_execution.live_trader --strategy BUY70_SIZED_MANATEE
 
 1. Copy an existing config: `cp configs/strategies/manatee.json configs/strategies/my_strat.json`
 2. Edit the fields (experiment_id, threshold, TP/SL, sizing tiers)
-3. Backtest: `python agent/backtest_cl_advanced.py --config configs/strategies/my_strat.json --predictions <pred.csv> --data <ohlcv.parquet>`
+3. Backtest: `python agent/backtest_engine.py --config configs/strategies/my_strat.json --predictions <pred.csv> --data <ohlcv.parquet>`
 4. Deploy: `python -m src.live_execution.live_trader --config configs/strategies/my_strat.json --dry-run`
 
 ---
 
 ### Environment Setup
 
-**`.env` file** (at repo root — gitignored, local to each machine):
+**`.env` file** (at repo root â€” gitignored, local to each machine):
 ```
 CL_DATA_ROOT=C:\Users\bwang\OneDrive\Documents\Data
 ```
 This tells the live trader where to find `cl-5m_bk.csv` for warm-start. Required in worktrees where the `data/` directory doesn't exist.
 
-**IBKR Client ID:** The live trader auto-increments client IDs (1→2→...→31) if another instance is already connected. No manual `--client-id` needed.
+**IBKR Client ID:** The live trader auto-increments client IDs (1â†’2â†’...â†’31) if another instance is already connected. No manual `--client-id` needed.
 
 ---
 
@@ -279,7 +279,7 @@ python agent/regime_dual_model_backtest.py --buy-predictions reports/exp017_long
 ### Backtester file roles
 - `agent/backtester.py`: legacy, single-position event-driven backtest with raw CSV fallback.
 - `agent/backtest_cl_concurrent.py`: unlimited concurrent positions, TP/SL/ATR logic, grid sweeps.
-- `agent/backtest_cl_advanced.py`: single-model FSM backtest with `--config` support and optional live session comparison.
+- `agent/backtest_engine.py`: single-model FSM backtest with `--config` support and optional live session comparison.
 - `agent/regime_dual_model_backtest.py`: merges buy/sell prediction files and runs regime windows using the concurrent backtester.
 
 ### File format expectations

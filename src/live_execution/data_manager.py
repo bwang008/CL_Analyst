@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -48,10 +49,12 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Shared data root (set CL_DATA_ROOT env var to share raw data across worktrees)
 _CL_DATA_ROOT = os.environ.get("CL_DATA_ROOT", "")
-_DEFAULT_SEED_PATH = (
-    str(Path(_CL_DATA_ROOT) / "cl-5m_bk.csv")
-    if _CL_DATA_ROOT
-    else str(_PROJECT_ROOT / "data" / "raw" / "cl-5m_bk.csv")
+# Repo-local first, CL_DATA_ROOT fallback
+_LOCAL_SEED = _PROJECT_ROOT / "data" / "raw" / "cl-5m_bk.csv"
+_ROOT_SEED = Path(_CL_DATA_ROOT) / "raw" / "cl-5m_bk.csv" if _CL_DATA_ROOT else None
+_DEFAULT_SEED_PATH = str(
+    _LOCAL_SEED if _LOCAL_SEED.exists()
+    else (_ROOT_SEED if _ROOT_SEED and _ROOT_SEED.exists() else _LOCAL_SEED)
 )
 _DEFAULT_CACHE_PATH = str(
     _PROJECT_ROOT / "data" / "processed" / "warm_start_cache.parquet"
@@ -80,6 +83,21 @@ _ROLL_VALIDATION_BARS = 50
 
 # Maximum price difference ($) before considering cache stale.
 _ROLL_PRICE_TOLERANCE = 0.01
+
+
+def _mirror_to_root(src_path: Path, project_root: Path) -> None:
+    """Copy a file to CL_DATA_ROOT preserving the data/ subdirectory structure."""
+    _cl_root = os.environ.get("CL_DATA_ROOT", "")
+    if not _cl_root:
+        return
+    try:
+        rel = src_path.relative_to(project_root / "data")
+        dest = Path(_cl_root) / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(src_path), str(dest))
+        log.info("Mirrored %s → %s", src_path.name, dest)
+    except (ValueError, OSError) as exc:
+        log.warning("Could not mirror to root: %s", exc)
 
 
 class DataManager:
@@ -246,6 +264,7 @@ class DataManager:
             log.info(
                 "Cache saved: %d bars → %s", len(self._df), self.cache_path
             )
+            _mirror_to_root(self.cache_path, _PROJECT_ROOT)
         except Exception:
             # Clean up temp file on error
             try:
@@ -787,6 +806,7 @@ class DataManager:
                 "Master ledger saved: %d bars → %s",
                 len(ledger), self.master_ledger_path,
             )
+            _mirror_to_root(self.master_ledger_path, _PROJECT_ROOT)
         except Exception:
             try:
                 Path(tmp_path).unlink(missing_ok=True)

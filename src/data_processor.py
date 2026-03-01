@@ -18,12 +18,16 @@ Author: CL Analyst
 
 import os
 import json
+import shutil
 import numpy as np
 import pandas as pd
 import pandas_ta as ta  # noqa: F401
 from typing import Optional
 from pathlib import Path
 from datetime import datetime
+
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from src.features.alpha_factory import AlphaFactory
 
@@ -73,12 +77,16 @@ class DataProcessor:
             keep_ohlcv: If True, retain Open/High/Low/Close/Volume/DateTime columns.
         """
         if input_path is None:
+            # Try repo-local path first, fall back to CL_DATA_ROOT
+            _local = Path("data/raw/cl-5m_bk.csv")
             _cl_root = os.environ.get("CL_DATA_ROOT", "")
-            input_path = (
-                str(Path(_cl_root) / "cl-5m_bk.csv")
-                if _cl_root
-                else "data/raw/test100k.csv"
-            )
+            _root = Path(_cl_root) / "raw" / "cl-5m_bk.csv" if _cl_root else None
+            if _local.exists():
+                input_path = str(_local)
+            elif _root and _root.exists():
+                input_path = str(_root)
+            else:
+                input_path = "data/raw/test100k.csv"
         self.input_path = input_path
         self._dataset_version = dataset_version
         self.keep_ohlcv = keep_ohlcv
@@ -646,22 +654,38 @@ class DataProcessor:
             os.makedirs(output_dir, exist_ok=True)
         
         # Try to save as Parquet first
+        saved_path = self.output_path
         if self.output_path.endswith('.parquet'):
             try:
                 df.to_parquet(self.output_path)
                 print(f"Saved processed data to {self.output_path}")
-                return self.output_path
             except ImportError:
                 # Parquet not available, fall back to CSV
-                csv_path = self.output_path.replace('.parquet', '.csv')
-                df.to_csv(csv_path)
-                print(f"Parquet not available. Saved as CSV to {csv_path}")
-                return csv_path
+                saved_path = self.output_path.replace('.parquet', '.csv')
+                df.to_csv(saved_path)
+                print(f"Parquet not available. Saved as CSV to {saved_path}")
         else:
             # Save as CSV
             df.to_csv(self.output_path)
             print(f"Saved processed data to {self.output_path}")
-            return self.output_path
+
+        # Mirror to shared data root for worktree access
+        self._mirror_to_root(saved_path)
+        return saved_path
+
+    def _mirror_to_root(self, saved_path: str) -> None:
+        """Copy the saved file to CL_DATA_ROOT if configured."""
+        _cl_root = os.environ.get("CL_DATA_ROOT", "")
+        if not _cl_root:
+            return
+        try:
+            rel = os.path.relpath(saved_path, "data")
+            dest = os.path.join(_cl_root, rel)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.copy2(saved_path, dest)
+            print(f"  ↳ Mirrored to {dest}")
+        except (ValueError, OSError) as exc:
+            print(f"  ↳ Mirror failed: {exc}")
     
     def process(self, threshold: float = 0.08, horizon: int = None) -> pd.DataFrame:
         """
