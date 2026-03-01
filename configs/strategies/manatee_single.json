@@ -1,0 +1,19 @@
+{
+    "nickname": "Manatee",
+    "experiment_id": "EXP-017_S_Ultimate",
+    "direction": "LONG",
+    "allow_concurrent": false,
+    "max_concurrent": 1,
+    "cooldown_bars": 10,
+    "trailing_atr_mult": 1.0,
+    "max_hold_bars": 288,
+    "entry_threshold": 0.70,
+    "tp_atr_mult": 7.0,
+    "sl_atr_mult": 1.0,
+    "sizing_tiers": {
+        "0.80": 3,
+        "0.70": 2,
+        "0.60": 2,
+        "0.50": 1
+    }
+}

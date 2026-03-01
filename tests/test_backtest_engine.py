@@ -511,3 +511,119 @@ class TestBackwardCompatAlias:
 
         assert CLAdvancedExecutionBacktester is BacktestEngine
 
+
+# ---------------------------------------------------------------------------
+# Pessimistic FSM Tests
+# ---------------------------------------------------------------------------
+
+
+class TestPessimisticSameBar:
+    """When both TP and SL breach on the same bar, SL wins."""
+
+    def test_same_bar_tp_sl_exits_as_sl(self) -> None:
+        """High-volatility bar breaches both barriers — pessimistic takes SL."""
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+
+        # Bar 25: massive range — High breaches TP AND Low breaches SL
+        # ATR ≈ 0.02, TP = 65.04, SL = 64.98
+        highs[25] = 65.10  # above TP at 65.04
+        lows[25] = 64.90   # below SL at 64.98
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        signals = _make_signal(ohlcv, bar_idx=20)
+
+        bt = _bt()
+        result = bt.run(signals, ohlcv)
+
+        assert result.trade_count == 1
+        trade = result.trades[0]
+        # Pessimistic: SL wins over TP on same bar
+        assert trade.exit_reason == ExitReason.SL
+
+    def test_only_tp_still_exits_tp(self) -> None:
+        """When only TP breaches (no SL), TP still fires correctly."""
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+
+        # Bar 25: only TP breached
+        highs[25] = 65.05
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        signals = _make_signal(ohlcv, bar_idx=20)
+
+        bt = _bt()
+        result = bt.run(signals, ohlcv)
+
+        assert result.trade_count == 1
+        assert result.trades[0].exit_reason == ExitReason.TP
+
+
+# ---------------------------------------------------------------------------
+# Equity Curve Tests
+# ---------------------------------------------------------------------------
+
+
+class TestEquityCurve:
+    """BacktestResult.equity_curve tracks floating + realized PnL."""
+
+    def test_equity_curve_has_entries(self) -> None:
+        """After a run, equity_curve has one entry per OHLCV bar."""
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+        highs[25] = 65.05  # TP hit
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        signals = _make_signal(ohlcv, bar_idx=20)
+
+        bt = _bt()
+        result = bt.run(signals, ohlcv)
+
+        assert len(result.equity_curve) == n
+
+    def test_equity_curve_flat_when_no_position(self) -> None:
+        """Before any trade, equity should be zero."""
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+        highs[30] = 65.05  # TP hit late
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        signals = _make_signal(ohlcv, bar_idx=20)
+
+        bt = _bt()
+        result = bt.run(signals, ohlcv)
+
+        # Before signal at bar 20, equity should be 0
+        for i in range(20):
+            assert result.equity_curve[i] == 0.0
+
+    def test_max_drawdown_uses_equity_curve(self) -> None:
+        """max_drawdown should reflect intra-trade floating losses."""
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+
+        # Entry at bar 20 (price 65.0), price dips then recovers to TP
+        # Bar 23: price drops → floating loss
+        prices[23] = 64.99
+        lows[23] = 64.99
+        # Bar 30: TP hit
+        highs[30] = 65.05
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        signals = _make_signal(ohlcv, bar_idx=20)
+
+        bt = _bt()
+        result = bt.run(signals, ohlcv)
+
+        # max_drawdown should be negative (reflecting the dip)
+        assert result.max_drawdown < 0.0
