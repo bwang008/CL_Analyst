@@ -73,21 +73,39 @@ class ConfigurableStrategy(Strategy):
             self.config: dict = json.load(f)
 
         self._nickname: str = self.config["nickname"]
-        self._direction: str = self.config["direction"].upper()
+        self._direction: str = self.config.get("direction", "BOTH").upper()
         self.allow_concurrent: bool = self.config.get("allow_concurrent", False)
 
-        # Threshold (safe default = 100.0 → no trades fire)
-        raw_threshold = self.config.get("entry_threshold", None)
-        if raw_threshold is None or not isinstance(raw_threshold, (int, float)):
-            log.warning(
-                "[%s] CONFIG MISSING/INVALID: 'entry_threshold' "
-                "not found or not a number — using safe default 100.0 "
-                "(no trades will fire)",
-                self._nickname,
+        # Detect ensemble vs single-model config
+        self._is_ensemble: bool = "models" in self.config
+
+        # Threshold
+        if self._is_ensemble:
+            # Ensemble: per-model thresholds; entry_threshold is a fallback
+            models_cfg = self.config["models"]
+            self._long_threshold: float = float(
+                models_cfg.get("long", {}).get("threshold", 0.50)
             )
-            self.entry_threshold: float = 100.0
+            self._short_threshold: float = float(
+                models_cfg.get("short", {}).get("threshold", 0.50)
+            )
+            self.entry_threshold: float = min(
+                self._long_threshold, self._short_threshold
+            )
         else:
-            self.entry_threshold = float(raw_threshold)
+            raw_threshold = self.config.get("entry_threshold", None)
+            if raw_threshold is None or not isinstance(raw_threshold, (int, float)):
+                log.warning(
+                    "[%s] CONFIG MISSING/INVALID: 'entry_threshold' "
+                    "not found or not a number -- using safe default 100.0 "
+                    "(no trades will fire)",
+                    self._nickname,
+                )
+                self.entry_threshold = 100.0
+            else:
+                self.entry_threshold = float(raw_threshold)
+            self._long_threshold = self.entry_threshold
+            self._short_threshold = self.entry_threshold
 
         # ATR multipliers
         self.tp_atr_mult: float = float(self.config.get("tp_atr_mult", 2.0))
@@ -100,18 +118,69 @@ class ConfigurableStrategy(Strategy):
             reverse=True,
         )
 
-        # Load model from registry
-        # Support nested live_config.experiment_id (new) with fallback to
-        # top-level experiment_id (backward compat)
+        # Load model(s) from registry
         live_cfg = self.config.get("live_config", {})
-        experiment_id = live_cfg.get(
-            "experiment_id", self.config.get("experiment_id")
-        )
-        if experiment_id is None:
-            raise ValueError(
-                f"[{self._nickname}] Config missing 'experiment_id' in both "
-                f"'live_config' and top-level."
+
+        if self._is_ensemble:
+            models_cfg = self.config["models"]
+            # Load LONG model
+            long_exp_id = (
+                models_cfg.get("long", {}).get("experiment_id")
+                or live_cfg.get("experiment_id")
             )
+            if long_exp_id:
+                self._long_learner = self._load_model(long_exp_id, "LONG")
+            else:
+                self._long_learner = None
+                log.warning("[%s] No LONG model experiment_id — long signals disabled", self._nickname)
+
+            # Load SHORT model
+            short_exp_id = models_cfg.get("short", {}).get("experiment_id")
+            if short_exp_id:
+                self._short_learner = self._load_model(short_exp_id, "SHORT")
+            else:
+                self._short_learner = None
+                log.warning("[%s] No SHORT model experiment_id — short signals disabled", self._nickname)
+
+            # Use the long model's features as primary (both should share features)
+            primary = self._long_learner or self._short_learner
+            if primary is None:
+                raise ValueError(f"[{self._nickname}] Ensemble config has no valid models")
+            self.learner = primary
+            self._feature_names: list[str] = primary.feature_names
+        else:
+            # Single-model: original behavior
+            experiment_id = live_cfg.get(
+                "experiment_id", self.config.get("experiment_id")
+            )
+            if experiment_id is None:
+                raise ValueError(
+                    f"[{self._nickname}] Config missing 'experiment_id' in both "
+                    f"'live_config' and top-level."
+                )
+            self.learner = self._load_model(experiment_id, self._direction)
+            self._feature_names = self.learner.feature_names
+            self._long_learner = self.learner if self._direction != "SHORT" else None
+            self._short_learner = self.learner if self._direction != "LONG" else None
+
+        log.info(
+            "[%s] Config: direction=%s  long_thresh=%.2f  short_thresh=%.2f  "
+            "TP=%.1fx  SL=%.1fx  concurrent=%s  tiers=%s  ensemble=%s",
+            self._nickname,
+            self._direction,
+            self._long_threshold,
+            self._short_threshold,
+            self.tp_atr_mult,
+            self.sl_atr_mult,
+            self.allow_concurrent,
+            self.sizing_tiers,
+            self._is_ensemble,
+        )
+
+        self.base_quantity = base_quantity
+
+    def _load_model(self, experiment_id: str, label: str) -> LGBMLearner:
+        """Load a LGBMLearner from the model registry."""
         model_dir = _PROJECT_ROOT / "models" / "registry" / experiment_id
         model_path = model_dir / "final_model.pkl"
         if not model_path.exists():
@@ -119,27 +188,14 @@ class ConfigurableStrategy(Strategy):
                 f"Model not found: {model_path} "
                 f"(experiment_id={experiment_id})"
             )
-        log.info("[%s] Loading model from %s", self._nickname, model_path)
-        self.learner = LGBMLearner.__new__(LGBMLearner)
-        self.learner.load(str(model_path))
-        self._feature_names: list[str] = self.learner.feature_names
+        log.info("[%s] Loading %s model from %s", self._nickname, label, model_path)
+        learner = LGBMLearner.__new__(LGBMLearner)
+        learner.load(str(model_path))
         log.info(
-            "[%s] Model loaded: %d features", self._nickname, len(self._feature_names)
+            "[%s] %s model loaded: %d features",
+            self._nickname, label, len(learner.feature_names),
         )
-
-        log.info(
-            "[%s] Config: direction=%s  threshold=%.2f  TP=%.1fx  SL=%.1fx  "
-            "concurrent=%s  tiers=%s",
-            self._nickname,
-            self._direction,
-            self.entry_threshold,
-            self.tp_atr_mult,
-            self.sl_atr_mult,
-            self.allow_concurrent,
-            self.sizing_tiers,
-        )
-
-        self.base_quantity = base_quantity
+        return learner
 
     # -- Strategy interface --------------------------------------------------
 
@@ -155,6 +211,14 @@ class ConfigurableStrategy(Strategy):
     def feature_names(self) -> list[str]:
         return self._feature_names
 
+    def _run_inference(self, learner: LGBMLearner, features: pd.DataFrame) -> float:
+        """Run model inference and return a probability."""
+        raw_pred = learner.model.predict(features)
+        raw_val = float(np.asarray(raw_pred).ravel()[0])
+        if raw_val < 0 or raw_val > 1:
+            return _sigmoid(raw_val)
+        return raw_val
+
     def evaluate(
         self,
         features: pd.DataFrame,
@@ -163,34 +227,51 @@ class ConfigurableStrategy(Strategy):
         current_position: int,
     ) -> TradeSignal:
         """Run inference and return a TradeSignal."""
-        # 1. Inference
-        raw_pred = self.learner.model.predict(features)
-        raw_val = float(np.asarray(raw_pred).ravel()[0])
+        # 1. Run inference on available models
+        buy_prob = 0.0
+        sell_prob = 0.0
+        if self._long_learner is not None:
+            buy_prob = self._run_inference(self._long_learner, features)
+        if self._short_learner is not None:
+            sell_prob = self._run_inference(self._short_learner, features)
 
-        if raw_val < 0 or raw_val > 1:
-            probability = _sigmoid(raw_val)
-        else:
-            probability = raw_val
+        # 2. Determine which signals pass their thresholds
+        buy_ok = buy_prob >= self._long_threshold and self._long_learner is not None
+        sell_ok = sell_prob >= self._short_threshold and self._short_learner is not None
 
-        confidence_pct = probability * 100.0
-
-        # Determine action label based on direction
-        if self._direction == "SHORT":
+        # Pick the winning signal
+        if buy_ok and sell_ok:
+            # Conflict: higher probability wins (conservative)
+            if buy_prob >= sell_prob:
+                probability = buy_prob
+                active_label = "Buy"
+                active_action = "BUY"
+            else:
+                probability = sell_prob
+                active_label = "Sell"
+                active_action = "SELL"
+        elif buy_ok:
+            probability = buy_prob
+            active_label = "Buy"
+            active_action = "BUY"
+        elif sell_ok:
+            probability = sell_prob
             active_label = "Sell"
             active_action = "SELL"
         else:
-            active_label = "Buy"
-            active_action = "BUY"
-
-        # 2. Threshold check
-        if probability < self.entry_threshold:
+            # Neither passes threshold — use higher prob for display
+            probability = max(buy_prob, sell_prob)
             return TradeSignal(
                 action="HOLD",
                 probability=probability,
-                confidence_pct=confidence_pct,
+                confidence_pct=probability * 100.0,
                 signal_label="Hold",
                 skip_reason="BELOW_THRESHOLD",
+                buy_prob=buy_prob,
+                sell_prob=sell_prob,
             )
+
+        confidence_pct = probability * 100.0
 
         # 3. Position check
         if not self.allow_concurrent and current_position != 0:
@@ -200,6 +281,8 @@ class ConfigurableStrategy(Strategy):
                 confidence_pct=confidence_pct,
                 signal_label=active_label,
                 skip_reason="POSITION_OPEN",
+                buy_prob=buy_prob,
+                sell_prob=sell_prob,
             )
 
         # 4. ATR validation
@@ -210,10 +293,12 @@ class ConfigurableStrategy(Strategy):
                 confidence_pct=confidence_pct,
                 signal_label=active_label,
                 skip_reason="ATR_INVALID",
+                buy_prob=buy_prob,
+                sell_prob=sell_prob,
             )
 
         # 5. Compute bracket levels (direction-aware)
-        if self._direction == "SHORT":
+        if active_action == "SELL":
             tp_price = round(current_price - self.tp_atr_mult * atr_value, 2)
             sl_price = round(current_price + self.sl_atr_mult * atr_value, 2)
         else:
@@ -231,6 +316,8 @@ class ConfigurableStrategy(Strategy):
             sl_price=sl_price,
             lots=lots,
             signal_label=active_label,
+            buy_prob=buy_prob,
+            sell_prob=sell_prob,
         )
 
     # -- Internal helpers ----------------------------------------------------
@@ -241,3 +328,4 @@ class ConfigurableStrategy(Strategy):
             if probability >= min_prob:
                 return lots
         return self.base_quantity
+

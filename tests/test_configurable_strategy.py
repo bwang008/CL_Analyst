@@ -92,6 +92,18 @@ def _make_strategy_stub(
     strategy._feature_names = ["ATR_14", "MACD", "ADX"]
     strategy.base_quantity = base_quantity
 
+    # Ensemble support attributes (single-model stub)
+    strategy._is_ensemble = False
+    strategy._long_threshold = strategy.entry_threshold
+    strategy._short_threshold = strategy.entry_threshold
+    direction = strategy.config.get("direction", "LONG").upper()
+    if direction == "SHORT":
+        strategy._long_learner = None
+        strategy._short_learner = strategy.learner
+    else:
+        strategy._long_learner = strategy.learner
+        strategy._short_learner = None
+
     return strategy
 
 
@@ -135,8 +147,10 @@ class TestSafeDefaults:
     def test_missing_threshold_uses_safe_default(self, tmp_path):
         # Remove entry_threshold from config
         s = _make_strategy_stub(str(tmp_path))
-        # Manually remove threshold to simulate missing config key
+        # Manually set threshold to safe default to simulate missing config key
         s.entry_threshold = 100.0
+        s._long_threshold = 100.0
+        s._short_threshold = 100.0
         s.learner.model.predict.return_value = np.array([0.99])
         signal = s.evaluate(
             features=_make_features(),
