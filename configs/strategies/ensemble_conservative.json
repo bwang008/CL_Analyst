@@ -4,14 +4,14 @@
     "models": {
         "long": {
             "experiment_id": "EXP-017_S_Ultimate",
-            "threshold": 0.70
+            "threshold": 0.60
         },
         "short": {
             "experiment_id": "EXP-020_S_Ultimate_Short",
             "threshold": 0.60
         }
     },
-    "tp_atr_mult": 7.0,
+    "tp_atr_mult": 3.0,
     "sl_atr_mult": 1.0,
     "trailing_atr_mult": 1.0,
     "cooldown_bars": 10,

@@ -12,8 +12,8 @@ offline model inference. Operates in two modes:
   rebuild features from scratch via AlphaFactory and compare both the
   features AND predictions. This is the gold-standard parity test.
 
-If predictions match → Pipeline Parity (the code is correct).
-If predictions diverge → Pipeline Bug (live vs. batch feature mismatch).
+If predictions match -> Pipeline Parity (the code is correct).
+If predictions diverge -> Pipeline Bug (live vs. batch feature mismatch).
 
 Usage:
     python scripts/validate_parity.py
@@ -140,6 +140,134 @@ def run_inference(learner: LGBMLearner, features_df: pd.DataFrame) -> np.ndarray
     return np.array(probs)
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Report printing
+# ═══════════════════════════════════════════════════════════════════
+
+def _print_trade_simulation(
+    w: int,
+    probs: np.ndarray,
+    closes: np.ndarray,
+    atrs: np.ndarray,
+    timestamps: np.ndarray | None,
+    direction: str = "LONG",
+    threshold: float = 0.70,
+    tp_mult: float = 5.0,
+    sl_mult: float = 1.0,
+) -> None:
+    """Simulate bracket trades and print win/loss stats."""
+    print()
+    print("=" * w)
+    print("SIMULATED TRADE RESULTS (bracket orders)".center(w))
+    print("=" * w)
+    print(f"  Direction:       {direction}")
+    print(f"  Entry threshold: {threshold}")
+    print(f"  TP multiplier:   {tp_mult}x ATR")
+    print(f"  SL multiplier:   {sl_mult}x ATR")
+    print("-" * w)
+
+    trades = []
+    i = 0
+    n = len(probs)
+    while i < n:
+        if probs[i] >= threshold and not np.isnan(atrs[i]) and atrs[i] > 0:
+            entry_price = closes[i]
+            atr = atrs[i]
+            if direction == "LONG":
+                tp_price = entry_price + tp_mult * atr
+                sl_price = entry_price - sl_mult * atr
+            else:
+                tp_price = entry_price - tp_mult * atr
+                sl_price = entry_price + sl_mult * atr
+
+            # Walk forward to find exit
+            exit_price = None
+            exit_reason = "TIMEOUT"
+            exit_bar = min(i + 288, n - 1)  # 24h max hold
+            for j in range(i + 1, min(i + 289, n)):
+                if direction == "LONG":
+                    if closes[j] >= tp_price:
+                        exit_price = tp_price
+                        exit_reason = "TP"
+                        exit_bar = j
+                        break
+                    if closes[j] <= sl_price:
+                        exit_price = sl_price
+                        exit_reason = "SL"
+                        exit_bar = j
+                        break
+                else:
+                    if closes[j] <= tp_price:
+                        exit_price = tp_price
+                        exit_reason = "TP"
+                        exit_bar = j
+                        break
+                    if closes[j] >= sl_price:
+                        exit_price = sl_price
+                        exit_reason = "SL"
+                        exit_bar = j
+                        break
+
+            if exit_price is None:
+                exit_price = closes[exit_bar]
+
+            if direction == "LONG":
+                pnl = exit_price - entry_price
+            else:
+                pnl = entry_price - exit_price
+
+            ts_str = str(timestamps[i])[:19] if timestamps is not None else f"bar_{i}"
+            trades.append({
+                "entry_bar": i,
+                "timestamp": ts_str,
+                "entry": entry_price,
+                "exit": exit_price,
+                "pnl": pnl,
+                "reason": exit_reason,
+                "prob": probs[i],
+                "bars_held": exit_bar - i,
+            })
+            i = exit_bar + 1  # skip to after exit
+        else:
+            i += 1
+
+    if not trades:
+        print("  No trades triggered at this threshold.")
+        return
+
+    wins = [t for t in trades if t["pnl"] > 0]
+    losses = [t for t in trades if t["pnl"] <= 0]
+    total_pnl = sum(t["pnl"] for t in trades)
+    avg_pnl = total_pnl / len(trades)
+    win_rate = len(wins) / len(trades) * 100.0
+    avg_win = np.mean([t["pnl"] for t in wins]) if wins else 0
+    avg_loss = np.mean([t["pnl"] for t in losses]) if losses else 0
+
+    print(f"  Total trades:    {len(trades)}")
+    print(f"  Wins:            {len(wins)}  ({win_rate:.1f}%)")
+    print(f"  Losses:          {len(losses)}")
+    print(f"  Avg Win:         ${avg_win:.2f}  (price points per contract)")
+    print(f"  Avg Loss:        ${avg_loss:.2f}")
+    print(f"  Total P&L:       ${total_pnl:.2f}")
+    print(f"  Avg P&L/trade:   ${avg_pnl:.2f}")
+    print()
+
+    # Show individual trades
+    show = min(20, len(trades))
+    print(f"  {'#':>3}  {'Timestamp':<20}  {'Entry':>8}  {'Exit':>8}  "
+          f"{'P&L':>8}  {'Reason':>7}  {'Prob':>6}  {'Bars':>4}")
+    print("  " + "-" * 78)
+    for idx, t in enumerate(trades[:show]):
+        pnl_str = f"${t['pnl']:>+7.2f}"
+        print(
+            f"  {idx+1:>3}  {t['timestamp']:<20}  {t['entry']:>8.2f}  "
+            f"{t['exit']:>8.2f}  {pnl_str}  {t['reason']:>7}  "
+            f"{t['prob']:>6.2f}  {t['bars_held']:>4}"
+        )
+    if len(trades) > show:
+        print(f"  ... and {len(trades) - show} more trades")
+
+
 def print_report(
     fpath: Path,
     model_name: str,
@@ -149,19 +277,24 @@ def print_report(
     tolerance: float,
     live_probs: np.ndarray,
     offline_probs: np.ndarray,
+    timestamps: np.ndarray | None = None,
+    closes: np.ndarray | None = None,
+    atrs: np.ndarray | None = None,
     df: pd.DataFrame | None = None,
     rebuilt: pd.DataFrame | None = None,
     feature_names: list[str] | None = None,
     offset: int = 0,
 ) -> None:
-    """Print the parity validation report."""
+    """Print the parity validation report with sample rows and trade stats."""
     diff = np.abs(offline_probs - live_probs)
     mae = np.mean(diff)
     max_diff = np.max(diff)
     parity_pct = np.mean(diff < tolerance) * 100.0
     divergent_idx = np.where(diff >= tolerance)[0]
 
-    w = 60
+    w = 70
+
+    # ── Section 1: Parity Summary ────────────────────────────────
     print()
     print("=" * w)
     print("STATE PARITY VALIDATION REPORT".center(w))
@@ -196,27 +329,109 @@ def print_report(
                 f"{offline_probs[idx]:>10.6f}  {diff[idx]:>10.6f}"
             )
 
-        # Feature-level comparison
-        if df is not None and rebuilt is not None and feature_names:
-            logged_features = [c for c in df.columns if c in feature_names]
-            if logged_features and len(rebuilt) > 0:
-                print()
-                print("-" * w)
-                print("  FEATURE-LEVEL DIVERGENCE (top 10):")
-                feature_mae = {}
-                for feat in logged_features:
-                    if feat in rebuilt.columns:
-                        live_vals = df[feat].values[offset:offset + n]
-                        offline_vals = rebuilt[feat].values[-n:]
-                        fmae = np.mean(np.abs(live_vals - offline_vals))
-                        feature_mae[feat] = fmae
-                sorted_feats = sorted(feature_mae.items(), key=lambda x: x[1], reverse=True)
-                print(f"  {'Feature':<35}  {'MAE':>12}")
-                for feat, fmae in sorted_feats[:10]:
-                    print(f"  {feat:<35}  {fmae:>12.8f}")
+    # ── Section 2: Sample Rows (proof of work) ───────────────────
+    print()
+    print("=" * w)
+    print("SAMPLE ROWS (side-by-side proof)".center(w))
+    print("=" * w)
+
+    # Pick representative sample: first 3, middle 3, highest 3, lowest 3
+    sample_indices = []
+    sample_indices.extend(range(min(3, n)))
+    mid = n // 2
+    sample_indices.extend(range(max(0, mid - 1), min(n, mid + 2)))
+    top_idx = np.argsort(live_probs)[-3:][::-1]
+    sample_indices.extend(top_idx.tolist())
+    low_idx = np.argsort(live_probs)[:3]
+    sample_indices.extend(low_idx.tolist())
+    sample_indices = sorted(set(sample_indices))
+
+    if timestamps is not None:
+        print(f"  {'Row':>5}  {'Timestamp':<20}  {'Close':>8}  "
+              f"{'LiveProb':>10}  {'OffProb':>10}  {'Match':>5}")
+        print("  " + "-" * 68)
+        for idx in sample_indices:
+            ts_str = str(timestamps[idx])[:19] if idx < len(timestamps) else "?"
+            close_str = f"{closes[idx]:>8.2f}" if closes is not None and idx < len(closes) else "     N/A"
+            match_str = "  YES" if diff[idx] < tolerance else "   NO"
+            print(
+                f"  {idx:>5}  {ts_str:<20}  {close_str}  "
+                f"{live_probs[idx]:>10.6f}  {offline_probs[idx]:>10.6f}  {match_str}"
+            )
+    else:
+        print(f"  {'Row':>5}  {'LiveProb':>10}  {'OffProb':>10}  {'Match':>5}")
+        print("  " + "-" * 36)
+        for idx in sample_indices:
+            match_str = "  YES" if diff[idx] < tolerance else "   NO"
+            print(
+                f"  {idx:>5}  {live_probs[idx]:>10.6f}  "
+                f"{offline_probs[idx]:>10.6f}  {match_str}"
+            )
+
+    # ── Section 3: Prediction Distribution ───────────────────────
+    print()
+    print("=" * w)
+    print("PREDICTION DISTRIBUTION".center(w))
+    print("=" * w)
+    print(f"  {'Stat':<20}  {'Live':>12}  {'Offline':>12}")
+    print("  " + "-" * 48)
+    for label, func in [
+        ("Mean", np.mean), ("Std Dev", np.std),
+        ("Min", np.min), ("25th pctile", lambda x: np.percentile(x, 25)),
+        ("Median", np.median),
+        ("75th pctile", lambda x: np.percentile(x, 75)),
+        ("Max", np.max),
+    ]:
+        print(f"  {label:<20}  {func(live_probs):>12.6f}  {func(offline_probs):>12.6f}")
+
+    # ── Section 4: Signal Analysis at Thresholds ─────────────────
+    print()
+    print("=" * w)
+    print("SIGNAL ANALYSIS (live predictions)".center(w))
+    print("=" * w)
+    thresholds = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90]
+    print(f"  {'Threshold':>10}  {'Signals':>8}  {'% of Bars':>10}  {'Avg Prob':>10}")
+    print("  " + "-" * 44)
+    for th in thresholds:
+        mask = live_probs >= th
+        count = int(np.sum(mask))
+        pct = count / n * 100.0 if n > 0 else 0
+        avg = float(np.mean(live_probs[mask])) if count > 0 else 0
+        marker = "  <-- entry threshold" if abs(th - 0.70) < 0.001 else ""
+        print(f"  {th:>10.2f}  {count:>8}  {pct:>9.1f}%  {avg:>10.4f}{marker}")
+
+    # ── Section 5: Simulated Trade Results ───────────────────────
+    if closes is not None and atrs is not None:
+        _print_trade_simulation(
+            w, live_probs, closes, atrs, timestamps,
+            direction="LONG" if live_prob_col == "prob_buy" else "SHORT",
+        )
+
+    # ── Section 6: Feature-level comparison (divergence only) ────
+    if len(divergent_idx) > 0 and df is not None and rebuilt is not None and feature_names:
+        logged_features = [c for c in df.columns if c in feature_names]
+        if logged_features and len(rebuilt) > 0:
+            print()
+            print("-" * w)
+            print("  FEATURE-LEVEL DIVERGENCE (top 10):")
+            feature_mae = {}
+            for feat in logged_features:
+                if feat in rebuilt.columns:
+                    live_vals = df[feat].values[offset:offset + n]
+                    offline_vals = rebuilt[feat].values[-n:]
+                    fmae = np.mean(np.abs(live_vals - offline_vals))
+                    feature_mae[feat] = fmae
+            sorted_feats = sorted(feature_mae.items(), key=lambda x: x[1], reverse=True)
+            print(f"  {'Feature':<35}  {'MAE':>12}")
+            for feat, fmae in sorted_feats[:10]:
+                print(f"  {feat:<35}  {fmae:>12.8f}")
 
     print("=" * w)
 
+
+# ═══════════════════════════════════════════════════════════════════
+# Main validation pipeline
+# ═══════════════════════════════════════════════════════════════════
 
 def run_validation(
     file_path: str,
@@ -259,39 +474,34 @@ def run_validation(
 
     live_probs = df[live_prob_col].values
 
+    # Extract timestamps and OHLCV for the report
+    timestamps = df["timestamp"].values if "timestamp" in df.columns else None
+    closes = df["Close"].values if "Close" in df.columns else None
+    atrs = df["ATR_14"].values if "ATR_14" in df.columns else None
+
     # Decide validation mode based on available data
-    # Check if shadow log contains logged feature columns
     logged_feature_cols = [c for c in feature_names if c in df.columns]
     has_logged_features = len(logged_feature_cols) >= len(feature_names) * 0.8
 
-    # Check if we have enough OHLCV for a full rebuild
     ohlcv_cols = ["Open", "High", "Low", "Close", "Volume"]
     has_ohlcv = all(c in df.columns for c in ohlcv_cols)
     can_rebuild = has_ohlcv and len(df) >= _MIN_REBUILD_ROWS
 
     if has_logged_features:
         # ── Mode A: Feature Replay ──────────────────────────────────
-        # Use already-logged feature columns for offline inference.
-        # This tests: "Does the model produce the same output given
-        # the exact same features?"
         print()
         print(f"Mode A: FEATURE REPLAY ({len(logged_feature_cols)}/{len(feature_names)} features available)")
         print("  Using logged feature columns for offline model inference.")
 
-        # Build features DataFrame from logged columns
         features_df = df[logged_feature_cols].copy()
 
-        # Fill any missing model features with 0
         missing = set(feature_names) - set(logged_feature_cols)
         if missing:
             print(f"  WARNING: {len(missing)} features missing, filling with 0: {sorted(missing)[:5]}...")
             for m in missing:
                 features_df[m] = 0.0
 
-        # Reorder to match model's expected column order
         features_df = features_df[feature_names]
-
-        # Replace NaN with 0 (matches live pipeline behavior)
         features_df = features_df.fillna(0)
 
         print(f"Running offline inference on {len(features_df)} rows...")
@@ -306,12 +516,13 @@ def run_validation(
             tolerance=tolerance,
             live_probs=live_probs,
             offline_probs=offline_probs,
+            timestamps=timestamps,
+            closes=closes,
+            atrs=atrs,
         )
 
     elif can_rebuild:
         # ── Mode B: Full Rebuild ────────────────────────────────────
-        # Rebuild features from raw OHLCV through AlphaFactory.
-        # This is the gold-standard parity test.
         print()
         print("Mode B: FULL FEATURE REBUILD")
         print(f"  Rebuilding features from {len(df)} OHLCV rows via AlphaFactory.")
@@ -335,8 +546,14 @@ def run_validation(
         if n < len(live_probs):
             offset = len(live_probs) - n
             live_probs_aligned = live_probs[offset:]
+            ts_aligned = timestamps[offset:] if timestamps is not None else None
+            closes_aligned = closes[offset:] if closes is not None else None
+            atrs_aligned = atrs[offset:] if atrs is not None else None
         else:
             live_probs_aligned = live_probs
+            ts_aligned = timestamps
+            closes_aligned = closes
+            atrs_aligned = atrs
 
         offline_probs_aligned = offline_probs[-n:]
 
@@ -349,6 +566,9 @@ def run_validation(
             tolerance=tolerance,
             live_probs=live_probs_aligned,
             offline_probs=offline_probs_aligned,
+            timestamps=ts_aligned,
+            closes=closes_aligned,
+            atrs=atrs_aligned,
             df=df,
             rebuilt=rebuilt,
             feature_names=feature_names,
