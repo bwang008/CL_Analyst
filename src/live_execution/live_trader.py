@@ -26,6 +26,7 @@ import argparse
 import hashlib
 import json
 import logging
+import logging.handlers
 import os
 import re
 import signal
@@ -107,6 +108,10 @@ _DEFAULT_CACHE_PATH = str(
 # Logging
 # ---------------------------------------------------------------------------
 
+_LOG_DIR = _PROJECT_ROOT / "data" / "logs"
+_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+_LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
 
 class CLOnlyLogFilter(logging.Filter):
     """Suppress ib_insync log messages about non-CL positions/trades.
@@ -133,10 +138,33 @@ class CLOnlyLogFilter(logging.Filter):
         return True
 
 
+def _setup_file_logging(client_id: int) -> None:
+    """Add a rotating file handler so logs are persisted to disk.
+
+    Writes to data/logs/live_trader_cid{N}.log with 5 MB rotation
+    and 3 backup files.
+    """
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = _LOG_DIR / f"live_trader_cid{client_id}.log"
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file,
+        maxBytes=5 * 1024 * 1024,  # 5 MB
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(
+        logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT)
+    )
+    # Add to both our logger and the root logger
+    logging.getLogger().addHandler(file_handler)
+    log.info("File logging enabled: %s", log_file)
+
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+    format=_LOG_FORMAT,
+    datefmt=_LOG_DATE_FORMAT,
 )
 log = logging.getLogger("LiveTrader")
 
@@ -282,8 +310,17 @@ class LiveTrader:
         # Strategy (owns model, config, threshold, sizing, bracket math)
         self.strategy = strategy
         self.feature_names: list[str] = strategy.feature_names
+
+        # Read max_hold_bars from strategy config (keeps backtest & live in sync)
+        strategy_config = getattr(strategy, "config", {})
+        self._max_hold_bars: int = int(
+            strategy_config.get("max_hold_bars", _MAX_HOLD_BARS)
+        )
         log.info("Strategy: %s  direction=%s", strategy.name, strategy.direction)
-        log.info("Entry mode: %s  adaptive_priority=%s", entry_mode, adaptive_priority)
+        log.info(
+            "Entry mode: %s  adaptive_priority=%s  max_hold_bars=%d",
+            entry_mode, adaptive_priority, self._max_hold_bars,
+        )
 
         # Telemetry
         self.telemetry = TelemetryDB(db_path)
@@ -509,14 +546,16 @@ class LiveTrader:
             return False
 
         self._position_bars_held += 1
-        if self._position_bars_held <= _MAX_HOLD_BARS:
+        if self._position_bars_held <= self._max_hold_bars:
             return False
 
         cancelled = self.manager.cancel_open_cl_orders()
         trade = self.manager.close_cl_position_market()
         log.info(
-            "TIME BARRIER EXIT: held_bars=%d, cancelled_orders=%d, position=%d",
+            "[TRADE] EXIT: TIME BARRIER after %d bars "
+            "(cancelled=%d orders, position=%d, price=%.2f)",
             self._position_bars_held, cancelled, current_position,
+            current_price,
         )
         self.telemetry.log_signal(
             timestamp=bar_time,
@@ -541,6 +580,36 @@ class LiveTrader:
             contract = getattr(trade, "contract", None)
             if order is None or status is None:
                 return
+
+            # Human-readable [TRADE] log for key status transitions
+            status_str = getattr(status, "status", "")
+            symbol_str = getattr(contract, "localSymbol", None) or "CL"
+            action_str = getattr(order, "action", "???")
+            qty = float(getattr(order, "totalQuantity", 0) or 0)
+            order_type = getattr(order, "orderType", "???")
+            parent_id = getattr(order, "parentId", 0)
+
+            if status_str == "Filled":
+                avg_price = float(getattr(status, "avgFillPrice", 0) or 0)
+                if parent_id and parent_id != 0:
+                    # Child order filled (TP or SL)
+                    if order_type == "LMT":
+                        exit_type = "TP HIT"
+                    elif order_type == "STP":
+                        exit_type = "SL HIT"
+                    else:
+                        exit_type = order_type
+                    log.info(
+                        "[TRADE] EXIT: %s %.0f %s @ %.2f (%s)",
+                        action_str, qty, symbol_str, avg_price, exit_type,
+                    )
+                else:
+                    # Parent entry order filled
+                    log.info(
+                        "[TRADE] FILLED: %s %.0f %s @ %.2f",
+                        action_str, qty, symbol_str, avg_price,
+                    )
+
             order_id = getattr(order, "orderId", None)
             ctx = self._last_decision_context_by_order_id.get(order_id)
             event_ts = self._utc_iso_now()
@@ -548,7 +617,7 @@ class LiveTrader:
                 event_type="ORDER_STATUS",
                 event_ts=event_ts,
                 order_id=order_id,
-                status=getattr(status, "status", None),
+                status=status_str,
             )
             self.telemetry.log_tradebook_event(
                 event_id=event_id,
@@ -556,17 +625,17 @@ class LiveTrader:
                 event_timestamp_utc=event_ts,
                 order_id=order_id,
                 perm_id=getattr(order, "permId", None),
-                parent_order_id=getattr(order, "parentId", None),
+                parent_order_id=parent_id,
                 account=getattr(order, "account", None),
                 symbol=getattr(contract, "symbol", None),
                 local_symbol=getattr(contract, "localSymbol", None),
                 contract_month=self._extract_contract_month(contract),
-                side=getattr(order, "action", None),
-                action=getattr(order, "action", None),
-                order_type=getattr(order, "orderType", None),
+                side=action_str,
+                action=action_str,
+                order_type=order_type,
                 time_in_force=getattr(order, "tif", None),
-                status=getattr(status, "status", None),
-                order_qty=float(getattr(order, "totalQuantity", 0) or 0),
+                status=status_str,
+                order_qty=qty,
                 cum_fill_qty=float(getattr(status, "filled", 0) or 0),
                 remaining_qty=float(getattr(status, "remaining", 0) or 0),
                 avg_fill_price=float(getattr(status, "avgFillPrice", 0) or 0),
@@ -586,6 +655,21 @@ class LiveTrader:
             execution = getattr(fill, "execution", None)
             if order is None or execution is None:
                 return
+
+            # Human-readable [TRADE] fill log
+            fill_price = float(getattr(execution, "price", 0) or 0)
+            fill_qty = float(getattr(execution, "shares", 0) or 0)
+            symbol_str = getattr(contract, "localSymbol", None) or "CL"
+            side_str = (
+                getattr(execution, "side", None)
+                or getattr(order, "action", "???")
+            )
+            log.info(
+                "[TRADE] FILL: %s %.0f %s @ %.2f (execId=%s)",
+                side_str, fill_qty, symbol_str, fill_price,
+                getattr(execution, "execId", "?"),
+            )
+
             order_id = getattr(order, "orderId", None)
             exec_id = getattr(execution, "execId", None)
             event_dt = getattr(execution, "time", None)
@@ -598,7 +682,6 @@ class LiveTrader:
                 event_ts = self._utc_iso_now()
             ctx = self._last_decision_context_by_order_id.get(order_id)
             expected_price = None if ctx is None else ctx.get("current_price")
-            fill_price = float(getattr(execution, "price", 0) or 0)
             slippage = None
             if expected_price is not None and fill_price > 0:
                 slippage = fill_price - float(expected_price)
@@ -621,14 +704,13 @@ class LiveTrader:
                 symbol=getattr(contract, "symbol", None),
                 local_symbol=getattr(contract, "localSymbol", None),
                 contract_month=self._extract_contract_month(contract),
-                side=getattr(execution, "side", None)
-                or getattr(order, "action", None),
+                side=side_str,
                 action=getattr(order, "action", None),
                 order_type=getattr(order, "orderType", None),
                 time_in_force=getattr(order, "tif", None),
                 status=getattr(status, "status", None) if status else None,
                 order_qty=float(getattr(order, "totalQuantity", 0) or 0),
-                fill_qty=float(getattr(execution, "shares", 0) or 0),
+                fill_qty=fill_qty,
                 cum_fill_qty=float(getattr(status, "filled", 0) or 0)
                 if status
                 else None,
@@ -1013,13 +1095,97 @@ class LiveTrader:
         ):
             return
 
-        # 2. Delegate decision to strategy
+        # 2. Position guard: check both filled position AND pending orders
+        #    to prevent duplicate entries when Adaptive Algo is still working
         current_position = self.manager.get_cl_position()
+        pending_cl_entry_orders = 0
+        try:
+            for t in self.manager.ib.openTrades():
+                c = getattr(t, "contract", None)
+                o = getattr(t, "order", None)
+                s = getattr(t, "orderStatus", None)
+                if c is None or o is None:
+                    continue
+                if getattr(c, "symbol", None) != "CL":
+                    continue
+                order_status = getattr(s, "status", "") if s else ""
+                parent_id = getattr(o, "parentId", 0) or 0
+                # Only count parent entry orders (parentId==0), not TP/SL children
+                if parent_id == 0 and order_status in (
+                    "Submitted", "PreSubmitted", "PendingSubmit",
+                ):
+                    pending_cl_entry_orders += 1
+        except Exception:
+            log.debug("Failed to check pending orders", exc_info=True)
+
+        # Treat pending entry orders as an effective position to block duplicates
+        effective_position = current_position
+        if pending_cl_entry_orders > 0 and current_position == 0:
+            effective_position = pending_cl_entry_orders  # non-zero → blocks entry
+            log.info(
+                "POSITION GUARD: portfolio=0 but %d pending CL entry order(s) "
+                "— treating as position=%d",
+                pending_cl_entry_orders, effective_position,
+            )
+
+        # Log human-friendly PnL summary when holding a position
+        if current_position != 0:
+            try:
+                acct = self.manager.get_account_summary()
+                # Find TP/SL bracket child orders
+                tp_price_live = None
+                sl_price_live = None
+                for t in self.manager.ib.openTrades():
+                    c = getattr(t, "contract", None)
+                    o = getattr(t, "order", None)
+                    if c is None or o is None:
+                        continue
+                    if getattr(c, "symbol", None) != "CL":
+                        continue
+                    parent_id = getattr(o, "parentId", 0) or 0
+                    if parent_id == 0:
+                        continue  # skip parent entry orders
+                    order_type = getattr(o, "orderType", "")
+                    lmt = getattr(o, "lmtPrice", 0.0) or 0.0
+                    aux = getattr(o, "auxPrice", 0.0) or 0.0
+                    if order_type == "LMT" and lmt > 0:
+                        tp_price_live = lmt
+                    elif order_type in ("STP", "TRAIL") and aux > 0:
+                        sl_price_live = aux
+
+                tp_str = f"${tp_price_live:.2f}" if tp_price_live else "N/A"
+                sl_str = f"${sl_price_live:.2f}" if sl_price_live else "N/A"
+                tp_dist = ""
+                sl_dist = ""
+                if tp_price_live:
+                    d = abs(tp_price_live - current_price)
+                    tp_dist = f" ({d:.2f} away)"
+                if sl_price_live:
+                    d = abs(sl_price_live - current_price)
+                    sl_dist = f" ({d:.2f} away)"
+
+                log.info(
+                    "[PNL] position=%d  unrealizedPnL=$%.2f  "
+                    "avgCost=$%.2f  mktPrice=%.2f  held=%d bars",
+                    current_position,
+                    acct["cl_unrealized_pnl"],
+                    acct["cl_avg_cost"],
+                    current_price,
+                    self._position_bars_held,
+                )
+                log.info(
+                    "[BRACKET] TP=%s%s  SL=%s%s",
+                    tp_str, tp_dist, sl_str, sl_dist,
+                )
+            except Exception:
+                log.debug("PnL/bracket summary failed", exc_info=True)
+
+        # 3. Delegate decision to strategy
         signal: TradeSignal = self.strategy.evaluate(
             features=features,
             current_price=current_price,
             atr_value=atr_value,
-            current_position=current_position,
+            current_position=effective_position,
         )
 
         # Shadow-replay logging: capture exact state for parity validation
@@ -1152,13 +1318,16 @@ class LiveTrader:
                 order_type_str = f"{order_type_str}+{algo_str}"
             self._position_entry_bar_time = bar_time
             self._position_bars_held = 0
+            local_sym = getattr(
+                self._front_month_contract, "localSymbol", "CL"
+            )
             log.info(
-                "ORDER PLACED: orderId=%d  %s %d CL @ %s  "
-                "TP=%.2f  SL=%.2f  (prob=%.2f)  entry_mode=%s",
-                order_id, signal.action, signal.lots,
+                "[TRADE] ENTRY: %s %d %s @ %s  "
+                "TP=%.2f  SL=%.2f  (prob=%.2f, orderId=%d)",
+                signal.action, signal.lots, local_sym,
                 order_type_str,
                 signal.tp_price, signal.sl_price, signal.probability,
-                self.entry_mode,
+                order_id,
             )
             self.telemetry.log_signal(
                 timestamp=bar_time,
@@ -1459,6 +1628,9 @@ def main() -> None:
         entry_mode=resolved_entry_mode,
         adaptive_priority=resolved_adaptive_priority,
     )
+    # Enable persistent file logging now that client_id is resolved
+    _setup_file_logging(resolved_client_id)
+
     trader.start()
 
 
