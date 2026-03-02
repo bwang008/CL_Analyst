@@ -22,7 +22,7 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
-def export_shadow_log(db_path: str, output_path: str) -> None:
+def export_shadow_log(db_path: str, output_path: str, strategy: str | None = None) -> None:
     """Read shadow_log from SQLite and export to Parquet."""
     db_file = Path(db_path)
     if not db_file.exists():
@@ -42,9 +42,14 @@ def export_shadow_log(db_path: str, output_path: str) -> None:
         conn.close()
         sys.exit(1)
 
-    df = pd.read_sql_query(
-        "SELECT * FROM shadow_log ORDER BY timestamp ASC", conn
-    )
+    query = "SELECT * FROM shadow_log"
+    params: list = []
+    if strategy:
+        query += " WHERE strategy_name = ?"
+        params.append(strategy)
+    query += " ORDER BY timestamp ASC"
+
+    df = pd.read_sql_query(query, conn, params=params or None)
     conn.close()
 
     if df.empty:
@@ -103,8 +108,13 @@ def main() -> None:
         ),
         help="Output Parquet file path",
     )
+    parser.add_argument(
+        "--strategy",
+        default=None,
+        help="Filter to a specific strategy_name",
+    )
     args = parser.parse_args()
-    export_shadow_log(args.db_path, args.output)
+    export_shadow_log(args.db_path, args.output, args.strategy)
 
 
 if __name__ == "__main__":

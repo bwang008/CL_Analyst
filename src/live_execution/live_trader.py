@@ -907,8 +907,10 @@ class LiveTrader:
 
         # Error 1102: connectivity restored, data maintained
         # Error 1101: connectivity restored, data lost
-        if errorCode in (1101, 1102) and self._subscriptions_lost:
-            log.info("CONNECTIVITY RESTORED (Error %d) — resubscribing...", errorCode)
+        # Warning 2104: Market data farm connection is OK
+        # Warning 2106: HMDS data farm connection is OK
+        if errorCode in (1101, 1102, 2104, 2106) and self._subscriptions_lost:
+            log.info("CONNECTIVITY RESTORED (code %d) — resubscribing...", errorCode)
             self._resubscribe_and_backfill()
 
     def _resubscribe_and_backfill(self) -> None:
@@ -916,7 +918,7 @@ class LiveTrader:
         try:
             # 1. Backfill any missed bars during the gap
             if self._last_bar_time is not None:
-                now_utc = pd.Timestamp.utcnow()
+                now_utc = pd.Timestamp.now(tz="UTC").tz_localize(None)
                 gap = now_utc - self._last_bar_time
                 gap_minutes = gap.total_seconds() / 60
 
@@ -1128,13 +1130,12 @@ class LiveTrader:
                 pending_cl_entry_orders, effective_position,
             )
 
-        # Log human-friendly PnL summary when holding a position
+        # Log human-friendly PnL + bracket summary when holding a position
         if current_position != 0:
+            # Find TP/SL bracket child orders
+            tp_price_live = None
+            sl_price_live = None
             try:
-                acct = self.manager.get_account_summary()
-                # Find TP/SL bracket child orders
-                tp_price_live = None
-                sl_price_live = None
                 for t in self.manager.ib.openTrades():
                     c = getattr(t, "contract", None)
                     o = getattr(t, "order", None)
@@ -1152,33 +1153,45 @@ class LiveTrader:
                         tp_price_live = lmt
                     elif order_type in ("STP", "TRAIL") and aux > 0:
                         sl_price_live = aux
+            except Exception:
+                log.warning("Bracket order scan failed", exc_info=True)
 
-                tp_str = f"${tp_price_live:.2f}" if tp_price_live else "N/A"
-                sl_str = f"${sl_price_live:.2f}" if sl_price_live else "N/A"
-                tp_dist = ""
-                sl_dist = ""
-                if tp_price_live:
-                    d = abs(tp_price_live - current_price)
-                    tp_dist = f" ({d:.2f} away)"
-                if sl_price_live:
-                    d = abs(sl_price_live - current_price)
-                    sl_dist = f" ({d:.2f} away)"
+            tp_str = f"TP={tp_price_live:.2f}" if tp_price_live else "TP=N/A"
+            sl_str = f"SL={sl_price_live:.2f}" if sl_price_live else "SL=N/A"
+            atr_str = f"ATR={atr_value:.4f}" if atr_value else "ATR=N/A"
 
+            try:
+                # Use cached portfolio (sync) — NOT get_account_summary()
+                # which calls ib.accountSummary() async and fails inside callbacks
+                unrealized_pnl = 0.0
+                avg_cost = 0.0
+                for item in self.manager.ib.portfolio():
+                    if item.contract.symbol == "CL":
+                        unrealized_pnl = float(item.unrealizedPNL)
+                        avg_cost = float(item.averageCost)
+                        break
+                # IBKR averageCost = price * multiplier (1000 for CL)
+                entry_price = avg_cost / 1000.0 if avg_cost else 0.0
                 log.info(
                     "[PNL] position=%d  unrealizedPnL=$%.2f  "
-                    "avgCost=$%.2f  mktPrice=%.2f  held=%d bars",
+                    "entryPrice=%.2f  mktPrice=%.2f  %s  %s  %s  held=%d bars",
                     current_position,
-                    acct["cl_unrealized_pnl"],
-                    acct["cl_avg_cost"],
+                    unrealized_pnl,
+                    entry_price,
                     current_price,
+                    sl_str, tp_str, atr_str,
                     self._position_bars_held,
                 )
-                log.info(
-                    "[BRACKET] TP=%s%s  SL=%s%s",
-                    tp_str, tp_dist, sl_str, sl_dist,
-                )
             except Exception:
-                log.debug("PnL/bracket summary failed", exc_info=True)
+                # Fallback: log without account data
+                log.info(
+                    "[PNL] position=%d  mktPrice=%.2f  %s  %s  %s  held=%d bars",
+                    current_position,
+                    current_price,
+                    sl_str, tp_str, atr_str,
+                    self._position_bars_held,
+                )
+                log.warning("Portfolio lookup failed", exc_info=True)
 
         # 3. Delegate decision to strategy
         signal: TradeSignal = self.strategy.evaluate(
