@@ -2,6 +2,32 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
+## 2026-03-02 — Entry Order Upgrade: Adaptive Algo + Marketable Limit
+
+- **Goal**: Upgrade entry orders from bare Market Orders to institutional-grade execution that reduces slippage and captures the spread. Avoid fragile async cancel/replace loops.
+- **Solution**: Implemented two new entry modes (configurable), defaulting to IBKR Adaptive Algo.
+
+### New methods
+- `ibkr_client.py` → `get_bid_ask(contract)` — real-time NBBO snapshot via `reqTickers()` with 2s timeout and polling. Returns `(bid, ask)` tuple.
+
+### Modified methods
+- `ibkr_client.py` → `place_bracket_order()` — new `entry_mode` parameter (`adaptive` / `marketable_limit` / `market`), `adaptive_priority` parameter (`Normal` / `Urgent` / `Patient`). Deprecated `use_market` flag preserved for backward compatibility. Added `TagValue` import for algo params.
+- `live_trader.py` → `__init__()` — added `entry_mode` and `adaptive_priority` params.
+- `live_trader.py` → `_on_new_bar()` — passes `entry_mode` / `adaptive_priority` to bracket order. Enhanced ORDER PLACED log line shows actual order type (e.g. `LMT+Adaptive`) and entry mode.
+- `live_trader.py` → `main()` — added `--entry-mode` and `--adaptive-priority` CLI args. Reads `live_config.entry_mode` / `live_config.adaptive_priority` from strategy JSON. Resolution: CLI > config > default.
+
+### Entry modes
+
+| Mode | Parent Order | Description |
+|------|-------------|-------------|
+| `adaptive` (default) | LMT + IBKR IBALGO | Server-side algo seeks mid-spread improvement. Zero extra data subscriptions. |
+| `marketable_limit` | LMT | Prices 2 ticks ($0.02) through best ask/bid. Falls back to MKT if quote unavailable. |
+| `market` | MKT | Legacy behavior. |
+
+### Test results
+- **356 passed, 0 failed** (127s)
+- `test_bracket_order.py` expanded from 6 → 16 tests across 4 classes: `TestBracketOrderConfig`, `TestAdaptiveAlgoOrder`, `TestMarketableLimitOrder`, `TestEntryModeBackwardCompat`
+
 ## 2026-02-24 — Track 4.4: Smart Backfill & Dual-Ledger (Live Execution Engine)
 
 - **Goal**: Solve the "Pipeline Parity Problem" — ensure live trading environment mirrors training environment.

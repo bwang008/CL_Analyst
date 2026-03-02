@@ -218,7 +218,43 @@ conda run -n trader --no-capture-output python -m src.live_execution.live_trader
 4. On each 5-min bar: generates features -> model inference -> `ConfigurableStrategy.evaluate()` -> bracket order
 5. Logs shadow state (OHLCV + features + prediction) for parity validation
 
----
+### Entry Order Modes
+
+The parent (entry) leg of bracket orders now supports three execution modes, configurable via CLI or strategy JSON:
+
+| Mode | Order Type | Description |
+|------|-----------|-------------|
+| `adaptive` (default) | LMT + IBKR Adaptive Algo | Server-side algo seeks mid-spread price improvement. No extra data subscriptions. |
+| `marketable_limit` | LMT | Fetches live NBBO, prices limit 2 ticks ($0.02) through best ask/bid. Falls back to MKT if quote unavailable. |
+| `market` | MKT | Legacy bare market order. Maximum slippage risk. |
+
+**CLI flags:**
+```powershell
+# Default (adaptive with Normal urgency)
+conda run -n trader --no-capture-output python -m src.live_execution.live_trader --config configs/strategies/manatee.json
+
+# Explicit adaptive with Urgent priority
+conda run -n trader --no-capture-output python -m src.live_execution.live_trader --config configs/strategies/manatee.json --entry-mode adaptive --adaptive-priority Urgent
+
+# Marketable limit
+conda run -n trader --no-capture-output python -m src.live_execution.live_trader --config configs/strategies/manatee.json --entry-mode marketable_limit
+
+# Legacy market order
+conda run -n trader --no-capture-output python -m src.live_execution.live_trader --config configs/strategies/manatee.json --entry-mode market
+```
+
+**Config-driven** (in `live_config` section of strategy JSON):
+```json
+"live_config": {
+    "experiment_id": "EXP-017_S_Ultimate",
+    "client_id": 10,
+    "entry_mode": "adaptive",
+    "adaptive_priority": "Normal"
+}
+```
+
+**Priority**: CLI `--entry-mode` overrides config `live_config.entry_mode`, which overrides the default (`adaptive`).
+
 
 ### Step 5: Creating a New Strategy (JSON-only)
 

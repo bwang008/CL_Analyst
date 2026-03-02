@@ -83,7 +83,7 @@ The live execution engine connects to IBKR (TWS or IB Gateway), uses a **Three-T
 | File | Purpose |
 |------|---------|
 | `src/live_execution/data_manager.py` | Three-Tier data manager: Seed CSV â†’ Parquet cache â†’ IBKR backfill â†’ live append |
-| `src/live_execution/ibkr_client.py` | IBKR connection manager, historical data, front-month resolution, bracket orders |
+| `src/live_execution/ibkr_client.py` | IBKR connection manager, historical data, front-month resolution, bracket orders (adaptive algo / marketable limit / market) |
 | `src/live_execution/live_trader.py` | Main execution loop: warm start â†’ Two-Stream bars â†’ features â†’ inference â†’ orders |
 | `src/live_execution/telemetry.py` | SQLite telemetry backend (`data/live_telemetry.db`) |
 | `src/live_execution/utils/time_utils.py` | `timedelta` â†’ IBKR duration string converter |
@@ -122,7 +122,7 @@ python -m src.live_execution.live_trader --seed-path data/raw/cl-5m_bk.csv --cac
    - If probability â‰¥ 0.45 and position is flat â†’ places bracket order
 4. **On each new bar** (Hands stream):
    - Logs raw front-month OHLCV + `contract_month` to `raw_front_month_bars` for future retraining
-5. **Bracket order**: Market buy + Limit TP (price + 2Ã—ATR) + Stop SL (price âˆ’ 1Ã—ATR)
+5. **Bracket order**: Adaptive Algo entry (default) + Limit TP + Stop SL. Supports `--entry-mode adaptive|marketable_limit|market`.
 
 ### Telemetry
 All bars and signals are logged to `data/live_telemetry.db`:
@@ -174,6 +174,6 @@ CL_Analyst/
 â”‚   â”œâ”€â”€ raw/                   # Source OHLCV CSVs (cl-5m_bk.csv = immutable seed)
 â”‚   â””â”€â”€ processed/             # ML-ready parquet + warm_start_cache.parquet
 â”œâ”€â”€ agent/                     # Automation scripts (backtester, sweeps, etc.)
-â”œâ”€â”€ tests/                     # Pytest test suite (174 tests)
+â”œâ”€â”€ tests/                     # Pytest test suite (356 tests)
 â””â”€â”€ reports/                   # Evaluation outputs
 ```

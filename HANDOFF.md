@@ -4,7 +4,7 @@
 - `main`
 
 ## Last Completed Task
-- **Task 4.4 — Smart Backfill & Dual-Ledger**: Built `src/live_execution/data_manager.py` (Three-Tier architecture: Seed CSV → Parquet cache → IBKR backfill → live append). Added Two-Stream architecture to `live_trader.py` (continuous contract for "Brain" signals, front-month contract for "Hands" execution + raw data logging). Upgraded `telemetry.py` with `raw_front_month_bars` table for training ledger. Added `get_front_month_contract()` and `fetch_historical_bars_by_duration()` to `ibkr_client.py`. Verified IBKR connectivity (IB Gateway port 4002, paper account DU1899929, front-month CLJ6). 174 tests passing.
+- **Entry Order Upgrade — Adaptive Algo + Marketable Limit**: Upgraded the parent (entry) leg of bracket orders from bare Market Orders to IBKR Adaptive Algo (default) and Marketable Limit modes. Added `get_bid_ask()` to `ibkr_client.py` for real-time NBBO snapshots. `place_bracket_order()` now accepts `entry_mode` parameter (`adaptive`/`marketable_limit`/`market`) with backward-compatible `use_market` shim. Added `--entry-mode` and `--adaptive-priority` CLI flags to `live_trader.py`. Config-driven via `live_config.entry_mode` in strategy JSON. Enhanced ORDER PLACED log line shows actual order type and entry mode. Expanded `test_bracket_order.py` from 6 → 16 tests. Full suite: 356 passed, 0 failed.
 
 ## Current Known Bugs / Issues
 - **Evaluator naming**: `reports/vault_metrics.json` uses class names `{1: "Buy", 2: "Sell"}` even for binary short targets. For `TARGET_TRIPLE_2x1_24H_SHORT`, the "Buy" slot corresponds to the positive short label.
@@ -18,7 +18,8 @@
 - **If the data file is missing**: The code will raise a `FileNotFoundError` with clear instructions. Agents should check both `CL_DATA_ROOT` and `data/raw/` before attempting any data-dependent operations.
 
 ## Immediate Next Steps
-- Run live trader in `--dry-run` mode during market hours to validate end-to-end warm-start + inference pipeline.
-- Monitor telemetry DB for feature quality, signal frequency, and raw front-month bar logging.
+- Test entry order modes in live paper trading session to verify IBKR Adaptive Algo fills.
+- Monitor telemetry for fill price improvement vs. old market order baseline.
+- Consider adding `entry_mode` to strategy JSON configs for per-strategy execution tuning.
 - Extend the evaluator/reporting to support "Short" naming for binary short targets.
-- Consider adding fill tracking (subscribe to `ib.orderStatusEvent` for real-time fill updates in telemetry).
+
