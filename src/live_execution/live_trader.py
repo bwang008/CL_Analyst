@@ -1020,8 +1020,13 @@ class LiveTrader:
         # Shadow-replay logging: capture exact state for parity validation
         try:
             last_row = self.rolling_df.iloc[-1]
-            _prob_buy = signal.probability if self.strategy.direction != "SHORT" else None
-            _prob_sell = signal.probability if self.strategy.direction != "LONG" else None
+            # Prefer per-signal buy/sell probs (ensemble); fall back to direction
+            if signal.buy_prob is not None or signal.sell_prob is not None:
+                _prob_buy = signal.buy_prob
+                _prob_sell = signal.sell_prob
+            else:
+                _prob_buy = signal.probability if self.strategy.direction != "SHORT" else None
+                _prob_sell = signal.probability if self.strategy.direction != "LONG" else None
             self.telemetry.log_shadow_state(
                 timestamp=bar_time,
                 open_=float(last_row["Open"]),
@@ -1037,12 +1042,26 @@ class LiveTrader:
         except Exception:
             log.debug("Shadow state logging failed", exc_info=True)
 
+        # Build direction-aware probability display
+        direction = getattr(self.strategy, 'direction', 'LONG').upper()
+        if signal.buy_prob is not None and signal.sell_prob is not None:
+            # Ensemble: both probs available
+            buy_prob_str = f"{signal.buy_prob:.4f}"
+            sell_prob_str = f"{signal.sell_prob:.4f}"
+        elif direction == "SHORT":
+            buy_prob_str = "N/A"
+            sell_prob_str = f"{signal.probability:.4f}"
+        else:  # LONG
+            buy_prob_str = f"{signal.probability:.4f}"
+            sell_prob_str = "N/A"
+
+        skip_str = f"  skip={signal.skip_reason}" if signal.skip_reason else ""
         log.info(
-            "INFERENCE [%s]: prob=%.4f (%.1f%%)  signal=%s  action=%s%s",
-            self.strategy.name,
-            signal.probability, signal.confidence_pct,
-            signal.signal_label, signal.action,
-            f"  skip={signal.skip_reason}" if signal.skip_reason else "",
+            "INFERENCE [%s] %s: buy_prob=%s  sell_prob=%s  "
+            "signal=%s  action=%s%s",
+            self.strategy.name, direction,
+            buy_prob_str, sell_prob_str,
+            signal.signal_label, signal.action, skip_str,
         )
 
         # 3. Handle HOLD signals
@@ -1050,12 +1069,14 @@ class LiveTrader:
             action_taken = signal.skip_reason or "HOLD"
             if signal.skip_reason == "POSITION_OPEN":
                 log.info(
-                    "%s signal ignored: already holding position (%d contracts)",
-                    signal.signal_label, current_position,
+                    ">>> %s signal TRIGGERED (prob=%.4f) but SKIPPED: "
+                    "already holding %d contracts",
+                    signal.signal_label, signal.probability,
+                    current_position,
                 )
                 action_taken = "SKIP_POSITION"
             elif signal.skip_reason == "ATR_INVALID":
-                log.warning("ATR is invalid — cannot calculate bracket levels")
+                log.warning("ATR is invalid -- cannot calculate bracket levels")
                 action_taken = "SKIP_ATR_INVALID"
             self.telemetry.log_signal(
                 timestamp=bar_time,
