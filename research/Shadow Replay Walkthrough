@@ -1,0 +1,56 @@
+# State Parity Test (Shadow Replay) — Walkthrough
+
+## What Was Built
+
+A complete **Shadow Replay** diagnostic pipeline that records the exact data, features, and model predictions the live bot sees on every 5-minute bar, and allows offline replay to detect whether sim-to-live performance gaps are caused by a **Pipeline Bug** or a **Data Discrepancy**.
+
+## Changes Made
+
+### Modified Files
+
+| File | Change |
+|------|--------|
+| [telemetry.py](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/src/live_execution/telemetry.py) | Added [shadow_log](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/src/live_execution/telemetry.py#461-465) table, [_sanitize_float()](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/src/live_execution/telemetry.py#408-420), [log_shadow_state()](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/src/live_execution/telemetry.py#421-460), [shadow_log_count()](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/src/live_execution/telemetry.py#461-465) |
+| [live_trader.py](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/src/live_execution/live_trader.py) | Added shadow state logging call in [_on_new_bar()](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/src/live_execution/live_trader.py#988-1180) after `strategy.evaluate()` |
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| [export_shadow_log.py](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/scripts/export_shadow_log.py) | SQLite → Parquet exporter for the shadow_log table |
+| [validate_parity.py](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/scripts/validate_parity.py) | Offline replay validator — compares live vs. offline predictions |
+| [generate_mock_shadow_log.py](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/scripts/generate_mock_shadow_log.py) | Mock data generator for immediate pipeline testing |
+| [test_shadow_log.py](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/tests/test_shadow_log.py) | 18 unit tests for shadow_log functionality |
+
+## Test Results
+
+- **18/18** new [test_shadow_log.py](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/tests/test_shadow_log.py) tests **PASSED** ✓
+- **19/19** existing [test_telemetry.py](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/tests/test_telemetry.py) + [test_pipeline_parity.py](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/tests/test_pipeline_parity.py) tests **PASSED** ✓ (zero regressions)
+
+## How to Use
+
+### 1. Live data accumulates automatically
+Once the live trader runs, every bar now logs a shadow state row to `data/live_telemetry.db → shadow_log` table.
+
+### 2. Generate mock data for immediate testing
+```bash
+python scripts/generate_mock_shadow_log.py --rows 500
+```
+
+### 3. Export live data to Parquet
+```bash
+python scripts/export_shadow_log.py
+```
+
+### 4. Run parity validation
+```bash
+# On mock data (test the pipeline):
+python scripts/validate_parity.py --file data/processed/mock_shadow_log.parquet
+
+# On real live data (diagnose the gap):
+python scripts/validate_parity.py --file data/processed/live_shadow_log.parquet
+```
+
+### Interpreting Results
+- **Parity Match ~100%** → Code is correct; issue is data discrepancy
+- **Divergence detected** → Pipeline bug; report shows which features/rows diverge

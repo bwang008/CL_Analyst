@@ -1,0 +1,352 @@
+﻿# Documentation entrypoint
+
+The repo now uses a "Three-File System" for documentation:
+
+- `README.md`: high-level project description, setup, and champion model architecture
+- `HANDOFF.md`: current state only (branch, last task, known issues, immediate next steps)
+- `AGENT_LOG.md`: historical progress (reverse-chronological)
+
+
+## Backtesting Guide (Quick Reference)
+
+### 1) Generate prediction files
+Use the saved model artifacts to produce probability CSVs:
+
+# EXP-017 is the best buy model, EXP-020 is the best short model created after we got to 17.
+# 
+
+```powershell
+conda run -n trader --no-capture-output python agent/generate_model_predictions.py --model-path models/registry/EXP-017_S_Ultimate/final_model.pkl --data-path data/processed/CL_set_06_shortfix.parquet --output reports/exp017_long_full_predictions.csv --prob-col prob_Buy
+conda run -n trader --no-capture-output python agent/generate_model_predictions.py --model-path models/registry/EXP-020_S_Ultimate_Short/final_model.pkl --data-path data/processed/CL_set_06_shortfix.parquet --output reports/exp020_short_full_predictions.csv --prob-col prob_Sell
+```
+
+### 2) Single-model concurrent backtest
+```powershell
+conda run -n trader --no-capture-output python agent/backtest_cl_concurrent.py --predictions reports/exp020_short_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --signal-side short --signal-col prob_Sell --threshold 0.60 --tp-mult 5.0 --sl-mult 0.75 --commission-per-side 2.5 --slippage-per-side 0.03 --contract-multiplier 1000
+conda run -n trader --no-capture-output python agent/backtest_cl_concurrent.py --predictions reports/exp017_long_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --signal-side long --signal-col prob_Buy --threshold 0.60 --tp-mult 5.0 --sl-mult 0.75 --commission-per-side 2.5 --slippage-per-side 0.03 --contract-multiplier 1000
+
+```
+
+### 2b) Single-model backtester.py (legacy)
+```powershell
+conda run -n trader --no-capture-output python agent/backtester.py --predictions reports/exp020_short_full_predictions.csv --threshold 0.60 --commission-per-side 2.5 --slippage-per-side 0.03 --contract-multiplier 1000
+conda run -n trader --no-capture-output python agent/backtester.py --predictions reports/exp017_long_full_predictions.csv --threshold 0.60 --commission-per-side 2.5 --slippage-per-side 0.03 --contract-multiplier 1000
+```
+
+### 3) Dual-model regime backtest (long + short)
+```powershell
+conda run -n trader --no-capture-output python agent/regime_dual_model_backtest.py --buy-predictions reports/exp017_long_full_predictions.csv --sell-predictions reports/exp020_short_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --buy-threshold 0.60 --sell-threshold 0.60 --tp-mult 5.0 --sl-mult 0.75 --commission-per-side 2.5 --slippage-per-side 0.03 --contract-multiplier 1000 --output-dir reports/oos_regimes
+```
+
+### 4) Key outputs
+- `reports/oos_regimes/dual_model_regime_summary.csv`
+- `reports/oos_regimes/<regime>_predictions.csv`
+- Grid results from concurrent backtester: `reports/*_grid_*.csv`
+
+### 5) Advanced backtest (single-model, A/B historical vs live)
+```powershell
+conda run -n trader --no-capture-output python agent/backtest_engine.py --predictions reports/exp017_long_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --threshold 0.60 --tp-mult 5.0 --sl-mult 0.75
+```
+
+Optional live-session comparison:
+```powershell
+conda run -n trader --no-capture-output python agent/backtest_engine.py --predictions reports/exp017_long_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --live-data data/processed/warm_start_cache.parquet --threshold 0.60 --tp-mult 5.0 --sl-mult 0.75
+```
+
+### Backtester file roles
+- `agent/backtester.py`: legacy, single-position event-driven backtest with raw CSV fallback.
+- `agent/backtest_cl_concurrent.py`: unlimited concurrent positions, TP/SL/ATR logic, grid sweeps.
+- `agent/backtest_engine.py`: single-model FSM backtest with `--config` support and optional live session comparison.
+- `agent/regime_dual_model_backtest.py`: merges buy/sell prediction files and runs regime windows using the concurrent backtester.
+
+### File format expectations
+- Prediction CSVs: `DateTime` index + `prob_Buy` / `prob_Sell` columns
+- OHLCV parquet: `Open/High/Low/Close/Volume` + `DateTime` index
+- Use `data/processed/CL_set_06_shortfix.parquet` for aligned OHLCV backtests
+
+## Pipeline entrypoint (main.py)
+`main.py` orchestrates data processing and model training/evaluation.
+
+```powershell
+# Process raw data into a processed parquet
+conda run -n trader --no-capture-output python main.py process
+
+# Train + evaluate (walk-forward), writes reports/ + models/
+conda run -n trader --no-capture-output python main.py train
+```
+
+## Standalone modules (direct CLI)
+
+### Data processing
+```powershell
+# Build a processed dataset (set_06 example)
+conda run -n trader --no-capture-output python -c "from src.data_processor import DataProcessor; p=DataProcessor(input_path='data/raw/cl-5m_bk.csv', dataset_version='set_06'); p.process()"
+```
+
+### Threshold sweep (binary model)
+```powershell
+conda run -n trader --no-capture-output python agent/threshold_sweep_binary.py --target TARGET_TRIPLE_2x1_24H_SHORT --data-path data/processed/CL_set_06_shortfix.parquet --output-predictions reports/short_sniper_predictions.csv
+```
+
+Live-session data source:
+- `data/processed/warm_start_cache.parquet` is maintained by `src/live_execution/data_manager.py`
+- It is updated during live runs (or when the live pipeline initializes and backfills)
+
+### OOS regime test (single-model, long-only baseline)
+```powershell
+conda run -n trader --no-capture-output python agent/oos_regime_test.py --data-path data/processed/CL_set_06_shortfix.parquet --target-name TARGET_TRIPLE_2x1_24H_LONG --threshold 0.60
+```
+
+## Config-Driven Strategy Workflow (End-to-End)
+
+This is the recommended workflow for creating, backtesting, and deploying a new strategy.
+No new Python code is needed -- just a JSON config file.
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `configs/strategies/*.json` | Strategy definitions (threshold, TP/SL, sizing) |
+| `src/live_execution/strategies/configurable_strategy.py` | Universal strategy class (reads JSON) |
+| `src/live_execution/live_trader.py` | Live execution engine |
+| `agent/backtest_engine.py` | FSM backtester |
+| `agent/generate_model_predictions.py` | Generates prediction CSVs from models |
+| `models/registry/EXP-XXX_*/` | Model bundles (model.pkl + config.json) |
+| `.env` | Local env vars (CL_DATA_ROOT for data path) |
+
+---
+
+### Step 1: Train a Model (or use an existing one)
+
+Models live in `models/registry/`. Each experiment folder contains:
+- `final_model.pkl` -- trained LightGBM model
+- `config.json` -- training metadata (threshold, features, metrics)
+
+To train a new model:
+```powershell
+conda run -n trader --no-capture-output python main.py train
+```
+This runs walk-forward training and auto-archives to `models/registry/EXP-XXX_*/`.
+
+Existing models:
+- `EXP-017_S_Ultimate` -- Long strategy (champion buy model)
+- `EXP-020_S_Ultimate_Short` -- Short strategy
+
+---
+
+### Step 2: Generate Predictions
+
+```powershell
+# Long predictions
+conda run -n trader --no-capture-output python agent/generate_model_predictions.py --model-path models/registry/EXP-017_S_Ultimate/final_model.pkl --data-path data/processed/CL_set_06_shortfix.parquet --output reports/exp017_long_predictions.csv --prob-col prob_Buy
+
+# Short predictions
+conda run -n trader --no-capture-output python agent/generate_model_predictions.py --model-path models/registry/EXP-020_S_Ultimate_Short/final_model.pkl --data-path data/processed/CL_set_06_shortfix.parquet --output reports/exp020_short_predictions.csv --prob-col prob_Sell
+```
+
+---
+
+### Step 3: Backtest with a Strategy Config
+
+Create a strategy JSON config (or use an existing one):
+
+**`configs/strategies/manatee.json`** (example -- Manatee long strategy):
+```json
+{
+    "nickname": "Manatee",
+    "experiment_id": "EXP-017_S_Ultimate",
+    "direction": "LONG",
+    "allow_concurrent": false,
+    "entry_threshold": 0.70,
+    "tp_atr_mult": 7.0,
+    "sl_atr_mult": 1.0,
+    "sizing_tiers": {
+        "0.80": 3,
+        "0.70": 2,
+        "0.60": 2,
+        "0.50": 1
+    }
+}
+```
+
+**Config fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `nickname` | string | Human-readable name (shows in logs) |
+| `experiment_id` | string | Folder name in `models/registry/` |
+| `direction` | string | `LONG`, `SHORT`, or `BOTH` |
+| `allow_concurrent` | bool | Allow entry while a position is open |
+| `entry_threshold` | float | Min probability to trigger entry |
+| `tp_atr_mult` | float | Take-profit = entry +/- (this x ATR) |
+| `sl_atr_mult` | float | Stop-loss = entry -/+ (this x ATR) |
+| `sizing_tiers` | dict | `{"min_probability": lots}` -- higher prob = more lots |
+
+**Run the backtest:**
+```powershell
+# Backtest using the strategy config (loads TP/SL/threshold from JSON)
+conda run -n trader --no-capture-output python agent/backtest_engine.py --config configs/strategies/manatee.json --predictions reports/exp017_long_predictions.csv --data data/processed/CL_set_06_shortfix.parquet
+conda run -n trader --no-capture-output python agent/backtest_engine.py --config configs/strategies/koala.json --predictions reports/exp020_short_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet
+
+
+# Or manually override parameters
+conda run -n trader --no-capture-output python agent/backtest_engine.py --predictions reports/exp017_long_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --threshold 0.70 --tp-mult 7.0 --sl-mult 1.0
+```
+
+---
+
+### Step 4: Deploy to Live Trader
+
+```powershell
+# Dry run (no real orders -- logs signals only)
+conda run -n trader --no-capture-output python -m src.live_execution.live_trader --config configs/strategies/manatee.json --dry-run
+
+# Buy trading model
+conda run -n trader --no-capture-output python -m src.live_execution.live_trader --config configs/strategies/manatee.json
+
+# Short trading model
+conda run -n trader --no-capture-output python -m src.live_execution.live_trader --config configs/strategies/koala.json
+
+# Legacy strategy registry (still works)
+conda run -n trader --no-capture-output python -m src.live_execution.live_trader --strategy BUY70_SIZED_MANATEE
+```
+
+**What happens when you run the live trader:**
+1. Loads model from `models/registry/{experiment_id}/final_model.pkl`
+2. Connects to IBKR (each config has its own `client_id` to allow concurrent instances)
+3. Warm-starts rolling data from seed CSV + IBKR backfill
+4. On each 5-min bar: generates features -> model inference -> `ConfigurableStrategy.evaluate()` -> bracket order
+5. Logs shadow state (OHLCV + features + prediction) for parity validation
+
+---
+
+### Step 5: Creating a New Strategy (JSON-only)
+
+1. Copy an existing config: `cp configs/strategies/manatee.json configs/strategies/my_strat.json`
+2. Edit the fields (experiment_id, threshold, TP/SL, sizing tiers)
+3. Backtest: `conda run -n trader --no-capture-output python agent/backtest_engine.py --config configs/strategies/my_strat.json --predictions <pred.csv> --data <ohlcv.parquet>`
+4. Deploy: `conda run -n trader --no-capture-output python -m src.live_execution.live_trader --config configs/strategies/my_strat.json --dry-run`
+
+---
+
+### Environment Setup
+
+**`.env` file** (at repo root -- gitignored, local to each machine):
+```
+CL_DATA_ROOT=C:\Users\bwang\OneDrive\Documents\Data
+```
+This tells the live trader where to find `cl-5m_bk.csv` for warm-start. Required in worktrees where the `data/` directory doesn't exist.
+
+---
+
+## State Parity Test (Shadow Replay)
+
+The State Parity Test diagnoses WHY the live bot may perform differently from backtests.
+It records the exact data, features, and predictions the live bot sees, then replays through
+the offline pipeline to isolate the root cause:
+
+- **[PASS] Pipeline Parity** = code is correct, issue is data discrepancy (training vs. live data)
+- **[FAIL] Pipeline Divergence** = bug in the feature pipeline (live vs. batch computation differs)
+
+### What It Does
+
+The live trader automatically logs a "shadow state" for every 5-minute bar to the SQLite
+telemetry DB. This includes OHLCV, the full feature vector (as JSON), and the model's
+probability output. The parity validator then re-runs the same model on the same features
+offline and checks that the predictions match exactly.
+
+### Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/backfill_shadow_log.py` | Create shadow log from existing `market_bars` in the live DB |
+| `scripts/export_shadow_log.py` | Export new `shadow_log` table from SQLite to Parquet |
+| `scripts/validate_parity.py` | Run parity validation (compare live vs. offline predictions) |
+| `scripts/generate_mock_shadow_log.py` | Generate mock data for testing the pipeline |
+
+### Complete Pipeline (copy-paste commands)
+
+**Option A: Using existing live data (backfill from market_bars)**
+```powershell
+# Step 1: Build shadow log from existing live market_bars + historical warmup data
+conda run -n trader --no-capture-output python scripts/backfill_shadow_log.py
+
+# Step 2: Run parity validation on the live shadow log
+conda run -n trader --no-capture-output python scripts/validate_parity.py --file data/processed/live_shadow_log.parquet
+```
+
+**Option B: Using new shadow_log table (after next live run)**
+```powershell
+# Step 1: Export the shadow_log table from SQLite to Parquet
+conda run -n trader --no-capture-output python scripts/export_shadow_log.py
+
+# Step 2: Run parity validation
+conda run -n trader --no-capture-output python scripts/validate_parity.py --file data/processed/live_shadow_log.parquet
+```
+
+**Option C: Mock test (no live data needed)**
+```powershell
+# Step 1: Generate mock shadow log from historical data
+conda run -n trader --no-capture-output python scripts/generate_mock_shadow_log.py --rows 500
+
+# Step 2: Validate mock (should be 100% parity)
+conda run -n trader --no-capture-output python scripts/validate_parity.py --file data/processed/mock_shadow_log.parquet
+```
+
+### Reading the Report
+
+```
+============================================================
+           STATE PARITY VALIDATION REPORT
+============================================================
+  Shadow log file:     live_shadow_log.parquet
+  Model:               EXP-017_S_Ultimate
+  Validation mode:     Feature Replay          <-- Mode A (uses logged features) or Mode B (full rebuild)
+  Total rows compared: 395
+  Tolerance:           1e-06
+------------------------------------------------------------
+  Parity Match:        100.0%                  <-- want this to be 100%
+  Mean Abs Error:      0.00000000
+  Divergent rows:      0
+------------------------------------------------------------
+  [PASS] PIPELINE PARITY CONFIRMED             <-- or [FAIL] PIPELINE DIVERGENCE DETECTED
+============================================================
+```
+
+**Validation Modes:**
+- **Mode A (Feature Replay):** Uses already-logged feature columns for inference. Tests model determinism. Used when <10,580 OHLCV rows.
+- **Mode B (Full Rebuild):** Rebuilds features from raw OHLCV via AlphaFactory. Gold-standard test. Used when 10,580+ OHLCV rows available.
+
+---
+
+## Multi-Instance Safety
+
+When running multiple strategies simultaneously, each instance auto-isolates:
+
+| Strategy | client_id | Telemetry DB | Cache File |
+|----------|-----------|-------------|------------|
+| Manatee | 10 | `live_telemetry_cid10.db` | `warm_start_cache_cid10.parquet` |
+| Koala | 11 | `live_telemetry_cid11.db` | `warm_start_cache_cid11.parquet` |
+| Manatee Single | 12 | `live_telemetry_cid12.db` | `warm_start_cache_cid12.parquet` |
+| Ensemble | 13 | `live_telemetry_cid13.db` | `warm_start_cache_cid13.parquet` |
+
+**Duplicate prevention:**
+- `market_bars`: UNIQUE on `timestamp` -- duplicate bars from concurrent instances are silently dropped
+- `raw_front_month_bars`: UNIQUE on `(timestamp, contract_month)` -- same protection
+- `shadow_log`: UNIQUE on `timestamp` -- built-in from day one
+
+**IBKR API lines:** Each instance creates 2 data subscriptions (continuous + front-month). 4 strategies = 8 lines out of ~100 limit. Safe for current scale.
+
+---
+
+## PowerShell Notes (Windows)
+
+This project runs on Windows with PowerShell. Key differences from bash:
+
+| What | PowerShell | Bash (DON'T use) |
+|------|-----------|-----------------|
+| Run in conda env | `conda run -n trader --no-capture-output <cmd>` | `conda activate trader && <cmd>` |
+| Chain commands | `cmd1; if ($?) { cmd2 }` | `cmd1 && cmd2` |
+| Set env var | `$env:VAR='val'; cmd` | `VAR=val cmd` |
+
+**Always use `conda run -n trader --no-capture-output`** to run scripts. Do NOT use `conda activate trader && ...` -- PowerShell does not support `&&`.

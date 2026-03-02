@@ -627,3 +627,307 @@ class TestEquityCurve:
 
         # max_drawdown should be negative (reflecting the dip)
         assert result.max_drawdown < 0.0
+
+
+# ---------------------------------------------------------------------------
+# Execution Strategy Tests
+# ---------------------------------------------------------------------------
+
+from src.live_execution.strategies.execution_models import (
+    SingleModelStrategy,
+    ConservativeEnsembleStrategy,
+    AggressiveEnsembleStrategy,
+    create_execution_strategy,
+)
+
+
+def _make_prob_signal(
+    ohlcv: pd.DataFrame,
+    bar_idx: int,
+    prob_buy: float = 0.0,
+    prob_sell: float = 0.0,
+) -> pd.DataFrame:
+    """Create a signals DataFrame with prob_Buy and/or prob_Sell at given bar."""
+    dt = ohlcv.index[bar_idx]
+    data: dict = {}
+    if prob_buy > 0:
+        data["prob_Buy"] = [prob_buy]
+    if prob_sell > 0:
+        data["prob_Sell"] = [prob_sell]
+    return pd.DataFrame(data, index=[dt])
+
+
+def _bt_with_strategy(config: dict, **kwargs) -> BacktestEngine:
+    """Create a BacktestEngine from a config dict with test-friendly defaults."""
+    defaults = {
+        "commission_per_side": 0.0,
+        "slippage_per_side": 0.0,
+    }
+    defaults.update(kwargs)
+    return BacktestEngine.from_config(config, **defaults)
+
+
+class TestSingleModelStrategy:
+    """SingleModelStrategy produces the same results as legacy behavior."""
+
+    def test_long_strategy_fires_on_prob_buy(self) -> None:
+        """prob_Buy above threshold with direction=LONG triggers a trade."""
+        config = {
+            "nickname": "TestLong",
+            "direction": "LONG",
+            "entry_threshold": 0.70,
+            "tp_atr_mult": 2.0,
+            "sl_atr_mult": 1.0,
+        }
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+        highs[25] = 65.05  # TP hit
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        signals = _make_prob_signal(ohlcv, bar_idx=20, prob_buy=0.80)
+
+        bt = _bt_with_strategy(config)
+        result = bt.run(signals, ohlcv)
+
+        assert result.trade_count == 1
+        trade = result.trades[0]
+        assert trade.exit_reason == ExitReason.TP
+        assert trade.side == 1
+
+    def test_short_strategy_fires_on_prob_sell(self) -> None:
+        """prob_Sell above threshold with direction=SHORT triggers a short trade."""
+        config = {
+            "nickname": "TestShort",
+            "direction": "SHORT",
+            "entry_threshold": 0.60,
+            "tp_atr_mult": 2.0,
+            "sl_atr_mult": 1.0,
+        }
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+        lows[25] = 64.95  # TP hit for short (price goes down)
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        signals = _make_prob_signal(ohlcv, bar_idx=20, prob_sell=0.75)
+
+        bt = _bt_with_strategy(config)
+        result = bt.run(signals, ohlcv)
+
+        assert result.trade_count == 1
+        assert result.trades[0].side == -1
+
+    def test_below_threshold_no_trade(self) -> None:
+        """Signal below threshold does not trigger a trade."""
+        config = {
+            "nickname": "TestNoTrade",
+            "direction": "LONG",
+            "entry_threshold": 0.70,
+            "tp_atr_mult": 2.0,
+            "sl_atr_mult": 1.0,
+        }
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+        highs[25] = 65.05
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        signals = _make_prob_signal(ohlcv, bar_idx=20, prob_buy=0.50)  # below 0.70
+
+        bt = _bt_with_strategy(config)
+        result = bt.run(signals, ohlcv)
+
+        assert result.trade_count == 0
+
+    def test_default_execution_class_is_single(self) -> None:
+        """Configs without execution_class default to SingleModelStrategy."""
+        config = {"nickname": "NoClass", "direction": "LONG"}
+        strategy = create_execution_strategy(config)
+        assert isinstance(strategy, SingleModelStrategy)
+
+
+class TestConservativeEnsembleStrategy:
+    """ConservativeEnsembleStrategy handles dual-model signals correctly."""
+
+    def test_buy_signal_only(self) -> None:
+        """Only buy signal above threshold → enters LONG."""
+        config = {
+            "nickname": "Ensemble",
+            "execution_class": "ConservativeEnsembleStrategy",
+            "models": {
+                "long": {"threshold": 0.70},
+                "short": {"threshold": 0.60},
+            },
+            "tp_atr_mult": 2.0,
+            "sl_atr_mult": 1.0,
+        }
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+        highs[25] = 65.05
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        signals = _make_prob_signal(ohlcv, bar_idx=20, prob_buy=0.80, prob_sell=0.30)
+
+        bt = _bt_with_strategy(config)
+        result = bt.run(signals, ohlcv)
+
+        assert result.trade_count == 1
+        assert result.trades[0].side == 1
+
+    def test_sell_signal_only(self) -> None:
+        """Only sell signal above threshold → enters SHORT."""
+        config = {
+            "nickname": "Ensemble",
+            "execution_class": "ConservativeEnsembleStrategy",
+            "models": {
+                "long": {"threshold": 0.70},
+                "short": {"threshold": 0.60},
+            },
+            "tp_atr_mult": 2.0,
+            "sl_atr_mult": 1.0,
+        }
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+        lows[25] = 64.95
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        signals = _make_prob_signal(ohlcv, bar_idx=20, prob_buy=0.40, prob_sell=0.75)
+
+        bt = _bt_with_strategy(config)
+        result = bt.run(signals, ohlcv)
+
+        assert result.trade_count == 1
+        assert result.trades[0].side == -1
+
+    def test_no_flip_when_in_position(self) -> None:
+        """Conservative strategy ignores signals when already in a position."""
+        config = {
+            "nickname": "Ensemble",
+            "execution_class": "ConservativeEnsembleStrategy",
+            "models": {
+                "long": {"threshold": 0.70},
+                "short": {"threshold": 0.60},
+            },
+            "tp_atr_mult": 2.0,
+            "sl_atr_mult": 1.0,
+            "max_hold_bars": 50,
+        }
+        n = 50
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+        highs[35] = 65.05  # TP hit
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+
+        # Signal at bar 20 (BUY), then bar 25 (SELL while in position)
+        dt1 = ohlcv.index[20]
+        dt2 = ohlcv.index[25]
+        signals = pd.DataFrame(
+            {"prob_Buy": [0.80, 0.10], "prob_Sell": [0.10, 0.90]},
+            index=[dt1, dt2],
+        )
+
+        bt = _bt_with_strategy(config)
+        result = bt.run(signals, ohlcv)
+
+        # Only one trade — the sell signal was ignored (in position)
+        assert result.trade_count == 1
+        assert result.trades[0].side == 1
+
+
+class TestEnsembleSameBarConflict:
+    """When both signals exceed threshold on the same bar, higher prob wins."""
+
+    def test_buy_wins_on_higher_prob(self) -> None:
+        config = {
+            "nickname": "Conflict",
+            "execution_class": "ConservativeEnsembleStrategy",
+            "models": {
+                "long": {"threshold": 0.60},
+                "short": {"threshold": 0.60},
+            },
+            "tp_atr_mult": 2.0,
+            "sl_atr_mult": 1.0,
+        }
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+        highs[25] = 65.05
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        # Both above threshold, but buy is higher
+        signals = _make_prob_signal(ohlcv, bar_idx=20, prob_buy=0.85, prob_sell=0.70)
+
+        bt = _bt_with_strategy(config)
+        result = bt.run(signals, ohlcv)
+
+        assert result.trade_count == 1
+        assert result.trades[0].side == 1  # Buy wins
+
+    def test_sell_wins_on_higher_prob(self) -> None:
+        config = {
+            "nickname": "Conflict",
+            "execution_class": "ConservativeEnsembleStrategy",
+            "models": {
+                "long": {"threshold": 0.60},
+                "short": {"threshold": 0.60},
+            },
+            "tp_atr_mult": 2.0,
+            "sl_atr_mult": 1.0,
+        }
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+        lows[25] = 64.95
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        # Both above threshold, but sell is higher
+        signals = _make_prob_signal(ohlcv, bar_idx=20, prob_buy=0.65, prob_sell=0.90)
+
+        bt = _bt_with_strategy(config)
+        result = bt.run(signals, ohlcv)
+
+        assert result.trade_count == 1
+        assert result.trades[0].side == -1  # Sell wins
+
+
+class TestAggressiveEnsembleFlip:
+    """AggressiveEnsembleStrategy flips positions on opposing signals."""
+
+    def test_no_flip_needed_when_flat(self) -> None:
+        """When flat, aggressive behaves same as conservative."""
+        config = {
+            "nickname": "Aggressive",
+            "execution_class": "AggressiveEnsembleStrategy",
+            "models": {
+                "long": {"threshold": 0.70},
+                "short": {"threshold": 0.60},
+            },
+            "tp_atr_mult": 2.0,
+            "sl_atr_mult": 1.0,
+        }
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+        highs[25] = 65.05
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        signals = _make_prob_signal(ohlcv, bar_idx=20, prob_buy=0.80)
+
+        bt = _bt_with_strategy(config)
+        result = bt.run(signals, ohlcv)
+
+        assert result.trade_count == 1
+        assert result.trades[0].side == 1

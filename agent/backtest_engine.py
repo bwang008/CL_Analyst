@@ -36,6 +36,14 @@ import pandas as pd
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
+from src.live_execution.strategies.execution_models import (
+    BaseExecutionStrategy,
+    EngineState,
+    Order,
+    HOLD,
+    create_execution_strategy,
+)
+
 
 # ---------------------------------------------------------------------------
 # Enums & Data Structures
@@ -85,6 +93,7 @@ class TradeRecord:
     gross_pnl_dollars: float
     commission_dollars: float
     net_pnl_dollars: float
+    lots: int = 1
 
 
 @dataclass
@@ -180,6 +189,7 @@ class _OpenPosition:
     bars_held: int = 0
     highest_high: float = 0.0
     lowest_low: float = float("inf")
+    lots: int = 1
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +243,7 @@ class BacktestEngine:
         prob_threshold: float = 0.45,
         allow_concurrent: bool = False,
         max_concurrent: int = 1,
+        execution_strategy: Optional[BaseExecutionStrategy] = None,
     ) -> None:
         self.tp_atr_mult = tp_atr_mult
         self.sl_atr_mult = sl_atr_mult
@@ -246,6 +257,12 @@ class BacktestEngine:
         self.prob_threshold = prob_threshold
         self.allow_concurrent = allow_concurrent
         self.max_concurrent = max(1, max_concurrent)
+
+        # Pluggable execution strategy (None = legacy signal_sides fallback)
+        self._execution_strategy = execution_strategy
+
+        # Mutable engine state (allocated once, reused across bars)
+        self._engine_state = EngineState()
 
         # FSM state — single-position mode (reset per run)
         self._state: TradeState = TradeState.FLAT
@@ -262,6 +279,7 @@ class BacktestEngine:
         self._highest_high: float = 0.0
         self._lowest_low: float = float("inf")
         self._cooldown_remaining: int = 0
+        self._lots: int = 1
         self._trades: list[TradeRecord] = []
 
         # Concurrent mode state
@@ -272,8 +290,12 @@ class BacktestEngine:
         """Create a BacktestEngine from a strategy config dict.
 
         Reads all supported fields from the JSON config, with CLI overrides
-        taking precedence.
+        taking precedence.  Also instantiates the appropriate execution
+        strategy via the registry/factory pattern.
         """
+        # Instantiate the execution strategy from config
+        strategy = create_execution_strategy(cfg)
+
         kwargs = {
             "tp_atr_mult": cfg.get("tp_atr_mult", 2.0),
             "sl_atr_mult": cfg.get("sl_atr_mult", 1.0),
@@ -283,6 +305,7 @@ class BacktestEngine:
             "cooldown_bars": cfg.get("cooldown_bars", 10),
             "trailing_atr_mult": cfg.get("trailing_atr_mult", 1.0),
             "max_horizon": cfg.get("max_hold_bars", 288),
+            "execution_strategy": strategy,
         }
         kwargs.update(overrides)
         return cls(**kwargs)
@@ -307,6 +330,12 @@ class BacktestEngine:
         self._realized_pnl: float = 0.0
         self._equity_curve: list[float] = []
         self._open_positions = []
+
+        # Reset mutable engine state
+        self._engine_state.position = 0
+        self._engine_state.side = 0
+        self._engine_state.bars_held = 0
+        self._engine_state.open_positions = 0
 
     def _apply_slippage(self, price: float, order_side: str) -> float:
         """Apply 1-tick slippage penalty in the adverse direction.
@@ -373,8 +402,8 @@ class BacktestEngine:
         exit_fill = self._apply_slippage(exit_price, exit_order_side)
 
         gross_pnl_price = self._side * (exit_fill - self._entry_fill)
-        gross_pnl_dollars = gross_pnl_price * self.contract_multiplier
-        commission = 2 * self.commission_per_side
+        gross_pnl_dollars = gross_pnl_price * self.contract_multiplier * self._lots
+        commission = 2 * self.commission_per_side * self._lots
         net_pnl = gross_pnl_dollars - commission
 
         record = TradeRecord(
@@ -391,6 +420,7 @@ class BacktestEngine:
             gross_pnl_dollars=gross_pnl_dollars,
             commission_dollars=commission,
             net_pnl_dollars=net_pnl,
+            lots=self._lots,
         )
         self._trades.append(record)
         self._realized_pnl += net_pnl
@@ -408,6 +438,7 @@ class BacktestEngine:
         bar: pd.Series,
         signal_side: Optional[int],
         atr: float,
+        lots: int = 1,
     ) -> None:
         """FLAT state: accept valid signals and enter a position.
 
@@ -416,6 +447,7 @@ class BacktestEngine:
             bar: OHLCV bar data.
             signal_side: +1 for buy, -1 for sell, None for no signal.
             atr: Current ATR value.
+            lots: Number of contracts for this position.
         """
         if signal_side is None or np.isnan(atr) or atr <= 0:
             return
@@ -425,6 +457,7 @@ class BacktestEngine:
         self._entry_price = bar.Close
         self._atr_at_entry = atr
         self._side = signal_side
+        self._lots = lots
         self._bars_held = 0
         self._trailing_activated = False
 
@@ -530,6 +563,7 @@ class BacktestEngine:
         bar: pd.Series,
         signal_side: int,
         atr: float,
+        lots: int = 1,
     ) -> None:
         """Open a new position and add it to the open-positions list."""
         entry_price = bar.Close
@@ -554,6 +588,7 @@ class BacktestEngine:
             original_sl_price=sl_price,
             highest_high=bar.High,
             lowest_low=bar.Low,
+            lots=lots,
         )
         self._open_positions.append(pos)
 
@@ -633,8 +668,8 @@ class BacktestEngine:
             exit_order_side = "Sell" if pos.side == 1 else "Buy"
             exit_fill = self._apply_slippage(exit_price, exit_order_side)
             gross_pnl_price = pos.side * (exit_fill - pos.entry_fill)
-            gross_pnl_dollars = gross_pnl_price * self.contract_multiplier
-            commission = 2 * self.commission_per_side
+            gross_pnl_dollars = gross_pnl_price * self.contract_multiplier * pos.lots
+            commission = 2 * self.commission_per_side * pos.lots
             net_pnl = gross_pnl_dollars - commission
 
             return TradeRecord(
@@ -651,6 +686,7 @@ class BacktestEngine:
                 gross_pnl_dollars=gross_pnl_dollars,
                 commission_dollars=commission,
                 net_pnl_dollars=net_pnl,
+                lots=pos.lots,
             )
 
         return None
@@ -696,25 +732,69 @@ class BacktestEngine:
         ohlcv["atr_"] = tr.rolling(self.atr_period).mean()
 
         # Build signal lookup — which bars have a trade signal
-        signal_sides: dict[pd.Timestamp, int] = {}
+        #
+        # Two code paths:
+        #   1. Strategy-aware: delegate to execution strategy on_bar()
+        #   2. Legacy: build signal_sides dict from columns (backward compat)
+        #
+        if self._execution_strategy is not None:
+            # Strategy-aware path: build prob lookup dicts
+            prob_buy_lookup: dict[pd.Timestamp, float] = {}
+            prob_sell_lookup: dict[pd.Timestamp, float] = {}
 
-        if "side" in signals_df.columns:
-            for dt_idx in signals_df.index:
-                ts = pd.Timestamp(dt_idx)
-                signal_sides[ts] = int(signals_df.at[dt_idx, "side"])
-        elif "prob_Buy" in signals_df.columns:
-            mask = signals_df["prob_Buy"] >= self.prob_threshold
-            for dt_idx in signals_df[mask].index:
-                signal_sides[pd.Timestamp(dt_idx)] = 1
-        elif "Predicted" in signals_df.columns:
-            mask = signals_df["Predicted"] == 1
-            for dt_idx in signals_df[mask].index:
-                signal_sides[pd.Timestamp(dt_idx)] = 1
+            if "prob_Buy" in signals_df.columns:
+                for dt_idx in signals_df.index:
+                    prob_buy_lookup[pd.Timestamp(dt_idx)] = float(
+                        signals_df.at[dt_idx, "prob_Buy"]
+                    )
+            if "prob_Sell" in signals_df.columns:
+                for dt_idx in signals_df.index:
+                    prob_sell_lookup[pd.Timestamp(dt_idx)] = float(
+                        signals_df.at[dt_idx, "prob_Sell"]
+                    )
+            # Legacy column fallback: if only 'side' column, map to probs
+            if "side" in signals_df.columns and not prob_buy_lookup and not prob_sell_lookup:
+                for dt_idx in signals_df.index:
+                    s = int(signals_df.at[dt_idx, "side"])
+                    if s == 1:
+                        prob_buy_lookup[pd.Timestamp(dt_idx)] = 1.0
+                    elif s == -1:
+                        prob_sell_lookup[pd.Timestamp(dt_idx)] = 1.0
+            # Predicted column fallback
+            if "Predicted" in signals_df.columns and not prob_buy_lookup:
+                mask = signals_df["Predicted"] == 1
+                for dt_idx in signals_df[mask].index:
+                    prob_buy_lookup[pd.Timestamp(dt_idx)] = 1.0
 
-        if self.allow_concurrent:
-            self._run_concurrent(ohlcv, signal_sides)
+            if self.allow_concurrent:
+                self._run_concurrent_strategy(
+                    ohlcv, prob_buy_lookup, prob_sell_lookup
+                )
+            else:
+                self._run_single_strategy(
+                    ohlcv, prob_buy_lookup, prob_sell_lookup
+                )
         else:
-            self._run_single(ohlcv, signal_sides)
+            # Legacy path: build signal_sides dict
+            signal_sides: dict[pd.Timestamp, int] = {}
+
+            if "side" in signals_df.columns:
+                for dt_idx in signals_df.index:
+                    ts = pd.Timestamp(dt_idx)
+                    signal_sides[ts] = int(signals_df.at[dt_idx, "side"])
+            elif "prob_Buy" in signals_df.columns:
+                mask = signals_df["prob_Buy"] >= self.prob_threshold
+                for dt_idx in signals_df[mask].index:
+                    signal_sides[pd.Timestamp(dt_idx)] = 1
+            elif "Predicted" in signals_df.columns:
+                mask = signals_df["Predicted"] == 1
+                for dt_idx in signals_df[mask].index:
+                    signal_sides[pd.Timestamp(dt_idx)] = 1
+
+            if self.allow_concurrent:
+                self._run_concurrent(ohlcv, signal_sides)
+            else:
+                self._run_single(ohlcv, signal_sides)
 
         return BacktestResult(
             trades=self._trades,
@@ -800,6 +880,126 @@ class BacktestEngine:
                 self._open_new_position(ts, row, sig, atr)
 
             # 3. Record equity: realized + floating
+            self._equity_curve.append(
+                self._realized_pnl + self._floating_pnl_concurrent(row.Close)
+            )
+
+    # -------------------------------------------------------------------
+    # Strategy-aware loop methods
+    # -------------------------------------------------------------------
+
+    def _update_engine_state(self) -> None:
+        """Sync the mutable EngineState with FSM state (single mode)."""
+        es = self._engine_state
+        if self._state == TradeState.IN_POSITION:
+            es.position = 1
+            es.side = self._side
+            es.bars_held = self._bars_held
+        else:
+            es.position = 0
+            es.side = 0
+            es.bars_held = 0
+        es.open_positions = 1 if self._state == TradeState.IN_POSITION else 0
+
+    def _run_single_strategy(
+        self,
+        ohlcv: pd.DataFrame,
+        prob_buy_lookup: dict[pd.Timestamp, float],
+        prob_sell_lookup: dict[pd.Timestamp, float],
+    ) -> None:
+        """Single-position FSM loop with execution strategy delegation."""
+        strategy = self._execution_strategy
+        assert strategy is not None
+
+        for row in ohlcv.itertuples():
+            ts = pd.Timestamp(row.Index)
+            atr = row.atr_
+
+            if self._state == TradeState.FLAT:
+                # Update engine state for strategy
+                self._update_engine_state()
+
+                # Get probabilities for this bar
+                pb = prob_buy_lookup.get(ts, 0.0)
+                ps = prob_sell_lookup.get(ts, 0.0)
+
+                # Ask strategy what to do
+                orders = strategy.on_bar(
+                    ts, row.Open, row.High, row.Low, row.Close,
+                    atr, pb, ps, self._engine_state,
+                )
+
+                # Dispatch orders to existing FSM entry point
+                for order in orders:
+                    if order.action in ("BUY", "SELL"):
+                        sig = order.side
+                        self._on_flat(ts, row, sig, atr, lots=order.lots)
+                        break  # single-position: only one entry per bar
+
+            elif self._state == TradeState.IN_POSITION:
+                self._on_in_position(ts, row.Open, row.High, row.Low)
+
+            elif self._state == TradeState.COOLDOWN:
+                self._on_cooldown()
+
+            # Record equity: realized + floating
+            self._equity_curve.append(
+                self._realized_pnl + self._floating_pnl_single(row.Close)
+            )
+
+    def _run_concurrent_strategy(
+        self,
+        ohlcv: pd.DataFrame,
+        prob_buy_lookup: dict[pd.Timestamp, float],
+        prob_sell_lookup: dict[pd.Timestamp, float],
+    ) -> None:
+        """Concurrent multi-position loop with execution strategy delegation."""
+        strategy = self._execution_strategy
+        assert strategy is not None
+
+        for row in ohlcv.itertuples():
+            ts = pd.Timestamp(row.Index)
+            atr = row.atr_
+
+            # 1. Check existing positions for exits
+            surviving: list[_OpenPosition] = []
+            for pos in self._open_positions:
+                record = self._check_position(pos, ts, row.Open, row.High, row.Low)
+                if record is not None:
+                    self._trades.append(record)
+                    self._realized_pnl += record.net_pnl_dollars
+                else:
+                    surviving.append(pos)
+            self._open_positions = surviving
+
+            # 2. Update engine state for strategy
+            self._engine_state.open_positions = len(self._open_positions)
+            if self._open_positions:
+                self._engine_state.position = 1
+                self._engine_state.side = self._open_positions[0].side
+            else:
+                self._engine_state.position = 0
+                self._engine_state.side = 0
+
+            # 3. Ask strategy what to do
+            pb = prob_buy_lookup.get(ts, 0.0)
+            ps = prob_sell_lookup.get(ts, 0.0)
+            orders = strategy.on_bar(
+                ts, row.Open, row.High, row.Low, row.Close,
+                atr, pb, ps, self._engine_state,
+            )
+
+            # 4. Dispatch orders
+            for order in orders:
+                if order.action in ("BUY", "SELL"):
+                    if (
+                        not (np.isnan(atr) if isinstance(atr, float) else False)
+                        and atr > 0
+                        and len(self._open_positions) < self.max_concurrent
+                    ):
+                        self._open_new_position(ts, row, order.side, atr, lots=order.lots)
+
+            # 5. Record equity: realized + floating
             self._equity_curve.append(
                 self._realized_pnl + self._floating_pnl_concurrent(row.Close)
             )

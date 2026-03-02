@@ -1,0 +1,143 @@
+# Agent Prompt: Ensemble Strategy Pattern Refactor
+
+> Copy everything below this line and paste into a new agent context.
+
+---
+
+**Role & Context:**
+Act as a Principal Quantitative Software Engineer. We are upgrading a CL futures trading infrastructure to use a fully decoupled Strategy Design Pattern. Currently, our [BacktestEngine](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/agent/backtest_engine.py#191-806) ([agent/backtest_engine.py](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/agent/backtest_engine.py)) and [LiveTrader](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/src/live_execution/live_trader.py#238-1237) ([src/live_execution/live_trader.py](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/src/live_execution/live_trader.py)) contain hardcoded signal-parsing and conflict-resolution logic that only handles one direction at a time. We need to decouple the "Decision Logic" (Strategy) from the "Execution Shells" (Engine/Trader) so we can support multi-model ensembles (e.g., a Buy model + a Sell model running together) without modifying the core engines.
+
+**Critical Existing Infrastructure — DO NOT BREAK THESE:**
+
+1. **[agent/backtest_engine.py](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/agent/backtest_engine.py)** — The master backtester. It already has:
+   - Pessimistic FSM: when both TP and SL breach on the same bar, SL wins. This logic lives in [_on_in_position()](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/agent/backtest_engine.py#447-513) (single mode) and [_check_position()](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/agent/backtest_engine.py#560-657) (concurrent mode). **Do NOT modify these methods.**
+   - Bar-by-bar equity curve: `BacktestResult.equity_curve` tracks `realized_pnl + floating_pnl` every bar. [max_drawdown](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/agent/backtest_cl_concurrent.py#130-136) uses this. **Do NOT modify the equity tracking.**
+   - `itertuples()` optimization in [_run_single()](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/agent/backtest_engine.py#740-764) and [_run_concurrent()](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/agent/backtest_engine.py#765-806). **Do NOT revert to `iterrows()`.**
+   - Concurrent position support via [_OpenPosition](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/agent/backtest_engine.py#167-183) dataclass, `allow_concurrent`, [max_concurrent](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/tests/test_backtest_engine.py#414-436).
+   - `BacktestEngine.from_config(cfg)` classmethod for JSON-driven instantiation.
+   - Gap-aware slippage ([_gap_fill_price](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/agent/backtest_cl_advanced.py#248-287), [_apply_slippage](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/agent/backtest_engine.py#311-324)), trailing stops, time barriers, cooldown.
+   - Backward-compatible alias: `CLAdvancedExecutionBacktester = BacktestEngine`.
+
+2. **[src/live_execution/strategy.py](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/src/live_execution/strategy.py)** — Existing [Strategy](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/src/live_execution/strategy.py#51-93) ABC with:
+   - `name -> str`, `direction -> str` (`"LONG"`, `"SHORT"`, or `"BOTH"`), `feature_names -> list[str]`
+   - [evaluate(features, current_price, atr_value, current_position) -> TradeSignal](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/src/live_execution/strategy.py#72-93)
+   - [TradeSignal](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/src/live_execution/strategy.py#17-44) dataclass: [action](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/tests/test_strategy.py#48-53) (`"BUY"|"SELL"|"HOLD"`), `probability`, `tp_price`, `sl_price`, [lots](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/agent/backtester.py#153-161), `signal_label`, `skip_reason`
+
+3. **[src/live_execution/strategies/configurable_strategy.py](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/src/live_execution/strategies/configurable_strategy.py)** — [ConfigurableStrategy(Strategy)](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/src/live_execution/strategies/configurable_strategy.py#49-234):
+   - Loads a single model from `models/registry/{experiment_id}/final_model.pkl`
+   - Handles LONG or SHORT direction with direction-aware brackets
+   - Config-driven threshold, TP/SL multipliers, sizing tiers
+   - This is the **current production strategy class** used by the live trader.
+
+4. **[agent/backtest_cl_concurrent.py](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst/agent/backtest_cl_concurrent.py)** — Older standalone backtester with battle-tested dual-signal parsing. Lines 352-430 contain working `prob_Buy` + `prob_Sell` conflict resolution logic (higher probability wins on same-bar conflicts). **Port this logic rather than reimplementing from scratch.**
+
+5. **Strategy JSON configs** already exist in `configs/strategies/`:
+   - `manatee.json`: `direction=LONG`, `experiment_id=EXP-017_S_Ultimate`, `threshold=0.70`
+   - `koala.json`: `direction=SHORT`, `experiment_id=EXP-020_S_Ultimate_Short`, `threshold=0.60`
+
+---
+
+**The Architecture Plan:**
+
+1. The JSON config will specify an `execution_class` and optionally multiple `models` (e.g., long and short).
+2. A new file `src/live_execution/strategies/execution_models.py` will contain a `BaseExecutionStrategy` interface and concrete implementations. This must be **compatible with the existing `Strategy` ABC** — either extend it or ensure the live trader can consume both interfaces.
+3. The `BacktestEngine`'s signal-parsing layer (currently in `run()`, lines ~698-712) will be refactored to delegate to the execution strategy. The FSM execution logic (`_on_in_position`, `_check_position`, `_close_trade`, equity curve) stays untouched.
+4. The `LiveTrader` changes should be summarized but **not fully implemented yet** — provide a clear specification of what needs to change.
+
+---
+
+**Task 1: The Prediction Merger Script**
+
+Create `scripts/merge_predictions.py`:
+- Takes two CSV prediction files via CLI args: `--long-preds` and `--short-preds`
+- Aligns them by `DateTime` index (outer join, NaN-fill for missing bars)
+- Outputs a single CSV with both `prob_Buy` and `prob_Sell` columns
+- Include a `--output` flag (default: `reports/ensemble_predictions.csv`)
+- Add basic validation: warn if date ranges don't overlap, report alignment stats
+- Fill `NaN` values with 0.0 after the join (models may have different date ranges). Log a warning with the count of NaN-filled rows per column.
+
+**Task 2: The Base Interface & Concrete Strategies**
+
+Create `src/live_execution/strategies/execution_models.py`:
+
+- `BaseExecutionStrategy(ABC)`:
+  - `__init__(self, config: dict)` — receives the full JSON config
+  - Abstract method: `on_bar(self, dt, open, high, low, close, atr, prob_buy: float, prob_sell: float, state: EngineState) -> list[Order]`
+  - **Performance constraint:** Do NOT pass `predictions` or `engine_state` as newly-allocated dicts — this loop runs 100k+ times. Instead, pass `prob_buy` and `prob_sell` as flat floats, and use a mutable `EngineState` dataclass that is allocated once and reused (fields mutated in-place each bar).
+  - `EngineState` dataclass fields: `position: int, side: int, bars_held: int, open_positions: int`
+  - Return type `Order` is a dataclass: `action: str` (`"BUY"|"SELL"|"HOLD"`), `side: int` (+1|-1), `lots: int`, `reason: str`
+  - **NaN handling:** Strategies must treat `NaN` prediction values as 0.0 probability (models may have misaligned date ranges after outer-join merge). Use explicit `if np.isnan(prob_buy): prob_buy = 0.0` guards, do not rely on silent NaN comparison behavior.
+
+- `SingleModelStrategy(BaseExecutionStrategy)`:
+  - Wraps the current single-direction behavior. If `config["direction"]` is `"LONG"`, reads `prob_Buy`. If `"SHORT"`, reads `prob_Sell`. Fires when probability >= threshold and position guard passes. This ensures backward compatibility with existing `manatee.json` and `koala.json` configs.
+
+- `ConservativeEnsembleStrategy(BaseExecutionStrategy)`:
+  - If already in a position, ignore new signals (no flipping).
+  - If FLAT: check both `prob_Buy` and `prob_Sell` against their respective thresholds. If both exceed threshold on the same bar, take the higher probability signal. If only one exceeds, take that one.
+  - Port the conflict resolution logic from `agent/backtest_cl_concurrent.py` lines 374-397.
+
+- `AggressiveEnsembleStrategy(BaseExecutionStrategy)`:
+  - Same as Conservative, but if in a LONG position and a valid SELL signal appears (above threshold), return EXIT + SELL (position flip). Vice versa for SHORT→LONG.
+
+**Task 3: Extend the JSON Schema**
+
+Create `configs/strategies/ensemble_conservative.json`:
+```json
+{
+    "nickname": "ManateeKoala_Conservative",
+    "execution_class": "ConservativeEnsembleStrategy",
+    "models": {
+        "long": {"experiment_id": "EXP-017_S_Ultimate", "threshold": 0.70},
+        "short": {"experiment_id": "EXP-020_S_Ultimate_Short", "threshold": 0.60}
+    },
+    "tp_atr_mult": 7.0,
+    "sl_atr_mult": 1.0,
+    "allow_concurrent": false,
+    "max_concurrent": 1,
+    "cooldown_bars": 10,
+    "trailing_atr_mult": 1.0,
+    "max_hold_bars": 288
+}
+```
+
+Existing single-model configs (`manatee.json`, `koala.json`) should continue to work without changes by defaulting `execution_class` to `"SingleModelStrategy"` when the field is absent.
+
+**Task 4: Refactor BacktestEngine Signal Parsing**
+
+In `agent/backtest_engine.py`:
+- **Only modify the signal-parsing block** in `run()` (currently lines ~698-712) and the signal dispatch in `_run_single`/`_run_concurrent`.
+- Create a strategy registry/factory that maps `execution_class` strings to classes.
+- In `from_config()`, instantiate the appropriate execution strategy.
+- In the main loop, instead of looking up `signal_sides[ts]`, call `strategy.on_bar(...)` and route the returned orders to the existing `_on_flat()` / `_open_new_position()` methods.
+- **Do NOT modify:** `_on_in_position`, `_check_position`, `_close_trade`, `_gap_fill_price`, `_apply_slippage`, equity curve logic, `BacktestResult`, or any FSM logic.
+
+**Task 5: LiveTrader Integration Spec (Document Only)**
+
+Do NOT refactor the live trader code yet. Instead, provide a written specification:
+- Which methods in `LiveTrader` need to change
+- How `ConfigurableStrategy.evaluate()` maps to the new `on_bar()` interface
+- Whether to create an adapter or replace `ConfigurableStrategy` with the new interface
+- Exact list of files that would need modification
+
+**Task 6: Tests**
+
+- Add tests in `tests/test_backtest_engine.py` for:
+  - `SingleModelStrategy` producing same results as current behavior (regression test)
+  - `ConservativeEnsembleStrategy` with both `prob_Buy` and `prob_Sell` columns
+  - Same-bar conflict resolution (both signals above threshold → higher prob wins)
+  - `AggressiveEnsembleStrategy` position flipping
+- All existing tests (318 currently passing) must continue to pass.
+
+**Task 7: Execution Commands**
+
+Provide the exact CLI commands to:
+1. Merge predictions from two model CSVs
+2. Run a backtest using the ensemble conservative config
+3. Run a backtest using the existing `manatee.json` (regression check)
+
+**Constraints:**
+- Do NOT use `iterrows()` — maintain `itertuples()` in all loops.
+- Do NOT write monolithic `if/else` blocks in the engine to handle strategy types — use the registry/factory pattern.
+- Do NOT modify FSM execution logic, equity curve, or pessimistic resolution.
+- All existing configs must continue to work without modification (backward compatibility).
+- Create the new branch from `main` — it has the latest code with all realism fixes.

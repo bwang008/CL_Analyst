@@ -1017,6 +1017,26 @@ class LiveTrader:
             current_position=current_position,
         )
 
+        # Shadow-replay logging: capture exact state for parity validation
+        try:
+            last_row = self.rolling_df.iloc[-1]
+            _prob_buy = signal.probability if self.strategy.direction != "SHORT" else None
+            _prob_sell = signal.probability if self.strategy.direction != "LONG" else None
+            self.telemetry.log_shadow_state(
+                timestamp=bar_time,
+                open_=float(last_row["Open"]),
+                high=float(last_row["High"]),
+                low=float(last_row["Low"]),
+                close=float(last_row["Close"]),
+                volume=float(last_row["Volume"]),
+                features_dict=features.iloc[0].to_dict(),
+                prob_buy=_prob_buy,
+                prob_sell=_prob_sell,
+                strategy_name=self.strategy.name,
+            )
+        except Exception:
+            log.debug("Shadow state logging failed", exc_info=True)
+
         log.info(
             "INFERENCE [%s]: prob=%.4f (%.1f%%)  signal=%s  action=%s%s",
             self.strategy.name,
@@ -1262,8 +1282,8 @@ def main() -> None:
         help="IBKR primary port (default: 4002 for IB Gateway; falls back to 7497 TWS)",
     )
     parser.add_argument(
-        "--client-id", type=int, default=10,
-        help="IBKR client ID (default: 10)",
+        "--client-id", type=int, default=1,
+        help="IBKR client ID (default: 1; overridden by config live_config.client_id)",
     )
     parser.add_argument(
         "--strategy", default=_DEFAULT_STRATEGY,
@@ -1297,11 +1317,15 @@ def main() -> None:
     args = parser.parse_args()
 
     # Resolve strategy: --config takes priority over --strategy
+    config_client_id: int | None = None
     if args.config is not None:
         strategy = ConfigurableStrategy(
             config_path=args.config,
             base_quantity=args.quantity,
         )
+        # Read client_id from config's live_config section
+        live_cfg = strategy.config.get("live_config", {})
+        config_client_id = live_cfg.get("client_id")
     else:
         strategy_key = args.strategy.upper()
         if strategy_key not in _STRATEGY_REGISTRY:
@@ -1312,14 +1336,62 @@ def main() -> None:
         strategy_cls = _STRATEGY_REGISTRY[strategy_key]
         strategy = strategy_cls(base_quantity=args.quantity)
 
+    # CLI --client-id takes priority; if not explicitly set (== 1 default),
+    # fall back to config's live_config.client_id
+    resolved_client_id = args.client_id
+    if resolved_client_id == 1 and config_client_id is not None:
+        resolved_client_id = config_client_id
+
+    # ── Per-strategy isolation ────────────────────────────────────
+    # Derive per-client_id cache and DB paths to prevent concurrent
+    # write conflicts when running multiple LiveTrader instances.
+    resolved_db_path = args.db_path
+    resolved_cache_path = args.cache_path
+
+    if resolved_client_id != 1:
+        cid_suffix = f"_cid{resolved_client_id}"
+
+        # Only override if user hasn't explicitly set a custom path
+        if resolved_db_path == _DEFAULT_DB_PATH:
+            resolved_db_path = str(
+                _PROJECT_ROOT / "data" / f"live_telemetry{cid_suffix}.db"
+            )
+
+        if resolved_cache_path == _DEFAULT_CACHE_PATH:
+            resolved_cache_path = str(
+                _PROJECT_ROOT / "data" / "processed"
+                / f"warm_start_cache{cid_suffix}.parquet"
+            )
+
+        log.info(
+            "Multi-instance isolation: client_id=%d  "
+            "db=%s  cache=%s",
+            resolved_client_id,
+            Path(resolved_db_path).name,
+            Path(resolved_cache_path).name,
+        )
+
+    # ── IBKR subscription advisory ───────────────────────────────
+    # Each LiveTrader instance creates 2 IBKR real-time data lines
+    # (continuous + front-month). IBKR's default limit is ~100 lines.
+    # With N strategies, that's 2*N lines. This is wasteful but safe
+    # for < ~50 concurrent strategies.
+    if resolved_client_id != 1:
+        log.info(
+            "NOTE: This instance (client_id=%d) creates its own IBKR "
+            "data subscriptions. With many concurrent strategies, "
+            "consider a shared data broadcaster.",
+            resolved_client_id,
+        )
+
     trader = LiveTrader(
         host=args.host,
         port=args.port,
-        client_id=args.client_id,
+        client_id=resolved_client_id,
         strategy=strategy,
-        db_path=args.db_path,
+        db_path=resolved_db_path,
         seed_path=args.seed_path,
-        cache_path=args.cache_path,
+        cache_path=resolved_cache_path,
         quantity=args.quantity,
         dry_run=args.dry_run,
     )
