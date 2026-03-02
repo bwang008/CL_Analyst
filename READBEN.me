@@ -154,7 +154,6 @@ Create a strategy JSON config (or use an existing one):
 ```json
 {
     "nickname": "Manatee",
-    "experiment_id": "EXP-017_S_Ultimate",
     "direction": "LONG",
     "allow_concurrent": false,
     "entry_threshold": 0.70,
@@ -165,7 +164,29 @@ Create a strategy JSON config (or use an existing one):
         "0.70": 2,
         "0.60": 2,
         "0.50": 1
+    },
+    "live_config": {
+        "experiment_id": "EXP-017_S_Ultimate",
+        "client_id": 10,
+        "entry_mode": "adaptive",
+        "adaptive_priority": "Normal"
     }
+}
+```
+
+**`configs/strategies/ensemble_conservative.json`** (example -- dual-model ensemble):
+```json
+{
+    "nickname": "ManateeKoala_Conservative",
+    "execution_class": "ConservativeEnsembleStrategy",
+    "models": {
+        "long":  {"experiment_id": "EXP-017_S_Ultimate",       "threshold": 0.60},
+        "short": {"experiment_id": "EXP-020_S_Ultimate_Short", "threshold": 0.60}
+    },
+    "tp_atr_mult": 3.0,
+    "sl_atr_mult": 2.5,
+    "sizing_tiers": {"0.80": 3, "0.70": 2, "0.60": 1},
+    "live_config": {"client_id": 13}
 }
 ```
 
@@ -174,13 +195,17 @@ Create a strategy JSON config (or use an existing one):
 | Field | Type | Description |
 |-------|------|-------------|
 | `nickname` | string | Human-readable name (shows in logs) |
-| `experiment_id` | string | Folder name in `models/registry/` |
-| `direction` | string | `LONG`, `SHORT`, or `BOTH` |
+| `direction` | string | `LONG`, `SHORT` (single-model only; ensemble omits this) |
+| `models` | dict | Ensemble only: `{long: {experiment_id, threshold}, short: {...}}` |
 | `allow_concurrent` | bool | Allow entry while a position is open |
-| `entry_threshold` | float | Min probability to trigger entry |
+| `entry_threshold` | float | Min probability to trigger entry (single-model) |
 | `tp_atr_mult` | float | Take-profit = entry +/- (this x ATR) |
 | `sl_atr_mult` | float | Stop-loss = entry -/+ (this x ATR) |
 | `sizing_tiers` | dict | `{"min_probability": lots}` -- higher prob = more lots |
+| `live_config.experiment_id` | string | Model registry folder (single-model live config) |
+| `live_config.client_id` | int | IBKR client ID for concurrent instances |
+| `live_config.entry_mode` | string | `adaptive`, `marketable_limit`, or `market` |
+| `live_config.adaptive_priority` | string | `Normal`, `Urgent`, or `Patient` |
 
 **Run the backtest:**
 ```powershell
