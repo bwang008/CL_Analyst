@@ -41,6 +41,8 @@ class TradeSignal:
     lots: int = 1
     signal_label: str = "Hold"
     skip_reason: Optional[str] = None
+    buy_prob: Optional[float] = None
+    sell_prob: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
