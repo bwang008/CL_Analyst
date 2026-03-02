@@ -2,6 +2,32 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
+## 2026-03-02 — Config Refactor + Sizing Tiers + Ensemble Live Trader
+
+- **Goal**: Implement position sizing (lots) in BacktestEngine, refactor configs to group live-only attributes under `live_config`, add per-config `client_id`, and make `ConfigurableStrategy` support ensemble configs.
+
+### Config refactoring
+- All 4 strategy JSONs (`manatee.json`, `koala.json`, `manatee_single.json`, `ensemble_conservative.json`) restructured: `experiment_id` moved under `live_config`, `client_id` added (10/11/12/13).
+- Created `configs/strategies/config_readme.md` — full attribute reference with compatibility matrix.
+
+### Sizing tiers implementation
+- `execution_models.py` → `BaseExecutionStrategy._parse_sizing_tiers()` and `_prob_to_lots()`: maps probability to lot count via highest-first matching.
+- All 3 strategies (`SingleModelStrategy`, `ConservativeEnsembleStrategy`, `AggressiveEnsembleStrategy`) set `Order.lots` from tiers.
+- `backtest_engine.py` → `TradeRecord.lots`, `_OpenPosition.lots`, PnL calculations in `_close_trade` and `_check_position` multiply by `lots`.
+- `configurable_strategy.py` → `_prob_to_lots()` mirrors the same logic for live trader parity.
+
+### LiveTrader updates
+- CLI `--client-id` default changed from `10` → `1`. Reads `live_config.client_id` from config JSON.
+- `ConfigurableStrategy` reads `experiment_id` from `live_config` with backward compat fallback to top-level.
+- Refactored `ConfigurableStrategy` for ensemble support: detects `models` dict, loads both LONG and SHORT models, runs dual inference, applies per-model thresholds, higher-probability signal wins on conflict.
+- Added `buy_prob`/`sell_prob` fields to `TradeSignal` dataclass.
+- Enhanced INFERENCE log: shows direction (LONG/SHORT/BOTH), `buy_prob`, `sell_prob`, and explicit position-skip labeling.
+- Fixed shadow state logging to use `signal.buy_prob`/`signal.sell_prob` when available.
+
+### Test results
+- **52 passed, 0 failed** (backtest_engine + configurable_strategy tests)
+- Updated test stub to handle new ensemble attributes (`_long_learner`, `_short_learner`, `_is_ensemble`, `_long_threshold`, `_short_threshold`).
+
 ## 2026-03-02 — Entry Order Upgrade: Adaptive Algo + Marketable Limit
 
 - **Goal**: Upgrade entry orders from bare Market Orders to institutional-grade execution that reduces slippage and captures the spread. Avoid fragile async cancel/replace loops.
