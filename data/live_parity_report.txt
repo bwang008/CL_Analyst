@@ -1,0 +1,27 @@
+Loaded shadow log: 395 rows, 89 columns
+Using model: EXP-017_S_Ultimate
+Model loaded: C:\Users\bwang\Documents\GitHub\CL_Analyst\models\registry\EXP-017_S_Ultimate\final_model.pkl (80 features)
+
+Mode A: FEATURE REPLAY (80/80 features available)
+  Using logged feature columns for offline model inference.
+Running offline inference on 395 rows...
+
+============================================================
+               STATE PARITY VALIDATION REPORT               
+============================================================
+  Shadow log file:     live_shadow_log.parquet
+  Model:               EXP-017_S_Ultimate
+  Validation mode:     Feature Replay
+  Total rows compared: 395
+  Live prob column:    prob_buy
+  Tolerance:           1e-06
+------------------------------------------------------------
+  Parity Match:        100.0%
+  Mean Abs Error:      0.00000000
+  Max Abs Error:       0.00000000
+  Divergent rows:      0
+------------------------------------------------------------
+  [PASS] PIPELINE PARITY CONFIRMED
+    The live pipeline produces identical predictions.
+    If live performance diverges, the issue is DATA, not CODE.
+============================================================

@@ -193,10 +193,8 @@ Create a strategy JSON config (or use an existing one):
 **Run the backtest:**
 ```bash
 # Backtest using the strategy config (loads TP/SL/threshold from JSON)
-python agent/backtest_engine.py \
-  --config configs/strategies/manatee.json \
-  --predictions reports/exp017_long_predictions.csv \
-  --data data/processed/CL_set_06_shortfix.parquet
+python agent/backtest_engine.py --config configs/strategies/manatee.json --predictions reports/exp017_long_predictions.csv --data data/processed/CL_set_06_shortfix.parquet
+python agent/backtest_engine.py --config configs/strategies/koala.json --predictions reports/exp020_short_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet
 
 # Or manually override parameters
 python agent/backtest_engine.py \
@@ -215,9 +213,11 @@ python -m src.live_execution.live_trader \
   --config configs/strategies/manatee.json \
   --dry-run
 
-# Live paper trading
-python -m src.live_execution.live_trader \
-  --config configs/strategies/manatee.json
+# Buy trading model
+python -m src.live_execution.live_trader --config configs/strategies/manatee.json
+
+# Short trading model
+python -m src.live_execution.live_trader --config configs/strategies/koala.json
 
 # Legacy strategy registry (still works)
 python -m src.live_execution.live_trader --strategy BUY70_SIZED_MANATEE

@@ -101,7 +101,17 @@ class ConfigurableStrategy(Strategy):
         )
 
         # Load model from registry
-        experiment_id = self.config["experiment_id"]
+        # Support nested live_config.experiment_id (new) with fallback to
+        # top-level experiment_id (backward compat)
+        live_cfg = self.config.get("live_config", {})
+        experiment_id = live_cfg.get(
+            "experiment_id", self.config.get("experiment_id")
+        )
+        if experiment_id is None:
+            raise ValueError(
+                f"[{self._nickname}] Config missing 'experiment_id' in both "
+                f"'live_config' and top-level."
+            )
         model_dir = _PROJECT_ROOT / "models" / "registry" / experiment_id
         model_path = model_dir / "final_model.pkl"
         if not model_path.exists():
