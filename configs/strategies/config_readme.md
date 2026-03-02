@@ -32,6 +32,8 @@ Configs are organized into two sections:
 | `sizing_tiers` | ✅ | ✅ | ✅ |
 | `live_config.experiment_id` | ❌ | ✅ Model load | ❌ |
 | `live_config.client_id` | ❌ | ✅ IB Gateway | ❌ |
+| `live_config.entry_mode` | ❌ | ✅ Order type | ❌ |
+| `live_config.adaptive_priority` | ❌ | ✅ Algo urgency | ❌ |
 
 ---
 
@@ -90,9 +92,14 @@ These fields are **only used by the LiveTrader** and are ignored during backtest
 |-----------|------|---------|-------------|
 | `experiment_id` | string | — | Model registry folder name (e.g. `"EXP-017_S_Ultimate"`). Used to locate `models/registry/{id}/final_model.pkl` |
 | `client_id` | int | `1` | IB Gateway client ID. Each strategy running concurrently needs a unique value to avoid connection conflicts |
+| `entry_mode` | string | `"adaptive"` | Parent order type for entries: `"adaptive"` (IBKR algo seeks spread improvement), `"marketable_limit"` (limit 2 ticks through NBBO), or `"market"` (bare MKT). Also settable via CLI `--entry-mode`. |
+| `adaptive_priority` | string | `"Normal"` | Urgency for Adaptive Algo: `"Normal"`, `"Urgent"`, or `"Patient"`. Only used when `entry_mode` is `"adaptive"`. Also settable via CLI `--adaptive-priority`. |
 
 > [!NOTE]
 > For backward compatibility, `experiment_id` is also read from the top-level config if `live_config.experiment_id` is not present.
+
+> [!NOTE]
+> CLI flags `--entry-mode` and `--adaptive-priority` take priority over config values.
 
 ---
 
@@ -114,7 +121,9 @@ These fields are **only used by the LiveTrader** and are ignored during backtest
     "sizing_tiers": {"0.80": 3, "0.70": 3, "0.60": 1, "0.50": 1},
     "live_config": {
         "experiment_id": "EXP-017_S_Ultimate",
-        "client_id": 10
+        "client_id": 10,
+        "entry_mode": "adaptive",
+        "adaptive_priority": "Normal"
     }
 }
 ```

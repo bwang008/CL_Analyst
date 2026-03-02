@@ -268,17 +268,22 @@ class LiveTrader:
         cache_path: str = _DEFAULT_CACHE_PATH,
         quantity: int = _DEFAULT_QUANTITY,
         dry_run: bool = False,
+        entry_mode: str = "adaptive",
+        adaptive_priority: str = "Normal",
     ) -> None:
         self.host = host
         self.port = port
         self.client_id = client_id
         self.quantity = quantity
         self.dry_run = dry_run
+        self.entry_mode = entry_mode
+        self.adaptive_priority = adaptive_priority
 
         # Strategy (owns model, config, threshold, sizing, bracket math)
         self.strategy = strategy
         self.feature_names: list[str] = strategy.feature_names
         log.info("Strategy: %s  direction=%s", strategy.name, strategy.direction)
+        log.info("Entry mode: %s  adaptive_priority=%s", entry_mode, adaptive_priority)
 
         # Telemetry
         self.telemetry = TelemetryDB(db_path)
@@ -1135,16 +1140,25 @@ class LiveTrader:
                 limit_price=current_price,
                 tp_price=signal.tp_price,
                 sl_price=signal.sl_price,
-                use_market=True,
+                entry_mode=self.entry_mode,
+                adaptive_priority=self.adaptive_priority,
             )
             parent_trade = trades[0]
             order_id = parent_trade.order.orderId
+            parent_order = parent_trade.order
+            order_type_str = getattr(parent_order, "orderType", "???")
+            algo_str = getattr(parent_order, "algoStrategy", None)
+            if algo_str:
+                order_type_str = f"{order_type_str}+{algo_str}"
             self._position_entry_bar_time = bar_time
             self._position_bars_held = 0
             log.info(
-                "ORDER PLACED: orderId=%d  %s %d CL @ MKT  TP=%.2f  SL=%.2f  (prob=%.2f)",
+                "ORDER PLACED: orderId=%d  %s %d CL @ %s  "
+                "TP=%.2f  SL=%.2f  (prob=%.2f)  entry_mode=%s",
                 order_id, signal.action, signal.lots,
+                order_type_str,
                 signal.tp_price, signal.sl_price, signal.probability,
+                self.entry_mode,
             )
             self.telemetry.log_signal(
                 timestamp=bar_time,
@@ -1334,19 +1348,37 @@ def main() -> None:
         "--cache-path", default=_DEFAULT_CACHE_PATH,
         help="Path to the warm-start Parquet cache",
     )
+    parser.add_argument(
+        "--entry-mode", default=None,
+        choices=["adaptive", "marketable_limit", "market"],
+        help=(
+            "Entry order type: 'adaptive' (IBKR algo, default), "
+            "'marketable_limit' (limit 2 ticks through NBBO), "
+            "'market' (plain MKT). Overrides live_config.entry_mode in JSON."
+        ),
+    )
+    parser.add_argument(
+        "--adaptive-priority", default=None,
+        choices=["Normal", "Urgent", "Patient"],
+        help="Adaptive algo urgency (default: Normal). Only used with --entry-mode adaptive.",
+    )
 
     args = parser.parse_args()
 
     # Resolve strategy: --config takes priority over --strategy
     config_client_id: int | None = None
+    config_entry_mode: str | None = None
+    config_adaptive_priority: str | None = None
     if args.config is not None:
         strategy = ConfigurableStrategy(
             config_path=args.config,
             base_quantity=args.quantity,
         )
-        # Read client_id from config's live_config section
+        # Read live_config overrides from the strategy JSON
         live_cfg = strategy.config.get("live_config", {})
         config_client_id = live_cfg.get("client_id")
+        config_entry_mode = live_cfg.get("entry_mode")
+        config_adaptive_priority = live_cfg.get("adaptive_priority")
     else:
         strategy_key = args.strategy.upper()
         if strategy_key not in _STRATEGY_REGISTRY:
@@ -1405,6 +1437,15 @@ def main() -> None:
             resolved_client_id,
         )
 
+    # ── Resolve entry_mode: CLI > config > default ────────────────
+    resolved_entry_mode = args.entry_mode
+    if resolved_entry_mode is None:
+        resolved_entry_mode = config_entry_mode or "adaptive"
+
+    resolved_adaptive_priority = args.adaptive_priority
+    if resolved_adaptive_priority is None:
+        resolved_adaptive_priority = config_adaptive_priority or "Normal"
+
     trader = LiveTrader(
         host=args.host,
         port=args.port,
@@ -1415,6 +1456,8 @@ def main() -> None:
         cache_path=resolved_cache_path,
         quantity=args.quantity,
         dry_run=args.dry_run,
+        entry_mode=resolved_entry_mode,
+        adaptive_priority=resolved_adaptive_priority,
     )
     trader.start()
 
