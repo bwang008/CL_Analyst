@@ -10,6 +10,8 @@ Author: CL Analyst
 
 from __future__ import annotations
 
+import json
+import math
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -21,7 +23,7 @@ _DEFAULT_DB_PATH = "data/live_telemetry.db"
 _CREATE_MARKET_BARS = """
 CREATE TABLE IF NOT EXISTS market_bars (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp   TEXT    NOT NULL,
+    timestamp   TEXT    NOT NULL UNIQUE,
     open        REAL    NOT NULL,
     high        REAL    NOT NULL,
     low         REAL    NOT NULL,
@@ -63,7 +65,8 @@ CREATE TABLE IF NOT EXISTS raw_front_month_bars (
     close           REAL    NOT NULL,
     volume          REAL    NOT NULL,
     contract_month  TEXT    NOT NULL,
-    created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(timestamp, contract_month)
 );
 """
 
@@ -125,6 +128,27 @@ CREATE INDEX IF NOT EXISTS idx_tradebook_signal_id ON tradebook_events(signal_id
 CREATE INDEX IF NOT EXISTS idx_tradebook_decision_id ON tradebook_events(decision_id);
 """
 
+_CREATE_SHADOW_LOG = """
+CREATE TABLE IF NOT EXISTS shadow_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp       TEXT    NOT NULL UNIQUE,
+    open            REAL    NOT NULL,
+    high            REAL    NOT NULL,
+    low             REAL    NOT NULL,
+    close           REAL    NOT NULL,
+    volume          REAL    NOT NULL,
+    features_json   TEXT,                     -- full feature vector as JSON
+    prob_buy        REAL,                     -- model probability (long)
+    prob_sell       REAL,                     -- model probability (short)
+    strategy_name   TEXT,
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+_CREATE_SHADOW_LOG_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_shadow_ts ON shadow_log(timestamp);
+"""
+
 
 class TelemetryDB:
     """Lightweight SQLite telemetry backend for live execution."""
@@ -147,10 +171,13 @@ class TelemetryDB:
             + _CREATE_TRADE_LEDGER
             + _CREATE_RAW_FRONT_MONTH_BARS
             + _CREATE_TRADEBOOK_EVENTS
+            + _CREATE_SHADOW_LOG
             + _CREATE_INDEXES
             + _CREATE_TRADEBOOK_INDEXES
+            + _CREATE_SHADOW_LOG_INDEXES
         )
         self._migrate_trade_ledger_columns(conn)
+        self._migrate_unique_constraints(conn)
         conn.commit()
 
     def _migrate_trade_ledger_columns(self, conn: sqlite3.Connection) -> None:
@@ -168,6 +195,45 @@ class TelemetryDB:
             )
         if "exit_reason" not in cols:
             conn.execute("ALTER TABLE trade_ledger ADD COLUMN exit_reason TEXT")
+
+    def _migrate_unique_constraints(self, conn: sqlite3.Connection) -> None:
+        """Add unique indexes to market_bars and raw_front_month_bars for
+        existing databases that predate the UNIQUE constraint.
+
+        De-duplicates any existing data first (keeps the earliest row per
+        timestamp), then creates a UNIQUE INDEX.
+        """
+        # Check if unique index already exists for market_bars
+        indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(market_bars)").fetchall()
+        }
+        if "uq_market_bars_ts" not in indexes:
+            # De-duplicate: keep the row with the smallest id per timestamp
+            conn.execute(
+                "DELETE FROM market_bars WHERE id NOT IN "
+                "(SELECT MIN(id) FROM market_bars GROUP BY timestamp)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_market_bars_ts "
+                "ON market_bars(timestamp)"
+            )
+
+        # Check if unique index already exists for raw_front_month_bars
+        indexes = {
+            row[1] for row in conn.execute(
+                "PRAGMA index_list(raw_front_month_bars)"
+            ).fetchall()
+        }
+        if "uq_raw_bars_ts_month" not in indexes:
+            conn.execute(
+                "DELETE FROM raw_front_month_bars WHERE id NOT IN "
+                "(SELECT MIN(id) FROM raw_front_month_bars "
+                " GROUP BY timestamp, contract_month)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_raw_bars_ts_month "
+                "ON raw_front_month_bars(timestamp, contract_month)"
+            )
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -197,7 +263,7 @@ class TelemetryDB:
         ts = timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp)
         conn = self._get_conn()
         conn.execute(
-            "INSERT INTO market_bars (timestamp, open, high, low, close, volume) "
+            "INSERT OR IGNORE INTO market_bars (timestamp, open, high, low, close, volume) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (ts, open_, high, low, close, volume),
         )
@@ -351,7 +417,7 @@ class TelemetryDB:
         ts = timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp)
         conn = self._get_conn()
         conn.execute(
-            "INSERT INTO raw_front_month_bars "
+            "INSERT OR IGNORE INTO raw_front_month_bars "
             "(timestamp, open, high, low, close, volume, contract_month) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (ts, open_, high, low, close, volume, contract_month),
@@ -375,6 +441,68 @@ class TelemetryDB:
         ).fetchall()
         conn.row_factory = None
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Shadow log (State Parity Test)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sanitize_float(val: object) -> object:
+        """Convert NaN / inf to None for safe SQLite insertion."""
+        if val is None:
+            return None
+        try:
+            f = float(val)
+            if math.isnan(f) or math.isinf(f):
+                return None
+            return f
+        except (TypeError, ValueError):
+            return val
+
+    def log_shadow_state(
+        self,
+        timestamp: str | datetime,
+        open_: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+        features_dict: dict | None = None,
+        prob_buy: float | None = None,
+        prob_sell: float | None = None,
+        strategy_name: str | None = None,
+    ) -> None:
+        """Record a shadow-replay state row for parity validation."""
+        ts = timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp)
+
+        # Serialize features dict to JSON, sanitizing NaN/inf
+        features_json = None
+        if features_dict is not None:
+            sanitized = {
+                k: self._sanitize_float(v) for k, v in features_dict.items()
+            }
+            features_json = json.dumps(sanitized)
+
+        conn = self._get_conn()
+        conn.execute(
+            "INSERT OR IGNORE INTO shadow_log "
+            "(timestamp, open, high, low, close, volume, "
+            " features_json, prob_buy, prob_sell, strategy_name) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                ts, open_, high, low, close, volume,
+                features_json,
+                self._sanitize_float(prob_buy),
+                self._sanitize_float(prob_sell),
+                strategy_name,
+            ),
+        )
+        conn.commit()
+
+    def shadow_log_count(self) -> int:
+        """Return total number of shadow log entries."""
+        cur = self._get_conn().execute("SELECT COUNT(*) FROM shadow_log")
+        return cur.fetchone()[0]
 
     # ------------------------------------------------------------------
     # Tradebook events (execution lifecycle)

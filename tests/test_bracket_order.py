@@ -4,6 +4,7 @@ Validates that bracket orders use:
 - GTC time-in-force (not DAY)
 - outsideRth=True for overnight session support
 - triggerMethod=1 (double bid/ask) on stop-loss for native exchange triggers
+- Entry modes: adaptive (IBALGO), marketable_limit, and market
 """
 
 from unittest.mock import MagicMock, patch
@@ -83,7 +84,7 @@ class TestBracketOrderConfig:
         assert sl_child.triggerMethod == 1
 
     def test_market_order_conversion(self, manager):
-        """Parent order should convert to MKT when use_market=True."""
+        """Parent order should convert to MKT when use_market=True (backward compat)."""
         mgr, parent, tp_child, sl_child = manager
         mgr.place_bracket_order(
             contract=MagicMock(),
@@ -110,6 +111,7 @@ class TestBracketOrderConfig:
             tp_price=65.50,
             sl_price=64.50,
             use_market=False,
+            entry_mode="adaptive",
         )
         assert parent.orderType == "LMT"
         assert parent.lmtPrice == 65.00
@@ -127,3 +129,183 @@ class TestBracketOrderConfig:
         )
         assert len(result) == 3
         assert mgr.ib.placeOrder.call_count == 3
+
+
+class TestAdaptiveAlgoOrder:
+    """Verify IBKR Adaptive Algo configuration on parent order."""
+
+    def test_adaptive_algo_order(self, manager):
+        """Adaptive mode sets algoStrategy + algoParams on the parent."""
+        mgr, parent, _, _ = manager
+        mgr.place_bracket_order(
+            contract=MagicMock(),
+            action="BUY",
+            quantity=1,
+            limit_price=65.00,
+            tp_price=65.50,
+            sl_price=64.50,
+            entry_mode="adaptive",
+        )
+        assert parent.orderType == "LMT"
+        assert parent.lmtPrice == 65.00
+        assert parent.algoStrategy == "Adaptive"
+        # Verify algoParams contain the priority TagValue
+        assert parent.algoParams is not None
+        assert len(parent.algoParams) == 1
+        tag = parent.algoParams[0]
+        assert tag.tag == "adaptivePriority"
+        assert tag.value == "Normal"
+
+    def test_adaptive_algo_urgency_param(self, manager):
+        """Configurable priority passes through to algoParams."""
+        mgr, parent, _, _ = manager
+        mgr.place_bracket_order(
+            contract=MagicMock(),
+            action="BUY",
+            quantity=1,
+            limit_price=65.00,
+            tp_price=65.50,
+            sl_price=64.50,
+            entry_mode="adaptive",
+            adaptive_priority="Urgent",
+        )
+        tag = parent.algoParams[0]
+        assert tag.tag == "adaptivePriority"
+        assert tag.value == "Urgent"
+
+    def test_adaptive_is_default_entry_mode(self, manager):
+        """When neither use_market nor entry_mode is set, default is adaptive."""
+        mgr, parent, _, _ = manager
+        mgr.place_bracket_order(
+            contract=MagicMock(),
+            action="BUY",
+            quantity=1,
+            limit_price=65.00,
+            tp_price=65.50,
+            sl_price=64.50,
+        )
+        assert parent.orderType == "LMT"
+        assert parent.algoStrategy == "Adaptive"
+
+
+class TestMarketableLimitOrder:
+    """Verify marketable limit order pricing."""
+
+    def test_marketable_limit_buy(self, manager):
+        """BUY: limit = best_ask + 2 ticks ($0.02)."""
+        mgr, parent, _, _ = manager
+        # Mock get_bid_ask to return a known spread
+        mgr.get_bid_ask = MagicMock(return_value=(64.98, 65.00))
+
+        mgr.place_bracket_order(
+            contract=MagicMock(),
+            action="BUY",
+            quantity=1,
+            limit_price=65.00,
+            tp_price=65.50,
+            sl_price=64.50,
+            entry_mode="marketable_limit",
+        )
+        assert parent.orderType == "LMT"
+        # 65.00 (best ask) + 0.02 (2 ticks) = 65.02
+        assert parent.lmtPrice == 65.02
+
+    def test_marketable_limit_sell(self, manager):
+        """SELL: limit = best_bid - 2 ticks ($0.02)."""
+        mgr, parent, _, _ = manager
+        mgr.get_bid_ask = MagicMock(return_value=(64.98, 65.00))
+
+        mgr.place_bracket_order(
+            contract=MagicMock(),
+            action="SELL",
+            quantity=1,
+            limit_price=65.00,
+            tp_price=64.50,
+            sl_price=65.50,
+            entry_mode="marketable_limit",
+        )
+        assert parent.orderType == "LMT"
+        # 64.98 (best bid) - 0.02 (2 ticks) = 64.96
+        assert parent.lmtPrice == 64.96
+
+    def test_marketable_limit_fallback_no_ask(self, manager):
+        """If ask quote unavailable for BUY, fall back to MKT."""
+        mgr, parent, _, _ = manager
+        mgr.get_bid_ask = MagicMock(return_value=(64.98, None))
+
+        mgr.place_bracket_order(
+            contract=MagicMock(),
+            action="BUY",
+            quantity=1,
+            limit_price=65.00,
+            tp_price=65.50,
+            sl_price=64.50,
+            entry_mode="marketable_limit",
+        )
+        assert parent.orderType == "MKT"
+        assert parent.lmtPrice == 0
+
+    def test_marketable_limit_fallback_no_bid(self, manager):
+        """If bid quote unavailable for SELL, fall back to MKT."""
+        mgr, parent, _, _ = manager
+        mgr.get_bid_ask = MagicMock(return_value=(None, 65.00))
+
+        mgr.place_bracket_order(
+            contract=MagicMock(),
+            action="SELL",
+            quantity=1,
+            limit_price=65.00,
+            tp_price=64.50,
+            sl_price=65.50,
+            entry_mode="marketable_limit",
+        )
+        assert parent.orderType == "MKT"
+        assert parent.lmtPrice == 0
+
+
+class TestEntryModeBackwardCompat:
+    """Verify backward compatibility of deprecated use_market flag."""
+
+    def test_backward_compat_use_market_true(self, manager):
+        """use_market=True without explicit entry_mode → market order."""
+        mgr, parent, _, _ = manager
+        mgr.place_bracket_order(
+            contract=MagicMock(),
+            action="BUY",
+            quantity=1,
+            limit_price=65.00,
+            tp_price=65.50,
+            sl_price=64.50,
+            use_market=True,
+        )
+        assert parent.orderType == "MKT"
+        assert parent.lmtPrice == 0
+
+    def test_entry_mode_market_explicit(self, manager):
+        """Explicit entry_mode='market' produces MKT order."""
+        mgr, parent, _, _ = manager
+        mgr.place_bracket_order(
+            contract=MagicMock(),
+            action="BUY",
+            quantity=1,
+            limit_price=65.00,
+            tp_price=65.50,
+            sl_price=64.50,
+            entry_mode="market",
+        )
+        assert parent.orderType == "MKT"
+        assert parent.lmtPrice == 0
+
+    def test_invalid_entry_mode_raises(self, manager):
+        """Invalid entry_mode raises ValueError."""
+        mgr, *_ = manager
+        with pytest.raises(ValueError, match="Invalid entry_mode"):
+            mgr.place_bracket_order(
+                contract=MagicMock(),
+                action="BUY",
+                quantity=1,
+                limit_price=65.00,
+                tp_price=65.50,
+                sl_price=64.50,
+                entry_mode="invalid_mode",
+            )

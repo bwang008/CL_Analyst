@@ -1,6 +1,6 @@
 ﻿# CL_Analyst
 
-Machine learning pipeline for predicting significant price movements in Crude Oil (CL) futures using 5â€‘minute OHLCV data.
+Machine learning pipeline for predicting significant price movements in Crude Oil (CL) futures using 5-minute OHLCV data.
 
 ## Setup
 
@@ -31,8 +31,10 @@ python main.py train
 3. **Training/Evaluation**: `main.py train`
    - walk-forward validation
    - final vault evaluation + artifact export to `reports/`
-4. **Backtesting**: `agent/backtester.py`
+4. **Backtesting**: `agent/backtest_engine.py` (config-driven, FSM-based)
    - friction-aware PnL, long/short compatible (commission + slippage + CL multiplier)
+   - supports `--config configs/strategies/*.json` for strategy-driven backtests
+   - sizing tiers, trailing stops, concurrent positions, ensemble strategies
 
 ### Prediction + backtest file conventions
 This is the shared contract so prediction files can be used across backtesters.
@@ -66,7 +68,7 @@ This is the shared contract so prediction files can be used across backtesters.
 - **Training**: walk-forward (expanding window), `balance_mode=downsample`
 - **Objective**: binary + focal loss (`use_focal=true`)
 - **Key params**:
-  - `num_leaves=31`, `max_depth=4`, `learning_rateâ‰ˆ0.0524`, `min_child_samples=166`, `n_estimators=1000`
+  - `num_leaves=31`, `max_depth=4`, `learning_rate~0.0524`, `min_child_samples=166`, `n_estimators=1000`
 
 ### Primary artifacts
 - **Metrics**: `reports/vault_metrics.json`
@@ -82,32 +84,35 @@ The live execution engine connects to IBKR (TWS or IB Gateway), uses a **Three-T
 ### Files
 | File | Purpose |
 |------|---------|
-| `src/live_execution/data_manager.py` | Three-Tier data manager: Seed CSV â†’ Parquet cache â†’ IBKR backfill â†’ live append |
+| `src/live_execution/data_manager.py` | Three-Tier data manager: Seed CSV -> Parquet cache -> IBKR backfill -> live append |
 | `src/live_execution/ibkr_client.py` | IBKR connection manager, historical data, front-month resolution, bracket orders |
-| `src/live_execution/live_trader.py` | Main execution loop: warm start â†’ Two-Stream bars â†’ features â†’ inference â†’ orders |
+| `src/live_execution/live_trader.py` | Main execution loop: warm start -> Two-Stream bars -> features -> inference -> orders |
+| `src/live_execution/strategy.py` | Strategy ABC + `TradeSignal` dataclass |
+| `src/live_execution/strategies/configurable_strategy.py` | Config-driven strategy: reads JSON, supports single + ensemble configs |
+| `src/live_execution/strategies/execution_models.py` | Backtest execution strategies: Single, ConservativeEnsemble, AggressiveEnsemble |
 | `src/live_execution/telemetry.py` | SQLite telemetry backend (`data/live_telemetry.db`) |
-| `src/live_execution/utils/time_utils.py` | `timedelta` â†’ IBKR duration string converter |
+| `configs/strategies/*.json` | Strategy config files (TP/SL, thresholds, sizing tiers, live_config) |
+| `configs/strategies/config_readme.md` | Full config attribute reference with compatibility matrix |
 
 ### Prerequisites
 1. Install and start **TWS** or **IB Gateway** in Paper Trading mode
-2. Enable API connections: Configure â†’ API â†’ Settings
+2. Enable API connections: Configure -> API -> Settings
    - Port: `7497` (TWS) or `4002` (Gateway)
    - Enable ActiveX and Socket Clients
 
 ### Running
 ```bash
-# Dry run (no real orders, logs signals only)
-conda activate trader
-python -m src.live_execution.live_trader --dry-run
+# Config-driven strategy (recommended)
+python -m src.live_execution.live_trader --config configs/strategies/manatee.json --dry-run
+
+# Ensemble strategy (dual long+short models)
+python -m src.live_execution.live_trader --config configs/strategies/ensemble_conservative.json --dry-run
 
 # Live paper trading (IB Gateway, default port 4002)
-python -m src.live_execution.live_trader
+python -m src.live_execution.live_trader --config configs/strategies/manatee.json
 
-# Custom port (TWS)
-python -m src.live_execution.live_trader --port 7497
-
-# Custom seed/cache paths
-python -m src.live_execution.live_trader --seed-path data/raw/cl-5m_bk.csv --cache-path data/processed/warm_start_cache.parquet
+# Legacy strategy registry (still works)
+python -m src.live_execution.live_trader --strategy BUY70_SIZED_MANATEE
 ```
 
 ### Execution Loop
@@ -118,18 +123,18 @@ python -m src.live_execution.live_trader --seed-path data/raw/cl-5m_bk.csv --cac
 3. **On each new bar** (Brain stream):
    - Appends to rolling window (capped at ~11,000 bars) + warm-start cache
    - Runs `AlphaFactory` to generate 80 features
-   - Runs model inference (sigmoid on focal loss logits â†’ probability)
-   - If probability â‰¥ 0.45 and position is flat â†’ places bracket order
+   - Runs model inference (sigmoid on focal loss logits -> probability)
+   - If probability >= threshold and position is flat -> places bracket order (sizing tiers determine lot count)
 4. **On each new bar** (Hands stream):
    - Logs raw front-month OHLCV + `contract_month` to `raw_front_month_bars` for future retraining
-5. **Bracket order**: Market buy + Limit TP (price + 2Ã—ATR) + Stop SL (price âˆ’ 1Ã—ATR)
+5. **Bracket order**: Adaptive Algo entry (default) + Limit TP + Stop SL. Supports `--entry-mode adaptive|marketable_limit|market`.
 
 ### Telemetry
 All bars and signals are logged to `data/live_telemetry.db`:
-- **`market_bars`** â€” smoothed continuous contract bars (used for training)
-- **`raw_front_month_bars`** â€” raw front-month bars with `contract_month` (for retraining)
-- **`trade_ledger`** â€” every signal (Hold/Buy), confidence %, action taken, order details
-- **`tradebook_events`** â€” append-only normalized execution lifecycle events (order submit/status/fills/commissions)
+- **`market_bars`** -- smoothed continuous contract bars (used for training)
+- **`raw_front_month_bars`** -- raw front-month bars with `contract_month` (for retraining)
+- **`trade_ledger`** -- every signal (Hold/Buy/Sell), confidence %, action taken, order details
+- **`tradebook_events`** -- append-only normalized execution lifecycle events (order submit/status/fills/commissions)
 
 Tradebook normalization notes:
 - `tradebook_events` keeps execution facts and join keys only (`signal_id` / `decision_id`).
@@ -150,30 +155,42 @@ db.close()
 
 ```
 CL_Analyst/
-â”œâ”€â”€ src/
-â”‚   â”œâ”€â”€ data_processor.py      # ETL pipeline (OHLCV â†’ features â†’ targets)
-â”‚   â”œâ”€â”€ LGBMLearner.py         # LightGBM wrapper (train/query/save/load)
-â”‚   â”œâ”€â”€ evaluator.py           # Walk-forward evaluation and metrics
-â”‚   â”œâ”€â”€ walk_forward.py        # Walk-forward validation framework
-â”‚   â”œâ”€â”€ visualizer.py          # Plotting and visualization
-â”‚   â”œâ”€â”€ features/
-â”‚   â”‚   â””â”€â”€ alpha_factory.py   # Feature generation engine (80 features)
-â”‚   â””â”€â”€ live_execution/
-â”‚       â”œâ”€â”€ data_manager.py    # Three-Tier data manager (seed â†’ cache â†’ backfill)
-â”‚       â”œâ”€â”€ ibkr_client.py     # IBKR connection, data, front-month, orders
-â”‚       â”œâ”€â”€ live_trader.py     # Live execution engine (Two-Stream)
-â”‚       â”œâ”€â”€ telemetry.py       # SQLite logging (smoothed + raw front-month)
-â”‚       â””â”€â”€ utils/
-â”‚           â””â”€â”€ time_utils.py  # IBKR duration string utilities
-â”œâ”€â”€ models/
-â”‚   â”œâ”€â”€ registry/              # Archived model bundles
-â”‚   â”‚   â”œâ”€â”€ EXP-017_S_Ultimate/
-â”‚   â”‚   â””â”€â”€ EXP-020_S_Ultimate_Short/
-â”‚   â””â”€â”€ final_model.pkl        # Current production model
-â”œâ”€â”€ data/
-â”‚   â”œâ”€â”€ raw/                   # Source OHLCV CSVs (cl-5m_bk.csv = immutable seed)
-â”‚   â””â”€â”€ processed/             # ML-ready parquet + warm_start_cache.parquet
-â”œâ”€â”€ agent/                     # Automation scripts (backtester, sweeps, etc.)
-â”œâ”€â”€ tests/                     # Pytest test suite (174 tests)
-â””â”€â”€ reports/                   # Evaluation outputs
++-- src/
+|   +-- data_processor.py          # ETL pipeline (OHLCV -> features -> targets)
+|   +-- LGBMLearner.py             # LightGBM wrapper (train/query/save/load)
+|   +-- evaluator.py               # Walk-forward evaluation and metrics
+|   +-- walk_forward.py            # Walk-forward validation framework
+|   +-- visualizer.py              # Plotting and visualization
+|   +-- features/
+|   |   +-- alpha_factory.py       # Feature generation engine (80 features)
+|   +-- live_execution/
+|       +-- data_manager.py        # Three-Tier data manager (seed -> cache -> backfill)
+|       +-- ibkr_client.py         # IBKR connection, data, front-month, orders
+|       +-- live_trader.py         # Live execution engine (Two-Stream)
+|       +-- strategy.py            # Strategy ABC + TradeSignal dataclass
+|       +-- telemetry.py           # SQLite logging (smoothed + raw front-month)
+|       +-- strategies/
+|       |   +-- configurable_strategy.py  # Config-driven strategy (single + ensemble)
+|       |   +-- execution_models.py       # Backtest execution strategies
+|       +-- utils/
+|           +-- time_utils.py      # IBKR duration string utilities
++-- configs/
+|   +-- strategies/                # Strategy JSON configs
+|       +-- manatee.json           # Long strategy (EXP-017, client_id=10)
+|       +-- koala.json             # Short strategy (EXP-020, client_id=11)
+|       +-- manatee_single.json    # Single-model variant (client_id=12)
+|       +-- ensemble_conservative.json  # Dual-model ensemble (client_id=13)
+|       +-- config_readme.md       # Full attribute reference
++-- models/
+|   +-- registry/                  # Archived model bundles
+|   |   +-- EXP-017_S_Ultimate/
+|   |   +-- EXP-020_S_Ultimate_Short/
+|   +-- final_model.pkl            # Current production model
++-- data/
+|   +-- raw/                       # Source OHLCV CSVs (cl-5m_bk.csv = immutable seed)
+|   +-- processed/                 # ML-ready parquet + warm_start_cache.parquet
++-- agent/                         # Automation scripts (backtester, sweeps, etc.)
++-- scripts/                       # Utility scripts (shadow log, parity validation)
++-- tests/                         # Pytest test suite (350+ tests)
++-- reports/                       # Evaluation outputs
 ```

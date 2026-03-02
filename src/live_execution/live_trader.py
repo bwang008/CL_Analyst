@@ -268,17 +268,22 @@ class LiveTrader:
         cache_path: str = _DEFAULT_CACHE_PATH,
         quantity: int = _DEFAULT_QUANTITY,
         dry_run: bool = False,
+        entry_mode: str = "adaptive",
+        adaptive_priority: str = "Normal",
     ) -> None:
         self.host = host
         self.port = port
         self.client_id = client_id
         self.quantity = quantity
         self.dry_run = dry_run
+        self.entry_mode = entry_mode
+        self.adaptive_priority = adaptive_priority
 
         # Strategy (owns model, config, threshold, sizing, bracket math)
         self.strategy = strategy
         self.feature_names: list[str] = strategy.feature_names
         log.info("Strategy: %s  direction=%s", strategy.name, strategy.direction)
+        log.info("Entry mode: %s  adaptive_priority=%s", entry_mode, adaptive_priority)
 
         # Telemetry
         self.telemetry = TelemetryDB(db_path)
@@ -1017,12 +1022,51 @@ class LiveTrader:
             current_position=current_position,
         )
 
+        # Shadow-replay logging: capture exact state for parity validation
+        try:
+            last_row = self.rolling_df.iloc[-1]
+            # Prefer per-signal buy/sell probs (ensemble); fall back to direction
+            if signal.buy_prob is not None or signal.sell_prob is not None:
+                _prob_buy = signal.buy_prob
+                _prob_sell = signal.sell_prob
+            else:
+                _prob_buy = signal.probability if self.strategy.direction != "SHORT" else None
+                _prob_sell = signal.probability if self.strategy.direction != "LONG" else None
+            self.telemetry.log_shadow_state(
+                timestamp=bar_time,
+                open_=float(last_row["Open"]),
+                high=float(last_row["High"]),
+                low=float(last_row["Low"]),
+                close=float(last_row["Close"]),
+                volume=float(last_row["Volume"]),
+                features_dict=features.iloc[0].to_dict(),
+                prob_buy=_prob_buy,
+                prob_sell=_prob_sell,
+                strategy_name=self.strategy.name,
+            )
+        except Exception:
+            log.debug("Shadow state logging failed", exc_info=True)
+
+        # Build direction-aware probability display
+        direction = getattr(self.strategy, 'direction', 'LONG').upper()
+        if signal.buy_prob is not None and signal.sell_prob is not None:
+            # Ensemble: both probs available
+            buy_prob_str = f"{signal.buy_prob:.4f}"
+            sell_prob_str = f"{signal.sell_prob:.4f}"
+        elif direction == "SHORT":
+            buy_prob_str = "N/A"
+            sell_prob_str = f"{signal.probability:.4f}"
+        else:  # LONG
+            buy_prob_str = f"{signal.probability:.4f}"
+            sell_prob_str = "N/A"
+
+        skip_str = f"  skip={signal.skip_reason}" if signal.skip_reason else ""
         log.info(
-            "INFERENCE [%s]: prob=%.4f (%.1f%%)  signal=%s  action=%s%s",
-            self.strategy.name,
-            signal.probability, signal.confidence_pct,
-            signal.signal_label, signal.action,
-            f"  skip={signal.skip_reason}" if signal.skip_reason else "",
+            "INFERENCE [%s] %s: buy_prob=%s  sell_prob=%s  "
+            "signal=%s  action=%s%s",
+            self.strategy.name, direction,
+            buy_prob_str, sell_prob_str,
+            signal.signal_label, signal.action, skip_str,
         )
 
         # 3. Handle HOLD signals
@@ -1030,12 +1074,14 @@ class LiveTrader:
             action_taken = signal.skip_reason or "HOLD"
             if signal.skip_reason == "POSITION_OPEN":
                 log.info(
-                    "%s signal ignored: already holding position (%d contracts)",
-                    signal.signal_label, current_position,
+                    ">>> %s signal TRIGGERED (prob=%.4f) but SKIPPED: "
+                    "already holding %d contracts",
+                    signal.signal_label, signal.probability,
+                    current_position,
                 )
                 action_taken = "SKIP_POSITION"
             elif signal.skip_reason == "ATR_INVALID":
-                log.warning("ATR is invalid — cannot calculate bracket levels")
+                log.warning("ATR is invalid -- cannot calculate bracket levels")
                 action_taken = "SKIP_ATR_INVALID"
             self.telemetry.log_signal(
                 timestamp=bar_time,
@@ -1094,16 +1140,25 @@ class LiveTrader:
                 limit_price=current_price,
                 tp_price=signal.tp_price,
                 sl_price=signal.sl_price,
-                use_market=True,
+                entry_mode=self.entry_mode,
+                adaptive_priority=self.adaptive_priority,
             )
             parent_trade = trades[0]
             order_id = parent_trade.order.orderId
+            parent_order = parent_trade.order
+            order_type_str = getattr(parent_order, "orderType", "???")
+            algo_str = getattr(parent_order, "algoStrategy", None)
+            if algo_str:
+                order_type_str = f"{order_type_str}+{algo_str}"
             self._position_entry_bar_time = bar_time
             self._position_bars_held = 0
             log.info(
-                "ORDER PLACED: orderId=%d  %s %d CL @ MKT  TP=%.2f  SL=%.2f  (prob=%.2f)",
+                "ORDER PLACED: orderId=%d  %s %d CL @ %s  "
+                "TP=%.2f  SL=%.2f  (prob=%.2f)  entry_mode=%s",
                 order_id, signal.action, signal.lots,
+                order_type_str,
                 signal.tp_price, signal.sl_price, signal.probability,
+                self.entry_mode,
             )
             self.telemetry.log_signal(
                 timestamp=bar_time,
@@ -1262,8 +1317,8 @@ def main() -> None:
         help="IBKR primary port (default: 4002 for IB Gateway; falls back to 7497 TWS)",
     )
     parser.add_argument(
-        "--client-id", type=int, default=10,
-        help="IBKR client ID (default: 10)",
+        "--client-id", type=int, default=1,
+        help="IBKR client ID (default: 1; overridden by config live_config.client_id)",
     )
     parser.add_argument(
         "--strategy", default=_DEFAULT_STRATEGY,
@@ -1293,15 +1348,37 @@ def main() -> None:
         "--cache-path", default=_DEFAULT_CACHE_PATH,
         help="Path to the warm-start Parquet cache",
     )
+    parser.add_argument(
+        "--entry-mode", default=None,
+        choices=["adaptive", "marketable_limit", "market"],
+        help=(
+            "Entry order type: 'adaptive' (IBKR algo, default), "
+            "'marketable_limit' (limit 2 ticks through NBBO), "
+            "'market' (plain MKT). Overrides live_config.entry_mode in JSON."
+        ),
+    )
+    parser.add_argument(
+        "--adaptive-priority", default=None,
+        choices=["Normal", "Urgent", "Patient"],
+        help="Adaptive algo urgency (default: Normal). Only used with --entry-mode adaptive.",
+    )
 
     args = parser.parse_args()
 
     # Resolve strategy: --config takes priority over --strategy
+    config_client_id: int | None = None
+    config_entry_mode: str | None = None
+    config_adaptive_priority: str | None = None
     if args.config is not None:
         strategy = ConfigurableStrategy(
             config_path=args.config,
             base_quantity=args.quantity,
         )
+        # Read live_config overrides from the strategy JSON
+        live_cfg = strategy.config.get("live_config", {})
+        config_client_id = live_cfg.get("client_id")
+        config_entry_mode = live_cfg.get("entry_mode")
+        config_adaptive_priority = live_cfg.get("adaptive_priority")
     else:
         strategy_key = args.strategy.upper()
         if strategy_key not in _STRATEGY_REGISTRY:
@@ -1312,16 +1389,75 @@ def main() -> None:
         strategy_cls = _STRATEGY_REGISTRY[strategy_key]
         strategy = strategy_cls(base_quantity=args.quantity)
 
+    # CLI --client-id takes priority; if not explicitly set (== 1 default),
+    # fall back to config's live_config.client_id
+    resolved_client_id = args.client_id
+    if resolved_client_id == 1 and config_client_id is not None:
+        resolved_client_id = config_client_id
+
+    # ── Per-strategy isolation ────────────────────────────────────
+    # Derive per-client_id cache and DB paths to prevent concurrent
+    # write conflicts when running multiple LiveTrader instances.
+    resolved_db_path = args.db_path
+    resolved_cache_path = args.cache_path
+
+    if resolved_client_id != 1:
+        cid_suffix = f"_cid{resolved_client_id}"
+
+        # Only override if user hasn't explicitly set a custom path
+        if resolved_db_path == _DEFAULT_DB_PATH:
+            resolved_db_path = str(
+                _PROJECT_ROOT / "data" / f"live_telemetry{cid_suffix}.db"
+            )
+
+        if resolved_cache_path == _DEFAULT_CACHE_PATH:
+            resolved_cache_path = str(
+                _PROJECT_ROOT / "data" / "processed"
+                / f"warm_start_cache{cid_suffix}.parquet"
+            )
+
+        log.info(
+            "Multi-instance isolation: client_id=%d  "
+            "db=%s  cache=%s",
+            resolved_client_id,
+            Path(resolved_db_path).name,
+            Path(resolved_cache_path).name,
+        )
+
+    # ── IBKR subscription advisory ───────────────────────────────
+    # Each LiveTrader instance creates 2 IBKR real-time data lines
+    # (continuous + front-month). IBKR's default limit is ~100 lines.
+    # With N strategies, that's 2*N lines. This is wasteful but safe
+    # for < ~50 concurrent strategies.
+    if resolved_client_id != 1:
+        log.info(
+            "NOTE: This instance (client_id=%d) creates its own IBKR "
+            "data subscriptions. With many concurrent strategies, "
+            "consider a shared data broadcaster.",
+            resolved_client_id,
+        )
+
+    # ── Resolve entry_mode: CLI > config > default ────────────────
+    resolved_entry_mode = args.entry_mode
+    if resolved_entry_mode is None:
+        resolved_entry_mode = config_entry_mode or "adaptive"
+
+    resolved_adaptive_priority = args.adaptive_priority
+    if resolved_adaptive_priority is None:
+        resolved_adaptive_priority = config_adaptive_priority or "Normal"
+
     trader = LiveTrader(
         host=args.host,
         port=args.port,
-        client_id=args.client_id,
+        client_id=resolved_client_id,
         strategy=strategy,
-        db_path=args.db_path,
+        db_path=resolved_db_path,
         seed_path=args.seed_path,
-        cache_path=args.cache_path,
+        cache_path=resolved_cache_path,
         quantity=args.quantity,
         dry_run=args.dry_run,
+        entry_mode=resolved_entry_mode,
+        adaptive_priority=resolved_adaptive_priority,
     )
     trader.start()
 

@@ -8,7 +8,7 @@ from typing import Iterable, Optional
 import pandas as pd
 from ib_insync import (
     IB, ContFuture, Contract, Future, LimitOrder, MarketOrder,
-    Order, StopOrder, Trade, util,
+    Order, StopOrder, TagValue, Trade, util,
 )
 
 log = logging.getLogger(__name__)
@@ -538,8 +538,68 @@ class IBKRConnectionManager:
             self.ib.cancelHistoricalData(bars)
 
     # ------------------------------------------------------------------
+    # Real-time quote snapshot
+    # ------------------------------------------------------------------
+
+    _CL_TICK_SIZE = 0.01  # CL futures minimum tick = $0.01
+
+    def get_bid_ask(
+        self,
+        contract: Contract,
+        *,
+        timeout: float = 2.0,
+    ) -> tuple[float | None, float | None]:
+        """Fetch real-time best bid/ask for a contract.
+
+        Uses reqTickers() for a live snapshot.  Returns (bid, ask)
+        where either may be None if the quote is unavailable or stale.
+
+        Args:
+            contract: Qualified IBKR contract.
+            timeout: Seconds to wait for a valid quote.
+
+        Returns:
+            Tuple of (best_bid, best_ask).  Values may be None.
+        """
+        self.ensure_connected()
+        tickers = self.ib.reqTickers(contract)
+        if not tickers:
+            log.warning("get_bid_ask: no ticker data returned")
+            return None, None
+
+        ticker = tickers[0]
+        # ib_insync populates bid/ask after a short delay; poll briefly
+        elapsed = 0.0
+        poll_step = 0.1
+        while elapsed < timeout:
+            bid = getattr(ticker, "bid", None)
+            ask = getattr(ticker, "ask", None)
+            # IBKR returns -1.0 for unavailable quotes
+            bid_valid = bid is not None and bid > 0
+            ask_valid = ask is not None and ask > 0
+            if bid_valid and ask_valid:
+                return float(bid), float(ask)
+            self.ib.sleep(poll_step)
+            elapsed += poll_step
+
+        # Return whatever we have (may be None)
+        bid = getattr(ticker, "bid", None)
+        ask = getattr(ticker, "ask", None)
+        bid = float(bid) if bid is not None and bid > 0 else None
+        ask = float(ask) if ask is not None and ask > 0 else None
+        if bid is None or ask is None:
+            log.warning(
+                "get_bid_ask: incomplete quote after %.1fs (bid=%s, ask=%s)",
+                timeout, bid, ask,
+            )
+        return bid, ask
+
+    # ------------------------------------------------------------------
     # Bracket order execution
     # ------------------------------------------------------------------
+
+    # Valid entry modes for the parent leg of a bracket order
+    _VALID_ENTRY_MODES = {"market", "adaptive", "marketable_limit"}
 
     def place_bracket_order(
         self,
@@ -550,24 +610,54 @@ class IBKRConnectionManager:
         tp_price: float,
         sl_price: float,
         *,
-        use_market: bool = True,
+        entry_mode: str = "adaptive",
+        adaptive_priority: str = "Normal",
+        use_market: bool | None = None,
     ) -> list[Trade]:
-        """
-        Create and transmit a bracket order (parent + TP + SL children).
+        """Create and transmit a bracket order (parent + TP + SL children).
 
         Args:
             contract: Qualified IBKR contract.
             action: 'BUY' or 'SELL'.
             quantity: Number of contracts.
-            limit_price: Limit price for parent (ignored if use_market=True).
+            limit_price: Limit price for parent (used by LMT and as fallback).
             tp_price: Take-profit price (limit order).
             sl_price: Stop-loss price (stop order).
-            use_market: If True, parent is a Market order (default).
+            entry_mode: Parent order type — one of:
+                - "adaptive"  (default) — IBKR Adaptive Algo, seeks spread
+                  improvement server-side.  No extra data subscriptions.
+                - "marketable_limit" — Limit order priced 2 ticks through
+                  the NBBO (asks for BUY, bids for SELL) to guarantee an
+                  instant fill while capping max slippage.
+                - "market" — Plain market order (legacy behavior).
+            adaptive_priority: Urgency for Adaptive Algo — "Normal",
+                "Urgent", or "Patient".  Ignored unless entry_mode is
+                "adaptive".
+            use_market: **Deprecated** — backward compatibility shim.
+                If True and entry_mode is not explicitly provided,
+                equivalent to entry_mode="market".
 
         Returns:
             list[Trade]: [parent_trade, tp_trade, sl_trade].
         """
         self.ensure_connected()
+
+        # ── Backward-compat: honour old use_market flag ──────────────
+        if use_market is True and entry_mode == "adaptive":
+            # Caller used the old API without setting entry_mode;
+            # preserve legacy behavior.
+            entry_mode = "market"
+            log.debug(
+                "place_bracket_order: use_market=True mapped to "
+                "entry_mode='market' (deprecated — use entry_mode instead)"
+            )
+
+        if entry_mode not in self._VALID_ENTRY_MODES:
+            raise ValueError(
+                f"Invalid entry_mode '{entry_mode}'. "
+                f"Must be one of: {sorted(self._VALID_ENTRY_MODES)}"
+            )
+
         bracket = self.ib.bracketOrder(
             action=action,
             quantity=quantity,
@@ -576,11 +666,69 @@ class IBKRConnectionManager:
             stopLossPrice=sl_price,
         )
 
-        # If market order requested, convert parent to Market
-        if use_market:
-            parent = bracket[0]
+        parent = bracket[0]
+
+        # ── Configure parent order based on entry_mode ───────────────
+        if entry_mode == "adaptive":
+            # IBKR Adaptive Algo: server-side algo that seeks price
+            # improvement inside the bid/ask spread.
+            parent.orderType = "LMT"
+            parent.lmtPrice = limit_price
+            parent.algoStrategy = "Adaptive"
+            parent.algoParams = [
+                TagValue("adaptivePriority", adaptive_priority),
+            ]
+            log.info(
+                "Entry mode: ADAPTIVE (priority=%s, limit=%.2f)",
+                adaptive_priority, limit_price,
+            )
+
+        elif entry_mode == "marketable_limit":
+            # Marketable Limit: price 2 ticks through NBBO for instant
+            # fill with bounded slippage.
+            bid, ask = self.get_bid_ask(contract)
+            tick2 = 2 * self._CL_TICK_SIZE  # $0.02 for CL
+
+            if action.upper() == "BUY":
+                if ask is not None:
+                    ml_price = round(ask + tick2, 2)
+                    parent.orderType = "LMT"
+                    parent.lmtPrice = ml_price
+                    log.info(
+                        "Entry mode: MARKETABLE_LIMIT BUY "
+                        "(best_ask=%.2f, limit=%.2f, buffer=%.2f)",
+                        ask, ml_price, tick2,
+                    )
+                else:
+                    # Fallback: couldn't get ask → use market
+                    log.warning(
+                        "Marketable limit BUY: no ask quote available — "
+                        "falling back to MARKET order"
+                    )
+                    parent.orderType = "MKT"
+                    parent.lmtPrice = 0
+            else:  # SELL
+                if bid is not None:
+                    ml_price = round(bid - tick2, 2)
+                    parent.orderType = "LMT"
+                    parent.lmtPrice = ml_price
+                    log.info(
+                        "Entry mode: MARKETABLE_LIMIT SELL "
+                        "(best_bid=%.2f, limit=%.2f, buffer=%.2f)",
+                        bid, ml_price, tick2,
+                    )
+                else:
+                    log.warning(
+                        "Marketable limit SELL: no bid quote available — "
+                        "falling back to MARKET order"
+                    )
+                    parent.orderType = "MKT"
+                    parent.lmtPrice = 0
+
+        else:  # entry_mode == "market"
             parent.orderType = "MKT"
             parent.lmtPrice = 0
+            log.info("Entry mode: MARKET")
 
         # Configure all orders: GTC + outside-RTH to avoid DAY-order
         # expiry and ensure triggers work during overnight sessions.
