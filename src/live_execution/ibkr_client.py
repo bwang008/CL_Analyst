@@ -684,46 +684,32 @@ class IBKRConnectionManager:
             )
 
         elif entry_mode == "marketable_limit":
-            # Marketable Limit: price 2 ticks through NBBO for instant
-            # fill with bounded slippage.
-            bid, ask = self.get_bid_ask(contract)
+            # Marketable Limit: price 2 ticks through the current price
+            # for instant fill with bounded slippage.
+            # NOTE: We use limit_price (bar close) instead of fetching
+            # live NBBO via reqTickers(), because reqTickers() is an
+            # async call that fails inside ib_insync callbacks with
+            # "RuntimeError: This event loop is already running".
             tick2 = 2 * self._CL_TICK_SIZE  # $0.02 for CL
 
             if action.upper() == "BUY":
-                if ask is not None:
-                    ml_price = round(ask + tick2, 2)
-                    parent.orderType = "LMT"
-                    parent.lmtPrice = ml_price
-                    log.info(
-                        "Entry mode: MARKETABLE_LIMIT BUY "
-                        "(best_ask=%.2f, limit=%.2f, buffer=%.2f)",
-                        ask, ml_price, tick2,
-                    )
-                else:
-                    # Fallback: couldn't get ask → use market
-                    log.warning(
-                        "Marketable limit BUY: no ask quote available — "
-                        "falling back to MARKET order"
-                    )
-                    parent.orderType = "MKT"
-                    parent.lmtPrice = 0
+                ml_price = round(limit_price + tick2, 2)
+                parent.orderType = "LMT"
+                parent.lmtPrice = ml_price
+                log.info(
+                    "Entry mode: MARKETABLE_LIMIT BUY "
+                    "(price=%.2f, limit=%.2f, buffer=%.2f)",
+                    limit_price, ml_price, tick2,
+                )
             else:  # SELL
-                if bid is not None:
-                    ml_price = round(bid - tick2, 2)
-                    parent.orderType = "LMT"
-                    parent.lmtPrice = ml_price
-                    log.info(
-                        "Entry mode: MARKETABLE_LIMIT SELL "
-                        "(best_bid=%.2f, limit=%.2f, buffer=%.2f)",
-                        bid, ml_price, tick2,
-                    )
-                else:
-                    log.warning(
-                        "Marketable limit SELL: no bid quote available — "
-                        "falling back to MARKET order"
-                    )
-                    parent.orderType = "MKT"
-                    parent.lmtPrice = 0
+                ml_price = round(limit_price - tick2, 2)
+                parent.orderType = "LMT"
+                parent.lmtPrice = ml_price
+                log.info(
+                    "Entry mode: MARKETABLE_LIMIT SELL "
+                    "(price=%.2f, limit=%.2f, buffer=%.2f)",
+                    limit_price, ml_price, tick2,
+                )
 
         else:  # entry_mode == "market"
             parent.orderType = "MKT"

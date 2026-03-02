@@ -437,6 +437,7 @@ def run_validation(
     file_path: str,
     model_dir_str: str | None,
     tolerance: float,
+    strategy: str | None = None,
 ) -> None:
     """Run the full parity validation pipeline."""
     # Load shadow log
@@ -447,6 +448,33 @@ def run_validation(
 
     df = pd.read_parquet(str(fpath))
     print(f"Loaded shadow log: {len(df)} rows, {len(df.columns)} columns")
+
+    # Show available strategies and filter (auto-selects latest if mixed)
+    if "strategy_name" in df.columns:
+        strategies = df["strategy_name"].dropna().unique()
+        if len(strategies) > 0:
+            print(f"  Strategies found: {', '.join(sorted(strategies))}")
+        if strategy:
+            before = len(df)
+            df = df[df["strategy_name"] == strategy].reset_index(drop=True)
+            print(f"  Filtered to strategy '{strategy}': {before} → {len(df)} rows")
+            if df.empty:
+                print(f"ERROR: No rows match strategy '{strategy}'.")
+                print(f"  Available strategies: {', '.join(sorted(strategies))}")
+                sys.exit(1)
+        elif len(strategies) > 1:
+            # Auto-select the most recent strategy
+            latest = df.dropna(subset=["strategy_name"]).iloc[-1]["strategy_name"]
+            before = len(df)
+            df = df[df["strategy_name"] == latest].reset_index(drop=True)
+            print(f"  Auto-selected latest strategy '{latest}': {before} → {len(df)} rows")
+            print(f"  (Use --strategy to override)")
+        elif len(strategies) == 1:
+            # Single strategy — filter to it (exclude any NaN rows)
+            before = len(df)
+            df = df[df["strategy_name"] == strategies[0]].reset_index(drop=True)
+            if len(df) < before:
+                print(f"  Filtered to '{strategies[0]}': {before} → {len(df)} rows")
 
     # Find model
     if model_dir_str:
@@ -612,8 +640,13 @@ def main() -> None:
         default=1e-6,
         help="Maximum acceptable prediction difference (default: 1e-6)",
     )
+    parser.add_argument(
+        "--strategy",
+        default=None,
+        help="Filter shadow log to a specific strategy_name (e.g. 'ManateeKoala_Conservative')",
+    )
     args = parser.parse_args()
-    run_validation(args.file, args.model_dir, args.tolerance)
+    run_validation(args.file, args.model_dir, args.tolerance, args.strategy)
 
 
 if __name__ == "__main__":

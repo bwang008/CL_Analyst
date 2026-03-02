@@ -2,7 +2,50 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
-## 2026-03-02 — Config Refactor + Sizing Tiers + Ensemble Live Trader
+## 2026-03-02 — Live Trader Bug Fixes & Parity Tester Enhancement
+
+### BUG-001: Bar subscriptions lost after IBKR disconnects (never recovered)
+
+- **Symptom**: After `Error 10182` (subscriptions lost), `NEW BAR` and `INFERENCE` logs stopped appearing. `updatePortfolio` continued working. The bot was alive but blind — no new signals generated.
+- **Root cause**: `_on_ib_error()` only triggered `_resubscribe_and_backfill()` on error codes 1101/1102 (full connectivity restored). IBKR actually sends warning codes **2104** (Market data farm OK) and **2106** (HMDS data farm OK) after brief disconnects. Resubscription never fired.
+- **Fix**: Added 2104 and 2106 to the trigger set in `_on_ib_error()` (`live_trader.py` line ~910).
+- **Impact**: Bot now auto-recovers bar subscriptions after brief IBKR data farm blips.
+
+### BUG-002: Marketable limit orders fail with "event loop already running"
+
+- **Symptom**: `[ERROR] Failed to place bracket order: This event loop is already running`. Orders placed with `entry_mode="marketable_limit"` always failed. Position stayed at 0 despite valid sell signals.
+- **Root cause**: `marketable_limit` mode called `get_bid_ask()` → `ib.reqTickers()` inside the `_on_new_bar` callback. `reqTickers()` internally calls `loop.run_until_complete()`, but the asyncio event loop is already running (we're inside an ib_insync callback). This is a fundamental ib_insync constraint: only cached/sync methods work inside callbacks.
+- **Why it wasn't caught earlier**: The initial short position used `adaptive` mode (default), which only sets order attributes — no async calls. `marketable_limit` was added to the config mid-session and failed on its first real invocation.
+- **Fix**: `place_bracket_order()` in `ibkr_client.py` now uses `limit_price` (bar close) + 2 ticks instead of fetching live NBBO via `reqTickers()`. Functionally identical result, no async calls.
+- **Safe methods inside callbacks**: `ib.portfolio()`, `ib.positions()`, `ib.openTrades()`, `ib.placeOrder()`, setting order attributes.
+- **Unsafe methods inside callbacks**: `ib.reqTickers()`, `ib.accountSummary()`, `ib.reqHistoricalData()` — anything making a new request to IBKR.
+
+### BUG-003: Resubscription crashes with timezone mismatch
+
+- **Symptom**: `TypeError: Cannot subtract tz-naive and tz-aware datetime-like objects` in `_resubscribe_and_backfill()`.
+- **Root cause**: `pd.Timestamp.utcnow()` returns tz-aware (`+00:00`), but `self._last_bar_time` is tz-naive (naive UTC). Pandas refuses the subtraction.
+- **Why it wasn't caught earlier**: Latent bug — `_resubscribe_and_backfill()` was never executed until BUG-001 was fixed (adding 2104/2106 triggers). The code path was dead until the resubscription trigger fix made it reachable.
+- **Fix**: Replaced `pd.Timestamp.utcnow()` with `pd.Timestamp.now(tz="UTC").tz_localize(None)` to produce tz-naive UTC.
+
+### BUG-004: TWS mobile blocks paper bot bar data (IBKR HMDS conflict)
+
+- **Symptom**: `Error 162: Trading TWS session is connected from a different IP address`. No `NEW BAR` logs after startup despite "Subscribed to live bars" message.
+- **Root cause**: IBKR's Historical Market Data Service (HMDS) is shared per username across all sessions (Gateway, TWS desktop, TWS mobile). Logging into TWS mobile from a different IP causes HMDS to reject `reqHistoricalData(keepUpToDate=True)` on the Gateway session. Portfolio data and order execution continue working (separate channels).
+- **Fix**: Not a code fix — IBKR infrastructure limitation. User must avoid running TWS mobile while the paper bot is running, or use a separate IBKR paper username.
+
+### Enhancement: Strategy filter for validate_parity.py
+
+- **Problem**: Running different strategies (manatee vs ensemble_conservative) appends mixed predictions to the shadow log. `validate_parity.py` replays all rows against one model, causing false `[FAIL] PIPELINE DIVERGENCE`.
+- **Solution**: Added `--strategy` filter to `validate_parity.py` and `export_shadow_log.py`. When multiple strategies are detected and no `--strategy` is specified, the script auto-selects the most recent strategy.
+
+### Live trade results (Paper DU1899929, session 2026-03-02)
+
+| # | Direction | Entry | Contracts | Exit | P&L |
+|---|-----------|-------|-----------|------|-----|
+| 1 | Short @ 72.07 | 02:09 UTC | 4 | SL 72.86 (2), TP 70.10 (2) | +$361.04 |
+| 2 | Short @ 71.42 | 15:20 UTC | 2 | TP 70.10 | +$2,630.52 |
+| 3 | Short @ 70.62 | 16:50 UTC | 3 | *Open* | — |
+| | | | | **Session Total** | **+$2,991.56** |
 
 - **Goal**: Implement position sizing (lots) in BacktestEngine, refactor configs to group live-only attributes under `live_config`, add per-config `client_id`, and make `ConfigurableStrategy` support ensemble configs.
 

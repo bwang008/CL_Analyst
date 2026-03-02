@@ -24,6 +24,7 @@
         "0.60": 1
     },
     "live_config": {
-        "client_id": 13
+        "client_id": 13,
+        "entry_mode": "marketable_limit"
     }
 }
