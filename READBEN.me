@@ -187,7 +187,7 @@ Create a strategy JSON config (or use an existing one):
 # Backtest using the strategy config (loads TP/SL/threshold from JSON)
 conda run -n trader --no-capture-output python agent/backtest_engine.py --config configs/strategies/manatee.json --predictions reports/exp017_long_predictions.csv --data data/processed/CL_set_06_shortfix.parquet
 conda run -n trader --no-capture-output python agent/backtest_engine.py --config configs/strategies/koala.json --predictions reports/exp020_short_full_predictions.csv --data data/processed/CL_set_06_shortfix.parquet
-
+python agent/backtest_engine.py --config configs/strategies/ensemble_conservative.json --predictions reports/ensemble_predictions.csv --data data/processed/CL_set_06_shortfix.parquet
 
 # Or manually override parameters
 conda run -n trader --no-capture-output python agent/backtest_engine.py --predictions reports/exp017_long_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --threshold 0.70 --tp-mult 7.0 --sl-mult 1.0
