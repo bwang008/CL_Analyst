@@ -108,7 +108,7 @@ _DEFAULT_CACHE_PATH = str(
 # Logging
 # ---------------------------------------------------------------------------
 
-_LOG_DIR = _PROJECT_ROOT / "data" / "logs"
+_LOG_DIR = _PROJECT_ROOT / "reports"
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 _LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -139,17 +139,16 @@ class CLOnlyLogFilter(logging.Filter):
 
 
 def _setup_file_logging(client_id: int) -> None:
-    """Add a rotating file handler so logs are persisted to disk.
+    """Add a file handler so logs are persisted to disk.
 
-    Writes to data/logs/live_trader_cid{N}.log with 5 MB rotation
-    and 3 backup files.
+    Writes to reports/livetrader_{N}.log in append mode.
+    Logs accumulate across restarts for the same client_id.
     """
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log_file = _LOG_DIR / f"live_trader_cid{client_id}.log"
-    file_handler = logging.handlers.RotatingFileHandler(
+    log_file = _LOG_DIR / f"livetrader_{client_id}.log"
+    file_handler = logging.FileHandler(
         log_file,
-        maxBytes=5 * 1024 * 1024,  # 5 MB
-        backupCount=3,
+        mode="a",
         encoding="utf-8",
     )
     file_handler.setLevel(logging.INFO)
