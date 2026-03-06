@@ -532,6 +532,34 @@ class IBKRConnectionManager:
         )
         return bars
 
+    async def subscribe_live_bars_async(
+        self,
+        contract: Contract,
+        *,
+        bar_size: str = "5 mins",
+        what_to_show: str = "TRADES",
+        use_rth: bool = False,
+        duration_str: str = "60 S",
+    ):
+        """Async version of subscribe_live_bars for use inside the event loop.
+
+        Identical to subscribe_live_bars but uses reqHistoricalDataAsync
+        so it can be awaited from an async context (e.g., reconnection
+        callbacks) without crashing with 'event loop already running'.
+        """
+        self.ensure_connected()
+        bars = await self.ib.reqHistoricalDataAsync(
+            contract,
+            endDateTime="",
+            durationStr=duration_str,
+            barSizeSetting=bar_size,
+            whatToShow=what_to_show,
+            useRTH=use_rth,
+            formatDate=1,
+            keepUpToDate=True,
+        )
+        return bars
+
     def cancel_subscription(self, bars) -> None:
         """Cancel a live bar subscription."""
         if self.ib.isConnected():

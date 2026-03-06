@@ -1,0 +1,351 @@
+"""
+Tests for LiveTrader cooldown logic and timezone-safe resubscription.
+
+Validates:
+- Post-exit cooldown blocks re-entry for configured number of bars
+- Cooldown counts down correctly then allows new entries
+- cooldown_bars=0 disables the feature (backward compat)
+- Timezone-safe gap calculation in _resubscribe_and_backfill
+
+All tests use mocks — no live IB connection or real models needed.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+import pandas as pd
+import pytest
+
+from src.live_execution import live_trader as lt_module
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_trader_stub(cooldown_bars: int = 10) -> lt_module.LiveTrader:
+    """Create a LiveTrader-like object with cooldown support.
+
+    Bypasses __init__ and manually sets all attributes needed for
+    cooldown tests.
+    """
+    trader = object.__new__(lt_module.LiveTrader)
+
+    # Mock the IBKRConnectionManager
+    trader.manager = MagicMock()
+    trader.manager.ib = MagicMock()
+    trader.manager.connect = MagicMock()
+    trader.manager.get_cl_position = MagicMock(return_value=0)
+    trader.manager.subscribe_live_bars = MagicMock()
+    trader.manager.cancel_subscription = MagicMock()
+
+    # Strategy mock
+    trader.strategy = MagicMock()
+    trader.strategy.name = "MockStrategy"
+    trader.strategy.direction = "BOTH"
+    trader.strategy.config = {"cooldown_bars": cooldown_bars}
+
+    # State
+    trader._running = True
+    trader._subscriptions_lost = False
+    trader._live_bars = None
+    trader._front_month_bars = None
+    trader._contract = MagicMock()
+    trader._front_month_contract = MagicMock()
+    trader._front_month_str = "202604"
+    trader._last_bar_time = None
+    trader._max_hold_bars = 288
+
+    # Cooldown state
+    trader._cooldown_bars = cooldown_bars
+    trader._cooldown_remaining = 0
+
+    # Position tracking
+    trader._position_entry_bar_time = None
+    trader._position_bars_held = 0
+
+    # Telemetry mock
+    trader.telemetry = MagicMock()
+
+    # Feature/model mocks
+    trader.feature_names = ["ATR_14", "MACD"]
+    trader.rolling_df = pd.DataFrame(
+        {"DateTime": pd.date_range("2026-01-01", periods=200, freq="5min"),
+         "Open": 70.0, "High": 71.0, "Low": 69.0, "Close": 70.5,
+         "Volume": 100.0}
+    )
+    trader.rolling_df = trader.rolling_df.set_index(
+        pd.DatetimeIndex(trader.rolling_df["DateTime"]), drop=False
+    )
+
+    # Dry-run mode (don't place real orders)
+    trader.dry_run = True
+    trader.entry_mode = "market"
+    trader.adaptive_priority = "Normal"
+
+    # Execution callback state
+    trader._callbacks_registered = False
+    trader._last_decision_context_by_order_id = {}
+
+    return trader
+
+
+# ---------------------------------------------------------------------------
+# Tests: Cooldown in _on_new_bar
+# ---------------------------------------------------------------------------
+
+
+class TestCooldownEnforcement:
+    """Verify cooldown blocks re-entry after exits."""
+
+    @patch("src.live_execution.live_trader.build_live_features")
+    def test_cooldown_skips_entry(self, mock_features):
+        """When cooldown is active, _on_new_bar returns early without evaluating."""
+        trader = _make_trader_stub(cooldown_bars=10)
+        trader._cooldown_remaining = 5
+
+        bar_time = pd.Timestamp("2026-03-02 18:00:00")
+        trader._on_new_bar(bar_time)
+
+        # Feature generation should NOT be called during cooldown
+        mock_features.assert_not_called()
+        # Strategy evaluate should NOT be called
+        trader.strategy.evaluate.assert_not_called()
+
+    @patch("src.live_execution.live_trader.build_live_features")
+    def test_cooldown_counts_down(self, mock_features):
+        """Cooldown decrements each bar and eventually allows entry."""
+        trader = _make_trader_stub(cooldown_bars=3)
+        trader._cooldown_remaining = 3
+
+        bar_time = pd.Timestamp("2026-03-02 18:00:00")
+
+        # Bar 1: cooldown=3 → skip
+        trader._on_new_bar(bar_time)
+        assert trader._cooldown_remaining == 2
+        mock_features.assert_not_called()
+
+        # Bar 2: cooldown=2 → skip
+        trader._on_new_bar(bar_time)
+        assert trader._cooldown_remaining == 1
+        mock_features.assert_not_called()
+
+        # Bar 3: cooldown=1 → skip
+        trader._on_new_bar(bar_time)
+        assert trader._cooldown_remaining == 0
+        mock_features.assert_not_called()
+
+        # Bar 4: cooldown=0 → evaluate normally
+        mock_features.return_value = None  # Will exit early but proves it was called
+        trader._on_new_bar(bar_time)
+        mock_features.assert_called_once()
+
+    @patch("src.live_execution.live_trader.build_live_features")
+    def test_zero_cooldown_disabled(self, mock_features):
+        """cooldown_bars=0 means no cooldown — backward compatible."""
+        trader = _make_trader_stub(cooldown_bars=0)
+        trader._cooldown_remaining = 0
+
+        mock_features.return_value = None
+        bar_time = pd.Timestamp("2026-03-02 18:00:00")
+        trader._on_new_bar(bar_time)
+
+        # Should call features right away
+        mock_features.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Tests: Cooldown activation on exit
+# ---------------------------------------------------------------------------
+
+
+class TestCooldownActivation:
+    """Verify cooldown is activated when bracket child orders fill."""
+
+    def test_sl_hit_activates_cooldown(self):
+        """A stop-loss fill should activate cooldown."""
+        trader = _make_trader_stub(cooldown_bars=10)
+
+        # Simulate a STP child order fill
+        mock_trade = MagicMock()
+        mock_order = MagicMock()
+        mock_order.orderType = "STP"
+        mock_order.parentId = 42  # non-zero = child order
+        mock_order.orderId = 99
+        mock_order.action = "BUY"
+        mock_order.totalQuantity = 2.0
+        mock_order.tif = "GTC"
+        mock_order.permId = 12345
+        mock_order.lmtPrice = 0.0
+        mock_order.auxPrice = 72.64
+        mock_order.account = "DU1899929"
+
+        mock_status = MagicMock()
+        mock_status.status = "Filled"
+        mock_status.avgFillPrice = 72.65
+        mock_status.filled = 2.0
+        mock_status.remaining = 0.0
+
+        mock_contract = MagicMock()
+        mock_contract.localSymbol = "CLJ6"
+        mock_contract.symbol = "CL"
+        mock_contract.lastTradeDateOrContractMonth = "20260320"
+
+        mock_trade.order = mock_order
+        mock_trade.orderStatus = mock_status
+        mock_trade.contract = mock_contract
+
+        assert trader._cooldown_remaining == 0
+        trader._on_order_status(mock_trade)
+        assert trader._cooldown_remaining == 10
+
+    def test_tp_hit_activates_cooldown(self):
+        """A take-profit fill should activate cooldown."""
+        trader = _make_trader_stub(cooldown_bars=5)
+
+        mock_trade = MagicMock()
+        mock_order = MagicMock()
+        mock_order.orderType = "LMT"
+        mock_order.parentId = 42
+        mock_order.orderId = 100
+        mock_order.action = "BUY"
+        mock_order.totalQuantity = 2.0
+        mock_order.tif = "GTC"
+        mock_order.permId = 12346
+        mock_order.lmtPrice = 71.83
+        mock_order.auxPrice = 0.0
+        mock_order.account = "DU1899929"
+
+        mock_status = MagicMock()
+        mock_status.status = "Filled"
+        mock_status.avgFillPrice = 71.83
+        mock_status.filled = 2.0
+        mock_status.remaining = 0.0
+
+        mock_contract = MagicMock()
+        mock_contract.localSymbol = "CLJ6"
+        mock_contract.symbol = "CL"
+        mock_contract.lastTradeDateOrContractMonth = "20260320"
+
+        mock_trade.order = mock_order
+        mock_trade.orderStatus = mock_status
+        mock_trade.contract = mock_contract
+
+        assert trader._cooldown_remaining == 0
+        trader._on_order_status(mock_trade)
+        assert trader._cooldown_remaining == 5
+
+    def test_parent_fill_does_not_activate_cooldown(self):
+        """A parent entry order fill should NOT activate cooldown."""
+        trader = _make_trader_stub(cooldown_bars=10)
+
+        mock_trade = MagicMock()
+        mock_order = MagicMock()
+        mock_order.orderType = "LMT"
+        mock_order.parentId = 0  # parentId=0 → is the parent entry order
+        mock_order.orderId = 59
+        mock_order.action = "SELL"
+        mock_order.totalQuantity = 2.0
+        mock_order.tif = "GTC"
+        mock_order.permId = 12340
+        mock_order.lmtPrice = 72.25
+        mock_order.auxPrice = 0.0
+        mock_order.account = "DU1899929"
+
+        mock_status = MagicMock()
+        mock_status.status = "Filled"
+        mock_status.avgFillPrice = 72.26
+        mock_status.filled = 2.0
+        mock_status.remaining = 0.0
+
+        mock_contract = MagicMock()
+        mock_contract.localSymbol = "CLJ6"
+        mock_contract.symbol = "CL"
+        mock_contract.lastTradeDateOrContractMonth = "20260320"
+
+        mock_trade.order = mock_order
+        mock_trade.orderStatus = mock_status
+        mock_trade.contract = mock_contract
+
+        trader._on_order_status(mock_trade)
+        assert trader._cooldown_remaining == 0  # NOT activated
+
+    def test_cooldown_zero_no_activation(self):
+        """With cooldown_bars=0, exit does not set cooldown."""
+        trader = _make_trader_stub(cooldown_bars=0)
+
+        mock_trade = MagicMock()
+        mock_order = MagicMock()
+        mock_order.orderType = "STP"
+        mock_order.parentId = 42
+        mock_order.orderId = 99
+        mock_order.action = "BUY"
+        mock_order.totalQuantity = 2.0
+        mock_order.tif = "GTC"
+        mock_order.permId = 12345
+        mock_order.lmtPrice = 0.0
+        mock_order.auxPrice = 72.64
+        mock_order.account = "DU1899929"
+
+        mock_status = MagicMock()
+        mock_status.status = "Filled"
+        mock_status.avgFillPrice = 72.65
+        mock_status.filled = 2.0
+        mock_status.remaining = 0.0
+
+        mock_contract = MagicMock()
+        mock_contract.localSymbol = "CLJ6"
+        mock_contract.symbol = "CL"
+        mock_contract.lastTradeDateOrContractMonth = "20260320"
+
+        mock_trade.order = mock_order
+        mock_trade.orderStatus = mock_status
+        mock_trade.contract = mock_contract
+
+        trader._on_order_status(mock_trade)
+        assert trader._cooldown_remaining == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: Timezone-safe gap calculation
+# ---------------------------------------------------------------------------
+
+
+class TestTimezoneResubscribe:
+    """Verify _resubscribe_and_backfill handles tz-aware/naive datetimes."""
+
+    def test_tz_naive_last_bar_time(self):
+        """Gap calculation works when _last_bar_time is tz-naive."""
+        trader = _make_trader_stub()
+        # tz-naive timestamp (e.g., from warm-start cache)
+        trader._last_bar_time = pd.Timestamp("2026-03-02 18:00:00")
+        trader._subscriptions_lost = True
+
+        # Should NOT raise TypeError
+        trader._resubscribe_and_backfill()
+
+    def test_tz_aware_last_bar_time(self):
+        """Gap calculation works when _last_bar_time is tz-aware (UTC)."""
+        trader = _make_trader_stub()
+        # tz-aware timestamp (e.g., from IBKR bar callback)
+        trader._last_bar_time = pd.Timestamp(
+            "2026-03-02 18:00:00", tz="UTC"
+        )
+        trader._subscriptions_lost = True
+
+        # Should NOT raise TypeError
+        trader._resubscribe_and_backfill()
+
+    def test_tz_aware_eastern_last_bar_time(self):
+        """Gap calculation works when _last_bar_time is tz-aware (US/Eastern)."""
+        trader = _make_trader_stub()
+        # tz-aware in US/Eastern (IBKR sends these)
+        trader._last_bar_time = pd.Timestamp(
+            "2026-03-02 13:00:00", tz="US/Eastern"
+        )
+        trader._subscriptions_lost = True
+
+        # Should NOT raise TypeError
+        trader._resubscribe_and_backfill()

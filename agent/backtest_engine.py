@@ -1254,10 +1254,20 @@ def main() -> None:
             if bt.allow_concurrent
             else "single-position"
         )
+        # Display the correct threshold(s) depending on which path is used
+        strat = bt._execution_strategy
+        if strat is not None and hasattr(strat, "long_threshold"):
+            threshold_str = (
+                f"threshold(buy={strat.long_threshold}, sell={strat.short_threshold})"
+            )
+        elif strat is not None and hasattr(strat, "threshold"):
+            threshold_str = f"threshold={strat.threshold}"
+        else:
+            threshold_str = f"threshold={bt.prob_threshold}"
         print(
             f"Loaded strategy config '{strategy_cfg.get('nickname', '?')}': "
             f"TP={bt.tp_atr_mult}x  SL={bt.sl_atr_mult}x  "
-            f"threshold={bt.prob_threshold}  [{concurrent_str}]"
+            f"{threshold_str}  [{concurrent_str}]"
         )
     else:
         bt = BacktestEngine(
