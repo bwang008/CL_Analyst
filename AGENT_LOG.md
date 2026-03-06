@@ -2,6 +2,28 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
+## 2026-03-03 — Resubscription Bug Fixes (BUG-005, BUG-006)
+
+### BUG-005: Resubscription crashes with "event loop already running" (bars never recovered)
+
+- **Symptom**: After HMDS disconnect (`Error 10182`) + reconnect (`2106`), resubscription always failed with `RuntimeError: This event loop is already running`. Bars never resumed despite connectivity being restored. Portfolio updates continued, so the bot appeared alive.
+- **Root cause**: `_on_ib_error()` is an ib_insync callback running inside the asyncio event loop. `_resubscribe_and_backfill()` calls `subscribe_live_bars()` → `reqHistoricalData()` → `loop.run_until_complete()`, which crashes because the loop is already running. Same async-inside-callback issue as BUG-002 (marketable_limit).
+- **Fix (attempt 1 — failed)**: Deferred resubscription via `asyncio.ensure_future()` + `loop.call_soon()`. Still crashed because even in a coroutine, sync ib_insync methods call `loop.run_until_complete()` which fails inside a running loop.
+- **Fix (final)**: Added `subscribe_live_bars_async()` to `ibkr_client.py` using `reqHistoricalDataAsync()`. Rewrote `_deferred_resubscribe()` as a fully async method that `await`s the async subscribe. Removed gap backfill from the reconnection path (gaps fill naturally via `keepUpToDate=True`). Added `_resubscribe_pending` flag to deduplicate rapid-fire 2104/2106 events.
+
+### BUG-006: Gap backfill called with invalid keyword argument
+
+- **Symptom**: `TypeError: IBKRConnectionManager.fetch_historical_bars_by_duration() got an unexpected keyword argument 'contract'`
+- **Root cause**: `_resubscribe_and_backfill()` passed `contract=self._contract` to `fetch_historical_bars_by_duration()`, but that method doesn't accept a `contract` parameter — it builds its own via `build_cl_contract()`.
+- **Fix**: Removed the invalid `contract=self._contract` keyword argument.
+
+### User additions (manual edits)
+
+- Added `cooldown_bars` config param + `_cooldown_remaining` state to `LiveTrader.__init__()`, `_on_new_bar()`, and trade exit handler for parity with backtest engine FSM COOLDOWN state.
+- Updated `ensemble_conservative.json`: TP=2.0 ATR, SL=1.0 ATR, sizing tiers all set to 1 contract.
+- Updated `ensemble_aggro.json`: SL=3.0 ATR (from 2.5).
+- Improved timezone normalization in `_resubscribe_and_backfill()` to handle both tz-aware and tz-naive `_last_bar_time`.
+
 ## 2026-03-02 — Live Trader Bug Fixes & Parity Tester Enhancement
 
 ### BUG-001: Bar subscriptions lost after IBKR disconnects (never recovered)

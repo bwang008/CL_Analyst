@@ -11,20 +11,20 @@
             "threshold": 0.60
         }
     },
-    "tp_atr_mult": 2.0,
-    "sl_atr_mult": 1.0,
+    "tp_atr_mult": 3.0,
+    "sl_atr_mult": 3.0,
     "trailing_atr_mult": 100.0,
     "cooldown_bars": 10,
     "max_hold_bars": 288,
     "allow_concurrent": false,
     "max_concurrent": 1,
     "sizing_tiers": {
-        "0.80": 1,
-        "0.70": 1,
+        "0.80": 3,
+        "0.70": 2,
         "0.60": 1
     },
     "live_config": {
-        "client_id": 13,
+        "client_id": 14,
         "entry_mode": "marketable_limit"
     }
 }

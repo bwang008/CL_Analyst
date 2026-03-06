@@ -315,10 +315,18 @@ class LiveTrader:
         self._max_hold_bars: int = int(
             strategy_config.get("max_hold_bars", _MAX_HOLD_BARS)
         )
+        # Cooldown: bars to wait after an exit before allowing new entries
+        # (parity with backtest engine FSM COOLDOWN state)
+        self._cooldown_bars: int = int(
+            strategy_config.get("cooldown_bars", 0)
+        )
+        self._cooldown_remaining: int = 0
         log.info("Strategy: %s  direction=%s", strategy.name, strategy.direction)
         log.info(
-            "Entry mode: %s  adaptive_priority=%s  max_hold_bars=%d",
+            "Entry mode: %s  adaptive_priority=%s  max_hold_bars=%d  "
+            "cooldown_bars=%d",
             entry_mode, adaptive_priority, self._max_hold_bars,
+            self._cooldown_bars,
         )
 
         # Telemetry
@@ -350,6 +358,7 @@ class LiveTrader:
         self._running = False
         self._last_bar_time: Optional[pd.Timestamp] = None
         self._subscriptions_lost = False  # Track connectivity drops
+        self._resubscribe_pending = False  # Prevent duplicate resubscription scheduling
         self._callbacks_registered = False
         self._last_decision_context_by_order_id: dict[int, dict] = {}
         self._position_entry_bar_time: Optional[pd.Timestamp] = None
@@ -602,6 +611,13 @@ class LiveTrader:
                         "[TRADE] EXIT: %s %.0f %s @ %.2f (%s)",
                         action_str, qty, symbol_str, avg_price, exit_type,
                     )
+                    # Activate post-exit cooldown (parity with backtest engine)
+                    if self._cooldown_bars > 0:
+                        self._cooldown_remaining = self._cooldown_bars
+                        log.info(
+                            "COOLDOWN activated: %d bars after %s",
+                            self._cooldown_bars, exit_type,
+                        )
                 else:
                     # Parent entry order filled
                     log.info(
@@ -909,53 +925,30 @@ class LiveTrader:
         # Warning 2104: Market data farm connection is OK
         # Warning 2106: HMDS data farm connection is OK
         if errorCode in (1101, 1102, 2104, 2106) and self._subscriptions_lost:
-            log.info("CONNECTIVITY RESTORED (code %d) — resubscribing...", errorCode)
-            self._resubscribe_and_backfill()
+            if self._resubscribe_pending:
+                log.info("CONNECTIVITY RESTORED (code %d) — resubscription already scheduled, skipping", errorCode)
+                return
+            log.info("CONNECTIVITY RESTORED (code %d) — scheduling resubscription...", errorCode)
+            self._resubscribe_pending = True
+            # CRITICAL: Cannot call IBKR API methods (reqHistoricalData,
+            # subscribe_live_bars) inside this callback because the asyncio
+            # event loop is already running.  Schedule resubscription to
+            # run on the next loop iteration via ensure_future.
+            import asyncio
+            loop = asyncio.get_event_loop()
+            loop.call_soon(lambda: asyncio.ensure_future(self._deferred_resubscribe()))
 
-    def _resubscribe_and_backfill(self) -> None:
-        """Re-subscribe to live bars after connectivity drop and backfill gaps."""
+    async def _deferred_resubscribe(self) -> None:
+        """Fully async resubscription — runs on the next event loop iteration.
+
+        Uses ib_insync's async API (reqHistoricalDataAsync) so it can
+        run inside the event loop without crashing.  The sync API
+        (reqHistoricalData) calls loop.run_until_complete() internally,
+        which fails with 'This event loop is already running' even
+        from an ensure_future coroutine.
+        """
         try:
-            # 1. Backfill any missed bars during the gap
-            if self._last_bar_time is not None:
-                now_utc = pd.Timestamp.now(tz="UTC").tz_localize(None)
-                gap = now_utc - self._last_bar_time
-                gap_minutes = gap.total_seconds() / 60
-
-                if gap_minutes > 5:  # At least one bar could have been missed
-                    log.info(
-                        "Backfilling gap: %s → %s (%.1f minutes)",
-                        self._last_bar_time, now_utc, gap_minutes,
-                    )
-                    try:
-                        gap_days = max(int(gap.total_seconds() / 86400) + 1, 1)
-                        duration_str = f"{gap_days} D"
-                        bars = self.manager.fetch_historical_bars_by_duration(
-                            duration_str=duration_str,
-                            contract=self._contract,
-                        )
-                        if bars is not None and len(bars) > 0:
-                            # Filter to only bars newer than _last_bar_time
-                            new_bars = bars[bars.index > self._last_bar_time]
-                            if len(new_bars) > 0:
-                                self.rolling_df = pd.concat(
-                                    [self.rolling_df, new_bars]
-                                ).drop_duplicates(subset=["DateTime"], keep="last")
-                                self.rolling_df = self.rolling_df.sort_index()
-                                if len(self.rolling_df) > _MAX_ROLLING_BARS:
-                                    self.rolling_df = self.rolling_df.iloc[
-                                        -_MAX_ROLLING_BARS:
-                                    ]
-                                self._last_bar_time = self.rolling_df.index[-1]
-                                # Append to warm-start cache too
-                                self.data_manager.append_bar(new_bars)
-                                log.info(
-                                    "Backfilled %d bars, latest=%s",
-                                    len(new_bars), self._last_bar_time,
-                                )
-                    except Exception:
-                        log.exception("Gap backfill failed — continuing without")
-
-            # 2. Cancel stale subscriptions
+            # 1. Cancel stale subscriptions (sync, safe — no network request)
             if self._live_bars is not None:
                 try:
                     self.manager.cancel_subscription(self._live_bars)
@@ -967,16 +960,36 @@ class LiveTrader:
                 except Exception:
                     pass
 
-            # 3. Re-subscribe
-            self._subscribe()
+            # 2. Re-subscribe using async API
+            log.info("Subscribing to live 5-min bars (Brain stream)...")
+            self._live_bars = await self.manager.subscribe_live_bars_async(
+                self._contract,
+                bar_size="5 mins",
+                duration_str="60 S",
+            )
+            self._live_bars.updateEvent += self._on_bar_update
+            log.info("Subscribed to continuous contract live bars")
+
             if self._front_month_contract is not None:
-                self._subscribe_front_month()
+                log.info(
+                    "Subscribing to front-month bars (Hands stream: %s)...",
+                    self._front_month_str,
+                )
+                self._front_month_bars = await self.manager.subscribe_live_bars_async(
+                    self._front_month_contract,
+                    bar_size="5 mins",
+                    duration_str="60 S",
+                )
+                self._front_month_bars.updateEvent += self._on_front_month_bar_update
+                log.info("Subscribed to front-month live bars")
 
             self._subscriptions_lost = False
             log.info("Reconnection complete — live bars flowing again")
 
         except Exception:
-            log.exception("Resubscription failed — will retry on next reconnect")
+            log.exception("Deferred resubscription failed — will retry on next reconnect")
+        finally:
+            self._resubscribe_pending = False
 
     def _on_front_month_bar_update(self, bars, has_new_bar) -> None:
         """Callback for front-month bars — log raw data to telemetry."""
@@ -1075,6 +1088,15 @@ class LiveTrader:
 
     def _on_new_bar(self, bar_time: pd.Timestamp) -> None:
         """Run feature generation, strategy evaluation, and potentially execute a trade."""
+        # 0. Cooldown enforcement (parity with backtest engine)
+        if self._cooldown_remaining > 0:
+            self._cooldown_remaining -= 1
+            log.info(
+                "COOLDOWN: %d bar(s) remaining — skipping entry evaluation",
+                self._cooldown_remaining + 1,
+            )
+            return
+
         # 1. Generate features
         features = build_live_features(self.rolling_df, self.feature_names)
         if features is None:
