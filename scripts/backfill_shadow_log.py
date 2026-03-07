@@ -36,7 +36,8 @@ def _sigmoid(x: float) -> float:
 
 
 def find_default_model_dir() -> Path | None:
-    registry = PROJECT_ROOT / "models" / "registry"
+    from src.data_paths import get_models_root
+    registry = get_models_root() / "registry"
     if not registry.exists():
         return None
     for d in sorted(registry.iterdir()):
@@ -74,7 +75,8 @@ def backfill(db_path: str, model_dir_str: str | None, output_path: str) -> None:
     live_df["DateTime"] = pd.to_datetime(live_df["DateTime"])
 
     # 2. Load warmup data from cl_continuous_master.parquet
-    warmup_path = PROJECT_ROOT / "data" / "processed" / "cl_continuous_master.parquet"
+    from src.data_paths import get_data_path as _gdp
+    warmup_path = _gdp("processed/cl_continuous_master.parquet")
     if not warmup_path.exists():
         print(f"ERROR: Warmup data not found: {warmup_path}")
         sys.exit(1)
@@ -202,7 +204,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--db-path",
-        default=str(PROJECT_ROOT / "data" / "live_telemetry.db"),
+        default=None,
         help="Path to the telemetry SQLite database",
     )
     parser.add_argument(
@@ -212,12 +214,21 @@ def main() -> None:
     )
     parser.add_argument(
         "--output",
-        default=str(
-            PROJECT_ROOT / "data" / "processed" / "live_shadow_log.parquet"
-        ),
+        default=None,
         help="Output Parquet file path",
     )
     args = parser.parse_args()
+
+    # Resolve paths via CL_DATA_ROOT fallback
+    from src.data_paths import get_data_path as _gdp2
+    if args.db_path is None:
+        args.db_path = str(_gdp2("live_telemetry.db"))
+    if args.output is None:
+        args.output = str(_gdp2("processed/live_shadow_log.parquet"))
+    if args.model_dir:
+        from src.data_paths import resolve_cli_path
+        args.model_dir = resolve_cli_path(args.model_dir)
+
     backfill(args.db_path, args.model_dir, args.output)
 
 

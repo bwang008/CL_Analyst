@@ -78,6 +78,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # Resolve paths via CL_DATA_ROOT fallback
+    from src.data_paths import resolve_cli_path
+    args.model_path = resolve_cli_path(args.model_path)
+    args.data_path = resolve_cli_path(args.data_path)
+    args.output = resolve_cli_path(args.output)
+    if args.model_config:
+        args.model_config = resolve_cli_path(args.model_config)
+
     # ---- Load data ----
     if args.data_path.endswith(".parquet"):
         df = pd.read_parquet(args.data_path)

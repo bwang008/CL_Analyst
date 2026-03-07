@@ -57,17 +57,31 @@ PROCESSED_FILES = [
     "CL_set_06.parquet",
     "CL_set_06_shortfix.parquet",
     "cl_continuous_master.parquet",
+    "live_shadow_log.parquet",
+    "mock_shadow_log.parquet",
     "test100k_set_01.csv",
     "test100k_set_01.parquet",
     "test100k_set_02.parquet",
     "test100k_set_03.parquet",
     "test_data_set_03.parquet",
     "warm_start_cache.parquet",
+    "warm_start_cache_cid10.parquet",
+    "warm_start_cache_cid13.parquet",
 ]
 
 # Telemetry databases to create empty if missing
 TELEMETRY_DBS = [
     DATA_DIR / "live_telemetry.db",
+]
+
+# Reports files to symlink from CL_DATA_ROOT/reports/ (generated outputs)
+REPORTS_DIR = PROJECT_ROOT / "reports"
+REPORTS_FILES = [
+    "ensemble_predictions.csv",
+    "exp017_long_full_predictions.csv",
+    "exp017_long_oos_predictions.csv",
+    "exp020_short_full_predictions.csv",
+    "exp020_short_oos_predictions.csv",
 ]
 
 # ---------------------------------------------------------------------------
@@ -259,7 +273,23 @@ def run(*, force: bool = False, copy: bool = False) -> dict:
         summary["ok" if ok else "fail"] += 1
         summary["details"].append((str(db_path.relative_to(PROJECT_ROOT)), status))
 
-    # ── 6. Validate critical imports ──────────────────────────────────────
+    # ── 6. Link reports files ─────────────────────────────────────────
+    log.info("\n=== Linking reports files ===")
+    reports_source_dir = data_root / "reports"
+    if reports_source_dir.exists():
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        for fname in REPORTS_FILES:
+            source = reports_source_dir / fname
+            target = REPORTS_DIR / fname
+            ok = _create_link(source, target, force=force, copy=copy)
+            status = "[OK]" if ok else "[FAIL]"
+            summary["ok" if ok else "fail"] += 1
+            summary["details"].append((f"reports/{fname}", status))
+    else:
+        log.info("  SKIPPED: %s does not exist (no reports to link)", reports_source_dir)
+        summary["details"].append(("reports/", "[SKIP] no reports dir in CL_DATA_ROOT"))
+
+    # ── 7. Validate critical imports ──────────────────────────────────────
     log.info("\n=== Validating imports ===")
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -283,7 +313,7 @@ def run(*, force: bool = False, copy: bool = False) -> dict:
             summary["fail"] += 1
             summary["details"].append((f"import {module_name}", f"[FAIL] {exc}"))
 
-    # ── 7. Validate data files are loadable ───────────────────────────────
+    # ── 8. Validate data files are loadable ───────────────────────────────
     log.info("\n=== Validating data files ===")
     try:
         import pandas as pd

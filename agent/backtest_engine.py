@@ -1157,9 +1157,10 @@ def load_ohlcv(path: str) -> pd.DataFrame:
     missing = required - set(df.columns)
     if missing:
         # Fall back to loading raw CSV directly
+        from src.data_paths import get_data_path as _gdp
         raw_candidates = [
-            os.path.join(PROJECT_ROOT, "data", "raw", "cl-5m_bk.csv"),
-            os.path.join(PROJECT_ROOT, "data", "raw", "CL.csv"),
+            str(_gdp("raw/cl-5m_bk.csv")),
+            str(_gdp("raw/CL.csv")),
         ]
         loaded = False
         for raw_path in raw_candidates:
@@ -1237,6 +1238,15 @@ def main() -> None:
         "--contract-multiplier", type=float, default=1000.0, help="CL multiplier"
     )
     args = parser.parse_args()
+
+    # Resolve paths via CL_DATA_ROOT fallback
+    from src.data_paths import resolve_cli_path
+    args.predictions = resolve_cli_path(args.predictions)
+    args.data = resolve_cli_path(args.data)
+    if args.live_data:
+        args.live_data = resolve_cli_path(args.live_data)
+    if args.config:
+        args.config = resolve_cli_path(args.config)
 
     # If --config is provided, create engine from strategy JSON
     if args.config is not None:
