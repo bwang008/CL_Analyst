@@ -43,11 +43,14 @@ _SIZING_TIERS: list[tuple[float, int]] = [
 
 # Default paths
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+
+from src.data_paths import get_model_path as _dp_model_path
+
 _DEFAULT_MODEL_PATH = str(
-    _PROJECT_ROOT / "models" / "registry" / "EXP-017_S_Ultimate" / "final_model.pkl"
+    _dp_model_path("registry/EXP-017_S_Ultimate/final_model.pkl")
 )
 _DEFAULT_CONFIG_PATH = str(
-    _PROJECT_ROOT / "models" / "registry" / "EXP-017_S_Ultimate" / "config.json"
+    _dp_model_path("registry/EXP-017_S_Ultimate/config.json")
 )
 
 

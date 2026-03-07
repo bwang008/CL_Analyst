@@ -116,22 +116,15 @@ def get_cl_data(data_file=None):
       - assign columns: ['Date','Time','Open','High','Low','Close','Volume']
     - Creates proper datetime index for time-based operations
 
-    If data_file is None, checks CL_DATA_ROOT env var for shared data,
-    falling back to data/raw/test10k.csv.
+    If data_file is None, resolves via CL_DATA_ROOT (primary) or repo-local
+    (fallback), trying cl-5m_bk.csv first, then test10k.csv.
 
     Returns a pandas DataFrame containing the CSV contents with datetime index.
     """
     if data_file is None:
-        # Try repo-local path first, fall back to CL_DATA_ROOT
-        _local = "data/raw/test10k.csv"
-        _cl_root = os.environ.get("CL_DATA_ROOT", "")
-        if os.path.exists(_local):
-            data_file = _local
-        elif _cl_root:
-            _root = os.path.join(_cl_root, "raw", "cl-5m_bk.csv")
-            data_file = _root if os.path.exists(_root) else _local
-        else:
-            data_file = _local
+        from src.data_paths import get_data_path
+        _primary = get_data_path("raw/test10k.csv")
+        data_file = str(_primary)
     # Try different separators in order of likelihood
     separators = [';', ',', '\t']
     
