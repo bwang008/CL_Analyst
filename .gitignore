@@ -14,6 +14,7 @@
 *.pkl
 *.joblib
 *.png
+*.log
 reports/checkpoints/
 
 # ----- Keep these in git -----
@@ -32,3 +33,4 @@ reports/checkpoints/
 *.db-shm
 *.db-wal
 data/processed/warm_start_cache.parquet
+reports/livetrader_13.log
