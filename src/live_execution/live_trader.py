@@ -64,7 +64,9 @@ from src.live_execution.telemetry import TelemetryDB
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
-_DEFAULT_DB_PATH = str(_PROJECT_ROOT / "data" / "live_telemetry.db")
+from src.data_paths import get_data_path as _dp_data_path, get_data_root as _dp_data_root
+
+_DEFAULT_DB_PATH = str(_dp_data_path("live_telemetry.db"))
 
 # AlphaFactory windows used during training (set_05/set_06)
 _ALPHA_WINDOWS = [864, 2016, 4032, 10080]  # 3d, 7d, 14d, 35d in 5-min bars
@@ -90,18 +92,10 @@ _RECONNECT_BASE_DELAY = 5.0      # Initial delay before reconnect attempt (secon
 _RECONNECT_MAX_DELAY = 300.0     # Max backoff delay (5 minutes)
 _RECONNECT_MAX_ATTEMPTS = 50     # Max retry attempts (~2+ hours of retries)
 
-# Default paths for DataManager
-# Shared data root (set CL_DATA_ROOT env var to share raw data across worktrees)
-_CL_DATA_ROOT = os.environ.get("CL_DATA_ROOT", "")
-# Repo-local first, CL_DATA_ROOT fallback
-_LOCAL_SEED = _PROJECT_ROOT / "data" / "raw" / "cl-5m_bk.csv"
-_ROOT_SEED = Path(_CL_DATA_ROOT) / "raw" / "cl-5m_bk.csv" if _CL_DATA_ROOT else None
-_DEFAULT_SEED_PATH = str(
-    _LOCAL_SEED if _LOCAL_SEED.exists()
-    else (_ROOT_SEED if _ROOT_SEED and _ROOT_SEED.exists() else _LOCAL_SEED)
-)
+# Default paths for DataManager (CL_DATA_ROOT primary, repo-local fallback)
+_DEFAULT_SEED_PATH = str(_dp_data_path("raw/cl-5m_bk.csv"))
 _DEFAULT_CACHE_PATH = str(
-    _PROJECT_ROOT / "data" / "processed" / "warm_start_cache.parquet"
+    _dp_data_root() / "processed" / "warm_start_cache.parquet"
 )
 
 # ---------------------------------------------------------------------------
@@ -1610,12 +1604,12 @@ def main() -> None:
         # Only override if user hasn't explicitly set a custom path
         if resolved_db_path == _DEFAULT_DB_PATH:
             resolved_db_path = str(
-                _PROJECT_ROOT / "data" / f"live_telemetry{cid_suffix}.db"
+                _dp_data_root() / f"live_telemetry{cid_suffix}.db"
             )
 
         if resolved_cache_path == _DEFAULT_CACHE_PATH:
             resolved_cache_path = str(
-                _PROJECT_ROOT / "data" / "processed"
+                _dp_data_root() / "processed"
                 / f"warm_start_cache{cid_suffix}.parquet"
             )
 

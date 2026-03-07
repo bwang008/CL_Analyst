@@ -40,6 +40,8 @@ log = logging.getLogger("LiveTrader")
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
+from src.data_paths import get_model_path as _dp_model_path
+
 
 def _sigmoid(x: float) -> float:
     """Apply sigmoid to convert logit to probability."""
@@ -181,7 +183,7 @@ class ConfigurableStrategy(Strategy):
 
     def _load_model(self, experiment_id: str, label: str) -> LGBMLearner:
         """Load a LGBMLearner from the model registry."""
-        model_dir = _PROJECT_ROOT / "models" / "registry" / experiment_id
+        model_dir = _dp_model_path(f"registry/{experiment_id}")
         model_path = model_dir / "final_model.pkl"
         if not model_path.exists():
             raise FileNotFoundError(

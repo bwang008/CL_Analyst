@@ -47,23 +47,16 @@ log = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
-# Shared data root (set CL_DATA_ROOT env var to share raw data across worktrees)
-_CL_DATA_ROOT = os.environ.get("CL_DATA_ROOT", "")
-# Repo-local first, CL_DATA_ROOT fallback
-_LOCAL_SEED = _PROJECT_ROOT / "data" / "raw" / "cl-5m_bk.csv"
-_ROOT_SEED = Path(_CL_DATA_ROOT) / "raw" / "cl-5m_bk.csv" if _CL_DATA_ROOT else None
-_DEFAULT_SEED_PATH = str(
-    _LOCAL_SEED if _LOCAL_SEED.exists()
-    else (_ROOT_SEED if _ROOT_SEED and _ROOT_SEED.exists() else _LOCAL_SEED)
-)
-_DEFAULT_CACHE_PATH = str(
-    _PROJECT_ROOT / "data" / "processed" / "warm_start_cache.parquet"
-)
+# Resolve data paths via centralized helper (CL_DATA_ROOT primary, repo-local fallback)
+from src.data_paths import get_data_path, get_data_root, mirror_file as _dp_mirror
+
+_DEFAULT_SEED_PATH = str(get_data_path("raw/cl-5m_bk.csv"))
+_DEFAULT_CACHE_PATH = str(get_data_root() / "processed" / "warm_start_cache.parquet")
 _DEFAULT_MASTER_LEDGER_PATH = str(
-    _PROJECT_ROOT / "data" / "processed" / "cl_continuous_master.parquet"
+    get_data_root() / "processed" / "cl_continuous_master.parquet"
 )
 _ROLL_METADATA_PATH = str(
-    _PROJECT_ROOT / "data" / "processed" / ".roll_metadata.json"
+    get_data_root() / "processed" / ".roll_metadata.json"
 )
 
 # How many days of seed data to load into the initial cache.
@@ -86,16 +79,10 @@ _ROLL_PRICE_TOLERANCE = 0.01
 
 
 def _mirror_to_root(src_path: Path, project_root: Path) -> None:
-    """Copy a file to CL_DATA_ROOT preserving the data/ subdirectory structure."""
-    _cl_root = os.environ.get("CL_DATA_ROOT", "")
-    if not _cl_root:
-        return
+    """Copy a file to the other data location (shared ↔ repo-local)."""
     try:
-        rel = src_path.relative_to(project_root / "data")
-        dest = Path(_cl_root) / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(src_path), str(dest))
-        log.info("Mirrored %s → %s", src_path.name, dest)
+        _dp_mirror(src_path)
+        log.info("Mirrored %s", src_path.name)
     except (ValueError, OSError) as exc:
         log.warning("Could not mirror to root: %s", exc)
 

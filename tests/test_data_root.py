@@ -2,9 +2,10 @@
 Tests for CL_DATA_ROOT shared data root behavior.
 
 Covers:
-1. Reversed fallback order (repo-local first, CL_DATA_ROOT second)
+1. Priority order: CL_DATA_ROOT first, repo-local second
 2. Dual-write mirroring in DataProcessor.save()
 3. Dual-write mirroring in DataManager._mirror_to_root()
+4. Centralized data_paths helper functions
 """
 
 import os
@@ -28,10 +29,12 @@ def fake_data_layout(tmp_path):
     repo_raw = repo_data / "raw"
     repo_processed = repo_data / "processed"
     root_dir = tmp_path / "root"
-    root_raw = root_dir / "raw"
-    root_processed = root_dir / "processed"
+    root_data = root_dir / "data"
+    root_raw = root_data / "raw"
+    root_processed = root_data / "processed"
+    root_models = root_dir / "models"
 
-    for d in [repo_raw, repo_processed, root_raw, root_processed]:
+    for d in [repo_raw, repo_processed, root_raw, root_processed, root_models]:
         d.mkdir(parents=True)
 
     return {
@@ -39,8 +42,10 @@ def fake_data_layout(tmp_path):
         "repo_raw": repo_raw,
         "repo_processed": repo_processed,
         "root_dir": root_dir,
+        "root_data": root_data,
         "root_raw": root_raw,
         "root_processed": root_processed,
+        "root_models": root_models,
     }
 
 
@@ -57,68 +62,128 @@ def sample_df():
 
 
 # =============================================================================
-# FALLBACK ORDER TESTS
+# FALLBACK ORDER TESTS  (CL_DATA_ROOT first, repo-local second)
 # =============================================================================
 
 
 class TestFallbackOrder:
-    """Test that data resolution tries repo-local first, then CL_DATA_ROOT."""
+    """Test that data resolution tries CL_DATA_ROOT first, then repo-local."""
 
-    def test_local_file_preferred_over_root(self, fake_data_layout, monkeypatch):
-        """When local file exists, it is used even if root also has the file."""
+    def test_root_preferred_over_local(self, fake_data_layout, monkeypatch):
+        """When CL_DATA_ROOT file exists, it is used even if local also has the file."""
         local_csv = fake_data_layout["repo_raw"] / "cl-5m_bk.csv"
         root_csv = fake_data_layout["root_raw"] / "cl-5m_bk.csv"
         local_csv.write_text("local")
         root_csv.write_text("root")
 
-        # The logic: check local first → found → use it
+        # The logic: check CL_DATA_ROOT first → found → use it
         local_path = str(local_csv)
         root_path = str(root_csv)
 
         assert os.path.exists(local_path)
         assert os.path.exists(root_path)
-        # Local should be preferred
-        if os.path.exists(local_path):
-            chosen = local_path
-        elif os.path.exists(root_path):
+        # Root (CL_DATA_ROOT) should be preferred
+        if os.path.exists(root_path):
             chosen = root_path
-        else:
-            chosen = None
-
-        assert chosen == local_path
-
-    def test_root_used_when_local_missing(self, fake_data_layout, monkeypatch):
-        """When local file is missing, CL_DATA_ROOT is used as fallback."""
-        root_csv = fake_data_layout["root_raw"] / "cl-5m_bk.csv"
-        root_csv.write_text("root")
-        local_path = str(fake_data_layout["repo_raw"] / "cl-5m_bk.csv")
-
-        assert not os.path.exists(local_path)
-        assert os.path.exists(str(root_csv))
-
-        if os.path.exists(local_path):
+        elif os.path.exists(local_path):
             chosen = local_path
-        elif os.path.exists(str(root_csv)):
-            chosen = str(root_csv)
         else:
             chosen = None
 
-        assert chosen == str(root_csv)
+        assert chosen == root_path
+
+    def test_local_used_when_root_missing(self, fake_data_layout, monkeypatch):
+        """When CL_DATA_ROOT file is missing, repo-local is used as fallback."""
+        local_csv = fake_data_layout["repo_raw"] / "cl-5m_bk.csv"
+        local_csv.write_text("local")
+        root_path = str(fake_data_layout["root_raw"] / "cl-5m_bk.csv")
+
+        assert not os.path.exists(root_path)
+        assert os.path.exists(str(local_csv))
+
+        if os.path.exists(root_path):
+            chosen = root_path
+        elif os.path.exists(str(local_csv)):
+            chosen = str(local_csv)
+        else:
+            chosen = None
+
+        assert chosen == str(local_csv)
 
     def test_fallback_returns_default_when_neither_exists(self, tmp_path):
-        """When neither local nor root file exists, falls back to default."""
+        """When neither CL_DATA_ROOT nor local file exists, falls back to default."""
         local = str(tmp_path / "nonexistent_local.csv")
         root = str(tmp_path / "nonexistent_root.csv")
         default = "data/raw/test100k.csv"
 
-        if os.path.exists(local):
-            chosen = local
-        elif os.path.exists(root):
+        if os.path.exists(root):
             chosen = root
+        elif os.path.exists(local):
+            chosen = local
         else:
             chosen = default
 
         assert chosen == default
+
+
+# =============================================================================
+# DATA_PATHS MODULE TESTS
+# =============================================================================
+
+
+class TestDataPaths:
+    """Test the centralized data_paths helper functions."""
+
+    def test_get_data_path_prefers_cl_data_root(self, fake_data_layout, monkeypatch):
+        """get_data_path should return CL_DATA_ROOT path when file exists there."""
+        import src.data_paths as dp
+
+        monkeypatch.setattr(dp, "_CL_DATA_ROOT", str(fake_data_layout["root_dir"]))
+        monkeypatch.setattr(dp, "PROJECT_ROOT", fake_data_layout["repo_data"].parent)
+
+        # Create the file in both locations
+        (fake_data_layout["root_raw"] / "seed.csv").write_text("root")
+        (fake_data_layout["repo_raw"] / "seed.csv").write_text("local")
+
+        result = dp.get_data_path("raw/seed.csv")
+        assert str(result) == str(fake_data_layout["root_raw"] / "seed.csv")
+
+    def test_get_data_path_falls_back_to_local(self, fake_data_layout, monkeypatch):
+        """get_data_path should fall back to repo-local when CL_DATA_ROOT file missing."""
+        import src.data_paths as dp
+
+        monkeypatch.setattr(dp, "_CL_DATA_ROOT", str(fake_data_layout["root_dir"]))
+        monkeypatch.setattr(dp, "PROJECT_ROOT", fake_data_layout["repo_data"].parent)
+
+        # Only create locally
+        (fake_data_layout["repo_raw"] / "seed.csv").write_text("local")
+
+        result = dp.get_data_path("raw/seed.csv")
+        assert str(result) == str(fake_data_layout["repo_raw"] / "seed.csv")
+
+    def test_get_model_path_prefers_cl_data_root(self, fake_data_layout, monkeypatch):
+        """get_model_path should return CL_DATA_ROOT path when file exists there."""
+        import src.data_paths as dp
+
+        monkeypatch.setattr(dp, "_CL_DATA_ROOT", str(fake_data_layout["root_dir"]))
+        monkeypatch.setattr(dp, "PROJECT_ROOT", fake_data_layout["repo_data"].parent)
+
+        model_dir = fake_data_layout["root_models"] / "registry" / "EXP-001"
+        model_dir.mkdir(parents=True)
+        (model_dir / "model.pkl").write_text("model")
+
+        result = dp.get_model_path("registry/EXP-001/model.pkl")
+        assert str(result) == str(model_dir / "model.pkl")
+
+    def test_get_data_root_prefers_cl_data_root(self, fake_data_layout, monkeypatch):
+        """get_data_root should return CL_DATA_ROOT/data when it exists."""
+        import src.data_paths as dp
+
+        monkeypatch.setattr(dp, "_CL_DATA_ROOT", str(fake_data_layout["root_dir"]))
+        monkeypatch.setattr(dp, "PROJECT_ROOT", fake_data_layout["repo_data"].parent)
+
+        result = dp.get_data_root()
+        assert str(result) == str(fake_data_layout["root_data"])
 
 
 # =============================================================================
@@ -132,10 +197,13 @@ class TestMirrorToRoot:
     def test_dataprocessor_mirror_copies_file(
         self, fake_data_layout, sample_df, monkeypatch
     ):
-        """DataProcessor._mirror_to_root copies output to CL_DATA_ROOT."""
+        """DataProcessor._mirror_to_root copies output to the other location."""
+        import src.data_paths as dp
         from src.data_processor import DataProcessor
 
         monkeypatch.setenv("CL_DATA_ROOT", str(fake_data_layout["root_dir"]))
+        monkeypatch.setattr(dp, "_CL_DATA_ROOT", str(fake_data_layout["root_dir"]))
+        monkeypatch.setattr(dp, "PROJECT_ROOT", fake_data_layout["repo_data"].parent)
 
         # Create a processor and manually set output path within data/
         output_path = str(
@@ -190,10 +258,13 @@ class TestMirrorToRoot:
     def test_data_manager_mirror_copies_file(
         self, fake_data_layout, monkeypatch
     ):
-        """data_manager._mirror_to_root copies file to CL_DATA_ROOT."""
+        """data_manager._mirror_to_root copies file to the other location."""
+        import src.data_paths as dp
         from src.live_execution.data_manager import _mirror_to_root
 
         monkeypatch.setenv("CL_DATA_ROOT", str(fake_data_layout["root_dir"]))
+        monkeypatch.setattr(dp, "_CL_DATA_ROOT", str(fake_data_layout["root_dir"]))
+        monkeypatch.setattr(dp, "PROJECT_ROOT", fake_data_layout["repo_data"].parent)
 
         # Create a source file in repo's data/processed/
         src_file = fake_data_layout["repo_processed"] / "cache.parquet"

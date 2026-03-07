@@ -26,9 +26,7 @@ from typing import Optional
 from pathlib import Path
 from datetime import datetime
 
-from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-
+from src.data_paths import get_data_path, get_data_root, mirror_file
 from src.features.alpha_factory import AlphaFactory
 
 
@@ -77,16 +75,12 @@ class DataProcessor:
             keep_ohlcv: If True, retain Open/High/Low/Close/Volume/DateTime columns.
         """
         if input_path is None:
-            # Try repo-local path first, fall back to CL_DATA_ROOT
-            _local = Path("data/raw/cl-5m_bk.csv")
-            _cl_root = os.environ.get("CL_DATA_ROOT", "")
-            _root = Path(_cl_root) / "raw" / "cl-5m_bk.csv" if _cl_root else None
-            if _local.exists():
-                input_path = str(_local)
-            elif _root and _root.exists():
-                input_path = str(_root)
+            # Resolve from CL_DATA_ROOT first, repo-local fallback
+            resolved = get_data_path("raw/cl-5m_bk.csv")
+            if resolved.exists():
+                input_path = str(resolved)
             else:
-                input_path = "data/raw/test100k.csv"
+                input_path = str(get_data_path("raw/test100k.csv"))
         self.input_path = input_path
         self._dataset_version = dataset_version
         self.keep_ohlcv = keep_ohlcv
@@ -109,7 +103,7 @@ class DataProcessor:
     def _update_output_path(self):
         # Auto-generate output path based on input filename and dataset version
         input_name = Path(self.input_path).stem
-        self.output_path = f"data/processed/{input_name}_{self._dataset_version}.parquet"
+        self.output_path = str(get_data_root() / "processed" / f"{input_name}_{self._dataset_version}.parquet")
             
         self.df = None
         
@@ -674,16 +668,10 @@ class DataProcessor:
         return saved_path
 
     def _mirror_to_root(self, saved_path: str) -> None:
-        """Copy the saved file to CL_DATA_ROOT if configured."""
-        _cl_root = os.environ.get("CL_DATA_ROOT", "")
-        if not _cl_root:
-            return
+        """Mirror the saved file to the other data location."""
         try:
-            rel = os.path.relpath(saved_path, "data")
-            dest = os.path.join(_cl_root, rel)
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            shutil.copy2(saved_path, dest)
-            print(f"  ↳ Mirrored to {dest}")
+            mirror_file(Path(saved_path))
+            print(f"  ↳ Mirrored {Path(saved_path).name}")
         except (ValueError, OSError) as exc:
             print(f"  ↳ Mirror failed: {exc}")
     

@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Optional
 
 
-_DEFAULT_DB_PATH = "data/live_telemetry.db"
+from src.data_paths import get_data_path as _get_data_path
+
+_DEFAULT_DB_PATH = str(_get_data_path("live_telemetry.db"))
 
 _CREATE_MARKET_BARS = """
 CREATE TABLE IF NOT EXISTS market_bars (
