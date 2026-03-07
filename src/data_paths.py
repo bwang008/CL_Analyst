@@ -97,6 +97,65 @@ def get_model_path(relative: str) -> Path:
     return local
 
 
+def get_reports_root() -> Path:
+    """Return the primary reports root directory.
+
+    Prefers ``CL_DATA_ROOT/reports`` when CL_DATA_ROOT is set **and** the
+    directory exists, otherwise falls back to ``PROJECT_ROOT/reports``.
+    """
+    if _CL_DATA_ROOT:
+        candidate = Path(_CL_DATA_ROOT) / "reports"
+        if candidate.is_dir():
+            return candidate
+    return PROJECT_ROOT / "reports"
+
+
+def resolve_cli_path(path_str: str) -> str:
+    """Resolve a CLI-provided path using CL_DATA_ROOT fallback.
+
+    Designed to be called on argparse values *after* parsing.  Logic:
+
+    1. If *path_str* already points to an existing file/dir, return as-is.
+    2. If it starts with ``data/`` or ``data\\``, delegate to
+       :func:`get_data_path`.
+    3. If it starts with ``models/`` or ``models\\``, delegate to
+       :func:`get_model_path`.
+    4. If it starts with ``reports/`` or ``reports\\``, try
+       ``CL_DATA_ROOT/reports/…`` then ``PROJECT_ROOT/reports/…``.
+    5. Otherwise return the original string unchanged.
+    """
+    p = Path(path_str)
+    if p.exists():
+        return path_str
+
+    # Normalise to forward-slash for prefix checks
+    norm = path_str.replace("\\", "/")
+
+    if norm.startswith("data/"):
+        relative = norm[len("data/"):]
+        return str(get_data_path(relative))
+
+    if norm.startswith("models/"):
+        relative = norm[len("models/"):]
+        return str(get_model_path(relative))
+
+    if norm.startswith("reports/"):
+        relative = norm[len("reports/"):]
+        if _CL_DATA_ROOT:
+            candidate = Path(_CL_DATA_ROOT) / "reports" / relative
+            if candidate.exists():
+                return str(candidate)
+        local = PROJECT_ROOT / "reports" / relative
+        if local.exists():
+            return str(local)
+        # Neither exists — prefer shared root when configured
+        if _CL_DATA_ROOT:
+            return str(Path(_CL_DATA_ROOT) / "reports" / relative)
+        return str(local)
+
+    return path_str
+
+
 # ---------------------------------------------------------------------------
 # Mirror helper
 # ---------------------------------------------------------------------------

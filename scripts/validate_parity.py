@@ -51,7 +51,8 @@ def _sigmoid(x: float) -> float:
 
 def find_default_model_dir() -> Path | None:
     """Auto-detect the first model in the registry."""
-    registry = PROJECT_ROOT / "models" / "registry"
+    from src.data_paths import get_models_root
+    registry = get_models_root() / "registry"
     if not registry.exists():
         return None
     for d in sorted(registry.iterdir()):
@@ -624,9 +625,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--file",
-        default=str(
-            PROJECT_ROOT / "data" / "processed" / "live_shadow_log.parquet"
-        ),
+        default=None,
         help="Path to the shadow log Parquet file",
     )
     parser.add_argument(
@@ -646,6 +645,16 @@ def main() -> None:
         help="Filter shadow log to a specific strategy_name (e.g. 'ManateeKoala_Conservative')",
     )
     args = parser.parse_args()
+
+    # Resolve paths via CL_DATA_ROOT fallback
+    from src.data_paths import resolve_cli_path, get_data_path
+    if args.file is None:
+        args.file = str(get_data_path("processed/live_shadow_log.parquet"))
+    else:
+        args.file = resolve_cli_path(args.file)
+    if args.model_dir:
+        args.model_dir = resolve_cli_path(args.model_dir)
+
     run_validation(args.file, args.model_dir, args.tolerance, args.strategy)
 
 

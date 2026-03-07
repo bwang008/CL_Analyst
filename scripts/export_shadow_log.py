@@ -98,14 +98,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--db-path",
-        default=str(PROJECT_ROOT / "data" / "live_telemetry.db"),
+        default=None,
         help="Path to the telemetry SQLite database",
     )
     parser.add_argument(
         "--output",
-        default=str(
-            PROJECT_ROOT / "data" / "processed" / "live_shadow_log.parquet"
-        ),
+        default=None,
         help="Output Parquet file path",
     )
     parser.add_argument(
@@ -114,6 +112,14 @@ def main() -> None:
         help="Filter to a specific strategy_name",
     )
     args = parser.parse_args()
+
+    # Resolve paths via CL_DATA_ROOT fallback
+    from src.data_paths import get_data_path as _gdp
+    if args.db_path is None:
+        args.db_path = str(_gdp("live_telemetry.db"))
+    if args.output is None:
+        args.output = str(_gdp("processed/live_shadow_log.parquet"))
+
     export_shadow_log(args.db_path, args.output, args.strategy)
 
 
