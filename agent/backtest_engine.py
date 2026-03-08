@@ -17,8 +17,26 @@ Usage:
     python agent/backtest_engine.py --config configs/strategies/manatee.json --predictions reports/exp017_long_predictions.csv --data data/processed/CL_set_06.parquet
     python agent/backtest_engine.py --config configs/strategies/manatee.json --predictions ... --live-data data/live_session_feed.parquet
 
+Telemetry DBs (for comparing backtest vs live):
+    live_telemetry.db        - Manatee (client_id default), Feb 25 - Mar 2 2026
+    live_telemetry_cid10.db  - Manatee (client_id 10), Mar 3 - Mar 5 2026
+    live_telemetry_cid13.db  - ManateeKoala_Conservative ensemble (client_id 13), Mar 2 - Mar 6 2026
+    Tables: market_bars, trade_ledger, raw_front_month_bars, shadow_log (features_json + prob_buy/prob_sell), tradebook_events
+
+Known Parity Gap (2026-03-08 analysis):
+    52/80 features diverge >2σ between live system and processed parquet.
+    Worst: LIQ_AMIHUD_10080 (163x), VOL_YZ_4032 (136x), MACRO_WIDTH_3M (63x).
+    Root causes:
+      1. Lookback mismatch: live warm start = 60 days, parquet = 15+ years of history
+         → long-window indicators (10080 bars = 35 days) are most affected
+      2. OHLCV source: live uses IBKR continuous contract, parquet uses cl-5m_bk.csv
+      3. Normalization: parquet normalizes globally; live computes features on-the-fly
+    Impact: Buy model prob_buy maxes at 0.45 live (never fires at 0.6 threshold),
+            but backtest shows 68% WR on the same model. Sell model IS firing live.
+
 Author: CL Analyst
 """
+
 
 from __future__ import annotations
 

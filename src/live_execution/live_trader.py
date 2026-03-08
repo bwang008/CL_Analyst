@@ -71,8 +71,11 @@ _DEFAULT_DB_PATH = str(_dp_data_path("live_telemetry.db"))
 # AlphaFactory windows used during training (set_05/set_06)
 _ALPHA_WINDOWS = [864, 2016, 4032, 10080]  # 3d, 7d, 14d, 35d in 5-min bars
 
-# Rolling window size — must be >= largest alpha window + safety margin
-_MAX_ROLLING_BARS = 11_000
+# Rolling window size — must be >= largest seed lookback (150 days × 288 bars/day)
+# plus margin for IBKR backfill and live bars.
+# Parity note (2026-03-08): 52/80 features diverged >2σ when window was too small.
+# Features with long lookbacks (MACRO_3M, VOL_ROC_10080) need the full history.
+_MAX_ROLLING_BARS = 44_000
 
 # Trade parameters (engine-level safety rails)
 _DEFAULT_QUANTITY = 1  # 1 CL contract (base lot)
