@@ -16,6 +16,7 @@
     },
     "live_config": {
         "experiment_id": "EXP-020_S_Ultimate_Short",
-        "client_id": 11
+        "client_id": 11,
+        "exit_mode": "marketable_limit"
     }
 }

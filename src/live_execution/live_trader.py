@@ -294,6 +294,7 @@ class LiveTrader:
         dry_run: bool = False,
         entry_mode: str = "adaptive",
         adaptive_priority: str = "Normal",
+        exit_mode: str = "market",
     ) -> None:
         self.host = host
         self.port = port
@@ -302,6 +303,7 @@ class LiveTrader:
         self.dry_run = dry_run
         self.entry_mode = entry_mode
         self.adaptive_priority = adaptive_priority
+        self.exit_mode = exit_mode
 
         # Strategy (owns model, config, threshold, sizing, bracket math)
         self.strategy = strategy
@@ -318,12 +320,14 @@ class LiveTrader:
             strategy_config.get("cooldown_bars", 0)
         )
         self._cooldown_remaining: int = 0
+        # Exit mode for time-barrier exits (separate from entry_mode)
+        self._exit_mode: str = exit_mode
         log.info("Strategy: %s  direction=%s", strategy.name, strategy.direction)
         log.info(
             "Entry mode: %s  adaptive_priority=%s  max_hold_bars=%d  "
-            "cooldown_bars=%d",
+            "cooldown_bars=%d  exit_mode=%s",
             entry_mode, adaptive_priority, self._max_hold_bars,
-            self._cooldown_bars,
+            self._cooldown_bars, self._exit_mode,
         )
 
         # Telemetry
@@ -555,7 +559,10 @@ class LiveTrader:
             return False
 
         cancelled = self.manager.cancel_open_cl_orders()
-        trade = self.manager.close_cl_position_market()
+        trade = self.manager.close_cl_position(
+            exit_mode=self._exit_mode,
+            current_price=current_price,
+        )
         log.info(
             "[TRADE] EXIT: TIME BARRIER after %d bars "
             "(cancelled=%d orders, position=%d, price=%.2f)",
@@ -1569,6 +1576,7 @@ def main() -> None:
     config_client_id: int | None = None
     config_entry_mode: str | None = None
     config_adaptive_priority: str | None = None
+    config_exit_mode: str | None = None
     if args.config is not None:
         strategy = ConfigurableStrategy(
             config_path=args.config,
@@ -1579,6 +1587,7 @@ def main() -> None:
         config_client_id = live_cfg.get("client_id")
         config_entry_mode = live_cfg.get("entry_mode")
         config_adaptive_priority = live_cfg.get("adaptive_priority")
+        config_exit_mode = live_cfg.get("exit_mode")
     else:
         strategy_key = args.strategy.upper()
         if strategy_key not in _STRATEGY_REGISTRY:
@@ -1646,6 +1655,9 @@ def main() -> None:
     if resolved_adaptive_priority is None:
         resolved_adaptive_priority = config_adaptive_priority or "Normal"
 
+    # ── Resolve exit_mode: config > default ────────────────────────
+    resolved_exit_mode = config_exit_mode or "market"
+
     trader = LiveTrader(
         host=args.host,
         port=args.port,
@@ -1658,6 +1670,7 @@ def main() -> None:
         dry_run=args.dry_run,
         entry_mode=resolved_entry_mode,
         adaptive_priority=resolved_adaptive_priority,
+        exit_mode=resolved_exit_mode,
     )
     # Enable persistent file logging now that client_id is resolved
     _setup_file_logging(resolved_client_id)

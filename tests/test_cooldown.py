@@ -83,6 +83,8 @@ def _make_trader_stub(cooldown_bars: int = 10) -> lt_module.LiveTrader:
     # Dry-run mode (don't place real orders)
     trader.dry_run = True
     trader.entry_mode = "market"
+    trader.exit_mode = "marketable_limit"
+    trader._exit_mode = "marketable_limit"
     trader.adaptive_priority = "Normal"
 
     # Execution callback state
@@ -306,6 +308,68 @@ class TestCooldownActivation:
 
         trader._on_order_status(mock_trade)
         assert trader._cooldown_remaining == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: Time-barrier exit mode
+# ---------------------------------------------------------------------------
+
+
+class TestTimeBarrierExitMode:
+    """Verify _check_time_barrier uses exit_mode from config."""
+
+    def test_time_barrier_calls_close_with_exit_mode(self):
+        """Time barrier uses close_cl_position(exit_mode=...) not close_cl_position_market()."""
+        trader = _make_trader_stub(cooldown_bars=0)
+        trader._exit_mode = "marketable_limit"
+
+        # Simulate a position that has exceeded max_hold_bars
+        trader._max_hold_bars = 5
+        trader._position_entry_bar_time = pd.Timestamp("2026-03-02 17:00:00")
+        trader._position_bars_held = 6  # > max_hold_bars
+
+        # Position is open
+        trader.manager.get_cl_position.return_value = 1
+        trader.manager.cancel_open_cl_orders.return_value = 0
+        trader.manager.close_cl_position.return_value = MagicMock()
+
+        result = trader._check_time_barrier(
+            bar_time=pd.Timestamp("2026-03-02 18:00:00"),
+            current_price=72.50,
+            atr_value=0.5,
+        )
+
+        assert result is True
+        # Verify it called close_cl_position with exit_mode, NOT close_cl_position_market
+        trader.manager.close_cl_position.assert_called_once_with(
+            exit_mode="marketable_limit",
+            current_price=72.50,
+        )
+        trader.manager.close_cl_position_market.assert_not_called()
+
+    def test_time_barrier_default_market_mode(self):
+        """Default exit_mode='market' is passed to close_cl_position."""
+        trader = _make_trader_stub(cooldown_bars=0)
+        trader._exit_mode = "market"
+
+        trader._max_hold_bars = 5
+        trader._position_entry_bar_time = pd.Timestamp("2026-03-02 17:00:00")
+        trader._position_bars_held = 6
+
+        trader.manager.get_cl_position.return_value = 1
+        trader.manager.cancel_open_cl_orders.return_value = 0
+        trader.manager.close_cl_position.return_value = MagicMock()
+
+        trader._check_time_barrier(
+            bar_time=pd.Timestamp("2026-03-02 18:00:00"),
+            current_price=72.50,
+            atr_value=0.5,
+        )
+
+        trader.manager.close_cl_position.assert_called_once_with(
+            exit_mode="market",
+            current_price=72.50,
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -309,3 +309,93 @@ class TestEntryModeBackwardCompat:
                 sl_price=64.50,
                 entry_mode="invalid_mode",
             )
+
+
+class TestClosePositionModes:
+    """Verify close_cl_position() order modes."""
+
+    @pytest.fixture
+    def close_manager(self):
+        """IBKRConnectionManager with a mock position to close."""
+        with patch("src.live_execution.ibkr_client.IB") as MockIB:
+            mgr = IBKRConnectionManager(host="127.0.0.1", port=4002, client_id=99)
+            mgr.ib = MockIB.return_value
+            mgr.ib.isConnected.return_value = True
+
+            # Mock a LONG position (2 contracts)
+            pos = MagicMock()
+            pos.contract.symbol = "CL"
+            pos.position = 2
+            mgr.ib.positions.return_value = [pos]
+
+            # Capture the order placed
+            mgr.ib.placeOrder.side_effect = lambda c, o: MagicMock(order=o)
+
+            yield mgr, pos
+
+    def test_close_market_default(self, close_manager):
+        """Default exit_mode='market' produces a MarketOrder."""
+        mgr, _ = close_manager
+        trade = mgr.close_cl_position()
+        order = mgr.ib.placeOrder.call_args[0][1]
+        assert order.orderType == "MKT"
+        assert order.tif == "GTC"
+        assert order.outsideRth is True
+
+    def test_close_marketable_limit_sell(self, close_manager):
+        """Closing a LONG position: SELL exit priced 2 ticks below current."""
+        mgr, _ = close_manager
+        trade = mgr.close_cl_position(
+            exit_mode="marketable_limit", current_price=72.50,
+        )
+        order = mgr.ib.placeOrder.call_args[0][1]
+        assert order.orderType == "LMT"
+        assert order.lmtPrice == 72.48  # 72.50 - 0.02
+        assert order.action == "SELL"
+        assert order.tif == "GTC"
+        assert order.outsideRth is True
+
+    def test_close_marketable_limit_buy(self, close_manager):
+        """Closing a SHORT position: BUY exit priced 2 ticks above current."""
+        mgr, pos = close_manager
+        pos.position = -2  # SHORT
+        trade = mgr.close_cl_position(
+            exit_mode="marketable_limit", current_price=72.50,
+        )
+        order = mgr.ib.placeOrder.call_args[0][1]
+        assert order.orderType == "LMT"
+        assert order.lmtPrice == 72.52  # 72.50 + 0.02
+        assert order.action == "BUY"
+
+    def test_close_marketable_limit_fallback_no_price(self, close_manager):
+        """Marketable limit without current_price falls back to market."""
+        mgr, _ = close_manager
+        trade = mgr.close_cl_position(
+            exit_mode="marketable_limit", current_price=None,
+        )
+        order = mgr.ib.placeOrder.call_args[0][1]
+        assert order.orderType == "MKT"
+
+    def test_close_adaptive(self, close_manager):
+        """Adaptive exit sets algoStrategy on the order."""
+        mgr, _ = close_manager
+        trade = mgr.close_cl_position(
+            exit_mode="adaptive", current_price=72.50,
+        )
+        order = mgr.ib.placeOrder.call_args[0][1]
+        assert order.orderType == "LMT"
+        assert order.lmtPrice == 72.50
+        assert order.algoStrategy == "Adaptive"
+        assert order.algoParams[0].tag == "adaptivePriority"
+        assert order.algoParams[0].value == "Urgent"
+
+    def test_close_no_position(self, close_manager):
+        """No position returns None without placing any order."""
+        mgr, pos = close_manager
+        pos.position = 0
+        result = mgr.close_cl_position(
+            exit_mode="marketable_limit", current_price=72.50,
+        )
+        assert result is None
+        mgr.ib.placeOrder.assert_not_called()
+

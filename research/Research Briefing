@@ -119,7 +119,7 @@ The project has iterated through several target types. The current champion uses
 | Experiment Runner | `agent/experiment_runner.py` | Orchestrates end-to-end experiment: config → dataset → train → metrics → log |
 | Experiment Log | `agent/experiment_log.json` | Structured JSON log of all 20+ experiments with metrics, configs, verdicts |
 | Strategy Queue | `agent/strategy_queue.json` | Ordered queue of experiment strategies with status tracking |
-| Optuna Search | `agent/optuna_search.py` | Hyperparameter optimization using walk-forward CV |
+| Optuna Search | `agent/optuna_lgbm_search.py` | Hyperparameter optimization using walk-forward CV |
 | Threshold Sweep | `agent/threshold_sweep.py` / `threshold_sweep_binary.py` | Probability threshold optimization for precision-recall tradeoff |
 | Model Registry | `models/registry/` | Archived model bundles with configs, metrics, and artifacts |
 | Model Archiver | `agent/archive_model.py` | CLI tool to archive models with full metadata |
@@ -264,7 +264,7 @@ CL_Analyst/
 │   ├── experiment_log.json           # All experiment results (812 lines)
 │   ├── strategy_queue.json           # Strategy queue with status tracking
 │   ├── backtester.py                 # Friction-aware backtesting (260 lines)
-│   ├── optuna_search.py              # Hyperparameter optimization (317 lines)
+│   ├── optuna_lgbm_search.py          # LightGBM hyperparameter optimization (317 lines)
 │   ├── threshold_sweep.py            # Probability threshold sweep
 │   ├── threshold_sweep_binary.py     # Binary (sigmoid-aware) threshold sweep
 │   ├── archive_model.py              # Model registry archival tool

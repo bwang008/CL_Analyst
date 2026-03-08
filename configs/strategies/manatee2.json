@@ -18,7 +18,8 @@
     },
     "live_config": {
         "experiment_id": "EXP-025_S_Ultimate_OOS",
-        "client_id": 10
+        "client_id": 10,
+        "exit_mode": "marketable_limit"
     },
     "training_info": {
         "experiment_id": "EXP-025",

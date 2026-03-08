@@ -357,6 +357,80 @@ class IBKRConnectionManager:
             return self.ib.placeOrder(pos.contract, order)
         return None
 
+    def close_cl_position(
+        self,
+        symbol: str = "CL",
+        *,
+        exit_mode: str = "market",
+        current_price: float | None = None,
+    ) -> Optional[Trade]:
+        """Close any open CL position using the specified order mode.
+
+        Args:
+            symbol: Contract symbol (default "CL").
+            exit_mode: Order type for the exit — one of:
+                - "market" (default) — plain market order.
+                - "marketable_limit" — limit order priced 2 ticks through
+                  ``current_price`` for bounded slippage.
+                - "adaptive" — IBKR Adaptive Algo limit order.
+            current_price: Current bar close price.  Required for
+                ``marketable_limit`` mode; if None the method falls back
+                to a plain market order.
+
+        Returns:
+            Trade object from IBKR, or None if no position to close.
+        """
+        self.ensure_connected()
+        for pos in self.ib.positions():
+            if pos.contract.symbol != symbol:
+                continue
+            if int(pos.position) == 0:
+                continue
+
+            action = "SELL" if pos.position > 0 else "BUY"
+            qty = abs(int(pos.position))
+
+            if exit_mode == "marketable_limit" and current_price is not None:
+                tick2 = 2 * self._CL_TICK_SIZE  # $0.02
+                if action == "BUY":
+                    lmt_price = round(current_price + tick2, 2)
+                else:
+                    lmt_price = round(current_price - tick2, 2)
+                order = LimitOrder(action, qty, lmt_price)
+                log.info(
+                    "Exit mode: MARKETABLE_LIMIT %s "
+                    "(price=%.2f, limit=%.2f, buffer=%.2f)",
+                    action, current_price, lmt_price, tick2,
+                )
+
+            elif exit_mode == "adaptive" and current_price is not None:
+                order = LimitOrder(action, qty, current_price)
+                order.algoStrategy = "Adaptive"
+                order.algoParams = [
+                    TagValue("adaptivePriority", "Urgent"),
+                ]
+                log.info(
+                    "Exit mode: ADAPTIVE %s (limit=%.2f, priority=Urgent)",
+                    action, current_price,
+                )
+
+            else:
+                # Fallback: plain market order
+                order = MarketOrder(action, qty)
+                if exit_mode != "market" and current_price is None:
+                    log.warning(
+                        "Exit mode '%s' requires current_price — "
+                        "falling back to market order.",
+                        exit_mode,
+                    )
+                else:
+                    log.info("Exit mode: MARKET %s", action)
+
+            order.tif = "GTC"
+            order.outsideRth = True
+            return self.ib.placeOrder(pos.contract, order)
+        return None
+
     def get_account_summary(self, symbol: str = "CL") -> dict:
         """
         Query IBKR for CL-only account summary.

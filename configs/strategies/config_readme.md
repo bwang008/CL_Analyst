@@ -33,6 +33,7 @@ Configs are organized into two sections:
 | `live_config.experiment_id` | ❌ | ✅ Model load | ❌ |
 | `live_config.client_id` | ❌ | ✅ IB Gateway | ❌ |
 | `live_config.entry_mode` | ❌ | ✅ Order type | ❌ |
+| `live_config.exit_mode` | ❌ | ✅ Exit order type | ❌ |
 | `live_config.adaptive_priority` | ❌ | ✅ Algo urgency | ❌ |
 
 ---
@@ -93,6 +94,7 @@ These fields are **only used by the LiveTrader** and are ignored during backtest
 | `experiment_id` | string | — | Model registry folder name (e.g. `"EXP-017_S_Ultimate"`). Used to locate `models/registry/{id}/final_model.pkl` |
 | `client_id` | int | `1` | IB Gateway client ID. Each strategy running concurrently needs a unique value to avoid connection conflicts |
 | `entry_mode` | string | `"adaptive"` | Parent order type for entries: `"adaptive"` (IBKR algo seeks spread improvement), `"marketable_limit"` (limit 2 ticks through NBBO), or `"market"` (bare MKT). Also settable via CLI `--entry-mode`. |
+| `exit_mode` | string | `"market"` | Order type for time-barrier exits: `"market"` (plain MKT), `"marketable_limit"` (limit 2 ticks through current price), or `"adaptive"` (IBKR algo, Urgent priority). |
 | `adaptive_priority` | string | `"Normal"` | Urgency for Adaptive Algo: `"Normal"`, `"Urgent"`, or `"Patient"`. Only used when `entry_mode` is `"adaptive"`. Also settable via CLI `--adaptive-priority`. |
 
 > [!NOTE]

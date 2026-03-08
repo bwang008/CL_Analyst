@@ -127,7 +127,7 @@ Used Optuna to search LightGBM hyperparameters with a constrained search space d
 Default LightGBM params don't constrain model complexity. A shallower, more regularized model may generalize better to unseen data.
 
 ### Implementation
-`agent/optuna_search.py` with 30 trials optimizing Buy F1 on walk-forward cross-validation.
+`agent/optuna_lgbm_search.py` with 30 trials optimizing Buy F1 on walk-forward cross-validation.
 
 **Search space (deliberately constrained)**:
 - `num_leaves`: 15–63 (prevents overly complex trees)
@@ -356,7 +356,7 @@ python agent/experiment_runner.py --experiment S_Ultimate_Short --save
 python agent/threshold_sweep.py
 
 # Optuna search (30 trials)
-python agent/optuna_search.py --n-trials 30
+python agent/optuna_lgbm_search.py --n-trials 30
 
 # Backtester
 python agent/backtester.py --threshold 0.50

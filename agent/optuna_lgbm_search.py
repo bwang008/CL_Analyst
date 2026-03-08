@@ -10,8 +10,8 @@ Constraints (per implementation plan):
 - Objective: average Buy F1 across all WF folds
 
 Usage:
-    python agent/optuna_search.py
-    python agent/optuna_search.py --n-trials 50
+    python agent/optuna_lgbm_search.py
+    python agent/optuna_lgbm_search.py --n-trials 50
 """
 
 import os
