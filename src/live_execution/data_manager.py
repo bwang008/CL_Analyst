@@ -60,7 +60,12 @@ _ROLL_METADATA_PATH = str(
 )
 
 # How many days of seed data to load into the initial cache.
-_SEED_LOOKBACK_DAYS = 60
+# Minimum requirements (from AlphaFactory feature lookback windows):
+#   - MACRO_3M: 2160 hourly bars = 90 days
+#   - VOL_ROC_10080: needs 2×10080 bars = ~70 days
+#   - VOL_VOLVOL_10080: needs rolling(10080) of VOL_PARK(10080) = ~70 days
+# Set to 150 days for ample margin. Cost is negligible (~43K bars from CSV).
+_SEED_LOOKBACK_DAYS = 150
 
 # 5-min bars per day (24-hour period × 12 bars/hour)
 _BARS_PER_DAY = 288
