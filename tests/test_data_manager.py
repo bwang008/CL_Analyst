@@ -21,7 +21,7 @@ from src.live_execution.data_manager import DataManager
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _create_mock_seed_csv(path: Path, n_days: int = 70) -> None:
+def _create_mock_seed_csv(path: Path, n_days: int = 200) -> None:
     """
     Create a mock seed CSV matching the cl-5m_bk.csv format.
 
@@ -91,7 +91,7 @@ def mock_seed(tmp_dirs):
     """Create a mock seed CSV and return its path."""
     seed_dir, _ = tmp_dirs
     seed_path = seed_dir / "cl-5m_bk.csv"
-    _create_mock_seed_csv(seed_path, n_days=70)
+    _create_mock_seed_csv(seed_path, n_days=200)
     return seed_path
 
 
@@ -121,8 +121,8 @@ class TestSeedLoading:
         assert cache_path.exists(), "Cache file should be created"
         assert len(df) > 0, "Should have data from seed"
 
-    def test_seed_loads_last_60_days(self, mock_seed, cache_path):
-        """Seed should only contain last 60 days of data."""
+    def test_seed_loads_last_150_days(self, mock_seed, cache_path):
+        """Seed should only contain last 150 days of data."""
         dm = DataManager(
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
@@ -131,9 +131,9 @@ class TestSeedLoading:
         df = dm.initialize()
 
         date_range = df.index.max() - df.index.min()
-        # Should be roughly 60 days (within margin)
-        assert date_range.days <= 61, f"Range too large: {date_range.days} days"
-        assert date_range.days >= 58, f"Range too small: {date_range.days} days"
+        # Should be roughly 150 days (within margin)
+        assert date_range.days <= 151, f"Range too large: {date_range.days} days"
+        assert date_range.days >= 148, f"Range too small: {date_range.days} days"
 
     def test_seed_has_correct_columns(self, mock_seed, cache_path):
         """Seed DataFrame should have standard OHLCV + DateTime columns."""
