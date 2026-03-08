@@ -1,0 +1,89 @@
+{
+  "experiment_id": "EXP-026",
+  "strategy": "S_Ultimate_Short_OOS",
+  "timestamp": "2026-03-06T22:42:27",
+  "target_name": "TARGET_TRIPLE_2x1_24H_SHORT",
+  "type": "Short",
+  "dataset_path": "data/processed/CL_set_06_shortfix.parquet",
+  "training_threshold": 0.02,
+  "optimized_probability_threshold": null,
+  "selected_trade_threshold": null,
+  "features_summary": "Unknown",
+  "model_params": {
+    "num_leaves": 31,
+    "min_child_samples": 166,
+    "learning_rate": 0.05242702195760322,
+    "feature_fraction": 0.6940065346564026,
+    "bagging_fraction": 0.6483459770074159,
+    "bagging_freq": 1,
+    "reg_alpha": 2.737488884954343,
+    "reg_lambda": 7.378557513409711,
+    "max_depth": 4,
+    "min_gain_to_split": 0.9901794009928347,
+    "n_estimators": 1000,
+    "objective": "binary",
+    "use_focal": true,
+    "metric": "binary_logloss",
+    "class_weight": null
+  },
+  "model_file": {
+    "archived_name": "final_model.pkl",
+    "source_path": "C:\\Users\\bwang\\Documents\\GitHub\\CL_Analyst_Development\\models\\final_model.pkl",
+    "source_modified_utc": "2026-03-08T06:22:16+00:00"
+  },
+  "source_experiment_record": {
+    "id": "EXP-026",
+    "timestamp": "2026-03-06T22:42:27",
+    "strategy": "S_Ultimate_Short_OOS",
+    "hypothesis": "OOS training with cutoff 2022-01-01",
+    "changes": {
+      "target_name": "TARGET_TRIPLE_2x1_24H_SHORT",
+      "data_path": "data/processed/CL_set_06_shortfix.parquet",
+      "method": "walk_forward",
+      "balance_mode": "downsample",
+      "train_cutoff_date": "2022-01-01"
+    },
+    "config": {
+      "data_path": "data/processed/CL_set_06_shortfix.parquet",
+      "target_name": "TARGET_TRIPLE_2x1_24H_SHORT",
+      "threshold": 0.02,
+      "horizon": 576,
+      "method": "walk_forward",
+      "balance_mode": "downsample",
+      "model_params": {
+        "num_leaves": 31,
+        "min_child_samples": 166,
+        "learning_rate": 0.05242702195760322,
+        "feature_fraction": 0.6940065346564026,
+        "bagging_fraction": 0.6483459770074159,
+        "bagging_freq": 1,
+        "reg_alpha": 2.737488884954343,
+        "reg_lambda": 7.378557513409711,
+        "max_depth": 4,
+        "min_gain_to_split": 0.9901794009928347,
+        "n_estimators": 1000,
+        "objective": "binary",
+        "use_focal": true,
+        "metric": "binary_logloss",
+        "class_weight": null
+      },
+      "train_cutoff_date": "2022-01-01"
+    },
+    "metrics": {
+      "vault_accuracy": 0.4013353306227263,
+      "signal_precision_buy": 0.97676643433101,
+      "signal_recall_buy": 0.09291954859847106,
+      "signal_f1_buy": 0.16969596239003717,
+      "signal_precision_sell": 0.0,
+      "signal_recall_sell": 0.0,
+      "signal_f1_sell": 0.0,
+      "hold_precision": 0.36288672973664027,
+      "hold_recall": 0.9957403092034378,
+      "hold_f1": 0.5319207319113622,
+      "n_samples": 116825,
+      "wall_time_seconds": 1397.426376300049
+    },
+    "verdict": "promising",
+    "oos_predictions_path": "reports\\oos_predictions.csv"
+  }
+}

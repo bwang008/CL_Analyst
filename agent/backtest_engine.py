@@ -1010,13 +1010,80 @@ class BacktestEngine:
 # ---------------------------------------------------------------------------
 
 
-def format_report(result: BacktestResult) -> str:
-    """Format a BacktestResult as a structured console report."""
-    w = 60
+def _safe_wr(wins: int, total: int) -> str:
+    """Format win rate, returning '-' if no trades."""
+    if total == 0:
+        return "   -  "
+    return f"{wins / total:>5.1%} "
+
+
+def _safe_pf(trades: list[TradeRecord]) -> float:
+    """Calculate profit factor from a list of trades."""
+    gross_profit = sum(t.net_pnl_dollars for t in trades if t.net_pnl_dollars > 0)
+    gross_loss = abs(sum(t.net_pnl_dollars for t in trades if t.net_pnl_dollars < 0))
+    if gross_loss == 0:
+        return float("inf") if gross_profit > 0 else 0.0
+    return gross_profit / gross_loss
+
+
+def format_report(
+    result: BacktestResult,
+    config: dict | None = None,
+    predictions_path: str | None = None,
+    data_path: str | None = None,
+) -> str:
+    """Format a BacktestResult as a structured console report.
+
+    Args:
+        result: BacktestResult from a backtest run.
+        config: Optional strategy config dict for metadata header.
+        predictions_path: Optional path shown in the header.
+        data_path: Optional data path shown in the header.
+    """
+    w = 90
     lines: list[str] = []
+
+    # ── Header: Model / Strategy Metadata ──
     lines.append("=" * w)
-    title = f"BACKTEST RESULTS: {result.label}" if result.label else "BACKTEST RESULTS"
+    title = f"BACKTEST REPORT: {result.label}" if result.label else "BACKTEST REPORT"
     lines.append(title.center(w))
+    lines.append("=" * w)
+
+    if config:
+        nickname = config.get("nickname", "?")
+        models = config.get("models", {})
+        if models:
+            long_id = models.get("long", {}).get("experiment_id", "N/A")
+            short_id = models.get("short", {}).get("experiment_id", "N/A")
+            long_thr = models.get("long", {}).get("threshold", "?")
+            short_thr = models.get("short", {}).get("threshold", "?")
+            lines.append(f"  Strategy:       {nickname}")
+            lines.append(f"  Models:         {long_id} (Long) + {short_id} (Short)")
+            lines.append(f"  Threshold:      Buy >= {long_thr}, Sell >= {short_thr}")
+        else:
+            lines.append(f"  Strategy:       {nickname}")
+            direction = config.get("direction", "?")
+            threshold = config.get("entry_threshold", "?")
+            lines.append(f"  Direction:      {direction}")
+            lines.append(f"  Threshold:      {threshold}")
+
+        tp = config.get("tp_atr_mult", "?")
+        sl = config.get("sl_atr_mult", "?")
+        trailing = config.get("trailing_atr_mult", "?")
+        lines.append(f"  TP / SL:        {tp}x / {sl}x ATR")
+        trailing_note = " (disabled)" if trailing and trailing >= 50 else ""
+        lines.append(f"  Trailing:       {trailing}x{trailing_note}")
+
+    if predictions_path:
+        lines.append(f"  Predictions:    {predictions_path}")
+    if data_path:
+        lines.append(f"  Data:           {data_path}")
+
+    # Prediction date range (from actual trades)
+    if result.trades:
+        entries = [t.entry_dt for t in result.trades]
+        lines.append(f"  Trade Range:    {min(entries)} -> {max(entries)}")
+
     lines.append("=" * w)
 
     if result.trade_count == 0:
@@ -1024,28 +1091,186 @@ def format_report(result: BacktestResult) -> str:
         lines.append("=" * w)
         return "\n".join(lines)
 
+    # ── Aggregate Summary ──
+    lines.append("  AGGREGATE SUMMARY")
+    lines.append("-" * w)
     lines.append(f"  Total Trades:     {result.trade_count}")
-    if result.start_dt is not None and result.end_dt is not None:
-        lines.append(f"  Date Range:       {result.start_dt} → {result.end_dt}")
     lines.append(f"  Win Rate:         {result.win_rate:.1%}")
     lines.append(f"  Profit Factor:    {result.profit_factor:.2f}")
     lines.append(f"  Total Net PnL:    ${result.total_pnl:>14,.2f}")
     lines.append(f"  Max Drawdown:     ${result.max_drawdown:>14,.2f}")
-    lines.append("-" * w)
-    lines.append("  Exit Distribution:")
 
-    dist = result.exit_distribution
+    # ── Monthly Breakdown Table ──
+    lines.append("")
+    lines.append("=" * w)
+    lines.append("  MONTHLY BREAKDOWN")
+    lines.append("-" * w)
+    hdr = (
+        f"  {'Month':<10s} | {'Trades':>6s} | {'Buys':>5s} | {'Sells':>5s} |"
+        f" {'WR%':>6s} | {'Buy WR':>6s} | {'Sell WR':>7s} |"
+        f" {'Net PnL':>11s} | {'PF':>5s}"
+    )
+    lines.append(hdr)
+    lines.append("-" * w)
+
+    # Group trades by month
+    from collections import defaultdict
+    monthly: dict[str, list[TradeRecord]] = defaultdict(list)
+    for t in result.trades:
+        key = t.entry_dt.strftime("%Y-%m")
+        monthly[key].append(t)
+
+    current_year = None
+    year_trades: list[TradeRecord] = []
+
+    for month_key in sorted(monthly.keys()):
+        year = month_key[:4]
+
+        # Yearly subtotal separator
+        if current_year is not None and year != current_year and year_trades:
+            _append_subtotal(lines, f"{current_year} Total", year_trades, w, bold=True)
+            year_trades = []
+
+        current_year = year
+        trades = monthly[month_key]
+        year_trades.extend(trades)
+
+        _append_month_row(lines, month_key, trades)
+
+    # Final year subtotal
+    if current_year is not None and year_trades:
+        _append_subtotal(lines, f"{current_year} Total", year_trades, w, bold=True)
+
+    # Grand total
+    lines.append("=" * w)
+    _append_subtotal(lines, "GRAND TOTAL", result.trades, w, bold=False)
+    lines.append("=" * w)
+
+    # ── Exit Distribution by Side ──
+    lines.append("")
+    lines.append("  EXIT DISTRIBUTION BY SIDE")
+    lines.append("-" * w)
+    lines.append(
+        f"  {'Exit Reason':<16s} | {'Long':>7s} | {'Short':>7s} | {'Total':>7s}"
+    )
+    lines.append("-" * w)
+
+    long_trades = [t for t in result.trades if t.side == 1]
+    short_trades = [t for t in result.trades if t.side == -1]
+
     for reason in ["TP", "SL", "TRAILING_BE", "TIME_BARRIER"]:
-        if reason in dist:
-            d = dist[reason]
-            lines.append(
-                f"    {reason:<16s} {int(d['count']):>5d}  ({d['pct']:.1f}%)"
-            )
-        else:
-            lines.append(f"    {reason:<16s}     0  (0.0%)")
+        long_count = sum(
+            1 for t in long_trades if t.exit_reason.value == reason
+        )
+        short_count = sum(
+            1 for t in short_trades if t.exit_reason.value == reason
+        )
+        total_count = long_count + short_count
+        lines.append(
+            f"  {reason:<16s} | {long_count:>7d} | {short_count:>7d} | {total_count:>7d}"
+        )
+
+    lines.append("-" * w)
+
+    # ── Notable Periods ──
+    lines.append("")
+    lines.append("  NOTABLE PERIODS")
+    lines.append("-" * w)
+
+    if monthly:
+        # Best / worst month by PnL
+        month_pnl = {
+            k: sum(t.net_pnl_dollars for t in v) for k, v in monthly.items()
+        }
+        best_month = max(month_pnl, key=month_pnl.get)  # type: ignore[arg-type]
+        worst_month = min(month_pnl, key=month_pnl.get)  # type: ignore[arg-type]
+        best_wr = sum(1 for t in monthly[best_month] if t.net_pnl_dollars > 0) / len(monthly[best_month])
+        worst_wr = sum(1 for t in monthly[worst_month] if t.net_pnl_dollars > 0) / max(len(monthly[worst_month]), 1)
+
+        lines.append(
+            f"  Best Month:       {best_month}  "
+            f"(${month_pnl[best_month]:>10,.2f}, {best_wr:.1%} WR, "
+            f"{len(monthly[best_month])} trades)"
+        )
+        lines.append(
+            f"  Worst Month:      {worst_month}  "
+            f"(${month_pnl[worst_month]:>10,.2f}, {worst_wr:.1%} WR, "
+            f"{len(monthly[worst_month])} trades)"
+        )
+
+    # Win / loss streaks
+    if result.trades:
+        max_win_streak = 0
+        max_loss_streak = 0
+        cur_win = 0
+        cur_loss = 0
+        for t in result.trades:
+            if t.net_pnl_dollars > 0:
+                cur_win += 1
+                cur_loss = 0
+            else:
+                cur_loss += 1
+                cur_win = 0
+            max_win_streak = max(max_win_streak, cur_win)
+            max_loss_streak = max(max_loss_streak, cur_loss)
+
+        lines.append(f"  Win Streak:       {max_win_streak} trades")
+        lines.append(f"  Loss Streak:      {max_loss_streak} trades")
+
+        best_trade = max(result.trades, key=lambda t: t.net_pnl_dollars)
+        worst_trade = min(result.trades, key=lambda t: t.net_pnl_dollars)
+        lines.append(
+            f"  Best Trade:       ${best_trade.net_pnl_dollars:>10,.2f}  "
+            f"({best_trade.entry_dt.strftime('%Y-%m-%d %H:%M')}, "
+            f"{'Long' if best_trade.side == 1 else 'Short'})"
+        )
+        lines.append(
+            f"  Worst Trade:      ${worst_trade.net_pnl_dollars:>10,.2f}  "
+            f"({worst_trade.entry_dt.strftime('%Y-%m-%d %H:%M')}, "
+            f"{'Long' if worst_trade.side == 1 else 'Short'})"
+        )
 
     lines.append("=" * w)
     return "\n".join(lines)
+
+
+def _append_month_row(
+    lines: list[str],
+    label: str,
+    trades: list[TradeRecord],
+) -> None:
+    """Append one month row to the report lines."""
+    total = len(trades)
+    buys = [t for t in trades if t.side == 1]
+    sells = [t for t in trades if t.side == -1]
+    wins = sum(1 for t in trades if t.net_pnl_dollars > 0)
+    buy_wins = sum(1 for t in buys if t.net_pnl_dollars > 0)
+    sell_wins = sum(1 for t in sells if t.net_pnl_dollars > 0)
+    pnl = sum(t.net_pnl_dollars for t in trades)
+    pf = _safe_pf(trades)
+    pf_str = f"{pf:>5.2f}" if pf < 100 else "  inf"
+
+    lines.append(
+        f"  {label:<10s} | {total:>6d} | {len(buys):>5d} | {len(sells):>5d} |"
+        f" {_safe_wr(wins, total)} | {_safe_wr(buy_wins, len(buys))} |"
+        f" {_safe_wr(sell_wins, len(sells))}  |"
+        f" ${pnl:>10,.2f} | {pf_str}"
+    )
+
+
+def _append_subtotal(
+    lines: list[str],
+    label: str,
+    trades: list[TradeRecord],
+    w: int,
+    bold: bool = False,
+) -> None:
+    """Append a subtotal row (year or grand total)."""
+    if bold:
+        lines.append("-" * w)
+    _append_month_row(lines, label, trades)
+    if bold:
+        lines.append("=" * w)
 
 
 def compare_runs(
@@ -1237,6 +1462,10 @@ def main() -> None:
     parser.add_argument(
         "--contract-multiplier", type=float, default=1000.0, help="CL multiplier"
     )
+    parser.add_argument(
+        "--report-file", default=None,
+        help="Optional path to save the full report as a text file",
+    )
     args = parser.parse_args()
 
     # Resolve paths via CL_DATA_ROOT fallback
@@ -1279,7 +1508,9 @@ def main() -> None:
             f"TP={bt.tp_atr_mult}x  SL={bt.sl_atr_mult}x  "
             f"{threshold_str}  [{concurrent_str}]"
         )
+        strategy_cfg = strategy_cfg  # already loaded
     else:
+        strategy_cfg = None  # no config provided
         bt = BacktestEngine(
             tp_atr_mult=args.tp_mult,
             sl_atr_mult=args.sl_mult,
@@ -1298,8 +1529,21 @@ def main() -> None:
 
     print("Running backtest on historical data...")
     result_a = bt.run(preds, ohlcv_a, label="Historical")
+    strategy_cfg_for_report = strategy_cfg if args.config else None
+    report_text = format_report(
+        result_a,
+        config=strategy_cfg_for_report,
+        predictions_path=args.predictions,
+        data_path=args.data,
+    )
     print()
-    print(format_report(result_a))
+    print(report_text)
+
+    if args.report_file:
+        os.makedirs(os.path.dirname(args.report_file) or ".", exist_ok=True)
+        with open(args.report_file, "w", encoding="utf-8") as rf:
+            rf.write(report_text + "\n")
+        print(f"\nReport saved to {args.report_file}")
 
     # Run B: Live session data (optional)
     if args.live_data and os.path.exists(args.live_data):

@@ -1,0 +1,31 @@
+{
+    "nickname": "Ensemble2_Aggro",
+    "description": "OOS Ensemble (EXP-025 Buy + EXP-026 Sell, walk-forward, cutoff 2022-01-01)",
+    "execution_class": "ConservativeEnsembleStrategy",
+    "models": {
+        "long": {
+            "experiment_id": "EXP-025_S_Ultimate_OOS",
+            "threshold": 0.60
+        },
+        "short": {
+            "experiment_id": "EXP-026_S_Ultimate_Short_OOS",
+            "threshold": 0.60
+        }
+    },
+    "tp_atr_mult": 3.0,
+    "sl_atr_mult": 1.5,
+    "trailing_atr_mult": 100.0,
+    "cooldown_bars": 10,
+    "max_hold_bars": 288,
+    "allow_concurrent": false,
+    "max_concurrent": 1,
+    "sizing_tiers": {
+        "0.80": 3,
+        "0.70": 2,
+        "0.60": 1
+    },
+    "live_config": {
+        "client_id": 15,
+        "entry_mode": "marketable_limit"
+    }
+}
