@@ -12,7 +12,7 @@ import json
 import os
 import re
 import shutil
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -229,7 +229,7 @@ def archive_experiment(
             "source_path": str(selected_model_path),
             "source_modified_utc": datetime.fromtimestamp(
                 selected_model_path.stat().st_mtime,
-                UTC,
+                timezone.utc,
             ).isoformat(timespec="seconds"),
         },
         "source_experiment_record": exp,

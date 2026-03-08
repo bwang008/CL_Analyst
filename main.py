@@ -120,6 +120,7 @@ def train_and_evaluate(
     balance_mode: str = "weight",
     random_state: int | None = None,
     checkpoint_path: str | None = None,
+    train_cutoff_date: str | None = None,
 ) -> dict:
     """
     Train and evaluate an LightGBM model using walk-forward validation.
@@ -178,6 +179,21 @@ def train_and_evaluate(
     
     print(f"  Loaded {len(df):,} rows, {len(df.columns)} columns")
     print(f"  Date range: {df.index[0]} to {df.index[-1]}")
+
+    # ---- Apply train cutoff date (OOS support) ----
+    full_df = None
+    if train_cutoff_date is not None:
+        cutoff = pd.Timestamp(train_cutoff_date)
+        full_df = df  # keep reference for OOS scoring later
+        df = df[df.index < cutoff].copy()
+        oos_df = full_df[full_df.index >= cutoff]
+        if len(df) == 0:
+            raise ValueError(f"No data before cutoff {cutoff.date()}")
+        if len(oos_df) == 0:
+            raise ValueError(f"No data after cutoff {cutoff.date()}")
+        print(f"\n  ** OOS CUTOFF: {cutoff.date()} **")
+        print(f"  Training data: {len(df):,} rows ({df.index[0]} to {df.index[-1]})")
+        print(f"  OOS holdout:   {len(oos_df):,} rows ({oos_df.index[0]} to {oos_df.index[-1]})")
     
     # Verify required columns
     feature_cols = util.get_feature_columns(df)
@@ -411,6 +427,43 @@ def train_and_evaluate(
     model_path = os.path.join(model_dir, model_name)
     final_model.save(model_path)
     print(f"  Saved final model to {model_path}")
+
+    # ---- Generate OOS predictions if cutoff was used ----
+    oos_predictions_path = None
+    if full_df is not None and train_cutoff_date is not None:
+        cutoff = pd.Timestamp(train_cutoff_date)
+        oos_df = full_df[full_df.index >= cutoff]
+        print(f"\n  [OOS] Scoring {len(oos_df):,} post-cutoff rows...")
+        X_oos = oos_df[feature_cols]
+        raw_pred = final_model.model.predict(X_oos)
+
+        # Convert logits to probabilities (focal loss emits raw logits)
+        raw_pred = np.asarray(raw_pred, dtype=float).ravel()
+        if np.nanmin(raw_pred) < 0.0 or np.nanmax(raw_pred) > 1.0:
+            raw_pred = np.clip(raw_pred, -60, 60)
+            oos_probs = 1.0 / (1.0 + np.exp(-raw_pred))
+        else:
+            oos_probs = raw_pred
+
+        # Determine probability column name from target direction
+        if target_name.endswith("_LONG"):
+            prob_col = "prob_Buy"
+        elif target_name.endswith("_SHORT"):
+            prob_col = "prob_Sell"
+        else:
+            prob_col = "prob_Signal"
+
+        oos_out = pd.DataFrame(index=oos_df.index)
+        oos_out[prob_col] = oos_probs
+        oos_predictions_path = os.path.join(output_dir, "oos_predictions.csv")
+        oos_out.to_csv(oos_predictions_path)
+
+        print(f"  [OOS] Saved {len(oos_out):,} predictions to {oos_predictions_path}")
+        print(f"  [OOS] Column: {prob_col}")
+        print(f"  [OOS] Mean prob: {oos_probs.mean():.4f}, Std: {oos_probs.std():.4f}")
+        for t in [0.50, 0.60, 0.70, 0.80]:
+            n = (oos_probs >= t).sum()
+            print(f"  [OOS]   >= {t}: {n:>7,} signals ({n/len(oos_probs)*100:.1f}%)")
     
     # Generate visualizations
     visualizer = SignalVisualizer()
@@ -530,6 +583,7 @@ def train_and_evaluate(
         'report': report,
         'final_model': final_model,
         'wall_time_seconds': elapsed_seconds,
+        'oos_predictions_path': oos_predictions_path,
     }
 
 

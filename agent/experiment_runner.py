@@ -102,6 +102,8 @@ def run_experiment(
     output_dir: str = "reports",
     model_dir: str = "models",
     checkpoint_dir: str = "reports/checkpoints",
+    # OOS cutoff
+    train_cutoff_date: str | None = None,
 ):
     """
     Run a single experiment and log results.
@@ -151,6 +153,7 @@ def run_experiment(
             balance_mode=balance_mode,
             random_state=random_state,
             checkpoint_path=os.path.join(checkpoint_dir, f"{experiment_id}.joblib"),
+            train_cutoff_date=train_cutoff_date,
         )
     except Exception as e:
         error_result = {
@@ -214,9 +217,11 @@ def run_experiment(
             "method": method,
             "balance_mode": balance_mode,
             "model_params": model_params,
+            "train_cutoff_date": train_cutoff_date,
         },
         "metrics": metrics,
         "verdict": verdict,
+        "oos_predictions_path": results.get("oos_predictions_path"),
     }
 
     # Step 6: Log results
@@ -298,45 +303,96 @@ def quick_test():
 
 
 if __name__ == "__main__":
-    args = sys.argv[1:]
+    import argparse
 
-    if "--quick-test" in args:
+    parser = argparse.ArgumentParser(description="Run CL_Analyst experiments")
+    parser.add_argument("--quick-test", action="store_true", help="Smoke test")
+    parser.add_argument("--experiment", type=str, help="Strategy ID from queue")
+    # ---- Direct experiment CLI args ----
+    parser.add_argument("--id", type=str, help="Experiment ID (e.g. EXP-025)")
+    parser.add_argument("--strategy", type=str, help="Strategy name")
+    parser.add_argument("--data", type=str, help="Data path")
+    parser.add_argument("--target", type=str, help="Target column name")
+    parser.add_argument("--method", type=str, default="walk_forward")
+    parser.add_argument("--balance_mode", type=str, default="weight")
+    parser.add_argument("--train-cutoff-date", type=str, default=None,
+                        help="Hard date cutoff for OOS (YYYY-MM-DD)")
+    parser.add_argument("--threshold", type=float, default=0.02)
+
+    cli_args = parser.parse_args()
+
+    if cli_args.quick_test:
         quick_test()
-    elif "--experiment" in args:
-        exp_idx = args.index("--experiment")
-        if exp_idx + 1 < len(args):
-            strategy_id = args[exp_idx + 1]
-            print(f"Running strategy: {strategy_id}")
-            # Load strategy from queue and run
-            queue = load_strategy_queue()
-            strategy = None
-            for s in queue["strategies"]:
-                if s["id"] == strategy_id:
-                    strategy = s
-                    break
-            if strategy is None:
-                print(f"Strategy {strategy_id} not found in queue")
-                sys.exit(1)
+    elif cli_args.experiment:
+        # Load strategy from queue and run
+        strategy_id = cli_args.experiment
+        print(f"Running strategy: {strategy_id}")
+        queue = load_strategy_queue()
+        strategy = None
+        for s in queue["strategies"]:
+            if s["id"] == strategy_id:
+                strategy = s
+                break
+        if strategy is None:
+            print(f"Strategy {strategy_id} not found in queue")
+            sys.exit(1)
 
-            update_strategy_status(strategy_id, "running")
-            log_data = load_experiment_log()
-            exp_id = generate_experiment_id(log_data)
+        update_strategy_status(strategy_id, "running")
+        log_data = load_experiment_log()
+        exp_id = generate_experiment_id(log_data)
 
-            config = strategy.get("config", {})
-            result = run_experiment(
-                experiment_id=exp_id,
-                strategy_id=strategy_id,
-                hypothesis=strategy["hypothesis"],
-                changes=config,
-                **{k: v for k, v in config.items()
-                   if k in run_experiment.__code__.co_varnames},
-            )
+        config = strategy.get("config", {})
+        result = run_experiment(
+            experiment_id=exp_id,
+            strategy_id=strategy_id,
+            hypothesis=strategy["hypothesis"],
+            changes=config,
+            **{k: v for k, v in config.items()
+               if k in run_experiment.__code__.co_varnames},
+        )
 
-            status = "done" if result.get("verdict") != "error" else "failed"
-            update_strategy_status(strategy_id, status)
-        else:
-            print("Usage: python agent/experiment_runner.py --experiment S1a")
+        status = "done" if result.get("verdict") != "error" else "failed"
+        update_strategy_status(strategy_id, status)
+    elif cli_args.id:
+        # Direct CLI mode: run experiment with explicit args
+        model_params = {
+            "num_leaves": 31,
+            "min_child_samples": 166,
+            "learning_rate": 0.05242702195760322,
+            "feature_fraction": 0.6940065346564026,
+            "bagging_fraction": 0.6483459770074159,
+            "bagging_freq": 1,
+            "reg_alpha": 2.737488884954343,
+            "reg_lambda": 7.378557513409711,
+            "max_depth": 4,
+            "min_gain_to_split": 0.9901794009928347,
+            "n_estimators": 1000,
+            "objective": "binary",
+            "use_focal": True,
+            "metric": "binary_logloss",
+            "class_weight": None,
+        }
+        result = run_experiment(
+            experiment_id=cli_args.id,
+            strategy_id=cli_args.strategy or cli_args.id,
+            hypothesis=f"OOS training with cutoff {cli_args.train_cutoff_date}",
+            changes={
+                "target_name": cli_args.target,
+                "data_path": cli_args.data,
+                "method": cli_args.method,
+                "balance_mode": cli_args.balance_mode,
+                "train_cutoff_date": cli_args.train_cutoff_date,
+            },
+            data_path=cli_args.data,
+            target_name=cli_args.target,
+            method=cli_args.method,
+            balance_mode=cli_args.balance_mode,
+            threshold=cli_args.threshold,
+            model_params=model_params,
+            train_cutoff_date=cli_args.train_cutoff_date,
+        )
+        print(f"\nResult: {result.get('verdict')}")
+        if result.get("oos_predictions_path"):
+            print(f"OOS predictions: {result['oos_predictions_path']}")
     else:
-        print("Usage:")
-        print("  python agent/experiment_runner.py --quick-test")
-        print("  python agent/experiment_runner.py --experiment S1a")
+        parser.print_help()

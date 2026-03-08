@@ -218,6 +218,14 @@ python agent/backtest_engine.py --config configs/strategies/ensemble_conservativ
 # Or manually override parameters
 conda run -n trader --no-capture-output python agent/backtest_engine.py --predictions reports/exp017_long_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --threshold 0.70 --tp-mult 7.0 --sl-mult 1.0
 ```
+## New Version
+# Individual Buy model backtest:
+conda run -n trader python agent/backtest_engine.py --predictions reports/oos_predictions.csv --data data/processed/CL_set_06.parquet --config configs/strategies/manatee2.json
+# Individual Sell model backtest:
+conda run -n trader python agent/backtest_engine.py --predictions reports/oos_sell_predictions.csv --data data/processed/CL_set_06_shortfix.parquet --config configs/strategies/koala2.json
+# Ensemble backtest:
+conda run -n trader python agent/backtest_engine.py --predictions reports/oos_ensemble_predictions.csv --data data/processed/CL_set_06.parquet --config configs/strategies/ensemble2.json
+
 
 ---
 
