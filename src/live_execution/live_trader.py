@@ -95,6 +95,10 @@ _RECONNECT_BASE_DELAY = 5.0      # Initial delay before reconnect attempt (secon
 _RECONNECT_MAX_DELAY = 300.0     # Max backoff delay (5 minutes)
 _RECONNECT_MAX_ATTEMPTS = 50     # Max retry attempts (~2+ hours of retries)
 
+# Auto-restart parameters (process-level recovery)
+_RESTART_MAX_ATTEMPTS = 5        # Max full restart attempts
+_RESTART_DELAY = 300.0           # Delay between restart attempts (5 minutes)
+
 # Default paths for DataManager (CL_DATA_ROOT primary, repo-local fallback)
 _DEFAULT_SEED_PATH = str(_dp_data_path("raw/cl-5m_bk.csv"))
 _DEFAULT_CACHE_PATH = str(
@@ -380,7 +384,16 @@ class LiveTrader:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Connect to IBKR, warm-start via DataManager, and enter the event loop."""
+        """Connect to IBKR, warm-start via DataManager, and enter the event loop.
+
+        If a disconnect is unrecoverable (all reconnect attempts fail),
+        the engine will tear down and re-run start() from scratch up to
+        _RESTART_MAX_ATTEMPTS times — equivalent to the user pressing
+        Ctrl+C and re-running the script.
+        """
+        self._needs_restart = False
+        self._restart_count = getattr(self, "_restart_count", 0)
+
         log.info("=" * 60)
         log.info("LiveTrader starting (dry_run=%s)", self.dry_run)
         log.info("=" * 60)
@@ -397,6 +410,7 @@ class LiveTrader:
 
             # Step 2: Register error handler for reconnection
             self.manager.ib.errorEvent += self._on_ib_error
+            self._callbacks_registered = False
             self._register_execution_callbacks()
 
             # Step 3: Qualify continuous contract (Brain stream)
@@ -433,14 +447,14 @@ class LiveTrader:
             # Step 7: Warm-start via DataManager
             self._warm_start()
 
-            # Step 7: Subscribe to live bars (Brain stream)
+            # Step 8: Subscribe to live bars (Brain stream)
             self._subscribe()
 
-            # Step 8: Subscribe to front-month bars (Hands stream)
+            # Step 9: Subscribe to front-month bars (Hands stream)
             if self._front_month_contract is not None:
                 self._subscribe_front_month()
 
-            # Step 9: Enter event loop
+            # Step 10: Enter event loop
             self._running = True
             self._event_loop()
 
@@ -449,6 +463,32 @@ class LiveTrader:
             raise
         finally:
             self._shutdown()
+
+        # ── Auto-restart if reconnection was unrecoverable ────────────
+        if self._needs_restart:
+            self._restart_count += 1
+            if self._restart_count <= _RESTART_MAX_ATTEMPTS:
+                log.info(
+                    "=" * 60 + "\n"
+                    "AUTO-RESTART %d/%d — waiting %.0fs before full restart...\n"
+                    + "=" * 60,
+                    self._restart_count, _RESTART_MAX_ATTEMPTS,
+                    _RESTART_DELAY,
+                )
+                time.sleep(_RESTART_DELAY)
+                # Reset state for fresh start
+                self._needs_restart = False
+                self._subscriptions_lost = False
+                self._resubscribe_pending = False
+                self._live_bars = None
+                self._front_month_bars = None
+                self.start()  # recursive restart
+            else:
+                log.error(
+                    "AUTO-RESTART exhausted all %d attempts — "
+                    "shutting down permanently.",
+                    _RESTART_MAX_ATTEMPTS,
+                )
 
     def _signal_handler(self, signum, frame) -> None:
         log.info("Received signal %d — shutting down gracefully...", signum)
@@ -995,6 +1035,39 @@ class LiveTrader:
         finally:
             self._resubscribe_pending = False
 
+    def _resubscribe_and_backfill(self) -> None:
+        """Synchronous resubscription — used by _reconnect() after a clean reconnect.
+
+        Cancels stale subscriptions and re-subscribes using the sync API.
+        This is safe to call from _reconnect() because the event loop is
+        NOT running at that point (we're inside a time.sleep-based retry
+        loop, not inside ib.sleep).
+        """
+        # 1. Cancel stale subscriptions
+        if self._live_bars is not None:
+            try:
+                self.manager.cancel_subscription(self._live_bars)
+            except Exception:
+                pass
+            self._live_bars = None
+        if self._front_month_bars is not None:
+            try:
+                self.manager.cancel_subscription(self._front_month_bars)
+            except Exception:
+                pass
+            self._front_month_bars = None
+
+        # 2. Re-subscribe using sync API (safe outside event loop)
+        self._subscribe()
+
+        if self._front_month_contract is not None:
+            self._subscribe_front_month()
+
+        # 3. Reset connectivity flags
+        self._subscriptions_lost = False
+        self._resubscribe_pending = False
+        log.info("Resubscription complete — live bars restored")
+
     def _on_front_month_bar_update(self, bars, has_new_bar) -> None:
         """Callback for front-month bars — log raw data to telemetry."""
         if not has_new_bar or not bars:
@@ -1497,8 +1570,14 @@ class LiveTrader:
             except (ConnectionError, OSError) as exc:
                 log.error("Connection lost: %s — attempting reconnect...", exc)
                 if not self._reconnect():
-                    log.error("Reconnection failed after %d attempts — shutting down.", _RECONNECT_MAX_ATTEMPTS)
+                    log.error(
+                        "Reconnection failed after %d attempts — "
+                        "attempting full restart...",
+                        _RECONNECT_MAX_ATTEMPTS,
+                    )
+                    # Signal that we need a full restart
                     self._running = False
+                    self._needs_restart = True
             except Exception:
                 log.exception("Error in event loop iteration")
                 time.sleep(_POLL_INTERVAL)

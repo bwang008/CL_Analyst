@@ -7,7 +7,7 @@ All tests use mocks — no live IB connection needed.
 from __future__ import annotations
 
 import time
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch, PropertyMock, call
 
 import pytest
 
@@ -38,15 +38,22 @@ def _make_trader_stub():
     # State flags
     trader._running = True
     trader._subscriptions_lost = False
+    trader._resubscribe_pending = False
     trader._live_bars = None
     trader._front_month_bars = None
     trader._contract = MagicMock()
     trader._front_month_contract = MagicMock()
     trader._front_month_str = "202604"
     trader._last_bar_time = None
+    trader._callbacks_registered = False
+    trader._needs_restart = False
+    trader._restart_count = 0
 
-    # Mock resubscribe (tested separately, already has its own tests)
-    trader._resubscribe_and_backfill = MagicMock()
+    # Mock the subscribe methods used by _resubscribe_and_backfill
+    trader._subscribe = MagicMock()
+    trader._subscribe_front_month = MagicMock()
+
+    # Mock _on_ib_error (tested separately)
     trader._on_ib_error = MagicMock()
 
     return trader
@@ -70,7 +77,7 @@ class TestReconnect:
 
         assert result is True
         trader.manager.connect.assert_called_once()
-        trader._resubscribe_and_backfill.assert_called_once()
+        trader._subscribe.assert_called_once()
 
     @patch.object(lt_module, "_RECONNECT_BASE_DELAY", 0.01)
     @patch.object(lt_module, "_RECONNECT_MAX_DELAY", 0.05)
@@ -112,8 +119,10 @@ class TestReconnect:
 
         trader._reconnect()
 
-        trader._resubscribe_and_backfill.assert_called_once()
-        assert trader._subscriptions_lost is True  # set before resubscribe
+        # _resubscribe_and_backfill calls _subscribe and _subscribe_front_month
+        trader._subscribe.assert_called_once()
+        trader._subscribe_front_month.assert_called_once()
+        assert trader._subscriptions_lost is False  # reset after resubscribe
 
     @patch.object(lt_module, "_RECONNECT_BASE_DELAY", 0.01)
     @patch.object(lt_module, "_RECONNECT_MAX_DELAY", 0.05)
@@ -166,6 +175,26 @@ class TestReconnect:
         assert disconnect_call is not None
         assert connect_call is not None
 
+    @patch.object(lt_module, "_RECONNECT_BASE_DELAY", 0.01)
+    @patch.object(lt_module, "_RECONNECT_MAX_DELAY", 0.05)
+    @patch.object(lt_module, "_RECONNECT_MAX_ATTEMPTS", 5)
+    def test_reconnect_cancels_stale_subscriptions(self):
+        """_resubscribe_and_backfill cancels stale bars before resubscribing."""
+        trader = _make_trader_stub()
+        old_live_bars = MagicMock()
+        old_front_bars = MagicMock()
+        trader._live_bars = old_live_bars
+        trader._front_month_bars = old_front_bars
+
+        trader._reconnect()
+
+        # Stale subscriptions should be cancelled
+        trader.manager.cancel_subscription.assert_any_call(old_live_bars)
+        trader.manager.cancel_subscription.assert_any_call(old_front_bars)
+        # New subscriptions should be created
+        trader._subscribe.assert_called_once()
+        trader._subscribe_front_month.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # Tests: _event_loop reconnection integration
@@ -206,3 +235,62 @@ class TestEventLoopReconnection:
             trader._event_loop()
 
         assert trader._running is False
+
+    def test_event_loop_sets_needs_restart_on_failed_reconnect(self):
+        """_event_loop sets _needs_restart when reconnection is exhausted."""
+        trader = _make_trader_stub()
+        trader.manager.ib.sleep.side_effect = ConnectionError("Socket disconnect")
+
+        with patch.object(
+            lt_module.LiveTrader, "_reconnect", return_value=False
+        ):
+            trader._event_loop()
+
+        assert trader._needs_restart is True
+        assert trader._running is False
+
+
+# ---------------------------------------------------------------------------
+# Tests: _resubscribe_and_backfill
+# ---------------------------------------------------------------------------
+
+class TestResubscribeAndBackfill:
+    """Tests for the _resubscribe_and_backfill sync method."""
+
+    def test_resubscribes_both_streams(self):
+        """Resubscribes to both Brain and Hands streams."""
+        trader = _make_trader_stub()
+        trader._subscriptions_lost = True
+        trader._resubscribe_pending = True
+
+        trader._resubscribe_and_backfill()
+
+        trader._subscribe.assert_called_once()
+        trader._subscribe_front_month.assert_called_once()
+        assert trader._subscriptions_lost is False
+        assert trader._resubscribe_pending is False
+
+    def test_skips_front_month_when_no_contract(self):
+        """Skips front-month subscription when contract is None."""
+        trader = _make_trader_stub()
+        trader._front_month_contract = None
+
+        trader._resubscribe_and_backfill()
+
+        trader._subscribe.assert_called_once()
+        trader._subscribe_front_month.assert_not_called()
+
+    def test_cancels_stale_subscriptions(self):
+        """Cancels old subscriptions before creating new ones."""
+        trader = _make_trader_stub()
+        old_live = MagicMock()
+        old_front = MagicMock()
+        trader._live_bars = old_live
+        trader._front_month_bars = old_front
+
+        trader._resubscribe_and_backfill()
+
+        trader.manager.cancel_subscription.assert_any_call(old_live)
+        trader.manager.cancel_subscription.assert_any_call(old_front)
+        # After cancel, the old references should be None before resubscribe
+        # (the method sets them to None)

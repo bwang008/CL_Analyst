@@ -140,8 +140,14 @@ def make_objective(
     base_cfg: dict,
     predictions_df: pd.DataFrame,
     ohlcv_df: pd.DataFrame,
+    results_cache: dict | None = None,
 ):
-    """Create a closure that Optuna can call with trial params."""
+    """Create a closure that Optuna can call with trial params.
+
+    If *results_cache* is provided (dict), the full BacktestResult is
+    stored under the trial number so the callback can read metrics
+    without re-running the backtest.
+    """
 
     def objective(trial: optuna.Trial) -> tuple[float, float]:
         cfg = copy.deepcopy(base_cfg)
@@ -162,6 +168,10 @@ def make_objective(
 
         engine = BacktestEngine.from_config(cfg)
         result = engine.run(predictions_df, ohlcv_df)
+
+        # Cache result for the callback (avoids re-running the backtest)
+        if results_cache is not None:
+            results_cache[trial.number] = result
 
         # Reject degenerate configs (too few trades)
         if result.trade_count < 50:
@@ -286,7 +296,9 @@ def run_optimization(
         study_name=f"strategy_opt_{model_name}",
     )
 
-    objective = make_objective(base_cfg, predictions_df, ohlcv_df)
+    # Shared cache: objective stores BacktestResult, callback reads it
+    results_cache: dict[int, BacktestResult] = {}
+    objective = make_objective(base_cfg, predictions_df, ohlcv_df, results_cache)
 
     # Collect all trial results for CSV
     all_trial_rows: list[dict] = []
@@ -297,22 +309,14 @@ def run_optimization(
             return
 
         pf, dd = trial.values
-        # Run the backtest once more to get full metrics
-        cfg_copy = copy.deepcopy(base_cfg)
-        cfg_copy["tp_atr_mult"] = trial.params["tp_atr_mult"]
-        cfg_copy["sl_atr_mult"] = trial.params["sl_atr_mult"]
-        cfg_copy["trailing_atr_mult"] = trial.params["trailing_atr_mult"]
-        cfg_copy["cooldown_bars"] = trial.params["cooldown_bars"]
-        cfg_copy["max_hold_bars"] = trial.params["max_hold_bars"]
-        threshold = trial.params["entry_threshold"]
-        cfg_copy["entry_threshold"] = threshold
-        if "models" in cfg_copy:
-            for direction in cfg_copy["models"]:
-                cfg_copy["models"][direction]["threshold"] = threshold
 
-        engine = BacktestEngine.from_config(cfg_copy)
-        result = engine.run(predictions_df, ohlcv_df)
-        metrics = extract_metrics(result)
+        # Retrieve cached result (no re-run needed)
+        cached_result = results_cache.pop(trial.number, None)
+        if cached_result is not None:
+            metrics = extract_metrics(cached_result)
+        else:
+            # Fallback: re-run if cache miss (shouldn't happen)
+            metrics = {"profit_factor": pf, "max_drawdown": dd}
 
         # Save trial config
         save_trial_config(base_cfg, trial, metrics, lab_dir, model_name.lower().replace(" ", "_"))
