@@ -25,7 +25,11 @@ from src.live_execution import live_trader as lt_module
 # ---------------------------------------------------------------------------
 
 
-def _make_trader_stub(cooldown_bars: int = 10) -> lt_module.LiveTrader:
+def _make_trader_stub(
+    cooldown_bars: int = 10,
+    tp_cooldown_bars: int | None = None,
+    sl_cooldown_bars: int | None = None,
+) -> lt_module.LiveTrader:
     """Create a LiveTrader-like object with cooldown support.
 
     Bypasses __init__ and manually sets all attributes needed for
@@ -59,7 +63,8 @@ def _make_trader_stub(cooldown_bars: int = 10) -> lt_module.LiveTrader:
     trader._max_hold_bars = 288
 
     # Cooldown state
-    trader._cooldown_bars = cooldown_bars
+    trader._tp_cooldown_bars = tp_cooldown_bars if tp_cooldown_bars is not None else cooldown_bars
+    trader._sl_cooldown_bars = sl_cooldown_bars if sl_cooldown_bars is not None else cooldown_bars
     trader._cooldown_remaining = 0
 
     # Position tracking
@@ -201,11 +206,11 @@ class TestCooldownActivation:
 
         assert trader._cooldown_remaining == 0
         trader._on_order_status(mock_trade)
-        assert trader._cooldown_remaining == 10
+        assert trader._cooldown_remaining == 10  # sl_cooldown_bars=10
 
     def test_tp_hit_activates_cooldown(self):
         """A take-profit fill should activate cooldown."""
-        trader = _make_trader_stub(cooldown_bars=5)
+        trader = _make_trader_stub(tp_cooldown_bars=5)
 
         mock_trade = MagicMock()
         mock_order = MagicMock()
@@ -237,7 +242,7 @@ class TestCooldownActivation:
 
         assert trader._cooldown_remaining == 0
         trader._on_order_status(mock_trade)
-        assert trader._cooldown_remaining == 5
+        assert trader._cooldown_remaining == 5  # tp_cooldown_bars=5
 
     def test_parent_fill_does_not_activate_cooldown(self):
         """A parent entry order fill should NOT activate cooldown."""

@@ -931,3 +931,204 @@ class TestAggressiveEnsembleFlip:
 
         assert result.trade_count == 1
         assert result.trades[0].side == 1
+
+
+# ---------------------------------------------------------------------------
+# Separate TP/SL Cooldown Tests
+# ---------------------------------------------------------------------------
+
+
+class TestSeparateCooldowns:
+    """Separate tp_cooldown_bars and sl_cooldown_bars apply correctly."""
+
+    def test_sl_cooldown_rejects_during_window(self) -> None:
+        """SL exit activates sl_cooldown_bars, rejecting signals within it."""
+        n = 50
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+
+        # Bar 25: SL hit
+        lows[25] = 64.97
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+
+        # Signal at bar 20 (accepted), signal at bar 28 (during sl_cooldown=5)
+        dt1 = ohlcv.index[20]
+        dt2 = ohlcv.index[28]
+        signals = pd.DataFrame({"side": [1, 1]}, index=[dt1, dt2])
+
+        bt = _bt(sl_cooldown_bars=5, tp_cooldown_bars=0)
+        result = bt.run(signals, ohlcv)
+
+        # Only 1 trade — second signal rejected during SL cooldown
+        assert result.trade_count == 1
+
+    def test_tp_cooldown_rejects_during_window(self) -> None:
+        """TP exit activates tp_cooldown_bars, rejecting signals within it."""
+        n = 50
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+
+        # Bar 25: TP hit
+        highs[25] = 65.05
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+
+        # Signal at bar 20 (accepted), signal at bar 28 (during tp_cooldown=5)
+        dt1 = ohlcv.index[20]
+        dt2 = ohlcv.index[28]
+        signals = pd.DataFrame({"side": [1, 1]}, index=[dt1, dt2])
+
+        bt = _bt(tp_cooldown_bars=5, sl_cooldown_bars=0)
+        result = bt.run(signals, ohlcv)
+
+        # Only 1 trade — second signal rejected during TP cooldown
+        assert result.trade_count == 1
+
+    def test_different_tp_sl_cooldown_lengths(self) -> None:
+        """SL gets long cooldown (10), TP gets short cooldown (2)."""
+        n = 50
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+
+        highs[25] = 65.05  # TP hit for first trade
+        highs[35] = 65.05  # TP hit for second trade
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+
+        dt1 = ohlcv.index[20]
+        dt2 = ohlcv.index[29]  # After tp_cooldown=2 expires
+        signals = pd.DataFrame({"side": [1, 1]}, index=[dt1, dt2])
+
+        bt = _bt(tp_cooldown_bars=2, sl_cooldown_bars=10)
+        result = bt.run(signals, ohlcv)
+
+        # Both trades should execute — TP cooldown (2 bars) expired before bar 29
+        assert result.trade_count == 2
+
+    def test_time_barrier_no_cooldown(self) -> None:
+        """Time barrier exit goes straight to FLAT with no cooldown."""
+        horizon = 5
+        n = 50
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+
+        # Signal at bar 20, time barrier exits at bar 26, signal at bar 27
+        dt1 = ohlcv.index[20]
+        dt2 = ohlcv.index[27]
+        signals = pd.DataFrame({"side": [1, 1]}, index=[dt1, dt2])
+
+        bt = _bt(max_horizon=horizon, tp_cooldown_bars=10, sl_cooldown_bars=10)
+        result = bt.run(signals, ohlcv)
+
+        # Both trades execute — time barrier has NO cooldown
+        assert result.trade_count == 2
+
+    def test_backward_compat_cooldown_bars_fallback(self) -> None:
+        """Old configs with only cooldown_bars still work via fallback."""
+        bt = BacktestEngine(cooldown_bars=7)
+        assert bt.tp_cooldown_bars == 7
+        assert bt.sl_cooldown_bars == 7
+
+    def test_explicit_tp_sl_override_cooldown_bars(self) -> None:
+        """Explicit tp/sl values override the cooldown_bars fallback."""
+        bt = BacktestEngine(cooldown_bars=10, tp_cooldown_bars=3, sl_cooldown_bars=8)
+        assert bt.tp_cooldown_bars == 3
+        assert bt.sl_cooldown_bars == 8
+
+
+class TestFromConfigCooldowns:
+    """from_config reads tp_cooldown_bars and sl_cooldown_bars correctly."""
+
+    def test_from_config_reads_separate_cooldowns(self) -> None:
+        cfg = {
+            "nickname": "TestCooldown",
+            "tp_cooldown_bars": 3,
+            "sl_cooldown_bars": 8,
+        }
+        bt = BacktestEngine.from_config(cfg)
+        assert bt.tp_cooldown_bars == 3
+        assert bt.sl_cooldown_bars == 8
+
+    def test_from_config_fallback_to_cooldown_bars(self) -> None:
+        """If only cooldown_bars is set, both tp/sl use it."""
+        cfg = {"nickname": "Legacy", "cooldown_bars": 12}
+        bt = BacktestEngine.from_config(cfg)
+        assert bt.tp_cooldown_bars == 12
+        assert bt.sl_cooldown_bars == 12
+
+
+# ---------------------------------------------------------------------------
+# Trailing Stop Offset Tests
+# ---------------------------------------------------------------------------
+
+
+class TestTrailingStopOffset:
+    """Trailing stop with configurable offset locks in profit."""
+
+    def test_offset_locks_in_profit(self) -> None:
+        """With offset=0.5, SL moves to entry + 0.5*ATR (small profit)."""
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+        opens = [65.0] * n
+
+        # Entry at bar 20 (price=65.0), ATR ≈ 0.02
+        # TP = 65.0 + 2.0*0.02 = 65.04
+        # Trailing triggers when high >= 65.0 + 1.0*0.02 = 65.02
+        # New SL = 65.0 + 0.5*0.02 = 65.01
+
+        # Bar 23: High triggers trailing (65.03 >= 65.02) but below TP (65.04)
+        # Bars 23-29: price stays above new SL (65.01) and below TP
+        for i in range(23, 30):
+            opens[i] = 65.02
+            prices[i] = 65.02
+            highs[i] = 65.03   # Above trailing trigger, below TP
+            lows[i] = 65.015   # Above new SL at 65.01
+
+        # Bar 30: Open above SL, Low breaches SL → fills at SL price (65.01)
+        opens[30] = 65.015
+        prices[30] = 65.005
+        highs[30] = 65.02
+        lows[30] = 65.005  # Below SL at 65.01
+
+        ohlcv = _make_ohlcv(n, prices=prices, opens=opens, highs=highs, lows=lows)
+        signals = _make_signal(ohlcv, bar_idx=20)
+
+        bt = _bt(trailing_atr_mult=1.0, trailing_sl_atr_offset=0.5)
+        result = bt.run(signals, ohlcv)
+
+        assert result.trade_count == 1
+        trade = result.trades[0]
+        assert trade.exit_reason == ExitReason.TRAILING_BE
+        # Exit at SL=65.01, entry at 65.0 → positive PnL
+        assert trade.net_pnl_dollars > 0
+
+    def test_zero_offset_is_breakeven(self) -> None:
+        """With offset=0.0, trailing stop is exact breakeven."""
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+
+        highs[23] = 65.03  # Trigger trailing
+        lows[26] = 65.00   # Hit breakeven
+        prices[26] = 65.00
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        signals = _make_signal(ohlcv, bar_idx=20)
+
+        bt = _bt(trailing_atr_mult=1.0, trailing_sl_atr_offset=0.0)
+        result = bt.run(signals, ohlcv)
+
+        assert result.trade_count == 1
+        trade = result.trades[0]
+        assert trade.exit_reason == ExitReason.TRAILING_BE
+        assert abs(trade.net_pnl_dollars) < 1.0  # ~$0

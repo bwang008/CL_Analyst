@@ -73,11 +73,11 @@ class TradeState(Enum):
 
     Transitions:
         FLAT ──[buy signal ≥ threshold]──→ IN_POSITION
-        IN_POSITION ──[TP hit]──→ FLAT
-        IN_POSITION ──[SL hit (no trailing)]──→ COOLDOWN
-        IN_POSITION ──[trailing stop hit at breakeven]──→ FLAT
+        IN_POSITION ──[TP hit]──→ COOLDOWN (tp_cooldown_bars)
+        IN_POSITION ──[SL hit]──→ COOLDOWN (sl_cooldown_bars)
+        IN_POSITION ──[trailing stop hit]──→ COOLDOWN (tp_cooldown_bars)
         IN_POSITION ──[288 bars elapsed]──→ FLAT
-        COOLDOWN ──[cooldown_bars elapsed]──→ FLAT
+        COOLDOWN ──[cooldown elapsed]──→ FLAT
     """
 
     FLAT = auto()
@@ -234,9 +234,12 @@ class BacktestEngine:
         tp_atr_mult: ATR multiplier for take-profit barrier.
         sl_atr_mult: ATR multiplier for stop-loss barrier.
         max_horizon: Max bars to hold a position (time barrier).
-        cooldown_bars: Bars to wait after a stop-loss exit (single mode).
-        trailing_atr_mult: ATR move in favor to trigger trailing stop
-                           to breakeven ($entry price).
+        cooldown_bars: Deprecated alias — if tp/sl not set, used for both.
+        tp_cooldown_bars: Bars to wait after a TP or trailing exit.
+        sl_cooldown_bars: Bars to wait after a SL exit.
+        trailing_atr_mult: ATR move in favor to trigger trailing stop.
+        trailing_sl_atr_offset: After trailing triggers, SL moves to
+                           entry + offset×ATR (0 = breakeven, 0.25 = small profit).
         atr_period: Period for ATR calculation.
         commission_per_side: Flat commission per side in dollars.
         slippage_per_side: Slippage penalty per side in price units.
@@ -252,8 +255,11 @@ class BacktestEngine:
         tp_atr_mult: float = 2.0,
         sl_atr_mult: float = 1.0,
         max_horizon: int = 288,
-        cooldown_bars: int = 10,
+        cooldown_bars: int = 5,
+        tp_cooldown_bars: Optional[int] = None,
+        sl_cooldown_bars: Optional[int] = None,
         trailing_atr_mult: float = 1.0,
+        trailing_sl_atr_offset: float = 0.25,
         atr_period: int = 14,
         commission_per_side: float = 2.50,
         slippage_per_side: float = 0.03,
@@ -266,8 +272,11 @@ class BacktestEngine:
         self.tp_atr_mult = tp_atr_mult
         self.sl_atr_mult = sl_atr_mult
         self.max_horizon = max_horizon
-        self.cooldown_bars = cooldown_bars
+        self.cooldown_bars = cooldown_bars  # backward compat
+        self.tp_cooldown_bars = tp_cooldown_bars if tp_cooldown_bars is not None else cooldown_bars
+        self.sl_cooldown_bars = sl_cooldown_bars if sl_cooldown_bars is not None else cooldown_bars
         self.trailing_atr_mult = trailing_atr_mult
+        self.trailing_sl_atr_offset = trailing_sl_atr_offset
         self.atr_period = atr_period
         self.commission_per_side = commission_per_side
         self.slippage_per_side = slippage_per_side
@@ -320,8 +329,11 @@ class BacktestEngine:
             "prob_threshold": cfg.get("entry_threshold", 0.45),
             "allow_concurrent": cfg.get("allow_concurrent", False),
             "max_concurrent": cfg.get("max_concurrent", 1),
-            "cooldown_bars": cfg.get("cooldown_bars", 10),
+            "cooldown_bars": cfg.get("cooldown_bars", 5),
+            "tp_cooldown_bars": cfg.get("tp_cooldown_bars"),
+            "sl_cooldown_bars": cfg.get("sl_cooldown_bars"),
             "trailing_atr_mult": cfg.get("trailing_atr_mult", 1.0),
+            "trailing_sl_atr_offset": cfg.get("trailing_sl_atr_offset", 0.25),
             "max_horizon": cfg.get("max_hold_bars", 288),
             "execution_strategy": strategy,
         }
@@ -443,11 +455,15 @@ class BacktestEngine:
         self._trades.append(record)
         self._realized_pnl += net_pnl
 
-        # FSM transition: SL → COOLDOWN, everything else → FLAT
+        # FSM transition: apply exit-type-specific cooldown
         if exit_reason == ExitReason.SL:
             self._state = TradeState.COOLDOWN
-            self._cooldown_remaining = self.cooldown_bars
+            self._cooldown_remaining = self.sl_cooldown_bars
+        elif exit_reason in (ExitReason.TP, ExitReason.TRAILING_BE):
+            self._state = TradeState.COOLDOWN
+            self._cooldown_remaining = self.tp_cooldown_bars
         else:
+            # TIME_BARRIER and any other exits → FLAT (no cooldown)
             self._state = TradeState.FLAT
 
     def _on_flat(
@@ -547,19 +563,26 @@ class BacktestEngine:
             self._close_trade(dt, exit_price, ExitReason.TP)
             return
 
-        # 3. Trailing stop upgrade: move SL to breakeven after +N×ATR
+        # 3. Trailing stop upgrade: move SL after +N×ATR in favor
+        #    SL target = entry ± offset×ATR (0 = breakeven, >0 = lock profit)
         if not self._trailing_activated:
             if self._side == 1:
                 if self._highest_high >= (
                     self._entry_price + self.trailing_atr_mult * self._atr_at_entry
                 ):
-                    self._sl_price = self._entry_price
+                    self._sl_price = (
+                        self._entry_price
+                        + self.trailing_sl_atr_offset * self._atr_at_entry
+                    )
                     self._trailing_activated = True
             else:
                 if self._lowest_low <= (
                     self._entry_price - self.trailing_atr_mult * self._atr_at_entry
                 ):
-                    self._sl_price = self._entry_price
+                    self._sl_price = (
+                        self._entry_price
+                        - self.trailing_sl_atr_offset * self._atr_at_entry
+                    )
                     self._trailing_activated = True
 
     def _on_cooldown(self) -> None:
@@ -673,13 +696,19 @@ class BacktestEngine:
                 if pos.highest_high >= (
                     pos.entry_price + self.trailing_atr_mult * pos.atr_at_entry
                 ):
-                    pos.sl_price = pos.entry_price
+                    pos.sl_price = (
+                        pos.entry_price
+                        + self.trailing_sl_atr_offset * pos.atr_at_entry
+                    )
                     pos.trailing_activated = True
             else:
                 if pos.lowest_low <= (
                     pos.entry_price - self.trailing_atr_mult * pos.atr_at_entry
                 ):
-                    pos.sl_price = pos.entry_price
+                    pos.sl_price = (
+                        pos.entry_price
+                        - self.trailing_sl_atr_offset * pos.atr_at_entry
+                    )
                     pos.trailing_activated = True
 
         if exit_reason is not None and exit_price is not None:

@@ -320,18 +320,32 @@ class LiveTrader:
         )
         # Cooldown: bars to wait after an exit before allowing new entries
         # (parity with backtest engine FSM COOLDOWN state)
-        self._cooldown_bars: int = int(
-            strategy_config.get("cooldown_bars", 0)
+        _cd_fallback: int = int(strategy_config.get("cooldown_bars", 5))
+        self._tp_cooldown_bars: int = int(
+            strategy_config.get("tp_cooldown_bars", _cd_fallback)
+        )
+        self._sl_cooldown_bars: int = int(
+            strategy_config.get("sl_cooldown_bars", _cd_fallback)
         )
         self._cooldown_remaining: int = 0
+        # Trailing stop config (parity with backtest engine)
+        self._trailing_atr_mult: float = float(
+            strategy_config.get("trailing_atr_mult", 100.0)
+        )
+        self._trailing_sl_atr_offset: float = float(
+            strategy_config.get("trailing_sl_atr_offset", 0.25)
+        )
         # Exit mode for time-barrier exits (separate from entry_mode)
         self._exit_mode: str = exit_mode
         log.info("Strategy: %s  direction=%s", strategy.name, strategy.direction)
         log.info(
             "Entry mode: %s  adaptive_priority=%s  max_hold_bars=%d  "
-            "cooldown_bars=%d  exit_mode=%s",
+            "tp_cooldown=%d  sl_cooldown=%d  trailing_atr_mult=%.2f  "
+            "trailing_sl_offset=%.2f  exit_mode=%s",
             entry_mode, adaptive_priority, self._max_hold_bars,
-            self._cooldown_bars, self._exit_mode,
+            self._tp_cooldown_bars, self._sl_cooldown_bars,
+            self._trailing_atr_mult,
+            self._trailing_sl_atr_offset, self._exit_mode,
         )
 
         # Telemetry
@@ -368,6 +382,13 @@ class LiveTrader:
         self._last_decision_context_by_order_id: dict[int, dict] = {}
         self._position_entry_bar_time: Optional[pd.Timestamp] = None
         self._position_bars_held: int = 0
+        # Trailing stop state (parity with backtest engine _on_in_position)
+        self._trailing_activated: bool = False
+        self._entry_price: Optional[float] = None
+        self._atr_at_entry: Optional[float] = None
+        self._position_side: int = 0  # +1 long, -1 short
+        self._highest_high: float = 0.0
+        self._lowest_low: float = float("inf")
         self._run_id = (
             f"live-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}-"
             f"{uuid.uuid4().hex[:8]}"
@@ -574,6 +595,99 @@ class LiveTrader:
     def _reset_position_state(self) -> None:
         self._position_entry_bar_time = None
         self._position_bars_held = 0
+        self._trailing_activated = False
+        self._entry_price = None
+        self._atr_at_entry = None
+        self._position_side = 0
+        self._highest_high = 0.0
+        self._lowest_low = float("inf")
+
+    def _check_trailing_stop(self) -> None:
+        """Check if trailing stop should activate and modify IBKR SL order.
+
+        Mirrors backtest engine _on_in_position trailing logic:
+        - Track highest_high / lowest_low since entry
+        - When price moves +trailing_atr_mult × ATR in favor, move SL
+          to entry ± trailing_sl_atr_offset × ATR
+        - Modify the live IBKR STP child order in-place
+        """
+        if self._trailing_activated:
+            return
+        if self._entry_price is None or self._atr_at_entry is None:
+            return
+        if self._atr_at_entry <= 0:
+            return
+
+        # Update bar extremes from the latest bar
+        last_bar = self.rolling_df.iloc[-1]
+        bar_high = float(last_bar["High"])
+        bar_low = float(last_bar["Low"])
+        self._highest_high = max(self._highest_high, bar_high)
+        self._lowest_low = min(self._lowest_low, bar_low)
+
+        # Check trailing trigger condition
+        triggered = False
+        if self._position_side == 1:  # Long
+            if self._highest_high >= (
+                self._entry_price
+                + self._trailing_atr_mult * self._atr_at_entry
+            ):
+                triggered = True
+        elif self._position_side == -1:  # Short
+            if self._lowest_low <= (
+                self._entry_price
+                - self._trailing_atr_mult * self._atr_at_entry
+            ):
+                triggered = True
+
+        if not triggered:
+            return
+
+        # Calculate new SL price
+        offset = self._trailing_sl_atr_offset * self._atr_at_entry
+        if self._position_side == 1:
+            new_sl = self._entry_price + offset
+        else:
+            new_sl = self._entry_price - offset
+        new_sl = round(new_sl, 2)
+
+        log.info(
+            "TRAILING STOP: activated — entry=%.2f  ATR=%.4f  "
+            "trigger=%.2f×ATR  offset=%.2f×ATR  new_SL=%.2f",
+            self._entry_price, self._atr_at_entry,
+            self._trailing_atr_mult, self._trailing_sl_atr_offset,
+            new_sl,
+        )
+
+        # Find and modify the STP child order on IBKR
+        try:
+            for t in self.manager.ib.openTrades():
+                c = getattr(t, "contract", None)
+                o = getattr(t, "order", None)
+                if c is None or o is None:
+                    continue
+                if getattr(c, "symbol", None) != "CL":
+                    continue
+                parent_id = getattr(o, "parentId", 0) or 0
+                if parent_id == 0:
+                    continue  # skip parent entry orders
+                order_type = getattr(o, "orderType", "")
+                if order_type != "STP":
+                    continue
+                old_sl = getattr(o, "auxPrice", 0.0) or 0.0
+                o.auxPrice = new_sl
+                self.manager.ib.placeOrder(c, o)
+                log.info(
+                    "TRAILING STOP: modified SL order %d: %.2f → %.2f",
+                    getattr(o, "orderId", 0), old_sl, new_sl,
+                )
+                self._trailing_activated = True
+                return
+            log.warning(
+                "TRAILING STOP: triggered but no STP child order found"
+            )
+        except Exception:
+            log.exception("TRAILING STOP: failed to modify SL order")
 
     def _check_time_barrier(
         self,
@@ -655,12 +769,18 @@ class LiveTrader:
                         "[TRADE] EXIT: %s %.0f %s @ %.2f (%s)",
                         action_str, qty, symbol_str, avg_price, exit_type,
                     )
-                    # Activate post-exit cooldown (parity with backtest engine)
-                    if self._cooldown_bars > 0:
-                        self._cooldown_remaining = self._cooldown_bars
+                    # Activate exit-type-specific cooldown
+                    if exit_type == "SL HIT" and self._sl_cooldown_bars > 0:
+                        self._cooldown_remaining = self._sl_cooldown_bars
                         log.info(
                             "COOLDOWN activated: %d bars after %s",
-                            self._cooldown_bars, exit_type,
+                            self._sl_cooldown_bars, exit_type,
+                        )
+                    elif exit_type == "TP HIT" and self._tp_cooldown_bars > 0:
+                        self._cooldown_remaining = self._tp_cooldown_bars
+                        log.info(
+                            "COOLDOWN activated: %d bars after %s",
+                            self._tp_cooldown_bars, exit_type,
                         )
                 else:
                     # Parent entry order filled
@@ -1291,6 +1411,9 @@ class LiveTrader:
                 )
                 log.warning("Portfolio lookup failed", exc_info=True)
 
+            # Check trailing stop condition on every bar while in position
+            self._check_trailing_stop()
+
         # 3. Delegate decision to strategy
         signal: TradeSignal = self.strategy.evaluate(
             features=features,
@@ -1429,6 +1552,13 @@ class LiveTrader:
                 order_type_str = f"{order_type_str}+{algo_str}"
             self._position_entry_bar_time = bar_time
             self._position_bars_held = 0
+            # Capture trailing stop context at entry
+            self._entry_price = current_price
+            self._atr_at_entry = atr_value
+            self._position_side = 1 if signal.action == "BUY" else -1
+            self._trailing_activated = False
+            self._highest_high = float(self.rolling_df["High"].iloc[-1])
+            self._lowest_low = float(self.rolling_df["Low"].iloc[-1])
             local_sym = getattr(
                 self._front_month_contract, "localSymbol", "CL"
             )
