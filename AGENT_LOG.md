@@ -2,6 +2,34 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
+## 2026-03-10 — Set 08: Exhaustion Features
+
+- **Goal**: Add "move exhaustion" features so the model can learn when a directional move is overextended and a snap-back is more likely than continuation. Addresses the problem of the model shorting into violent rebounds during extreme sell-offs (e.g., -14% day, -5% in 15 min).
+- **Dataset**: `CL_set_08.parquet` — 1,207,895 rows × 174 columns (154 features, +15 vs set_07).
+
+### New features (AlphaFactory `add_exhaustion_cluster`)
+
+| Feature | Formula | Purpose |
+|---------|---------|---------|
+| `EXHAUST_CUM_RET_{w}` | `rolling_sum(log_ret, w)` | Cumulative return — session-level directional magnitude |
+| `EXHAUST_CUM_ATR_{w}` | `cum_ret × Close / ATR_14` | ATR-normalised exhaustion — scale-invariant "how many ATRs moved" |
+| `EXHAUST_DIST_HIGH_{w}` | `(Close - rolling_max) / ATR_14` | Distance from recent high in ATR units (≤ 0) |
+
+Computed at 5 windows: 288, 864, 2016, 4032, 10080 → **15 new features**.
+
+### Files changed
+- `src/features/alpha_factory.py` — new `add_exhaustion_cluster()` method, wired into `add_all_features()` under `include_extended=True`
+- `src/data_processor.py` — new `process_set_08()` method, `set_08` added to `DATASET_VERSIONS` dict + routing
+- `data/DATASETS.json` — set_08 entry added
+
+### Verification
+- **22/22** existing tests pass (no regressions)
+- All 15 exhaustion features present, zero NaN in feature columns
+- `EXHAUST_CUM_RET_288` spot-check: exact match with recomputed `rolling(288).sum(log_ret)`
+- `EXHAUST_DIST_HIGH` max = 0.0 (correct: price at rolling high)
+- Processing wall time: 56:45
+
+
 ## 2026-03-10 — Entry Order TTL (1-Bar Cancel)
 
 - **Goal**: Cancel unfilled entry orders after 1 bar to prevent the position guard from permanently blocking new signals.
