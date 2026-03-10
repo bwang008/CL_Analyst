@@ -31,6 +31,10 @@ class TradeSignal:
         signal_label:   Human-readable label for telemetry ("Buy", "Sell", "Hold").
         skip_reason:    If HOLD, why (e.g. "BELOW_THRESHOLD", "POSITION_OPEN",
                         "ATR_INVALID").  None when action != HOLD.
+        tp_atr_mult:    Per-trade TP override (None = use engine/config global).
+        sl_atr_mult:    Per-trade SL override (None = use engine/config global).
+        trailing_atr_mult: Per-trade trailing override (None = use engine/config global).
+        max_hold_bars:  Per-trade time-barrier override (None = use engine/config global).
     """
 
     action: str  # "BUY" | "SELL" | "HOLD"
@@ -43,6 +47,11 @@ class TradeSignal:
     skip_reason: Optional[str] = None
     buy_prob: Optional[float] = None
     sell_prob: Optional[float] = None
+    # Per-trade overrides (tier system — None = use global config)
+    tp_atr_mult: Optional[float] = None
+    sl_atr_mult: Optional[float] = None
+    trailing_atr_mult: Optional[float] = None
+    max_hold_bars: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------

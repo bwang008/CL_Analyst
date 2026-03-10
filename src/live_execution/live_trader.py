@@ -435,6 +435,9 @@ class LiveTrader:
         self._last_decision_context_by_order_id: dict[int, dict] = {}
         self._position_entry_bar_time: Optional[pd.Timestamp] = None
         self._position_bars_held: int = 0
+        # Entry order TTL: cancel unfilled entry orders after 1 bar
+        self._pending_entry_order_id: Optional[int] = None
+        self._pending_entry_bar_time: Optional[pd.Timestamp] = None
         # Trailing stop state (parity with backtest engine _on_in_position)
         self._trailing_activated: bool = False
         self._entry_price: Optional[float] = None
@@ -654,6 +657,73 @@ class LiveTrader:
         self._position_side = 0
         self._highest_high = 0.0
         self._lowest_low = float("inf")
+        # Reset per-trade overrides (back to global config defaults)
+        self._trade_trailing_atr_mult = None
+        self._trade_max_hold_bars = None
+
+    def _check_entry_order_ttl(self, bar_time: pd.Timestamp) -> None:
+        """Cancel stale entry orders that haven't filled after 1 bar.
+
+        If an Adaptive/Limit entry order was placed on the previous bar
+        and is still pending (PreSubmitted/Submitted), cancel it and all
+        bracket children so the position guard unblocks for new signals.
+        """
+        if self._pending_entry_order_id is None:
+            return
+        if self._pending_entry_bar_time is None:
+            return
+        # Only cancel if at least 1 bar has elapsed
+        if bar_time <= self._pending_entry_bar_time:
+            return
+
+        # Check if the parent entry order is still open on IBKR
+        still_pending = False
+        try:
+            for t in self.manager.ib.openTrades():
+                o = getattr(t, "order", None)
+                c = getattr(t, "contract", None)
+                s = getattr(t, "orderStatus", None)
+                if o is None or c is None:
+                    continue
+                if getattr(c, "symbol", None) != "CL":
+                    continue
+                order_id = getattr(o, "orderId", None)
+                if order_id == self._pending_entry_order_id:
+                    status_str = getattr(s, "status", "") if s else ""
+                    if status_str in (
+                        "Submitted", "PreSubmitted", "PendingSubmit",
+                    ):
+                        still_pending = True
+                    break
+        except Exception:
+            log.debug("TTL check: failed to query open trades", exc_info=True)
+            return
+
+        if not still_pending:
+            # Order already filled or cancelled — clear pending state
+            self._pending_entry_order_id = None
+            self._pending_entry_bar_time = None
+            return
+
+        # Cancel the stale entry + bracket children
+        log.info(
+            "ENTRY TTL: cancelling unfilled entry order %d "
+            "(placed at %s, now %s — 1 bar TTL expired)",
+            self._pending_entry_order_id,
+            self._pending_entry_bar_time,
+            bar_time,
+        )
+        try:
+            cancelled = self.manager.cancel_open_cl_orders()
+            log.info(
+                "ENTRY TTL: cancelled %d CL order(s)", cancelled,
+            )
+        except Exception:
+            log.exception("ENTRY TTL: failed to cancel stale orders")
+
+        self._pending_entry_order_id = None
+        self._pending_entry_bar_time = None
+        self._reset_position_state()
 
     def _check_trailing_stop(self) -> None:
         """Check if trailing stop should activate and modify IBKR SL order.
@@ -679,17 +749,23 @@ class LiveTrader:
         self._lowest_low = min(self._lowest_low, bar_low)
 
         # Check trailing trigger condition
+        # Use per-trade override if set, otherwise global config
+        effective_trailing = (
+            self._trade_trailing_atr_mult
+            if self._trade_trailing_atr_mult is not None
+            else self._trailing_atr_mult
+        )
         triggered = False
         if self._position_side == 1:  # Long
             if self._highest_high >= (
                 self._entry_price
-                + self._trailing_atr_mult * self._atr_at_entry
+                + effective_trailing * self._atr_at_entry
             ):
                 triggered = True
         elif self._position_side == -1:  # Short
             if self._lowest_low <= (
                 self._entry_price
-                - self._trailing_atr_mult * self._atr_at_entry
+                - effective_trailing * self._atr_at_entry
             ):
                 triggered = True
 
@@ -762,7 +838,13 @@ class LiveTrader:
             return False
 
         self._position_bars_held += 1
-        if self._position_bars_held <= self._max_hold_bars:
+        # Use per-trade override if set, otherwise global config
+        effective_max_hold = (
+            self._trade_max_hold_bars
+            if self._trade_max_hold_bars is not None
+            else self._max_hold_bars
+        )
+        if self._position_bars_held <= effective_max_hold:
             return False
 
         cancelled = self.manager.cancel_open_cl_orders()
@@ -836,11 +918,13 @@ class LiveTrader:
                             self._tp_cooldown_bars, exit_type,
                         )
                 else:
-                    # Parent entry order filled
+                    # Parent entry order filled — clear TTL tracking
                     log.info(
                         "[TRADE] FILLED: %s %.0f %s @ %.2f",
                         action_str, qty, symbol_str, avg_price,
                     )
+                    self._pending_entry_order_id = None
+                    self._pending_entry_bar_time = None
 
             order_id = getattr(order, "orderId", None)
             ctx = self._last_decision_context_by_order_id.get(order_id)
@@ -1338,8 +1422,11 @@ class LiveTrader:
 
     def _on_new_bar(self, bar_time: pd.Timestamp) -> None:
         """Run feature generation, strategy evaluation, and potentially execute a trade."""
-        # 0. Track cooldown state (don't return early — we still want INFERENCE
-        #    and BRACKET to always be visible in logs)
+        # 0a. Entry order TTL: cancel stale entry orders after 1 bar
+        self._check_entry_order_ttl(bar_time)
+
+        # 0b. Track cooldown state (don't return early — we still want INFERENCE
+        #     and BRACKET to always be visible in logs)
         in_cooldown = False
         if self._cooldown_remaining > 0:
             self._cooldown_remaining -= 1
@@ -1622,6 +1709,9 @@ class LiveTrader:
                 order_type_str = f"{order_type_str}+{algo_str}"
             self._position_entry_bar_time = bar_time
             self._position_bars_held = 0
+            # Track pending entry for TTL cancellation
+            self._pending_entry_order_id = order_id
+            self._pending_entry_bar_time = bar_time
             # Capture trailing stop context at entry
             self._entry_price = current_price
             self._atr_at_entry = atr_value
@@ -1629,6 +1719,9 @@ class LiveTrader:
             self._trailing_activated = False
             self._highest_high = float(self.rolling_df["High"].iloc[-1])
             self._lowest_low = float(self.rolling_df["Low"].iloc[-1])
+            # Store per-trade overrides from tier matching (None = use global)
+            self._trade_trailing_atr_mult = signal.trailing_atr_mult
+            self._trade_max_hold_bars = signal.max_hold_bars
             local_sym = getattr(
                 self._front_month_contract, "localSymbol", "CL"
             )

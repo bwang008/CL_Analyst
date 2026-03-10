@@ -78,23 +78,70 @@ class ConfigurableStrategy(Strategy):
         self._direction: str = self.config.get("direction", "BOTH").upper()
         self.allow_concurrent: bool = self.config.get("allow_concurrent", False)
 
-        # Detect ensemble vs single-model config
+        # Detect config mode: tiered > ensemble > single-model
+        self._is_tiered: bool = (
+            "long" in self.config
+            and isinstance(self.config["long"], dict)
+            and "tiers" in self.config.get("long", {})
+        )
         self._is_ensemble: bool = "models" in self.config
 
-        # Threshold
-        if self._is_ensemble:
-            # Ensemble: per-model thresholds; entry_threshold is a fallback
-            models_cfg = self.config["models"]
+        # ── Tiered config ─────────────────────────────────────────────
+        if self._is_tiered:
+            self._direction = "BOTH"
+            long_cfg = self.config.get("long", {})
+            short_cfg = self.config.get("short", {})
+
+            # Parse tiers: sorted highest min_prob first
+            self._long_tiers: list[dict] = sorted(
+                long_cfg.get("tiers", []),
+                key=lambda t: float(t.get("min_prob", 0)),
+                reverse=True,
+            )
+            self._short_tiers: list[dict] = sorted(
+                short_cfg.get("tiers", []),
+                key=lambda t: float(t.get("min_prob", 0)),
+                reverse=True,
+            )
+
+            # Thresholds = lowest tier min_prob on each side
             self._long_threshold: float = float(
-                models_cfg.get("long", {}).get("threshold", 0.50)
-            )
+                self._long_tiers[-1]["min_prob"]
+            ) if self._long_tiers else 1.0
             self._short_threshold: float = float(
-                models_cfg.get("short", {}).get("threshold", 0.50)
-            )
+                self._short_tiers[-1]["min_prob"]
+            ) if self._short_tiers else 1.0
             self.entry_threshold: float = min(
                 self._long_threshold, self._short_threshold
             )
+
+            log.info(
+                "[%s] Tiered config: %d long tiers (min=%.2f), "
+                "%d short tiers (min=%.2f)",
+                self._nickname,
+                len(self._long_tiers), self._long_threshold,
+                len(self._short_tiers), self._short_threshold,
+            )
+
+        # ── Ensemble config ───────────────────────────────────────────
+        elif self._is_ensemble:
+            self._long_tiers = []
+            self._short_tiers = []
+            models_cfg = self.config["models"]
+            self._long_threshold = float(
+                models_cfg.get("long", {}).get("threshold", 0.50)
+            )
+            self._short_threshold = float(
+                models_cfg.get("short", {}).get("threshold", 0.50)
+            )
+            self.entry_threshold = min(
+                self._long_threshold, self._short_threshold
+            )
+
+        # ── Single-model config ───────────────────────────────────────
         else:
+            self._long_tiers = []
+            self._short_tiers = []
             raw_threshold = self.config.get("entry_threshold", None)
             if raw_threshold is None or not isinstance(raw_threshold, (int, float)):
                 log.warning(
@@ -109,7 +156,7 @@ class ConfigurableStrategy(Strategy):
             self._long_threshold = self.entry_threshold
             self._short_threshold = self.entry_threshold
 
-        # ATR multipliers
+        # ATR multipliers (global defaults; overridden per-trade by tiers)
         self.tp_atr_mult: float = float(self.config.get("tp_atr_mult", 2.0))
         self.sl_atr_mult: float = float(self.config.get("sl_atr_mult", 1.0))
 
@@ -123,9 +170,36 @@ class ConfigurableStrategy(Strategy):
         # Load model(s) from registry
         live_cfg = self.config.get("live_config", {})
 
-        if self._is_ensemble:
+        if self._is_tiered:
+            # Tiered: experiment_id is under long/short, not under models
+            long_cfg = self.config.get("long", {})
+            short_cfg = self.config.get("short", {})
+            long_exp_id = (
+                long_cfg.get("experiment_id")
+                or live_cfg.get("experiment_id")
+            )
+            short_exp_id = short_cfg.get("experiment_id")
+
+            if long_exp_id:
+                self._long_learner = self._load_model(long_exp_id, "LONG")
+            else:
+                self._long_learner = None
+                log.warning("[%s] No LONG model experiment_id — long signals disabled", self._nickname)
+
+            if short_exp_id:
+                self._short_learner = self._load_model(short_exp_id, "SHORT")
+            else:
+                self._short_learner = None
+                log.warning("[%s] No SHORT model experiment_id — short signals disabled", self._nickname)
+
+            primary = self._long_learner or self._short_learner
+            if primary is None:
+                raise ValueError(f"[{self._nickname}] Tiered config has no valid models")
+            self.learner = primary
+            self._feature_names: list[str] = primary.feature_names
+
+        elif self._is_ensemble:
             models_cfg = self.config["models"]
-            # Load LONG model
             long_exp_id = (
                 models_cfg.get("long", {}).get("experiment_id")
                 or live_cfg.get("experiment_id")
@@ -136,7 +210,6 @@ class ConfigurableStrategy(Strategy):
                 self._long_learner = None
                 log.warning("[%s] No LONG model experiment_id — long signals disabled", self._nickname)
 
-            # Load SHORT model
             short_exp_id = models_cfg.get("short", {}).get("experiment_id")
             if short_exp_id:
                 self._short_learner = self._load_model(short_exp_id, "SHORT")
@@ -144,12 +217,11 @@ class ConfigurableStrategy(Strategy):
                 self._short_learner = None
                 log.warning("[%s] No SHORT model experiment_id — short signals disabled", self._nickname)
 
-            # Use the long model's features as primary (both should share features)
             primary = self._long_learner or self._short_learner
             if primary is None:
                 raise ValueError(f"[{self._nickname}] Ensemble config has no valid models")
             self.learner = primary
-            self._feature_names: list[str] = primary.feature_names
+            self._feature_names = primary.feature_names
         else:
             # Single-model: original behavior
             experiment_id = live_cfg.get(
@@ -165,10 +237,12 @@ class ConfigurableStrategy(Strategy):
             self._long_learner = self.learner if self._direction != "SHORT" else None
             self._short_learner = self.learner if self._direction != "LONG" else None
 
+        mode_str = "tiered" if self._is_tiered else ("ensemble" if self._is_ensemble else "single")
         log.info(
-            "[%s] Config: direction=%s  long_thresh=%.2f  short_thresh=%.2f  "
-            "TP=%.1fx  SL=%.1fx  concurrent=%s  tiers=%s  ensemble=%s",
+            "[%s] Config: mode=%s  direction=%s  long_thresh=%.2f  short_thresh=%.2f  "
+            "TP=%.1fx  SL=%.1fx  concurrent=%s  sizing_tiers=%s",
             self._nickname,
+            mode_str,
             self._direction,
             self._long_threshold,
             self._short_threshold,
@@ -176,7 +250,6 @@ class ConfigurableStrategy(Strategy):
             self.sl_atr_mult,
             self.allow_concurrent,
             self.sizing_tiers,
-            self._is_ensemble,
         )
 
         self.base_quantity = base_quantity
@@ -299,16 +372,42 @@ class ConfigurableStrategy(Strategy):
                 sell_prob=sell_prob,
             )
 
-        # 5. Compute bracket levels (direction-aware)
-        if active_action == "SELL":
-            tp_price = round(current_price - self.tp_atr_mult * atr_value, 2)
-            sl_price = round(current_price + self.sl_atr_mult * atr_value, 2)
-        else:
-            tp_price = round(current_price + self.tp_atr_mult * atr_value, 2)
-            sl_price = round(current_price - self.sl_atr_mult * atr_value, 2)
+        # 5. Tier matching + bracket computation
+        tier_overrides: dict = {}  # per-trade override fields
+        tiers = self._long_tiers if active_action == "BUY" else self._short_tiers
+        matched_tier = self._match_tier(tiers, probability) if tiers else None
 
-        # 6. Position sizing
-        lots = self._prob_to_lots(probability)
+        if matched_tier is not None:
+            # Use per-tier TP/SL (fallback to global config)
+            tp_mult = float(matched_tier.get("tp_atr_mult", self.tp_atr_mult))
+            sl_mult = float(matched_tier.get("sl_atr_mult", self.sl_atr_mult))
+            lots = int(matched_tier.get("lots", 1))
+            # Per-trade overrides for LiveTrader trailing/max_hold
+            if "trailing_atr_mult" in matched_tier:
+                tier_overrides["trailing_atr_mult"] = float(matched_tier["trailing_atr_mult"])
+            if "max_hold_bars" in matched_tier:
+                tier_overrides["max_hold_bars"] = int(matched_tier["max_hold_bars"])
+            tier_overrides["tp_atr_mult"] = tp_mult
+            tier_overrides["sl_atr_mult"] = sl_mult
+            tier_label = matched_tier.get("label", "")
+            if tier_label:
+                log.info(
+                    "[%s] Tier matched: %s (prob=%.4f, lots=%d, TP=%.1fx, SL=%.1fx)",
+                    self._nickname, tier_label, probability, lots, tp_mult, sl_mult,
+                )
+        else:
+            # No tier match — use global config multipliers + sizing
+            tp_mult = self.tp_atr_mult
+            sl_mult = self.sl_atr_mult
+            lots = self._prob_to_lots(probability)
+
+        # Compute bracket prices (direction-aware)
+        if active_action == "SELL":
+            tp_price = round(current_price - tp_mult * atr_value, 2)
+            sl_price = round(current_price + sl_mult * atr_value, 2)
+        else:
+            tp_price = round(current_price + tp_mult * atr_value, 2)
+            sl_price = round(current_price - sl_mult * atr_value, 2)
 
         return TradeSignal(
             action=active_action,
@@ -320,9 +419,22 @@ class ConfigurableStrategy(Strategy):
             signal_label=active_label,
             buy_prob=buy_prob,
             sell_prob=sell_prob,
+            **tier_overrides,
         )
 
     # -- Internal helpers ----------------------------------------------------
+
+    @staticmethod
+    def _match_tier(tiers: list[dict], probability: float) -> Optional[dict]:
+        """Match probability to the highest-min_prob tier that qualifies.
+
+        Tiers are pre-sorted highest min_prob first; first match wins.
+        Returns None if no tier matches.
+        """
+        for tier in tiers:
+            if probability >= float(tier.get("min_prob", 0)):
+                return tier
+        return None
 
     def _prob_to_lots(self, probability: float) -> int:
         """Map model probability to lot count using config sizing tiers."""
