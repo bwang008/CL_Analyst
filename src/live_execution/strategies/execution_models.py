@@ -55,12 +55,20 @@ class Order:
         side:   +1 for long entry, -1 for short entry.
         lots:   Number of contracts.
         reason: Human-readable reason for logging.
+        tp_atr_mult: Per-trade TP override (None = use engine global).
+        sl_atr_mult: Per-trade SL override (None = use engine global).
+        trailing_atr_mult: Per-trade trailing override (None = use engine global).
+        max_hold_bars: Per-trade time-barrier override (None = use engine global).
     """
 
     action: str    # "BUY" | "SELL" | "HOLD"
     side: int      # +1 | -1
     lots: int = 1
     reason: str = ""
+    tp_atr_mult: Optional[float] = None
+    sl_atr_mult: Optional[float] = None
+    trailing_atr_mult: Optional[float] = None
+    max_hold_bars: Optional[int] = None
 
 
 # Sentinel for "do nothing this bar"
@@ -365,6 +373,143 @@ class AggressiveEnsembleStrategy(BaseExecutionStrategy):
         return HOLD
 
 
+class TieredEnsembleStrategy(BaseExecutionStrategy):
+    """Dual-model ensemble with per-tier TP/SL/trailing/max_hold overrides.
+
+    Supports SEPARATE buy and sell model configurations with SEPARATE
+    probability tiers per side.  Each tier specifies its own lots and
+    execution parameters (tp_atr_mult, sl_atr_mult, trailing_atr_mult,
+    max_hold_bars) which are passed to the engine via Order fields.
+
+    Config shape::
+
+        {
+            "long": {
+                "experiment_id": "...",
+                "tiers": [
+                    {"min_prob": 0.75, "lots": 2, "tp_atr_mult": 3.0, ...},
+                    {"min_prob": 0.60, "lots": 1, ...}
+                ]
+            },
+            "short": { ... same shape ... }
+        }
+
+    Tier matching rules:
+        - Tiers are evaluated highest min_prob first; first match wins.
+        - If no tier matches, HOLD is returned.
+        - When both buy and sell fire on the same bar, the higher
+          probability wins (same conflict resolution as Conservative).
+        - When in a position, no new entries (no-flip behaviour).
+    """
+
+    def __init__(self, config: dict) -> None:
+        super().__init__(config)
+        long_cfg = config.get("long", {})
+        short_cfg = config.get("short", {})
+        self.long_tiers = self._parse_tiers(long_cfg.get("tiers", []))
+        self.short_tiers = self._parse_tiers(short_cfg.get("tiers", []))
+        self.max_concurrent: int = config.get("max_concurrent", 1)
+
+    @staticmethod
+    def _parse_tiers(raw: list[dict]) -> list[dict]:
+        """Parse and sort tiers by min_prob descending (first match wins)."""
+        if not raw:
+            return []
+        tiers = []
+        for t in raw:
+            tiers.append({
+                "min_prob": float(t.get("min_prob", 0.0)),
+                "lots": int(t.get("lots", 1)),
+                "tp_atr_mult": t.get("tp_atr_mult"),
+                "sl_atr_mult": t.get("sl_atr_mult"),
+                "trailing_atr_mult": t.get("trailing_atr_mult"),
+                "max_hold_bars": t.get("max_hold_bars"),
+                "label": t.get("label", ""),
+            })
+        tiers.sort(key=lambda x: x["min_prob"], reverse=True)
+        return tiers
+
+    def _match_tier(
+        self, probability: float, tiers: list[dict]
+    ) -> Optional[dict]:
+        """Return the first tier whose min_prob <= probability, or None."""
+        for tier in tiers:
+            if probability >= tier["min_prob"]:
+                return tier
+        return None
+
+    def _tier_to_order(
+        self,
+        tier: dict,
+        action: str,
+        side: int,
+        probability: float,
+    ) -> Order:
+        """Build an Order from a matched tier, carrying per-trade overrides."""
+        label = tier.get("label", "")
+        tp = tier.get("tp_atr_mult")
+        sl = tier.get("sl_atr_mult")
+        trail = tier.get("trailing_atr_mult")
+        mhb = tier.get("max_hold_bars")
+        return Order(
+            action=action,
+            side=side,
+            lots=tier["lots"],
+            reason=(
+                f"TIERED_{action} prob={probability:.4f} "
+                f"tier={label} lots={tier['lots']}"
+            ),
+            tp_atr_mult=float(tp) if tp is not None else None,
+            sl_atr_mult=float(sl) if sl is not None else None,
+            trailing_atr_mult=float(trail) if trail is not None else None,
+            max_hold_bars=int(mhb) if mhb is not None else None,
+        )
+
+    def on_bar(
+        self,
+        dt: object,
+        open_: float,
+        high: float,
+        low: float,
+        close: float,
+        atr: float,
+        prob_buy: float,
+        prob_sell: float,
+        state: EngineState,
+    ) -> list[Order]:
+        # NaN guards
+        if np.isnan(prob_buy):
+            prob_buy = 0.0
+        if np.isnan(prob_sell):
+            prob_sell = 0.0
+
+        # If already in a position, ignore new signals (conservative)
+        if state.position != 0:
+            return HOLD
+        if state.open_positions >= self.max_concurrent:
+            return HOLD
+
+        # Match tiers
+        buy_tier = self._match_tier(prob_buy, self.long_tiers)
+        sell_tier = self._match_tier(prob_sell, self.short_tiers)
+
+        buy_ok = buy_tier is not None
+        sell_ok = sell_tier is not None
+
+        if buy_ok and sell_ok:
+            # Same-bar conflict: higher probability wins
+            if prob_buy >= prob_sell:
+                return [self._tier_to_order(buy_tier, "BUY", 1, prob_buy)]
+            else:
+                return [self._tier_to_order(sell_tier, "SELL", -1, prob_sell)]
+        elif buy_ok:
+            return [self._tier_to_order(buy_tier, "BUY", 1, prob_buy)]
+        elif sell_ok:
+            return [self._tier_to_order(sell_tier, "SELL", -1, prob_sell)]
+
+        return HOLD
+
+
 # ---------------------------------------------------------------------------
 # Strategy Registry / Factory
 # ---------------------------------------------------------------------------
@@ -373,6 +518,7 @@ STRATEGY_REGISTRY: dict[str, type[BaseExecutionStrategy]] = {
     "SingleModelStrategy": SingleModelStrategy,
     "ConservativeEnsembleStrategy": ConservativeEnsembleStrategy,
     "AggressiveEnsembleStrategy": AggressiveEnsembleStrategy,
+    "TieredEnsembleStrategy": TieredEnsembleStrategy,
 }
 
 

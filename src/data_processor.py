@@ -38,6 +38,7 @@ DATASET_VERSIONS = {
     'set_04': 'Lower thresholds (2%/3%) with shorter horizons (12h/24h)',
     'set_05': 'Dynamic Triple Barrier targets with ATR-based barriers',
     'set_06': 'Ultimate dataset (set_05 features + targets)',
+    'set_07': 'Extended features (set_05 + new clusters + expanded macro + 1D window)',
 }
 
 
@@ -169,7 +170,11 @@ class DataProcessor:
         raise ValueError(f"Could not read {self.input_path} with any of the separators: {separators}. "
                         f"Please check the file format.")
     
-    def add_time_features(self, df: pd.DataFrame) -> pd.DataFrame:
+    def add_time_features(
+        self,
+        df: pd.DataFrame,
+        include_day_of_week: bool = False,
+    ) -> pd.DataFrame:
         """
         Add cyclical time features based on minutes since midnight.
         
@@ -178,6 +183,7 @@ class DataProcessor:
         
         Args:
             df: DataFrame with DateTime index
+            include_day_of_week: If True, also add cyclical day-of-week features
             
         Returns:
             pd.DataFrame: DataFrame with Time_Sin and Time_Cos columns added
@@ -190,6 +196,13 @@ class DataProcessor:
         # Cyclical encoding using sine and cosine
         df['Time_Sin'] = np.sin(2 * np.pi * minutes / self.MINUTES_PER_DAY)
         df['Time_Cos'] = np.cos(2 * np.pi * minutes / self.MINUTES_PER_DAY)
+
+        # Day of week (cyclical): 0=Monday ... 4=Friday
+        if include_day_of_week:
+            day_of_week = df.index.dayofweek
+            df['Time_DayOfWeek_Sin'] = np.sin(2 * np.pi * day_of_week / 5)
+            df['Time_DayOfWeek_Cos'] = np.cos(2 * np.pi * day_of_week / 5)
+            print("  - Added day-of-week cyclical features")
         
         return df
     
@@ -702,6 +715,8 @@ class DataProcessor:
             return self.process_set_05(threshold=threshold, horizon=horizon)
         elif self.dataset_version == "set_06":
             return self.process_set_06()
+        elif self.dataset_version == "set_07":
+            return self.process_set_07()
         else:
             raise ValueError(f"Unknown dataset version: {self.dataset_version}. "
                            f"Available: {list(DATASET_VERSIONS.keys())}")
@@ -1176,6 +1191,111 @@ class DataProcessor:
         """
         self.dataset_version = "set_06"
         return self.process_set_05()
+
+    def process_set_07(self) -> pd.DataFrame:
+        """
+        Extended feature set for next-generation models.
+
+        Changes vs set_05/set_06:
+        - Adds 1-day (288) bar-level window (A2)
+        - Expands macro windows: 1D, 3D, 1W, 2W, 1M, 3M (A1)
+        - Enables extended AlphaFactory clusters (A3–A6):
+            return distribution, stochastic, Chaikin Money Flow,
+            cross-timeframe ratios
+        - Adds day-of-week encoding (A7)
+        - Triple Barrier targets (same as set_05)
+        """
+        start_time = datetime.now()
+        print("=" * 60)
+        print(f"Starting Data Processing Pipeline - {self.dataset_version.upper()}")
+        print(f"  Extended features: 1D window, expanded macro, new clusters")
+        print(f"Started at: {start_time.isoformat(timespec='seconds')}")
+        print("=" * 60)
+
+        # Step 1: Load data
+        df = self.load_data()
+        total_rows = len(df)
+        print(f"  [15%] Loaded {total_rows} rows at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 2: Add time features (includes day-of-week for set_07)
+        df = self.add_time_features(df, include_day_of_week=True)
+        print(f"  [20%] Time features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 3: Add AlphaFactory features with extended clusters
+        windows = [
+            1 * self.BARS_PER_DAY,   # 288 = 1 day (NEW)
+            3 * self.BARS_PER_DAY,   # 864 = 3 days
+            7 * self.BARS_PER_DAY,   # 2016 = 7 days
+            14 * self.BARS_PER_DAY,  # 4032 = 14 days
+            35 * self.BARS_PER_DAY,  # 10080 = 35 days
+        ]
+        macro_windows = {
+            "1D": 24, "3D": 72, "1W": 168, "2W": 336,
+            "1M": 840, "3M": 2160,
+        }
+        df = AlphaFactory(df).add_all_features(
+            windows=windows,
+            include_momentum=True,
+            include_macro=True,
+            include_extended=True,
+            macro_windows=macro_windows,
+            log_progress=True,
+        )
+        print(f"  [60%] AlphaFactory features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 4: Add RAW columns for evaluation
+        raw_horizon = 288
+        future_high = df['High'].iloc[::-1].rolling(
+            window=raw_horizon, min_periods=1
+        ).max().iloc[::-1].shift(-1)
+        future_low = df['Low'].iloc[::-1].rolling(
+            window=raw_horizon, min_periods=1
+        ).min().iloc[::-1].shift(-1)
+        df['RAW_Close'] = df['Close'].copy()
+        df['RAW_Future_High'] = future_high
+        df['RAW_Future_Low'] = future_low
+        print("  - Added RAW_Close, RAW_Future_High, RAW_Future_Low")
+
+        # Step 5: Create Triple Barrier targets (same as set_05)
+        df = self.add_triple_barrier_target(
+            df, prefix="TARGET_TRIPLE_2x1_12H",
+            tp_atr_mult=2.0, sl_atr_mult=1.0,
+            max_horizon=144, atr_period=14,
+        )
+        df = self.add_triple_barrier_target(
+            df, prefix="TARGET_TRIPLE_2x1_24H",
+            tp_atr_mult=2.0, sl_atr_mult=1.0,
+            max_horizon=288, atr_period=14,
+        )
+        df = self.add_triple_barrier_target(
+            df, prefix="TARGET_TRIPLE_3x1_24H",
+            tp_atr_mult=3.0, sl_atr_mult=1.0,
+            max_horizon=288, atr_period=14,
+        )
+        df = self.add_return_target(df, horizons=[144, 288])
+        print(f"  [80%] All targets created at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 6: Normalize features
+        df = self.normalize_features(df)
+
+        # Step 7: Cleanup
+        df = self.cleanup(df, drop_raw_returns=True, keep_ohlcv=self.keep_ohlcv)
+
+        # Step 8: Save
+        saved_path = self.save(df)
+        print(f"  [100%] Saved output at {datetime.now().isoformat(timespec='seconds')}")
+
+        print("=" * 60)
+        print("Processing Complete!")
+        print(f"Output: {saved_path}")
+        print(f"Shape: {df.shape}")
+        print(f"Columns: {list(df.columns)}")
+        duration = datetime.now() - start_time
+        print(f"Wall time: {str(duration).split('.')[0]}")
+        print("=" * 60)
+
+        self.df = df
+        return df
 
 
 def main(dataset_version: str = "set_01"):

@@ -2,6 +2,103 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
+## 2026-03-10 — Entry Order TTL (1-Bar Cancel)
+
+- **Goal**: Cancel unfilled entry orders after 1 bar to prevent the position guard from permanently blocking new signals.
+- **Problem**: Bracket entry orders were placed with `tif='GTC'` and no expiry mechanism. If an Adaptive/Limit entry didn't fill, all future signals were blocked indefinitely.
+- **Solution**: Added `_check_entry_order_ttl()` to `live_trader.py`:
+  - Tracks `_pending_entry_order_id` and `_pending_entry_bar_time` on order placement
+  - On each new bar: if 1+ bars elapsed and the entry is still pending (Submitted/PreSubmitted), cancels all CL orders and resets position state
+  - Clears pending state on parent fill in `_on_order_status()` to prevent false cancellations
+- **Note**: BacktestEngine assumes instant fills — no TTL concept needed there.
+
+## 2026-03-10 — Live Trader TieredEnsemble Support
+
+- **Goal**: Enable `TieredEnsemble2.json` to work with the live trader (`live_trader.py`) by adding per-tier execution parameter support, matching the backtest engine's per-Order override behavior.
+
+### TradeSignal extension (`strategy.py`)
+- Added 4 optional per-trade override fields: `tp_atr_mult`, `sl_atr_mult`, `trailing_atr_mult`, `max_hold_bars` (all default `None` for backward compat).
+
+### ConfigurableStrategy tier-awareness (`configurable_strategy.py`)
+- 3-mode config detection: **tiered** (`long.tiers`) > **ensemble** (`models`) > **single-model**.
+- Tiered mode: parses and sorts tiers by `min_prob` descending, matches first qualifying tier.
+- Per-tier: TP/SL multipliers used for bracket computation, trailing/max_hold overrides passed on `TradeSignal`.
+- New `_match_tier()` static method.
+- Backward compatible: ensemble and single-model configs use unchanged code paths.
+- Model loading adapted: tiered configs use `long.experiment_id`/`short.experiment_id` (not `models.long.experiment_id`).
+
+### LiveTrader per-trade overrides (`live_trader.py`)
+- **On entry**: stores `signal.trailing_atr_mult` / `signal.max_hold_bars` as `_trade_trailing_atr_mult` / `_trade_max_hold_bars`.
+- **`_check_trailing_stop()`**: uses per-trade trailing override when set.
+- **`_check_time_barrier()`**: uses per-trade max_hold override when set.
+- **`_reset_position_state()`**: resets per-trade overrides to `None`.
+
+### Parity gaps closed
+| Feature | Before | After |
+|---------|--------|-------|
+| Per-tier TP/SL | Backtest only | Backtest + Live |
+| Per-tier trailing | Backtest only | Backtest + Live |
+| Per-tier max_hold | Backtest only | Backtest + Live |
+
+### Tests
+- 72/72 passing (50 backtest_engine + 20 configurable_strategy + 2 others).
+- Test stub updated with `_is_tiered`, `_long_tiers`, `_short_tiers`.
+
+### Usage
+```bash
+# Backtest
+python -m agent.backtest_engine --config configs/strategies/TieredEnsemble2.json --predictions reports/oos_predictions.csv
+
+# Live (dry-run)
+python -m src.live_execution.live_trader --config configs/strategies/TieredEnsemble2.json --dry-run
+
+# Existing configs still work unchanged
+python -m src.live_execution.live_trader --config configs/strategies/ensemble2_alt.json
+```
+
+## 2026-03-10 — TieredEnsembleStrategy with Per-Order Overrides
+
+- **Goal**: Implement asymmetric buy/sell tiers with per-tier TP/SL/trailing/max_hold parameters, passed through the `Order` object to the `BacktestEngine`.
+
+### Order dataclass extension
+- Added 4 optional per-trade override fields to `Order` in `execution_models.py`: `tp_atr_mult`, `sl_atr_mult`, `trailing_atr_mult`, `max_hold_bars` (all default `None` for backward compat).
+
+### BacktestEngine per-Order overrides
+- `_on_flat()`: Accepts `Order`, resolves per-trade TP/SL/trailing/max_hold overrides (falls back to engine globals when `None`).
+- `_on_in_position()`: Uses per-trade `_trade_max_horizon` and `_trade_trailing_atr_mult` instead of engine globals.
+- `_open_new_position()` + `_check_position()`: `_OpenPosition` extended with `pos_max_horizon` and `pos_trailing_atr_mult` for concurrent mode.
+- `_reset_state()`: Initialises per-trade override fields.
+
+### TieredEnsembleStrategy class (~140 lines)
+- New class in `execution_models.py`: parses `long.tiers` / `short.tiers` config blocks.
+- Tier matching: highest `min_prob` first, first match wins. Each tier specifies lots + TP/SL/trailing/max_hold overrides.
+- Conflict resolution: when both buy and sell fire on the same bar, higher probability wins.
+- Conservative position management: HOLD when already in position (no-flip).
+- Registered in `STRATEGY_REGISTRY`.
+
+### New config
+- `configs/strategies/TieredEnsemble2.json`: 2 long tiers (high_confidence @ ≥0.75, base @ ≥0.60) + 2 short tiers (high_confidence @ ≥0.80, base @ ≥0.60), each with distinct TP/SL/trailing/max_hold.
+
+### Backtest results (OOS 2022-01 → 2026-02, 291K bars)
+
+| Config | Total PnL | Win Rate | PF | Trades |
+|--------|----------:|:--------:|----:|-------:|
+| Koala2_opt (Short only) | $101,650 | 97.6% | 43.57 | 127 |
+| Manatee2_opt (Long only) | $293,237 | 78.0% | 39.65 | 132 |
+| Ensemble2_Aggro (Both) | $1,080,623 | 62.4% | 2.30 | 7,266 |
+| TieredEnsemble2 | $618,520 | 72.8% | 2.12 | 11,974 |
+
+### Documentation
+- Updated `configs/strategies/config_readme.md`: added TieredEnsembleStrategy schema, tier matching rules, per-Order overrides section, example config.
+- Created `reports/tiered_ensemble_backtest_20260310.md`.
+
+### Test results
+- **50 passed, 0 failed** (39 existing + 11 new)
+- New test classes: `TestOrderOverrides` (2), `TestTieredEnsembleStrategy` (6), `TestTieredWithEngine` (2)
+
+### Limitations
+- **Live trader parity**: The `TieredEnsembleStrategy` is currently **backtest-only**. The live trader's `ConfigurableStrategy` reads the `models` key (not `execution_class`), so per-tier overrides are not yet supported in live trading. A future enhancement would extend `ConfigurableStrategy` to support tiered configs.
+
 ## 2026-03-03 — Resubscription Bug Fixes (BUG-005, BUG-006)
 
 ### BUG-005: Resubscription crashes with "event loop already running" (bars never recovered)

@@ -173,10 +173,22 @@ class AlphaFactory:
         windows: list[int] | tuple[int, ...] | int | None = None,
         include_momentum: bool = True,
         include_macro: bool = True,
+        include_extended: bool = False,
         macro_windows: dict[str, int] | None = None,
         log_progress: bool = False,
     ) -> pd.DataFrame:
-        """Run all feature clusters across multiple rolling windows."""
+        """Run all feature clusters across multiple rolling windows.
+
+        Args:
+            windows: Rolling window sizes (in bars).
+            include_momentum: Add momentum cluster (RSI, BB, ADX, MACD).
+            include_macro: Add macro context features.
+            include_extended: Add extended clusters (set_07+): return
+                distribution, stochastic oscillator, Chaikin Money Flow,
+                and cross-timeframe ratios.
+            macro_windows: Dict of label→hourly-window for macro context.
+            log_progress: Print progress timestamps.
+        """
         if windows is None:
             windows = [24, 288, 1440]
         if isinstance(windows, int):
@@ -194,8 +206,18 @@ class AlphaFactory:
             self.add_microstructure_cluster()  # Single pass, not window dependent
             self.add_trend_cluster(window=window)
             self.add_volume_flow_cluster(window=window)
+            if include_extended:
+                self.add_return_distribution_cluster(window=window)
+                self.add_stochastic_cluster(window=window)
             if log_progress:
                 print(f"[AlphaFactory] Window {window} done at {datetime.now().isoformat(timespec='seconds')}")
+
+        if include_extended:
+            if log_progress:
+                print(f"[AlphaFactory] Cross-timeframe ratios start")
+            self.add_cross_timeframe_ratios()
+            if log_progress:
+                print(f"[AlphaFactory] Cross-timeframe ratios done at {datetime.now().isoformat(timespec='seconds')}")
 
         if include_momentum:
             if log_progress:
@@ -344,6 +366,16 @@ class AlphaFactory:
         vwap = (self.close * self.volume).rolling(window).sum() / vol_sum.replace(0, np.nan)
         self.df[f"VOLFLOW_VWAP_DIST{suffix}"] = (self.close - vwap) / vwap
 
+        # Chaikin Money Flow (A5): volume-weighted close position
+        clv = ((self.close - self.low) - (self.high - self.close)) / (
+            self.high - self.low
+        ).replace(0, np.nan)
+        mf_volume = clv * self.volume
+        self.df[f"VOLFLOW_CMF{suffix}"] = (
+            mf_volume.rolling(window).sum()
+            / self.volume.rolling(window).sum().replace(0, np.nan)
+        )
+
         return self.df
 
     def add_macro_context(self, macro_windows: dict[str, int] | None = None) -> pd.DataFrame:
@@ -417,5 +449,81 @@ class AlphaFactory:
             self.df["MOM_MACD"] = macd.iloc[:, 0]
             self.df["MOM_MACD_Signal"] = macd.iloc[:, 1]
             self.df["MOM_MACD_Hist"] = macd.iloc[:, 2]
+
+        return self.df
+
+    # ------------------------------------------------------------------
+    # Extended clusters (set_07+)
+    # ------------------------------------------------------------------
+
+    def add_return_distribution_cluster(self, window: int) -> pd.DataFrame:
+        """Rolling return distribution shape features."""
+        suffix = f"_{window}"
+        log_ret = self.df["log_ret"]
+
+        # Rolling skewness: asymmetry indicator
+        self.df[f"DIST_SKEW{suffix}"] = log_ret.rolling(window).skew()
+
+        # Rolling kurtosis: tail thickness
+        self.df[f"DIST_KURT{suffix}"] = log_ret.rolling(window).kurt()
+
+        # Rolling Z-score of current return vs recent distribution
+        roll_mean = log_ret.rolling(window).mean()
+        roll_std = log_ret.rolling(window).std()
+        self.df[f"DIST_ZSCORE{suffix}"] = (
+            (log_ret - roll_mean) / roll_std.replace(0, np.nan)
+        )
+
+        return self.df
+
+    def add_stochastic_cluster(self, window: int) -> pd.DataFrame:
+        """Stochastic oscillator features at multiple timeframes."""
+        suffix = f"_{window}"
+
+        roll_low = self.low.rolling(window).min()
+        roll_high = self.high.rolling(window).max()
+        range_span = (roll_high - roll_low).replace(0, np.nan)
+
+        # %K: raw stochastic (Close relative to High-Low range)
+        stoch_k = (self.close - roll_low) / range_span
+        self.df[f"MOM_STOCH_K{suffix}"] = stoch_k
+
+        # %D: smoothed stochastic (3-bar SMA of %K)
+        self.df[f"MOM_STOCH_D{suffix}"] = stoch_k.rolling(3).mean()
+
+        return self.df
+
+    def add_cross_timeframe_ratios(self) -> pd.DataFrame:
+        """Ratios between short and long-term features for regime detection."""
+        # Volatility regime: short-term vol vs long-term vol
+        if "VOL_PARK_288" in self.df.columns and "VOL_PARK_10080" in self.df.columns:
+            self.df["CROSS_VOL_RATIO_1D_35D"] = (
+                self.df["VOL_PARK_288"]
+                / self.df["VOL_PARK_10080"].replace(0, np.nan)
+            )
+        if "VOL_PARK_864" in self.df.columns and "VOL_PARK_4032" in self.df.columns:
+            self.df["CROSS_VOL_RATIO_3D_14D"] = (
+                self.df["VOL_PARK_864"]
+                / self.df["VOL_PARK_4032"].replace(0, np.nan)
+            )
+
+        # Trend regime: short-term Donchian vs long-term Donchian
+        if "TREND_DONCHIAN_POS_288" in self.df.columns and "TREND_DONCHIAN_POS_10080" in self.df.columns:
+            self.df["CROSS_TREND_DIFF_1D_35D"] = (
+                self.df["TREND_DONCHIAN_POS_288"]
+                - self.df["TREND_DONCHIAN_POS_10080"]
+            )
+        if "TREND_DONCHIAN_POS_864" in self.df.columns and "TREND_DONCHIAN_POS_4032" in self.df.columns:
+            self.df["CROSS_TREND_DIFF_3D_14D"] = (
+                self.df["TREND_DONCHIAN_POS_864"]
+                - self.df["TREND_DONCHIAN_POS_4032"]
+            )
+
+        # VWAP regime: short-term vs long-term VWAP distance
+        if "VOLFLOW_VWAP_DIST_288" in self.df.columns and "VOLFLOW_VWAP_DIST_10080" in self.df.columns:
+            self.df["CROSS_VWAP_DIFF_1D_35D"] = (
+                self.df["VOLFLOW_VWAP_DIST_288"]
+                - self.df["VOLFLOW_VWAP_DIST_10080"]
+            )
 
         return self.df

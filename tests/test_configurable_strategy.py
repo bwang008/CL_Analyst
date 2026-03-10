@@ -94,6 +94,9 @@ def _make_strategy_stub(
 
     # Ensemble support attributes (single-model stub)
     strategy._is_ensemble = False
+    strategy._is_tiered = False
+    strategy._long_tiers = []
+    strategy._short_tiers = []
     strategy._long_threshold = strategy.entry_threshold
     strategy._short_threshold = strategy.entry_threshold
     direction = strategy.config.get("direction", "LONG").upper()

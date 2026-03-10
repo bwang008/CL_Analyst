@@ -125,8 +125,15 @@ class LGBMLearner:
     def add_evidence(self, X: Union[np.ndarray, pd.DataFrame], y: Any) -> None:
         """
         Train the LightGBM model on the provided data.
-        
+
         Supports custom focal loss if 'use_focal' is in params.
+        When validation_fraction > 0 and data is large enough, reserves the
+        last fraction of training data as an internal validation set for early
+        stopping and convergence tracking.
+
+        After training, sets:
+            self.best_iteration_: int  — best boosting round (or n_estimators)
+            self.evals_result_: dict | None — train/valid metric history
         """
         y_arr = np.asarray(y)
         if getattr(y_arr, "ndim", 0) > 1:
@@ -153,32 +160,70 @@ class LGBMLearner:
                 f"X and y shape mismatch: X has {n_rows} rows, y has {len(y_arr)}."
             )
 
-        lgb_params = {k: v for k, v in self.params.items() if k != "n_estimators"}
-        if lgb_params.get("objective") == "multiclass":
-            # Ensure num_class is present for multiclass
+        lgb_params = {k: v for k, v in self.params.items()
+                      if k not in ("n_estimators", "validation_fraction", "use_focal",
+                                   "focal_gamma")}
+        if self.params.get("use_focal", False):
+            lgb_params["objective"] = self._focal_loss_obj
+            # Keep focal_gamma accessible for the objective function
+        elif lgb_params.get("objective") == "multiclass":
             if "num_class" not in lgb_params:
                 lgb_params["num_class"] = self.params.get("num_class", 3)
         else:
             lgb_params.pop("num_class", None)
 
-        train_data = lgb.Dataset(X_mat, label=y_arr)
         num_boost = int(self.params.get("n_estimators", 100))
-        
-        use_focal = self.params.get("use_focal", False)
-        if use_focal:
-            # In LightGBM 4.x, pass custom objective function as 'objective' in params
-            lgb_params["objective"] = self._focal_loss_obj
+        valid_frac = float(self.params.get("validation_fraction", 0.1))
+
+        # --- Build train / optional validation datasets ---
+        if valid_frac > 0 and n_rows > 100:
+            split = int(n_rows * (1 - valid_frac))
+            if isinstance(X_mat, pd.DataFrame):
+                X_train_split = X_mat.iloc[:split]
+                X_valid_split = X_mat.iloc[split:]
+            else:
+                X_train_split = X_mat[:split]
+                X_valid_split = X_mat[split:]
+            y_train_split = y_arr[:split]
+            y_valid_split = y_arr[split:]
+
+            train_data = lgb.Dataset(X_train_split, label=y_train_split)
+            valid_data = lgb.Dataset(
+                X_valid_split, label=y_valid_split, reference=train_data,
+            )
+
+            evals_result: dict = {}
             self.model = lgb.train(
                 lgb_params,
                 train_data,
                 num_boost_round=num_boost,
+                valid_sets=[train_data, valid_data],
+                valid_names=["train", "valid"],
+                callbacks=[
+                    lgb.early_stopping(stopping_rounds=50, verbose=True),
+                    lgb.log_evaluation(period=100),
+                    lgb.record_evaluation(evals_result),
+                ],
             )
+            self.best_iteration_ = self.model.best_iteration
+            self.evals_result_ = evals_result
+
+            if self.best_iteration_ == num_boost:
+                import logging
+                logging.getLogger("LGBMLearner").warning(
+                    "Model used all %d rounds — more boosting rounds may help.",
+                    num_boost,
+                )
         else:
+            # Fallback: train without validation (small data or frac=0)
+            train_data = lgb.Dataset(X_mat, label=y_arr)
             self.model = lgb.train(
                 lgb_params,
                 train_data,
                 num_boost_round=num_boost,
             )
+            self.best_iteration_ = num_boost
+            self.evals_result_ = None
 
     def query(self, X: Union[np.ndarray, pd.DataFrame]) -> np.ndarray:
         """

@@ -314,6 +314,44 @@ def train_and_evaluate(
         )
     
     # -------------------------------------------------------------------------
+    # Step 3b: Training Diagnostics (B2)
+    # -------------------------------------------------------------------------
+    if method != "simple" and fold_results:
+        best_iters = [
+            fr.get("best_iteration")
+            for fr in fold_results
+            if fr.get("best_iteration") is not None
+        ]
+        converged = [
+            fr.get("converged_early", False) for fr in fold_results
+        ]
+        n_converged = sum(1 for c in converged if c)
+        if best_iters:
+            diagnostics = {
+                "n_folds": len(fold_results),
+                "n_converged_early": n_converged,
+                "mean_best_iteration": float(np.mean(best_iters)),
+                "per_fold": [
+                    {
+                        "fold": fr["fold"],
+                        "best_iteration": fr.get("best_iteration"),
+                        "converged_early": fr.get("converged_early"),
+                    }
+                    for fr in fold_results
+                ],
+            }
+            diag_path = os.path.join(output_dir, "training_diagnostics.json")
+            os.makedirs(output_dir, exist_ok=True)
+            with open(diag_path, "w", encoding="utf-8") as f:
+                json.dump(diagnostics, f, indent=2)
+            if verbose:
+                print(
+                    f"\n  Training diagnostics: {n_converged}/{len(fold_results)} folds "
+                    f"converged early, mean best iteration: {np.mean(best_iters):.0f}"
+                )
+                print(f"  Saved to {diag_path}")
+
+    # -------------------------------------------------------------------------
     # Step 4: Evaluate folds
     # -------------------------------------------------------------------------
     print(f"\n[Step 4] Evaluating fold results...")
