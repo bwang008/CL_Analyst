@@ -51,6 +51,47 @@
         "TARGET_SQZ_4PCT_LONG",
         "TARGET_SQZ_4PCT_SHORT"
       ]
+    },
+    "set_04": {
+      "name": "Lower Threshold Targets",
+      "summary": "Lower thresholds (2%/3%) with shorter horizons (12h/24h).",
+      "targets": [
+        "TARGET_DIR_2PCT_12H_LONG",
+        "TARGET_DIR_2PCT_12H_SHORT",
+        "TARGET_DIR_3PCT_24H_LONG",
+        "TARGET_DIR_3PCT_24H_SHORT"
+      ]
+    },
+    "set_05": {
+      "name": "Triple Barrier Targets",
+      "summary": "Dynamic Triple Barrier targets with ATR-based barriers (2x1 12H, 2x1 24H, 3x1 24H).",
+      "targets": [
+        "TARGET_TRIPLE_2x1_12H_LONG",
+        "TARGET_TRIPLE_2x1_12H_SHORT",
+        "TARGET_TRIPLE_2x1_24H_LONG",
+        "TARGET_TRIPLE_2x1_24H_SHORT",
+        "TARGET_TRIPLE_3x1_24H_LONG",
+        "TARGET_TRIPLE_3x1_24H_SHORT"
+      ]
+    },
+    "set_06": {
+      "name": "Ultimate Dataset",
+      "summary": "Alias for set_05 features + targets.",
+      "targets": ["(same as set_05)"]
+    },
+    "set_07": {
+      "name": "Extended Feature Set",
+      "summary": "set_05 targets with extended features: 1-day (288) bar window, expanded macro windows (1D/3D/1W/2W/1M/3M), return distribution (DIST_*), stochastic oscillator (MOM_STOCH_*), Chaikin Money Flow (VOLFLOW_CMF_*), cross-timeframe ratios (CROSS_*), and day-of-week encoding (Time_DayOfWeek_Sin/Cos).",
+      "windows": [288, 864, 2016, 4032, 10080],
+      "macro_windows": {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160},
+      "targets": [
+        "TARGET_TRIPLE_2x1_12H_LONG",
+        "TARGET_TRIPLE_2x1_12H_SHORT",
+        "TARGET_TRIPLE_2x1_24H_LONG",
+        "TARGET_TRIPLE_2x1_24H_SHORT",
+        "TARGET_TRIPLE_3x1_24H_LONG",
+        "TARGET_TRIPLE_3x1_24H_SHORT"
+      ]
     }
   }
 }

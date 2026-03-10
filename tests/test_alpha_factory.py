@@ -163,3 +163,78 @@ def test_macro_context_integration(long_trend_data):
     first_valid = pos_series.first_valid_index()
     assert first_valid is not None, "MACRO_POS_3M should not be all NaN"
     assert not pos_series.loc[first_valid:].isna().any(), "Forward-fill gaps detected"
+
+
+def test_return_distribution_non_nan(perfect_trend_data):
+    factory = AlphaFactory(perfect_trend_data)
+    df = factory.add_return_distribution_cluster(window=10)
+
+    for col in ["DIST_SKEW_10", "DIST_KURT_10", "DIST_ZSCORE_10"]:
+        assert col in df.columns, f"Missing column: {col}"
+        series = df[col].dropna()
+        assert not series.empty, f"{col} is all NaN"
+        assert not np.isinf(series).any(), f"{col} has inf values"
+
+
+def test_stochastic_bounded(perfect_trend_data):
+    factory = AlphaFactory(perfect_trend_data)
+    df = factory.add_stochastic_cluster(window=10)
+
+    k_series = df["MOM_STOCH_K_10"].dropna()
+    assert not k_series.empty, "MOM_STOCH_K_10 is all NaN"
+    assert (k_series >= 0).all() and (k_series <= 1).all(), (
+        "MOM_STOCH_K_10 should be in [0, 1]"
+    )
+
+    d_series = df["MOM_STOCH_D_10"].dropna()
+    assert not d_series.empty, "MOM_STOCH_D_10 is all NaN"
+    assert (d_series >= 0).all() and (d_series <= 1).all(), (
+        "MOM_STOCH_D_10 should be in [0, 1]"
+    )
+
+
+def test_cmf_bounded(long_trend_data):
+    factory = AlphaFactory(long_trend_data)
+    df = factory.add_volume_flow_cluster(window=10)
+
+    assert "VOLFLOW_CMF_10" in df.columns, "Missing VOLFLOW_CMF_10"
+    cmf = df["VOLFLOW_CMF_10"].dropna()
+    assert not cmf.empty, "VOLFLOW_CMF_10 is all NaN"
+    assert (cmf >= -1).all() and (cmf <= 1).all(), (
+        "VOLFLOW_CMF should be in [-1, 1]"
+    )
+
+
+def test_cross_timeframe_ratios(long_trend_data):
+    factory = AlphaFactory(long_trend_data)
+    df = factory.add_all_features(
+        windows=[288, 864, 2016, 4032, 10080],
+        include_extended=True,
+        include_macro=False,
+    )
+
+    for col in ["CROSS_VOL_RATIO_1D_35D", "CROSS_VOL_RATIO_3D_14D",
+                "CROSS_TREND_DIFF_1D_35D", "CROSS_TREND_DIFF_3D_14D",
+                "CROSS_VWAP_DIFF_1D_35D"]:
+        assert col in df.columns, f"Missing cross-timeframe column: {col}"
+        series = df[col].dropna()
+        assert not series.empty, f"{col} is all NaN"
+
+
+def test_add_all_features_extended(flat_line_data):
+    """Extended features should add extra columns when include_extended=True."""
+    factory = AlphaFactory(flat_line_data)
+    df_basic = factory.add_all_features(windows=[10], include_macro=False, include_extended=False)
+    n_basic = len(df_basic.columns)
+
+    factory2 = AlphaFactory(flat_line_data.copy())
+    df_ext = factory2.add_all_features(windows=[10], include_macro=False, include_extended=True)
+    n_ext = len(df_ext.columns)
+
+    assert n_ext > n_basic, (
+        f"Extended should have more columns ({n_ext} vs {n_basic})"
+    )
+    # Extended should add DIST_*, MOM_STOCH_* per window
+    assert "DIST_SKEW_10" in df_ext.columns
+    assert "MOM_STOCH_K_10" in df_ext.columns
+

@@ -2,6 +2,49 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
+## 2026-03-10 — TieredEnsembleStrategy with Per-Order Overrides
+
+- **Goal**: Implement asymmetric buy/sell tiers with per-tier TP/SL/trailing/max_hold parameters, passed through the `Order` object to the `BacktestEngine`.
+
+### Order dataclass extension
+- Added 4 optional per-trade override fields to `Order` in `execution_models.py`: `tp_atr_mult`, `sl_atr_mult`, `trailing_atr_mult`, `max_hold_bars` (all default `None` for backward compat).
+
+### BacktestEngine per-Order overrides
+- `_on_flat()`: Accepts `Order`, resolves per-trade TP/SL/trailing/max_hold overrides (falls back to engine globals when `None`).
+- `_on_in_position()`: Uses per-trade `_trade_max_horizon` and `_trade_trailing_atr_mult` instead of engine globals.
+- `_open_new_position()` + `_check_position()`: `_OpenPosition` extended with `pos_max_horizon` and `pos_trailing_atr_mult` for concurrent mode.
+- `_reset_state()`: Initialises per-trade override fields.
+
+### TieredEnsembleStrategy class (~140 lines)
+- New class in `execution_models.py`: parses `long.tiers` / `short.tiers` config blocks.
+- Tier matching: highest `min_prob` first, first match wins. Each tier specifies lots + TP/SL/trailing/max_hold overrides.
+- Conflict resolution: when both buy and sell fire on the same bar, higher probability wins.
+- Conservative position management: HOLD when already in position (no-flip).
+- Registered in `STRATEGY_REGISTRY`.
+
+### New config
+- `configs/strategies/TieredEnsemble2.json`: 2 long tiers (high_confidence @ ≥0.75, base @ ≥0.60) + 2 short tiers (high_confidence @ ≥0.80, base @ ≥0.60), each with distinct TP/SL/trailing/max_hold.
+
+### Backtest results (OOS 2022-01 → 2026-02, 291K bars)
+
+| Config | Total PnL | Win Rate | PF | Trades |
+|--------|----------:|:--------:|----:|-------:|
+| Koala2_opt (Short only) | $101,650 | 97.6% | 43.57 | 127 |
+| Manatee2_opt (Long only) | $293,237 | 78.0% | 39.65 | 132 |
+| Ensemble2_Aggro (Both) | $1,080,623 | 62.4% | 2.30 | 7,266 |
+| TieredEnsemble2 | $618,520 | 72.8% | 2.12 | 11,974 |
+
+### Documentation
+- Updated `configs/strategies/config_readme.md`: added TieredEnsembleStrategy schema, tier matching rules, per-Order overrides section, example config.
+- Created `reports/tiered_ensemble_backtest_20260310.md`.
+
+### Test results
+- **50 passed, 0 failed** (39 existing + 11 new)
+- New test classes: `TestOrderOverrides` (2), `TestTieredEnsembleStrategy` (6), `TestTieredWithEngine` (2)
+
+### Limitations
+- **Live trader parity**: The `TieredEnsembleStrategy` is currently **backtest-only**. The live trader's `ConfigurableStrategy` reads the `models` key (not `execution_class`), so per-tier overrides are not yet supported in live trading. A future enhancement would extend `ConfigurableStrategy` to support tiered configs.
+
 ## 2026-03-03 — Resubscription Bug Fixes (BUG-005, BUG-006)
 
 ### BUG-005: Resubscription crashes with "event loop already running" (bars never recovered)

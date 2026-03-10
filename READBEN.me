@@ -424,3 +424,7 @@ This project runs on Windows with PowerShell. Key differences from bash:
 | Set env var | `$env:VAR='val'; cmd` | `VAR=val cmd` |
 
 **Always use `conda run -n trader --no-capture-output`** to run scripts. Do NOT use `conda activate trader && ...` -- PowerShell does not support `&&`.
+
+
+# Generate data for set_07
+conda run -n trader --no-capture-output python -c "from main import get_processed_cl_df; df = get_processed_cl_df(input_path=r'C:\CL_Analyst_Data\data\raw\CL.csv', dataset_version='set_07', force_reprocess=True); print(f'Shape: {df.shape}'); print(f'Columns: {list(df.columns)}')"

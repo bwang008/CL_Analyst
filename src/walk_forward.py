@@ -390,6 +390,12 @@ def walk_forward_validate(
             'test_date_range': (df_test.index[0], df_test.index[-1]),
             'feature_importance': feature_importance,
             'feature_names': feature_names,
+            'best_iteration': getattr(model, 'best_iteration_', None),
+            'training_log': getattr(model, 'evals_result_', None),
+            'converged_early': (
+                getattr(model, 'best_iteration_', None) is not None
+                and getattr(model, 'best_iteration_', 0) < int(model_params.get('n_estimators', 100))
+            ),
         }
         results.append(fold_result)
         

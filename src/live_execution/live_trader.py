@@ -71,6 +71,18 @@ _DEFAULT_DB_PATH = str(_dp_data_path("live_telemetry.db"))
 # AlphaFactory windows used during training (set_05/set_06)
 _ALPHA_WINDOWS = [864, 2016, 4032, 10080]  # 3d, 7d, 14d, 35d in 5-min bars
 
+# Extended windows for set_07 models
+_ALPHA_WINDOWS_SET_07 = [288, 864, 2016, 4032, 10080]  # 1d, 3d, 7d, 14d, 35d
+_MACRO_WINDOWS_SET_07 = {
+    "1D": 24, "3D": 72, "1W": 168, "2W": 336,
+    "1M": 840, "3M": 2160,
+}
+
+# Sentinel feature names that indicate set_07 model
+_SET_07_SENTINEL_FEATURES = frozenset([
+    "DIST_SKEW_288", "Time_DayOfWeek_Sin", "MOM_STOCH_K_864",
+])
+
 # Rolling window size — must be >= largest seed lookback (150 days × 288 bars/day)
 # plus margin for IBKR backfill and live bars.
 # Parity note (2026-03-08): 52/80 features diverged >2σ when window was too small.
@@ -207,11 +219,15 @@ def build_live_features(
     """
     Generate features from a rolling OHLCV DataFrame for live inference.
 
-    Replicates the training pipeline (process_set_05/set_06):
+    Replicates the training pipeline (process_set_05/set_06 or set_07):
     1. Add Time_Sin, Time_Cos from the DateTime index
     2. Run AlphaFactory.add_all_features(windows=_ALPHA_WINDOWS)
     3. Add Volume_Log
     4. Select the exact columns the model expects
+
+    Automatically detects set_07 models by checking for sentinel feature
+    names and switches to the extended pipeline with 288-bar window,
+    expanded macro windows, and additional feature clusters.
 
     Args:
         df: Rolling OHLCV DataFrame with DateTime index and columns
@@ -222,10 +238,14 @@ def build_live_features(
         Single-row DataFrame with the model's expected features,
         or None if features cannot be computed (e.g. NaN in required columns).
     """
-    if len(df) < _ALPHA_WINDOWS[-1]:
+    # Auto-detect set_07 pipeline
+    is_set_07 = bool(_SET_07_SENTINEL_FEATURES & set(feature_names))
+    alpha_windows = _ALPHA_WINDOWS_SET_07 if is_set_07 else _ALPHA_WINDOWS
+
+    if len(df) < alpha_windows[-1]:
         log.warning(
             "Not enough bars for feature generation: %d < %d",
-            len(df), _ALPHA_WINDOWS[-1],
+            len(df), alpha_windows[-1],
         )
         return None
 
@@ -237,13 +257,27 @@ def build_live_features(
     work["Time_Sin"] = np.sin(2 * np.pi * minutes / 1440)
     work["Time_Cos"] = np.cos(2 * np.pi * minutes / 1440)
 
-    # 2. Run AlphaFactory (adds log_ret, VOL_*, LIQ_*, STRUC_*, TREND_*,
-    #    VOLFLOW_*, MOM_*, MACRO_*, ATR_14, etc.)
-    work = AlphaFactory(work).add_all_features(
-        windows=_ALPHA_WINDOWS,
-        include_momentum=True,
-        include_macro=True,
-    )
+    # 1b. Day-of-week encoding (set_07 only)
+    if is_set_07:
+        day_of_week = work.index.dayofweek
+        work["Time_DayOfWeek_Sin"] = np.sin(2 * np.pi * day_of_week / 5)
+        work["Time_DayOfWeek_Cos"] = np.cos(2 * np.pi * day_of_week / 5)
+
+    # 2. Run AlphaFactory
+    if is_set_07:
+        work = AlphaFactory(work).add_all_features(
+            windows=alpha_windows,
+            include_momentum=True,
+            include_macro=True,
+            include_extended=True,
+            macro_windows=_MACRO_WINDOWS_SET_07,
+        )
+    else:
+        work = AlphaFactory(work).add_all_features(
+            windows=alpha_windows,
+            include_momentum=True,
+            include_macro=True,
+        )
 
     # 3. Add ATR_14 (in training, this was created by add_triple_barrier_target
     #    in data_processor.py, but we skip target generation for live inference)

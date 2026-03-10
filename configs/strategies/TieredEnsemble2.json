@@ -1,27 +1,27 @@
 {
     "nickname": "TieredEnsemble2",
-    "description": "Dual-model tiered ensemble: EXP-025 Long + EXP-026 Short with per-tier TP/SL/trailing/max_hold",
+    "description": "Dual-model tiered ensemble: manatee2_opt (≥0.75) + manatee2_alt (0.60-0.75) for long, koala2_opt (≥0.75) + koala2_alt (0.60-0.75) for short",
     "execution_class": "TieredEnsembleStrategy",
     "long": {
         "experiment_id": "EXP-025_S_Ultimate_OOS",
         "tiers": [
             {
                 "min_prob": 0.75,
-                "lots": 2,
-                "tp_atr_mult": 3.0,
-                "sl_atr_mult": 1.0,
+                "lots": 3,
+                "tp_atr_mult": 7.0,
+                "sl_atr_mult": 2.5,
                 "trailing_atr_mult": 2.0,
-                "max_hold_bars": 288,
-                "label": "high_confidence"
+                "max_hold_bars": 144,
+                "label": "manatee2_opt"
             },
             {
                 "min_prob": 0.60,
                 "lots": 1,
-                "tp_atr_mult": 1.5,
-                "sl_atr_mult": 1.5,
-                "trailing_atr_mult": 100.0,
-                "max_hold_bars": 144,
-                "label": "base"
+                "tp_atr_mult": 3.5,
+                "sl_atr_mult": 2.5,
+                "trailing_atr_mult": 1.5,
+                "max_hold_bars": 432,
+                "label": "manatee2_alt"
             }
         ]
     },
@@ -29,37 +29,44 @@
         "experiment_id": "EXP-026_S_Ultimate_Short_OOS",
         "tiers": [
             {
-                "min_prob": 0.80,
+                "min_prob": 0.75,
                 "lots": 3,
                 "tp_atr_mult": 1.5,
                 "sl_atr_mult": 3.0,
                 "trailing_atr_mult": 4.0,
                 "max_hold_bars": 144,
-                "label": "high_confidence"
+                "label": "koala2_opt"
             },
             {
                 "min_prob": 0.60,
                 "lots": 1,
-                "tp_atr_mult": 1.0,
-                "sl_atr_mult": 2.0,
-                "trailing_atr_mult": 100.0,
+                "tp_atr_mult": 3.5,
+                "sl_atr_mult": 3.0,
+                "trailing_atr_mult": 1.5,
                 "max_hold_bars": 144,
-                "label": "base"
+                "label": "koala2_alt"
             }
         ]
     },
     "tp_atr_mult": 2.0,
     "sl_atr_mult": 1.0,
-    "trailing_atr_mult": 100.0,
+    "trailing_atr_mult": 1.5,
     "trailing_sl_atr_offset": 0.25,
     "tp_cooldown_bars": 5,
     "sl_cooldown_bars": 5,
     "max_hold_bars": 288,
     "allow_concurrent": false,
     "max_concurrent": 1,
-    "cooldown_bars": 10,
+    "cooldown_bars": 5,
     "live_config": {
-        "client_id": 13,
-        "entry_mode": "marketable_limit"
+        "client_id": 14,
+        "entry_mode": "marketable_limit",
+        "exit_mode": "marketable_limit"
+    },
+    "tier_sources": {
+        "long_high": "manatee2_opt.json (Optuna trial #827, threshold=0.75)",
+        "long_base": "manatee2_alt.json (Optuna trial #59, threshold=0.60)",
+        "short_high": "koala2_opt.json (Optuna trial #361, threshold=0.80→0.75)",
+        "short_base": "koala2_alt.json (Optuna trial #458, threshold=0.60)"
     }
 }
