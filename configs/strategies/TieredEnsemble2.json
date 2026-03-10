@@ -1,0 +1,65 @@
+{
+    "nickname": "TieredEnsemble2",
+    "description": "Dual-model tiered ensemble: EXP-025 Long + EXP-026 Short with per-tier TP/SL/trailing/max_hold",
+    "execution_class": "TieredEnsembleStrategy",
+    "long": {
+        "experiment_id": "EXP-025_S_Ultimate_OOS",
+        "tiers": [
+            {
+                "min_prob": 0.75,
+                "lots": 2,
+                "tp_atr_mult": 3.0,
+                "sl_atr_mult": 1.0,
+                "trailing_atr_mult": 2.0,
+                "max_hold_bars": 288,
+                "label": "high_confidence"
+            },
+            {
+                "min_prob": 0.60,
+                "lots": 1,
+                "tp_atr_mult": 1.5,
+                "sl_atr_mult": 1.5,
+                "trailing_atr_mult": 100.0,
+                "max_hold_bars": 144,
+                "label": "base"
+            }
+        ]
+    },
+    "short": {
+        "experiment_id": "EXP-026_S_Ultimate_Short_OOS",
+        "tiers": [
+            {
+                "min_prob": 0.80,
+                "lots": 3,
+                "tp_atr_mult": 1.5,
+                "sl_atr_mult": 3.0,
+                "trailing_atr_mult": 4.0,
+                "max_hold_bars": 144,
+                "label": "high_confidence"
+            },
+            {
+                "min_prob": 0.60,
+                "lots": 1,
+                "tp_atr_mult": 1.0,
+                "sl_atr_mult": 2.0,
+                "trailing_atr_mult": 100.0,
+                "max_hold_bars": 144,
+                "label": "base"
+            }
+        ]
+    },
+    "tp_atr_mult": 2.0,
+    "sl_atr_mult": 1.0,
+    "trailing_atr_mult": 100.0,
+    "trailing_sl_atr_offset": 0.25,
+    "tp_cooldown_bars": 5,
+    "sl_cooldown_bars": 5,
+    "max_hold_bars": 288,
+    "allow_concurrent": false,
+    "max_concurrent": 1,
+    "cooldown_bars": 10,
+    "live_config": {
+        "client_id": 13,
+        "entry_mode": "marketable_limit"
+    }
+}

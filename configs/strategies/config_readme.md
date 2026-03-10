@@ -50,7 +50,7 @@ Configs are organized into two sections:
 
 | Attribute | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `execution_class` | string | `"SingleModelStrategy"` | Strategy class: `SingleModelStrategy`, `ConservativeEnsembleStrategy`, `AggressiveEnsembleStrategy` |
+| `execution_class` | string | `"SingleModelStrategy"` | Strategy class: `SingleModelStrategy`, `ConservativeEnsembleStrategy`, `AggressiveEnsembleStrategy`, `TieredEnsembleStrategy` |
 | `direction` | string | `"LONG"` | `"LONG"` uses `prob_Buy`, `"SHORT"` uses `prob_Sell` |
 | `models` | object | — | Ensemble only: per-direction thresholds, e.g. `{"long": {"threshold": 0.70}, "short": {"threshold": 0.60}}` |
 
@@ -68,6 +68,8 @@ Configs are organized into two sections:
 | `sl_atr_mult` | float | `1.0` | Stop-loss distance (× ATR) |
 | `trailing_atr_mult` | float | `1.0` | ATR move in favor to shift SL to breakeven. ⚠ `0.0` triggers immediately (bug) |
 | `cooldown_bars` | int | `10` | Bars to wait after SL before re-entering |
+| `tp_cooldown_bars` | int | `cooldown_bars` | Bars to wait after TP/trailing exit (overrides cooldown_bars for TP) |
+| `sl_cooldown_bars` | int | `cooldown_bars` | Bars to wait after SL exit (overrides cooldown_bars for SL) |
 | `max_hold_bars` | int | `288` | Time barrier (288 = 24h on 5-min bars) |
 
 ### Position Management
@@ -102,6 +104,45 @@ These fields are **only used by the LiveTrader** and are ignored during backtest
 
 > [!NOTE]
 > CLI flags `--entry-mode` and `--adaptive-priority` take priority over config values.
+
+---
+
+## TieredEnsembleStrategy
+
+The `TieredEnsembleStrategy` enables **asymmetric buy/sell tiers** with per-tier execution parameters. Each tier specifies its own TP, SL, trailing, max_hold, and lot count — these are passed to the engine as **per-Order overrides** (the engine uses per-trade values instead of globals when set).
+
+### Config Schema
+
+| Attribute | Type | Required | Description |
+|-----------|------|:--------:|-------------|
+| `execution_class` | `"TieredEnsembleStrategy"` | ✅ | Strategy class name |
+| `long` | object | ✅ | Long-side configuration |
+| `long.experiment_id` | string | — | Model registry ID for the buy model |
+| `long.tiers` | array | ✅ | List of tier objects (see below) |
+| `short` | object | ✅ | Short-side configuration (same shape as `long`) |
+
+**Tier Object:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `min_prob` | float | `0.0` | Min probability to match this tier |
+| `lots` | int | `1` | Position size |
+| `tp_atr_mult` | float | _engine global_ | Per-trade TP override |
+| `sl_atr_mult` | float | _engine global_ | Per-trade SL override |
+| `trailing_atr_mult` | float | _engine global_ | Per-trade trailing override |
+| `max_hold_bars` | int | _engine global_ | Per-trade time barrier override |
+| `label` | string | `""` | Human-readable label for logging |
+
+### Tier Matching Rules
+
+1. Tiers are sorted **highest `min_prob` first**; first match wins
+2. If no tier matches, **HOLD** is returned
+3. When both buy and sell fire on the same bar → **higher probability wins**
+4. When already in a position → no new entries (conservative/no-flip)
+
+### Per-Order Overrides
+
+When a tier is matched, its `tp_atr_mult`, `sl_atr_mult`, `trailing_atr_mult`, and `max_hold_bars` values are attached to the returned `Order`. The engine uses these per-trade values instead of the global config. If a tier omits a field, the engine's global default is used.
 
 ---
 
@@ -152,6 +193,33 @@ These fields are **only used by the LiveTrader** and are ignored during backtest
 }
 ```
 
+### TieredEnsemble
+```json
+{
+    "nickname": "TieredEnsemble2",
+    "execution_class": "TieredEnsembleStrategy",
+    "long": {
+        "experiment_id": "EXP-025_S_Ultimate_OOS",
+        "tiers": [
+            {"min_prob": 0.75, "lots": 2, "tp_atr_mult": 3.0, "sl_atr_mult": 1.0, "trailing_atr_mult": 2.0, "max_hold_bars": 288, "label": "high_confidence"},
+            {"min_prob": 0.60, "lots": 1, "tp_atr_mult": 1.5, "sl_atr_mult": 1.5, "max_hold_bars": 144, "label": "base"}
+        ]
+    },
+    "short": {
+        "experiment_id": "EXP-026_S_Ultimate_Short_OOS",
+        "tiers": [
+            {"min_prob": 0.80, "lots": 3, "tp_atr_mult": 1.5, "sl_atr_mult": 3.0, "trailing_atr_mult": 4.0, "max_hold_bars": 144, "label": "high_confidence"},
+            {"min_prob": 0.60, "lots": 1, "tp_atr_mult": 1.0, "sl_atr_mult": 2.0, "max_hold_bars": 144, "label": "base"}
+        ]
+    },
+    "tp_atr_mult": 2.0,
+    "sl_atr_mult": 1.0,
+    "max_hold_bars": 288,
+    "cooldown_bars": 10,
+    "live_config": {"client_id": 14}
+}
+```
+
 ---
 
 ## Client ID Assignments
@@ -162,3 +230,4 @@ These fields are **only used by the LiveTrader** and are ignored during backtest
 | koala.json | 11 |
 | manatee_single.json | 12 |
 | ensemble_conservative.json | 13 |
+| TieredEnsemble2.json | 14 |

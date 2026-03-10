@@ -88,6 +88,33 @@ def _bt(**kwargs) -> BacktestEngine:
     return BacktestEngine(**defaults)
 
 
+def _make_prob_signal(
+    ohlcv: pd.DataFrame,
+    bar_idx: int,
+    prob_buy: float = 0.0,
+    prob_sell: float = 0.0,
+) -> pd.DataFrame:
+    """Create a signal DataFrame with prob_Buy/prob_Sell at the given bar."""
+    prob_buy_col = [0.0] * len(ohlcv)
+    prob_sell_col = [0.0] * len(ohlcv)
+    prob_buy_col[bar_idx] = prob_buy
+    prob_sell_col[bar_idx] = prob_sell
+    return pd.DataFrame(
+        {"prob_Buy": prob_buy_col, "prob_Sell": prob_sell_col},
+        index=ohlcv.index,
+    )
+
+
+def _bt_with_strategy(config: dict, **bt_kwargs) -> BacktestEngine:
+    """Create a BacktestEngine from a strategy config dict with test defaults."""
+    return BacktestEngine.from_config(
+        config,
+        commission_per_side=bt_kwargs.get("commission_per_side", 0.0),
+        slippage_per_side=bt_kwargs.get("slippage_per_side", 0.0),
+        contract_multiplier=bt_kwargs.get("contract_multiplier", 1000.0),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -1132,3 +1159,253 @@ class TestTrailingStopOffset:
         trade = result.trades[0]
         assert trade.exit_reason == ExitReason.TRAILING_BE
         assert abs(trade.net_pnl_dollars) < 1.0  # ~$0
+
+
+# ---------------------------------------------------------------------------
+# Per-Order Override Tests
+# ---------------------------------------------------------------------------
+
+
+from src.live_execution.strategies.execution_models import (
+    TieredEnsembleStrategy,
+    Order as ExecOrder,
+    EngineState as ExecEngineState,
+    create_execution_strategy,
+)
+
+
+class TestOrderOverrides:
+    """BacktestEngine honours per-Order TP/SL/trailing/max_hold overrides."""
+
+    def test_order_tp_override_changes_tp_barrier(self) -> None:
+        """Order.tp_atr_mult override should produce a different TP price."""
+        # ATR ≈ 0.02, global tp_atr_mult=2.0 → TP=65.04
+        # Override tp_atr_mult=50.0 → TP=65.0+50*0.02=66.0 (way above)
+        # So with the override, TP is never hit and trade exits at time barrier.
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+        highs[25] = 65.05  # would be TP with global mult but NOT with override
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+
+        # Create a TieredEnsembleStrategy config with a huge TP override
+        config = {
+            "nickname": "TPOverride",
+            "execution_class": "TieredEnsembleStrategy",
+            "long": {
+                "experiment_id": "test",
+                "tiers": [
+                    {"min_prob": 0.50, "lots": 1, "tp_atr_mult": 50.0, "sl_atr_mult": 1.0, "max_hold_bars": 10, "label": "big_tp"}
+                ]
+            },
+            "short": {},
+            "tp_atr_mult": 2.0,
+            "sl_atr_mult": 1.0,
+            "max_hold_bars": 10,
+        }
+        bt = _bt_with_strategy(config)
+        signals = _make_prob_signal(ohlcv, bar_idx=20, prob_buy=0.60)
+        result = bt.run(signals, ohlcv)
+
+        assert result.trade_count == 1
+        # Should NOT be TP since override raised the TP barrier way above
+        assert result.trades[0].exit_reason != ExitReason.TP
+
+    def test_order_max_hold_override(self) -> None:
+        """Order.max_hold_bars override should shorten the time barrier."""
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+
+        config = {
+            "nickname": "HoldOverride",
+            "execution_class": "TieredEnsembleStrategy",
+            "long": {
+                "experiment_id": "test",
+                "tiers": [
+                    {"min_prob": 0.50, "lots": 1, "tp_atr_mult": 100.0, "sl_atr_mult": 100.0, "max_hold_bars": 5, "label": "short_hold"}
+                ]
+            },
+            "short": {},
+            "tp_atr_mult": 100.0,
+            "sl_atr_mult": 100.0,
+            "max_hold_bars": 288,
+        }
+        bt = _bt_with_strategy(config)
+        signals = _make_prob_signal(ohlcv, bar_idx=20, prob_buy=0.60)
+        result = bt.run(signals, ohlcv)
+
+        assert result.trade_count == 1
+        trade = result.trades[0]
+        assert trade.exit_reason == ExitReason.TIME_BARRIER
+        assert trade.duration_bars == 6  # max_hold_bars=5 → exits on bar 6
+
+
+class TestTieredEnsembleStrategy:
+    """TieredEnsembleStrategy tier matching and per-tier Order fields."""
+
+    def test_high_prob_matches_first_tier(self) -> None:
+        """prob_buy=0.85 should match the high_confidence tier (min_prob=0.75)."""
+        config = {
+            "execution_class": "TieredEnsembleStrategy",
+            "long": {
+                "tiers": [
+                    {"min_prob": 0.75, "lots": 3, "tp_atr_mult": 5.0, "label": "high"},
+                    {"min_prob": 0.60, "lots": 1, "tp_atr_mult": 2.0, "label": "base"},
+                ]
+            },
+            "short": {},
+        }
+        strat = TieredEnsembleStrategy(config)
+        state = ExecEngineState()
+        orders = strat.on_bar(None, 65.0, 65.01, 64.99, 65.0, 0.02, 0.85, 0.0, state)
+        assert len(orders) == 1
+        assert orders[0].action == "BUY"
+        assert orders[0].lots == 3
+        assert orders[0].tp_atr_mult == 5.0
+        assert "high" in orders[0].reason
+
+    def test_medium_prob_matches_base_tier(self) -> None:
+        """prob_buy=0.65 (< 0.75) should match the base tier."""
+        config = {
+            "execution_class": "TieredEnsembleStrategy",
+            "long": {
+                "tiers": [
+                    {"min_prob": 0.75, "lots": 3, "label": "high"},
+                    {"min_prob": 0.60, "lots": 1, "tp_atr_mult": 2.0, "label": "base"},
+                ]
+            },
+            "short": {},
+        }
+        strat = TieredEnsembleStrategy(config)
+        state = ExecEngineState()
+        orders = strat.on_bar(None, 65.0, 65.01, 64.99, 65.0, 0.02, 0.65, 0.0, state)
+        assert len(orders) == 1
+        assert orders[0].lots == 1
+        assert orders[0].tp_atr_mult == 2.0
+
+    def test_below_all_tiers_returns_hold(self) -> None:
+        """prob_buy=0.40 (below all tiers) should return HOLD."""
+        config = {
+            "execution_class": "TieredEnsembleStrategy",
+            "long": {
+                "tiers": [
+                    {"min_prob": 0.75, "lots": 3, "label": "high"},
+                    {"min_prob": 0.60, "lots": 1, "label": "base"},
+                ]
+            },
+            "short": {},
+        }
+        strat = TieredEnsembleStrategy(config)
+        state = ExecEngineState()
+        orders = strat.on_bar(None, 65.0, 65.01, 64.99, 65.0, 0.02, 0.40, 0.0, state)
+        assert orders[0].action == "HOLD"
+
+    def test_conflict_resolution_higher_prob_wins(self) -> None:
+        """When both buy and sell fire, higher probability wins."""
+        config = {
+            "execution_class": "TieredEnsembleStrategy",
+            "long": {"tiers": [{"min_prob": 0.60, "lots": 1, "label": "long"}]},
+            "short": {"tiers": [{"min_prob": 0.60, "lots": 1, "label": "short"}]},
+        }
+        strat = TieredEnsembleStrategy(config)
+        state = ExecEngineState()
+
+        # Buy wins
+        orders = strat.on_bar(None, 65.0, 65.01, 64.99, 65.0, 0.02, 0.80, 0.70, state)
+        assert orders[0].action == "BUY"
+
+        # Sell wins
+        orders = strat.on_bar(None, 65.0, 65.01, 64.99, 65.0, 0.02, 0.65, 0.75, state)
+        assert orders[0].action == "SELL"
+
+    def test_in_position_returns_hold(self) -> None:
+        """When already in a position, TieredEnsembleStrategy should HOLD."""
+        config = {
+            "execution_class": "TieredEnsembleStrategy",
+            "long": {"tiers": [{"min_prob": 0.60, "lots": 1, "label": "long"}]},
+            "short": {},
+        }
+        strat = TieredEnsembleStrategy(config)
+        state = ExecEngineState(position=1, side=1)
+        orders = strat.on_bar(None, 65.0, 65.01, 64.99, 65.0, 0.02, 0.90, 0.0, state)
+        assert orders[0].action == "HOLD"
+
+    def test_order_carries_all_override_fields(self) -> None:
+        """Matched tier's TP/SL/trailing/max_hold should be on the Order."""
+        config = {
+            "execution_class": "TieredEnsembleStrategy",
+            "long": {
+                "tiers": [{
+                    "min_prob": 0.50,
+                    "lots": 2,
+                    "tp_atr_mult": 3.0,
+                    "sl_atr_mult": 1.5,
+                    "trailing_atr_mult": 2.5,
+                    "max_hold_bars": 100,
+                    "label": "full",
+                }]
+            },
+            "short": {},
+        }
+        strat = TieredEnsembleStrategy(config)
+        state = ExecEngineState()
+        orders = strat.on_bar(None, 65.0, 65.01, 64.99, 65.0, 0.02, 0.60, 0.0, state)
+        o = orders[0]
+        assert o.tp_atr_mult == 3.0
+        assert o.sl_atr_mult == 1.5
+        assert o.trailing_atr_mult == 2.5
+        assert o.max_hold_bars == 100
+        assert o.lots == 2
+
+
+class TestTieredWithEngine:
+    """End-to-end: TieredEnsembleStrategy + BacktestEngine.from_config."""
+
+    def test_tiered_config_produces_trades(self) -> None:
+        """TieredEnsemble config fires on prob signals and exits correctly."""
+        config = {
+            "nickname": "TieredTest",
+            "execution_class": "TieredEnsembleStrategy",
+            "long": {
+                "experiment_id": "test",
+                "tiers": [
+                    {"min_prob": 0.60, "lots": 1, "tp_atr_mult": 2.0, "sl_atr_mult": 1.0, "max_hold_bars": 15, "label": "test"}
+                ]
+            },
+            "short": {},
+            "tp_atr_mult": 2.0,
+            "sl_atr_mult": 1.0,
+            "max_hold_bars": 288,
+        }
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+        highs[25] = 65.05  # TP hit
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        signals = _make_prob_signal(ohlcv, bar_idx=20, prob_buy=0.70)
+
+        bt = _bt_with_strategy(config)
+        result = bt.run(signals, ohlcv)
+
+        assert result.trade_count == 1
+        assert result.trades[0].exit_reason == ExitReason.TP
+        assert result.trades[0].side == 1
+
+    def test_tiered_registry_lookup(self) -> None:
+        """TieredEnsembleStrategy is found in the registry."""
+        config = {
+            "execution_class": "TieredEnsembleStrategy",
+            "long": {"tiers": []},
+            "short": {"tiers": []},
+        }
+        strategy = create_execution_strategy(config)
+        assert isinstance(strategy, TieredEnsembleStrategy)
+

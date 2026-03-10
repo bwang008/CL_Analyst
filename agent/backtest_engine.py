@@ -208,6 +208,9 @@ class _OpenPosition:
     highest_high: float = 0.0
     lowest_low: float = float("inf")
     lots: int = 1
+    # Per-trade overrides (None = use engine global)
+    pos_max_horizon: Optional[int] = None
+    pos_trailing_atr_mult: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +311,9 @@ class BacktestEngine:
         self._cooldown_remaining: int = 0
         self._lots: int = 1
         self._trades: list[TradeRecord] = []
+        # Per-trade overrides (set at entry from Order, reset on close)
+        self._trade_max_horizon: int = max_horizon
+        self._trade_trailing_atr_mult: float = trailing_atr_mult
 
         # Concurrent mode state
         self._open_positions: list[_OpenPosition] = []
@@ -360,6 +366,8 @@ class BacktestEngine:
         self._realized_pnl: float = 0.0
         self._equity_curve: list[float] = []
         self._open_positions = []
+        self._trade_max_horizon = self.max_horizon
+        self._trade_trailing_atr_mult = self.trailing_atr_mult
 
         # Reset mutable engine state
         self._engine_state.position = 0
@@ -473,6 +481,7 @@ class BacktestEngine:
         signal_side: Optional[int],
         atr: float,
         lots: int = 1,
+        order: Optional[Order] = None,
     ) -> None:
         """FLAT state: accept valid signals and enter a position.
 
@@ -482,9 +491,30 @@ class BacktestEngine:
             signal_side: +1 for buy, -1 for sell, None for no signal.
             atr: Current ATR value.
             lots: Number of contracts for this position.
+            order: Optional Order carrying per-trade overrides.
         """
         if signal_side is None or np.isnan(atr) or atr <= 0:
             return
+
+        # Resolve per-trade overrides (Order fields take priority over globals)
+        tp_mult = self.tp_atr_mult
+        sl_mult = self.sl_atr_mult
+        if order is not None:
+            if order.tp_atr_mult is not None:
+                tp_mult = order.tp_atr_mult
+            if order.sl_atr_mult is not None:
+                sl_mult = order.sl_atr_mult
+            self._trade_max_horizon = (
+                order.max_hold_bars if order.max_hold_bars is not None
+                else self.max_horizon
+            )
+            self._trade_trailing_atr_mult = (
+                order.trailing_atr_mult if order.trailing_atr_mult is not None
+                else self.trailing_atr_mult
+            )
+        else:
+            self._trade_max_horizon = self.max_horizon
+            self._trade_trailing_atr_mult = self.trailing_atr_mult
 
         self._state = TradeState.IN_POSITION
         self._entry_dt = dt
@@ -499,13 +529,13 @@ class BacktestEngine:
         self._entry_fill = self._apply_slippage(self._entry_price, entry_order_side)
 
         if signal_side == 1:
-            self._tp_price = self._entry_price + self.tp_atr_mult * atr
-            self._sl_price = self._entry_price - self.sl_atr_mult * atr
+            self._tp_price = self._entry_price + tp_mult * atr
+            self._sl_price = self._entry_price - sl_mult * atr
             self._highest_high = bar.High
             self._lowest_low = bar.Low
         else:
-            self._tp_price = self._entry_price - self.tp_atr_mult * atr
-            self._sl_price = self._entry_price + self.sl_atr_mult * atr
+            self._tp_price = self._entry_price - tp_mult * atr
+            self._sl_price = self._entry_price + sl_mult * atr
             self._highest_high = bar.High
             self._lowest_low = bar.Low
 
@@ -527,7 +557,7 @@ class BacktestEngine:
         self._lowest_low = min(self._lowest_low, bar_low)
 
         # 1. Time-barrier exit
-        if self._bars_held > self.max_horizon:
+        if self._bars_held > self._trade_max_horizon:
             self._close_trade(dt, bar_open, ExitReason.TIME_BARRIER)
             return
 
@@ -568,7 +598,7 @@ class BacktestEngine:
         if not self._trailing_activated:
             if self._side == 1:
                 if self._highest_high >= (
-                    self._entry_price + self.trailing_atr_mult * self._atr_at_entry
+                    self._entry_price + self._trade_trailing_atr_mult * self._atr_at_entry
                 ):
                     self._sl_price = (
                         self._entry_price
@@ -577,7 +607,7 @@ class BacktestEngine:
                     self._trailing_activated = True
             else:
                 if self._lowest_low <= (
-                    self._entry_price - self.trailing_atr_mult * self._atr_at_entry
+                    self._entry_price - self._trade_trailing_atr_mult * self._atr_at_entry
                 ):
                     self._sl_price = (
                         self._entry_price
@@ -605,18 +635,34 @@ class BacktestEngine:
         signal_side: int,
         atr: float,
         lots: int = 1,
+        order: Optional[Order] = None,
     ) -> None:
         """Open a new position and add it to the open-positions list."""
         entry_price = bar.Close
         entry_order_side = "Buy" if signal_side == 1 else "Sell"
         entry_fill = self._apply_slippage(entry_price, entry_order_side)
 
+        # Resolve per-trade overrides
+        tp_mult = self.tp_atr_mult
+        sl_mult = self.sl_atr_mult
+        pos_max_horizon: Optional[int] = None
+        pos_trailing_atr_mult: Optional[float] = None
+        if order is not None:
+            if order.tp_atr_mult is not None:
+                tp_mult = order.tp_atr_mult
+            if order.sl_atr_mult is not None:
+                sl_mult = order.sl_atr_mult
+            if order.max_hold_bars is not None:
+                pos_max_horizon = order.max_hold_bars
+            if order.trailing_atr_mult is not None:
+                pos_trailing_atr_mult = order.trailing_atr_mult
+
         if signal_side == 1:
-            tp_price = entry_price + self.tp_atr_mult * atr
-            sl_price = entry_price - self.sl_atr_mult * atr
+            tp_price = entry_price + tp_mult * atr
+            sl_price = entry_price - sl_mult * atr
         else:
-            tp_price = entry_price - self.tp_atr_mult * atr
-            sl_price = entry_price + self.sl_atr_mult * atr
+            tp_price = entry_price - tp_mult * atr
+            sl_price = entry_price + sl_mult * atr
 
         pos = _OpenPosition(
             entry_dt=dt,
@@ -630,6 +676,8 @@ class BacktestEngine:
             highest_high=bar.High,
             lowest_low=bar.Low,
             lots=lots,
+            pos_max_horizon=pos_max_horizon,
+            pos_trailing_atr_mult=pos_trailing_atr_mult,
         )
         self._open_positions.append(pos)
 
@@ -654,8 +702,9 @@ class BacktestEngine:
         exit_price: Optional[float] = None
         exit_reason: Optional[ExitReason] = None
 
-        # 1. Time barrier
-        if pos.bars_held > self.max_horizon:
+        # 1. Time barrier (use per-position override if set)
+        effective_horizon = pos.pos_max_horizon if pos.pos_max_horizon is not None else self.max_horizon
+        if pos.bars_held > effective_horizon:
             exit_price = bar_open
             exit_reason = ExitReason.TIME_BARRIER
 
@@ -690,11 +739,12 @@ class BacktestEngine:
                 )
                 exit_reason = ExitReason.TP
 
-        # 3. Trailing stop upgrade
+        # 3. Trailing stop upgrade (use per-position override if set)
+        eff_trailing = pos.pos_trailing_atr_mult if pos.pos_trailing_atr_mult is not None else self.trailing_atr_mult
         if exit_reason is None and not pos.trailing_activated:
             if pos.side == 1:
                 if pos.highest_high >= (
-                    pos.entry_price + self.trailing_atr_mult * pos.atr_at_entry
+                    pos.entry_price + eff_trailing * pos.atr_at_entry
                 ):
                     pos.sl_price = (
                         pos.entry_price
@@ -703,7 +753,7 @@ class BacktestEngine:
                     pos.trailing_activated = True
             else:
                 if pos.lowest_low <= (
-                    pos.entry_price - self.trailing_atr_mult * pos.atr_at_entry
+                    pos.entry_price - eff_trailing * pos.atr_at_entry
                 ):
                     pos.sl_price = (
                         pos.entry_price
@@ -980,7 +1030,7 @@ class BacktestEngine:
                 for order in orders:
                     if order.action in ("BUY", "SELL"):
                         sig = order.side
-                        self._on_flat(ts, row, sig, atr, lots=order.lots)
+                        self._on_flat(ts, row, sig, atr, lots=order.lots, order=order)
                         break  # single-position: only one entry per bar
 
             elif self._state == TradeState.IN_POSITION:
@@ -1044,7 +1094,7 @@ class BacktestEngine:
                         and atr > 0
                         and len(self._open_positions) < self.max_concurrent
                     ):
-                        self._open_new_position(ts, row, order.side, atr, lots=order.lots)
+                        self._open_new_position(ts, row, order.side, atr, lots=order.lots, order=order)
 
             # 5. Record equity: realized + floating
             self._equity_curve.append(
