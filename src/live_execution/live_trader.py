@@ -115,14 +115,19 @@ _LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 class CLOnlyLogFilter(logging.Filter):
-    """Suppress ib_insync log messages about non-CL positions/trades.
+    """Suppress ib_insync log messages about non-CL positions/trades
+    and verbose callback dumps that are redundant with our [TRADE] lines.
 
     IBKR reports historical positions, portfolio updates, executions,
     and commission reports for ALL symbols in the account, even those
     with 0 position (closed-out stocks like XOM, MSFT, V, COP).
     ib_insync logs every one of these at INFO level, cluttering the
-    live trader output.  This filter drops those messages so only
-    CL-related (and generic connection/warning) events get through.
+    live trader output.  This filter drops:
+      1. Non-CL messages (Stock(), wrong symbol)
+      2. Verbose callback dumps (placeOrder, orderStatus, execDetails,
+         commissionReport, updatePortfolio, position) — these log
+         entire Trade/Fill/PortfolioItem repr strings (500+ chars each)
+         and are redundant with our concise [TRADE] ENTRY/FILL/EXIT lines.
     """
 
     _NON_CL_RE = re.compile(
@@ -132,10 +137,24 @@ class CLOnlyLogFilter(logging.Filter):
         r")",
     )
 
+    # Verbose ib_insync callback messages — redundant with our [TRADE] lines
+    _VERBOSE_IBKR_RE = re.compile(
+        r"^(?:"
+        r"placeOrder:"
+        r"|orderStatus:"
+        r"|execDetails[ :]"
+        r"|commissionReport:"
+        r"|updatePortfolio:"
+        r"|position:"
+        r")",
+    )
+
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
         if self._NON_CL_RE.search(msg):
             return False  # suppress non-CL message
+        if self._VERBOSE_IBKR_RE.match(msg):
+            return False  # suppress verbose callback dump
         return True
 
 
@@ -1285,16 +1304,14 @@ class LiveTrader:
 
     def _on_new_bar(self, bar_time: pd.Timestamp) -> None:
         """Run feature generation, strategy evaluation, and potentially execute a trade."""
-        # 0. Cooldown enforcement (parity with backtest engine)
+        # 0. Track cooldown state (don't return early — we still want INFERENCE
+        #    and BRACKET to always be visible in logs)
+        in_cooldown = False
         if self._cooldown_remaining > 0:
             self._cooldown_remaining -= 1
-            log.info(
-                "COOLDOWN: %d bar(s) remaining — skipping entry evaluation",
-                self._cooldown_remaining + 1,
-            )
-            return
+            in_cooldown = True
 
-        # 1. Generate features
+        # 1. Generate features (always — needed for INFERENCE display)
         features = build_live_features(self.rolling_df, self.feature_names)
         if features is None:
             log.info("Feature generation skipped (insufficient data or NaN)")
@@ -1308,7 +1325,7 @@ class LiveTrader:
             atr_value = float(features["ATR_14"].iloc[0])
 
         # Enforce 24-hour time barrier on any open position (engine safety rail)
-        if self._check_time_barrier(
+        if not in_cooldown and self._check_time_barrier(
             bar_time=bar_time,
             current_price=current_price,
             atr_value=atr_value,
@@ -1414,7 +1431,7 @@ class LiveTrader:
             # Check trailing stop condition on every bar while in position
             self._check_trailing_stop()
 
-        # 3. Delegate decision to strategy
+        # 3. Delegate decision to strategy (always — needed for INFERENCE display)
         signal: TradeSignal = self.strategy.evaluate(
             features=features,
             current_price=current_price,
@@ -1469,7 +1486,31 @@ class LiveTrader:
             signal.signal_label, signal.action, skip_str,
         )
 
-        # 3. Handle HOLD signals
+        # Always log BRACKET values (computed from strategy signal)
+        if signal.tp_price and signal.sl_price:
+            log.info(
+                "BRACKET: price=%.2f  TP=%.2f  SL=%.2f  lots=%d  ATR=%.4f",
+                current_price, signal.tp_price, signal.sl_price,
+                signal.lots, atr_value or 0,
+            )
+
+        # Enforce cooldown AFTER logging inference/bracket
+        if in_cooldown:
+            log.info(
+                "COOLDOWN: %d bar(s) remaining — skipping entry",
+                self._cooldown_remaining + 1,
+            )
+            self.telemetry.log_signal(
+                timestamp=bar_time,
+                signal=signal.signal_label,
+                confidence_pct=signal.confidence_pct,
+                action_taken="COOLDOWN",
+                current_price=current_price,
+                atr_value=atr_value,
+            )
+            return
+
+        # 4. Handle HOLD signals
         if signal.action == "HOLD":
             action_taken = signal.skip_reason or "HOLD"
             if signal.skip_reason == "POSITION_OPEN":
@@ -1493,12 +1534,7 @@ class LiveTrader:
             )
             return
 
-        # 4. Active signal (BUY or SELL) — prepare bracket order
-        log.info(
-            "BRACKET: price=%.2f  TP=%.2f  SL=%.2f  lots=%d  ATR=%.4f",
-            current_price, signal.tp_price, signal.sl_price,
-            signal.lots, atr_value or 0,
-        )
+        # 5. Active signal (BUY or SELL) — bracket already logged above
 
         decision_timestamp_utc = bar_time.isoformat()
         signal_id = uuid.uuid4().hex

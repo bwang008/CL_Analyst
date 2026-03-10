@@ -1,0 +1,11 @@
+ensemble_conservative is the first iteration using the first pass of best models (EXP-017, EXP-020)
+
+ensemble2 is using the new iteration of models
+
+ensemble2_opt was the absolute best profit factor config, but had very low trades volume, great win rate but not high pnl.
+
+ensemble2_alt is using new models but with optuna tuned/searched hyperparameters. Much higher pnl than ensemble_opt.
+
+Plan:
+
+ensemble3 will be the new model using new features and an improvvement on ensemble2_alt

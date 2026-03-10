@@ -1,0 +1,63 @@
+{
+    "nickname": "Koala2_Alt",
+    "description": "EXP-026 OOS Sell model — Optuna trial #458 (balanced: PF=2.83, WR=46.1%, 5691 trades)",
+    "direction": "SHORT",
+    "entry_threshold": 0.6,
+    "tp_atr_mult": 3.5,
+    "sl_atr_mult": 3.0,
+    "trailing_atr_mult": 1.5,
+    "cooldown_bars": 5,
+    "max_hold_bars": 144,
+    "allow_concurrent": false,
+    "max_concurrent": 1,
+    "sizing_tiers": {
+        "0.80": 3,
+        "0.70": 2,
+        "0.60": 1
+    },
+    "live_config": {
+        "experiment_id": "EXP-026_S_Ultimate_Short_OOS",
+        "client_id": 11,
+        "exit_mode": "marketable_limit"
+    },
+    "training_info": {
+        "experiment_id": "EXP-026",
+        "target": "TARGET_TRIPLE_2x1_24H_SHORT",
+        "target_description": "Triple Barrier: TP=2xATR(14), SL=1xATR(14), max_horizon=24h (288 bars)",
+        "data": "data/processed/CL_set_06_shortfix.parquet",
+        "method": "walk_forward",
+        "balance_mode": "downsample",
+        "train_cutoff_date": "2022-01-01",
+        "oos_predictions": "reports/oos_predictions.csv",
+        "backtest_results": {
+            "win_rate": 0.373,
+            "profit_factor": 2.14,
+            "total_pnl": 647668.48,
+            "total_trades": 7330,
+            "max_drawdown": -20134.04
+        }
+    },
+    "optuna_info": {
+        "trial_number": 458,
+        "optimizer": "strategy_optimizer",
+        "selection": "user_selected_alt",
+        "params": {
+            "tp_atr_mult": 3.5,
+            "sl_atr_mult": 3.0,
+            "trailing_atr_mult": 1.5,
+            "cooldown_bars": 5,
+            "max_hold_bars": 144,
+            "entry_threshold": 0.6
+        },
+        "metrics": {
+            "total_pnl": 902073.12,
+            "profit_factor": 2.8283,
+            "win_rate": 0.4611,
+            "trade_count": 5691,
+            "max_drawdown": -10676.96,
+            "sharpe_ratio": 6.6309,
+            "sortino_ratio": 3.0296,
+            "calmar_ratio": 4.9446
+        }
+    }
+}
