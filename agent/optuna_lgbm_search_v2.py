@@ -48,6 +48,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Optional
 
+# CPU count for dynamic thread allocation
+_CPU_COUNT = os.cpu_count() or 4
+
 import numpy as np
 import pandas as pd
 
@@ -136,6 +139,20 @@ def focal_obj(preds: np.ndarray, train_set: lgb.Dataset):
     grad = (p - labels) * ((1 - p_t) ** FOCAL_GAMMA)
     hess = (p * (1 - p)) * ((1 - p_t) ** FOCAL_GAMMA)
     return grad, hess
+
+
+def focal_eval(preds: np.ndarray, val_set: lgb.Dataset):
+    """Focal loss eval metric for early stopping (matches focal_obj).
+
+    Returns (name, value, is_higher_better) for LightGBM custom eval.
+    Lower focal loss = better, so is_higher_better=False.
+    """
+    labels = val_set.get_label().astype(int)
+    p = _sigmoid(preds)
+    p_t = np.where(labels == 1, p, 1 - p)
+    # Focal loss: -alpha_t * (1 - p_t)^gamma * log(p_t)
+    loss = -((1 - p_t) ** FOCAL_GAMMA) * np.log(np.clip(p_t, 1e-7, 1.0))
+    return "focal_loss", float(np.mean(loss)), False
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +252,7 @@ def make_objective(
     balance_mode: str = "downsample",
     ohlcv_gym: pd.DataFrame | None = None,
     strategy_cfg: dict | None = None,
+    n_jobs: int = 1,
 ):
     """Create the Optuna objective closure.
 
@@ -256,6 +274,7 @@ def make_objective(
         params = {
             "boosting_type": "gbdt",
             "verbose": -1,
+            "num_threads": max(1, _CPU_COUNT // n_jobs),
             "num_leaves": trial.suggest_int("num_leaves", 15, 63),
             "min_child_samples": trial.suggest_int("min_child_samples", 50, 300),
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
@@ -269,11 +288,8 @@ def make_objective(
         }
         n_estimators = trial.suggest_int("n_estimators", 500, 2000, step=100)
 
-        # For logloss mode, use binary_logloss as built-in metric (faster)
-        if ml_metric == "logloss":
-            params["metric"] = "binary_logloss"
-        else:
-            params["metric"] = "None"
+        # Disable built-in metric — we use focal_eval for early stopping
+        params["metric"] = "None"
 
         # Custom focal loss objective goes in params (LightGBM 4.x API)
         params["objective"] = focal_obj
@@ -297,11 +313,19 @@ def make_objective(
                 except ValueError:
                     continue  # Skip degenerate fold
 
-            # Train
-            train_data = lgb.Dataset(X_train, label=y_train)
+            # Split training into train/val for early stopping (chronological)
+            val_frac = 0.1
+            val_split = int(len(X_train) * (1 - val_frac))
+            X_tr, X_val = X_train.iloc[:val_split], X_train.iloc[val_split:]
+            y_tr, y_val = y_train.iloc[:val_split], y_train.iloc[val_split:]
+
+            # Train with early stopping
+            train_data = lgb.Dataset(X_tr, label=y_tr)
+            val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
 
             callbacks = [
                 lgb.log_evaluation(period=0),  # silent
+                lgb.early_stopping(stopping_rounds=100, verbose=False),
             ]
 
             try:
@@ -309,10 +333,16 @@ def make_objective(
                     params,
                     train_data,
                     num_boost_round=n_estimators,
+                    valid_sets=[val_data],
+                    valid_names=["val"],
+                    feval=focal_eval,
                     callbacks=callbacks,
                 )
             except Exception:
                 continue
+
+            # Track actual iterations used
+            best_iter = getattr(model, "best_iteration", n_estimators)
 
             # Predict probabilities
             raw_pred = model.predict(X_test)
@@ -340,6 +370,8 @@ def make_objective(
                 "f1": fold_f1,
                 "precision": fold_prec,
                 "score": score,
+                "best_iteration": best_iter,
+                "n_estimators_budget": n_estimators,
             })
 
         if not fold_scores:
@@ -350,11 +382,22 @@ def make_objective(
         # Log intermediate metrics
         avg_f1 = float(np.mean([d["f1"] for d in fold_details]))
         avg_prec = float(np.mean([d["precision"] for d in fold_details]))
+        iterations = [d["best_iteration"] for d in fold_details]
         trial.set_user_attr("avg_f1", round(avg_f1, 4))
         trial.set_user_attr("avg_precision", round(avg_prec, 4))
         trial.set_user_attr("n_folds_evaluated", len(fold_scores))
         trial.set_user_attr("fold_scores", [round(s, 4) for s in fold_scores])
         trial.set_user_attr("std_score", round(float(np.std(fold_scores)), 4))
+        # Early stopping iteration tracking
+        trial.set_user_attr("n_estimators_budget", n_estimators)
+        trial.set_user_attr("avg_iterations", round(float(np.mean(iterations)), 1))
+        trial.set_user_attr("min_iterations", int(np.min(iterations)))
+        trial.set_user_attr("max_iterations", int(np.max(iterations)))
+        trial.set_user_attr("fold_iterations", iterations)
+        trial.set_user_attr(
+            "early_stopped_folds",
+            sum(1 for d in fold_details if d["best_iteration"] < d["n_estimators_budget"]),
+        )
 
         return avg_score
 
@@ -371,6 +414,7 @@ def run_search(
     target_name: str,
     ml_metric: str = "logloss",
     n_trials: int = 100,
+    n_jobs: int = 1,
     balance_mode: str = "downsample",
     strategy_config_path: str | None = None,
     train_cutoff_date: str | None = None,
@@ -416,6 +460,7 @@ def run_search(
     print(f"  Target:          {target_name}")
     print(f"  ML metric:       {ml_metric}")
     print(f"  Trials:          {n_trials}")
+    print(f"  Workers:         {n_jobs}  (LGB threads/worker: {max(1, _CPU_COUNT // n_jobs)})")
     print(f"  Balance:         {balance_mode}")
     if train_cutoff_date:
         print(f"  Cutoff:          {train_cutoff_date} (date-based gym)")
@@ -486,7 +531,10 @@ def run_search(
 
     os.makedirs(db_dir, exist_ok=True)
     db_path = os.path.join(db_dir, f"{study_name}.db")
-    storage = f"sqlite:///{db_path}"
+    storage = optuna.storages.RDBStorage(
+        url=f"sqlite:///{db_path}",
+        engine_kwargs={"connect_args": {"timeout": 30}},
+    )
 
     study = optuna.create_study(
         study_name=study_name,
@@ -505,6 +553,7 @@ def run_search(
         balance_mode=balance_mode,
         ohlcv_gym=ohlcv_gym,
         strategy_cfg=strategy_cfg,
+        n_jobs=n_jobs,
     )
 
     # Progress callback
@@ -522,10 +571,16 @@ def run_search(
         std = trial.user_attrs.get("std_score", 0)
 
         if n_done % 10 == 0 or n_done <= 3:
+            avg_iters = trial.user_attrs.get('avg_iterations', 0)
+            budget = trial.user_attrs.get('n_estimators_budget', 0)
+            es_folds = trial.user_attrs.get('early_stopped_folds', 0)
+            n_folds_eval = trial.user_attrs.get('n_folds_evaluated', 0)
             print(
                 f"  Trial {n_done:>4}/{n_trials}  "
                 f"{ml_metric}={score:>8.4f} (±{std:.4f})  "
                 f"F1={trial.user_attrs.get('avg_f1', 0):.4f}  "
+                f"iters={avg_iters:.0f}/{budget} "
+                f"(ES:{es_folds}/{n_folds_eval})  "
                 f"[{elapsed:.0f}s elapsed, ~{remaining:.0f}s remaining]"
             )
             best = study.best_trial
@@ -538,6 +593,7 @@ def run_search(
     study.optimize(
         objective,
         n_trials=n_trials,
+        n_jobs=n_jobs,
         callbacks=[progress_callback],
         show_progress_bar=True,
     )
@@ -556,6 +612,10 @@ def run_search(
     print(f"  Avg Precision: {best.user_attrs.get('avg_precision', 0):.4f}")
     print(f"  Fold StdDev:   {best.user_attrs.get('std_score', 0):.4f}")
     print(f"  Folds used:    {best.user_attrs.get('n_folds_evaluated', 0)}")
+    print(f"  Avg Iters:     {best.user_attrs.get('avg_iterations', 0):.0f}"
+          f" / {best.user_attrs.get('n_estimators_budget', 0)} budget")
+    print(f"  ES Folds:      {best.user_attrs.get('early_stopped_folds', 0)}"
+          f" / {best.user_attrs.get('n_folds_evaluated', 0)} stopped early")
     print(f"\nBest Hyperparameters:")
     for k, v in best.params.items():
         print(f"  {k}: {v}")
@@ -604,11 +664,12 @@ def run_search(
     for trial in study.trials:
         if trial.state != optuna.trial.TrialState.COMPLETE:
             continue
+        _skip_keys = {"fold_scores", "fold_iterations"}
         row = {
             "trial_number": trial.number,
             "score": trial.value,
             **trial.params,
-            **{k: v for k, v in trial.user_attrs.items() if k != "fold_scores"},
+            **{k: v for k, v in trial.user_attrs.items() if k not in _skip_keys},
         }
         rows.append(row)
     if rows:
@@ -719,6 +780,11 @@ def main():
         "--db-dir", default="models/optuna_studies",
         help="Directory for SQLite study persistence (default: models/optuna_studies)",
     )
+    parser.add_argument(
+        "--n-jobs", type=int, default=1,
+        help="Number of parallel Optuna workers (default: 1). "
+             "LightGBM num_threads auto-scales to cpu_count/n_jobs.",
+    )
     args = parser.parse_args()
 
     run_search(
@@ -726,6 +792,7 @@ def main():
         target_name=args.target,
         ml_metric=args.ml_metric,
         n_trials=args.n_trials,
+        n_jobs=args.n_jobs,
         balance_mode=args.balance_mode,
         strategy_config_path=args.strategy_config,
         train_cutoff_date=args.train_cutoff_date,

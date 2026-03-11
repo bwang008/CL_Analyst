@@ -356,20 +356,21 @@ if __name__ == "__main__":
     elif cli_args.id:
         # Direct CLI mode: run experiment with explicit args
         model_params = {
-            "num_leaves": 31,
-            "min_child_samples": 166,
-            "learning_rate": 0.05242702195760322,
-            "feature_fraction": 0.6940065346564026,
-            "bagging_fraction": 0.6483459770074159,
+            "num_leaves": 63,
+            "min_child_samples": 204,
+            "learning_rate": 0.0760826273625786,
+            "feature_fraction": 0.7859724380404898,
+            "bagging_fraction": 0.8679683143706814,
             "bagging_freq": 1,
-            "reg_alpha": 2.737488884954343,
-            "reg_lambda": 7.378557513409711,
-            "max_depth": 4,
-            "min_gain_to_split": 0.9901794009928347,
-            "n_estimators": 1000,
+            "reg_alpha": 1.9757596556534656,
+            "reg_lambda": 0.5089475212416787,
+            "max_depth": 8,
+            "min_gain_to_split": 0.04047347482927402,
+            "n_estimators": 1700,
             "objective": "binary",
             "use_focal": True,
             "metric": "binary_logloss",
+            "validation_fraction": 0.1,
             "class_weight": None,
         }
         result = run_experiment(
