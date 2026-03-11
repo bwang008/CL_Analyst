@@ -1,0 +1,36 @@
+{
+    "experiment_id": "EXP-030",
+    "strategy": "optuna_v2_set07_logloss",
+    "hypothesis": "OOS training with Optuna v2 logloss-optimized hyperparams (set_07, trial #114)",
+    "data_path": "C:\\CL_Analyst_Data\\data\\processed\\CL_set_07.parquet",
+    "target_name": "TARGET_TRIPLE_2x1_24H_LONG",
+    "method": "walk_forward",
+    "balance_mode": "downsample",
+    "train_cutoff_date": "2022-01-01",
+    "threshold": 0.02,
+    "model_params": {
+        "num_leaves": 63,
+        "min_child_samples": 204,
+        "learning_rate": 0.0760826273625786,
+        "feature_fraction": 0.7859724380404898,
+        "bagging_fraction": 0.8679683143706814,
+        "bagging_freq": 1,
+        "reg_alpha": 1.9757596556534656,
+        "reg_lambda": 0.5089475212416787,
+        "max_depth": 8,
+        "min_gain_to_split": 0.04047347482927402,
+        "n_estimators": 1700,
+        "objective": "binary",
+        "use_focal": true,
+        "metric": "binary_logloss",
+        "validation_fraction": 0.1,
+        "class_weight": null
+    },
+    "optuna_provenance": {
+        "study_db": "models/optuna_studies/long_logloss_100t.db",
+        "metric": "logloss",
+        "best_trial": 114,
+        "total_trials": 119,
+        "best_value": null
+    }
+}

@@ -2,6 +2,62 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
+## 2026-03-11 — EXP-030 Logloss Bake-off & Registry-Centric Pipeline
+
+### EXP-030: Optuna v2 Logloss (set_07, Long)
+
+- **Optuna search**: 119 trials on `CL_set_07`, metric=`binary_logloss`, best trial #114
+- **Bug fix**: `LGBMLearner.py` — removed `num_class=3` when `use_focal=True` with binary objective (was causing `multiclass objective and metrics don't match` error)
+- **Training**: walk-forward, 68 folds, 53.67 min wall time
+- **OOS backtest** (2022-01 → 2026-02): **$1.67M PnL, 2.96 PF, 41.9% WR, 10,427 trades, -$6,415 MDD**
+- Every month profitable across 4+ years
+- Top features: Time_Sin, Time_Cos, STRUC_ENTROPY_100, STRUC_HURST_100, MOM_ADX_14
+
+### Registry-centric pipeline redesign
+
+Made `models/registry/{EXP_ID}/` the single source of truth for experiments.
+
+#### Files changed
+- `agent/archive_model.py` — added `oos_predictions_path`, `experiment_config_path`, `feature_importance_path` params
+- `agent/experiment_runner.py` — added `--config` flag (reads `configs/experiments/*.json`), auto-calls `archive_model.py` after training
+- `agent/backtest_engine.py` — auto-resolves predictions from config's `models.*.predictions_path` when `--predictions` is omitted; dual-model auto-merge (outer join) eliminates manual `merge_predictions.py` step
+- `configs/strategies/OPTUNA_EXP-030_Set07.json` — strategy config with `predictions_path` pointing to registry
+- `configs/strategies/ensemble2_alt.json` — added `predictions_path` for both long + short models
+- `configs/experiments/EXP-030.json` — experiment config template
+
+#### Registry bundle contents (EXP-030)
+```
+models/registry/EXP-030_optuna_v2_set07_logloss/
+  ├── final_model.pkl          # Trained model
+  ├── oos_predictions.csv      # OOS predictions (291K rows)
+  ├── experiment_config.json   # Training config (for reproduction)
+  ├── feature_importance.csv   # Walk-forward feature importance
+  ├── config.json              # Experiment metadata
+  ├── metrics.json             # Classification + backtest metrics
+  ├── vault_metrics.json       # Vault holdout metrics
+  └── backtest.csv             # Summary row
+```
+
+#### Pipeline flow (new)
+```
+Optuna search → configs/experiments/EXP-XXX.json
+                    ↓
+experiment_runner.py --config → trains model → auto-archives to models/registry/EXP-XXX/
+                                                    ↓
+configs/strategies/OPTUNA_EXP-XXX.json (predictions_path → registry)
+                    ↓
+backtest_engine.py --config (auto-resolves predictions, auto-merges dual-model)
+```
+
+#### Dual-model merge logic
+When a strategy config has both `models.long.predictions_path` and `models.short.predictions_path`, the backtest engine:
+1. Loads both CSVs independently
+2. Extracts `prob_Buy` from long, `prob_Sell` from short
+3. Outer-joins on DateTime index, fills NaN with 0.0
+4. Runs backtest on the merged DataFrame
+
+This eliminates the manual `scripts/merge_predictions.py` step.
+
 ## 2026-03-10 — Set 08: Exhaustion Features
 
 - **Goal**: Add "move exhaustion" features so the model can learn when a directional move is overextended and a snap-back is more likely than continuation. Addresses the problem of the model shorting into violent rebounds during extreme sell-offs (e.g., -14% day, -5% in 15 min).

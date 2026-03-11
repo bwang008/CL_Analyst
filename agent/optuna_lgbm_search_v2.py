@@ -590,13 +590,34 @@ def run_search(
                 f"(trial #{best.number})"
             )
 
-    study.optimize(
-        objective,
-        n_trials=n_trials,
-        n_jobs=n_jobs,
-        callbacks=[progress_callback],
-        show_progress_bar=True,
-    )
+    import logging
+    log_path = os.path.join(db_dir, f"{study_name}_errors.log")
+    file_handler = logging.FileHandler(log_path, mode="a")
+    file_handler.setLevel(logging.WARNING)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logging.getLogger("optuna").addHandler(file_handler)
+
+    try:
+        study.optimize(
+            objective,
+            n_trials=n_trials,
+            n_jobs=n_jobs,
+            callbacks=[progress_callback],
+            show_progress_bar=True,
+        )
+    except Exception as e:
+        print(f"\n{'='*70}")
+        print(f"STUDY CRASHED: {type(e).__name__}: {e}")
+        print(f"{'='*70}")
+        import traceback
+        traceback.print_exc()
+        with open(log_path, "a") as f:
+            f.write(f"\n{'='*70}\n")
+            f.write(f"STUDY CRASHED: {type(e).__name__}: {e}\n")
+            traceback.print_exc(file=f)
+        print(f"\nError log saved to: {log_path}")
+        print(f"Completed trials are preserved in the DB. Restart to resume.")
+        raise  # Stop the process
 
     elapsed = time.perf_counter() - start_time
 

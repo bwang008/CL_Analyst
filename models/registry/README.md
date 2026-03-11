@@ -37,3 +37,4 @@ python agent/archive_model.py --experiment-id EXP-017 --model-path models/final_
 | 2026-02-28 | EXP-020-FLAT | TARGET_TRIPLE_2x1_24H_SHORT | Short | 29.2% | 2.26 | Concurrent flat sizing candidate (threshold 0.60, TP 5.0x, SL 0.75x) using aligned processed OHLCV data. |
 | 2026-03-06 | EXP-025 | TARGET_TRIPLE_2x1_24H_LONG | Long | N/A | N/A | OOS walk-forward Buy model cutoff 2022-01-01 |
 | 2026-03-06 | EXP-026 | TARGET_TRIPLE_2x1_24H_SHORT | Short | N/A | N/A | OOS walk-forward Sell model cutoff 2022-01-01 |
+| 2026-03-11 | EXP-030 | TARGET_TRIPLE_2x1_24H_LONG | Long | N/A | N/A | Optuna v2 logloss bake-off (trial #114, set_07, .67M PnL) |

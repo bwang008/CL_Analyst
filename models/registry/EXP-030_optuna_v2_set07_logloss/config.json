@@ -1,0 +1,33 @@
+{
+  "experiment_id": "EXP-030",
+  "strategy": "optuna_v2_set07_logloss",
+  "timestamp": "2026-03-11T07:13:30",
+  "target_name": "TARGET_TRIPLE_2x1_24H_LONG",
+  "type": "Long",
+  "dataset_path": null,
+  "training_threshold": null,
+  "optimized_probability_threshold": null,
+  "selected_trade_threshold": null,
+  "features_summary": "Unknown",
+  "model_params": null,
+  "model_file": {
+    "archived_name": "final_model.pkl",
+    "source_path": "models\\final_model.pkl",
+    "source_modified_utc": "2026-03-11T15:08:12+00:00"
+  },
+  "source_experiment_record": {
+    "id": "EXP-030",
+    "timestamp": "2026-03-11T07:13:30",
+    "strategy": "optuna_v2_set07_logloss",
+    "hypothesis": "OOS training with cutoff 2022-01-01",
+    "changes": {
+      "target_name": "TARGET_TRIPLE_2x1_24H_LONG",
+      "data_path": "C:\\CL_Analyst_Data\\data\\processed\\CL_set_07.parquet",
+      "method": "walk_forward",
+      "balance_mode": "downsample",
+      "train_cutoff_date": "2022-01-01"
+    },
+    "error": "Multiclass objective and metrics don't match",
+    "verdict": "error"
+  }
+}

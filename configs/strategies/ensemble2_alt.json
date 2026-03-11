@@ -5,10 +5,12 @@
     "models": {
         "long": {
             "experiment_id": "EXP-025_S_Ultimate_OOS",
+            "predictions_path": "models/registry/EXP-025_S_Ultimate_OOS/oos_predictions.csv",
             "threshold": 0.60
         },
         "short": {
             "experiment_id": "EXP-026_S_Ultimate_Short_OOS",
+            "predictions_path": "models/registry/EXP-026_S_Ultimate_Short_OOS/oos_predictions.csv",
             "threshold": 0.60
         }
     },

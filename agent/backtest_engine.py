@@ -1520,8 +1520,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--predictions",
-        default="reports/vault_predictions.csv",
-        help="Path to vault predictions CSV",
+        default=None,
+        help="Path to predictions CSV. If omitted and --config is given, "
+             "auto-resolves from config's models.*.predictions_path",
     )
     parser.add_argument(
         "--data",
@@ -1567,7 +1568,8 @@ def main() -> None:
 
     # Resolve paths via CL_DATA_ROOT fallback
     from src.data_paths import resolve_cli_path
-    args.predictions = resolve_cli_path(args.predictions)
+    if args.predictions:
+        args.predictions = resolve_cli_path(args.predictions)
     args.data = resolve_cli_path(args.data)
     if args.live_data:
         args.live_data = resolve_cli_path(args.live_data)
@@ -1617,10 +1619,50 @@ def main() -> None:
             contract_multiplier=args.contract_multiplier,
         )
 
-    # Run A: Historical data
-    print(f"Loading predictions from {args.predictions}...")
-    preds = load_predictions(args.predictions)
+    # Auto-resolve predictions from config if not explicitly provided
+    if args.predictions is None and strategy_cfg is not None:
+        models_cfg = strategy_cfg.get("models", {})
+        long_preds_path = models_cfg.get("long", {}).get("predictions_path")
+        short_preds_path = models_cfg.get("short", {}).get("predictions_path")
 
+        if long_preds_path and short_preds_path:
+            # Dual-model: auto-merge long + short predictions
+            long_preds_path = resolve_cli_path(long_preds_path)
+            short_preds_path = resolve_cli_path(short_preds_path)
+            print(f"Auto-resolving predictions from config (dual-model):")
+            print(f"  Long:  {long_preds_path}")
+            print(f"  Short: {short_preds_path}")
+            long_df = load_predictions(long_preds_path)
+            short_df = load_predictions(short_preds_path)
+            # Find probability columns
+            long_col = "prob_Buy" if "prob_Buy" in long_df.columns else long_df.columns[0]
+            short_col = "prob_Sell" if "prob_Sell" in short_df.columns else short_df.columns[0]
+            long_probs = long_df[[long_col]].rename(columns={long_col: "prob_Buy"})
+            short_probs = short_df[[short_col]].rename(columns={short_col: "prob_Sell"})
+            preds = long_probs.join(short_probs, how="outer").fillna(0.0)
+            print(f"  Merged: {len(preds):,} rows ({preds['prob_Buy'].gt(0).sum():,} buy signals, {preds['prob_Sell'].gt(0).sum():,} sell signals)")
+        elif long_preds_path:
+            long_preds_path = resolve_cli_path(long_preds_path)
+            print(f"Auto-resolving predictions from config: {long_preds_path}")
+            preds = load_predictions(long_preds_path)
+        elif short_preds_path:
+            short_preds_path = resolve_cli_path(short_preds_path)
+            print(f"Auto-resolving predictions from config: {short_preds_path}")
+            preds = load_predictions(short_preds_path)
+        else:
+            print("WARNING: No predictions_path in config and no --predictions flag. Using default.")
+            args.predictions = resolve_cli_path("reports/vault_predictions.csv")
+            preds = load_predictions(args.predictions)
+    elif args.predictions is None:
+        # No config and no predictions — use legacy default
+        args.predictions = resolve_cli_path("reports/vault_predictions.csv")
+        print(f"Loading predictions from {args.predictions}...")
+        preds = load_predictions(args.predictions)
+    else:
+        print(f"Loading predictions from {args.predictions}...")
+        preds = load_predictions(args.predictions)
+
+    # Run A: Historical data
     print(f"Loading historical OHLCV from {args.data}...")
     ohlcv_a = load_ohlcv(args.data)
 
@@ -1630,7 +1672,7 @@ def main() -> None:
     report_text = format_report(
         result_a,
         config=strategy_cfg_for_report,
-        predictions_path=args.predictions,
+        predictions_path=args.predictions or "(auto-resolved from config)",
         data_path=args.data,
     )
     print()
@@ -1641,6 +1683,21 @@ def main() -> None:
         with open(args.report_file, "w", encoding="utf-8") as rf:
             rf.write(report_text + "\n")
         print(f"\nReport saved to {args.report_file}")
+
+    # Auto-save report to model registry if experiment_id is available from config
+    if strategy_cfg is not None:
+        models_cfg = strategy_cfg.get("models", {})
+        exp_id = (
+            models_cfg.get("long", {}).get("experiment_id")
+            or models_cfg.get("short", {}).get("experiment_id")
+        )
+        if exp_id:
+            registry_dir = os.path.join("models", "registry", exp_id)
+            if os.path.isdir(registry_dir):
+                registry_report = os.path.join(registry_dir, "backtest_report.txt")
+                with open(registry_report, "w", encoding="utf-8") as rf:
+                    rf.write(report_text + "\n")
+                print(f"Report auto-saved to registry: {registry_report}")
 
     # Run B: Live session data (optional)
     if args.live_data and os.path.exists(args.live_data):
