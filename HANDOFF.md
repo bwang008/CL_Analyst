@@ -4,7 +4,7 @@
 - `main`
 
 ## Last Completed Task
-- **Set_08 Models & Ensemble3**: Ran Optuna searches for long (126 trials, best #86) and short (106 trials, best #91) on `CL_set_08`. Trained EXP-031 (long) and EXP-032 (short). Ensemble3 backtest: **$2.60M PnL, 3.88 PF, 45.9% WR, every month green**. Created `manatee3.json`, `koala3.json`, `ensemble3.json`. Added error logging to Optuna script. Created `docs/EXPLORATION_BACKLOG.md`.
+- **Prediction Distribution Visualizer**: Created `scripts/plot_prediction_distributions.py` — auto-discovers all models in `models/registry/`, generates histogram+KDE plots per model + comparison grid. Key finding: EXP-025 is dead (max prob=0.547, 0% above 0.60); all Optuna models have healthy 20-26% signal rates. Output: `reports/prediction_distributions/`. Run: `python scripts/plot_prediction_distributions.py` (use `--force` to regenerate).
 
 ## Current Known Bugs / Issues
 - **`trailing_atr_mult = 0.0` bug**: Setting this to 0 does not disable the trailing stop as expected — it triggers immediately. Workaround: set to a large value (e.g. 99.0) to effectively disable.
