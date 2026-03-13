@@ -171,8 +171,28 @@ class SingleModelStrategy(BaseExecutionStrategy):
     def __init__(self, config: dict) -> None:
         super().__init__(config)
         self.direction: str = config.get("direction", "LONG").upper()
-        self.threshold: float = config.get("entry_threshold", 0.45)
         self.max_concurrent: int = config.get("max_concurrent", 1)
+
+        # Resolve threshold: check models.long/short.threshold first,
+        # then top-level entry_threshold, then DEFAULT TO 1.0 (no trading).
+        models = config.get("models", {})
+        model_key = "long" if self.direction == "LONG" else "short"
+        model_threshold = (models.get(model_key, {}) or {}).get("threshold")
+
+        if model_threshold is not None:
+            self.threshold: float = model_threshold
+        elif "entry_threshold" in config:
+            self.threshold = config["entry_threshold"]
+        else:
+            import warnings
+            self.threshold = 1.0
+            warnings.warn(
+                f"[SingleModelStrategy] No threshold found in config! "
+                f"Checked models.{model_key}.threshold and entry_threshold. "
+                f"Defaulting to 1.0 (NO TRADES). Set a threshold explicitly.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     def on_bar(
         self,

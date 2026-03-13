@@ -169,6 +169,9 @@ def archive_experiment(
     threshold_sweep_path: Path | None = None,
     selected_trade_threshold: float | None = None,
     notes: str | None = None,
+    oos_predictions_path: Path | None = None,
+    experiment_config_path: Path | None = None,
+    feature_importance_path: Path | None = None,
 ) -> Path:
     log_data = _load_json(EXPERIMENT_LOG)
     exp = _find_experiment(experiment_id, log_data)
@@ -190,6 +193,15 @@ def archive_experiment(
             "Pass --model-path explicitly."
         )
 
+    # Guard: check for stale model file and suggest isolated output if available
+    import time as _time
+    model_age_hours = (_time.time() - selected_model_path.stat().st_mtime) / 3600
+    if model_age_hours > 2:
+        print(f"  [WARN] Model file is {model_age_hours:.1f}h old — may be stale from a prior experiment!")
+    isolated_model = PROJECT_ROOT / "models" / experiment_id / "final_model.pkl"
+    if isolated_model.exists() and selected_model_path != isolated_model:
+        print(f"  [WARN] Isolated model found at {isolated_model} — consider using it instead of {selected_model_path}")
+
     # 1) Trained model artifact (.pkl)
     archived_model_path = bundle_dir / selected_model_path.name
     shutil.copy2(selected_model_path, archived_model_path)
@@ -201,6 +213,21 @@ def archive_experiment(
         shutil.copy2(backtest_results_path, bundle_dir / backtest_results_path.name)
     if threshold_sweep_path and threshold_sweep_path.exists():
         shutil.copy2(threshold_sweep_path, bundle_dir / threshold_sweep_path.name)
+
+    # Copy OOS predictions (the expensive, reproducibility-critical artifact)
+    if oos_predictions_path and oos_predictions_path.exists():
+        shutil.copy2(oos_predictions_path, bundle_dir / "oos_predictions.csv")
+        print(f"  Archived OOS predictions: {oos_predictions_path}")
+
+    # Copy experiment config for full reproducibility
+    if experiment_config_path and experiment_config_path.exists():
+        shutil.copy2(experiment_config_path, bundle_dir / "experiment_config.json")
+        print(f"  Archived experiment config: {experiment_config_path}")
+
+    # Copy feature importance
+    if feature_importance_path and feature_importance_path.exists():
+        shutil.copy2(feature_importance_path, bundle_dir / "feature_importance.csv")
+        print(f"  Archived feature importance: {feature_importance_path}")
 
     # 2) Experiment-specific config and metadata
     report_text = _read_text(REPORT_LOG)
@@ -319,12 +346,21 @@ def main() -> None:
     parser.add_argument("--threshold-sweep-path", default=None, help="Optional path to threshold sweep JSON to copy into bundle")
     parser.add_argument("--selected-trade-threshold", type=float, default=None, help="Threshold actually used for trading/backtest")
     parser.add_argument("--notes", default=None, help="Optional notes for registry catalog row")
+    parser.add_argument("--oos-predictions-path", default=None,
+                        help="Path to OOS predictions CSV to archive")
+    parser.add_argument("--experiment-config-path", default=None,
+                        help="Path to experiment config JSON to archive")
+    parser.add_argument("--feature-importance-path", default=None,
+                        help="Path to feature importance CSV to archive")
     args = parser.parse_args()
 
     model_path = Path(args.model_path) if args.model_path else None
     vault_metrics_path = Path(args.vault_metrics_path) if args.vault_metrics_path else None
     backtest_results_path = Path(args.backtest_results_path) if args.backtest_results_path else None
     threshold_sweep_path = Path(args.threshold_sweep_path) if args.threshold_sweep_path else None
+    oos_predictions_path = Path(args.oos_predictions_path) if args.oos_predictions_path else None
+    experiment_config_path = Path(args.experiment_config_path) if args.experiment_config_path else None
+    feature_importance_path = Path(args.feature_importance_path) if args.feature_importance_path else None
     archive_experiment(
         experiment_id=args.experiment_id,
         model_path=model_path,
@@ -333,6 +369,9 @@ def main() -> None:
         threshold_sweep_path=threshold_sweep_path,
         selected_trade_threshold=args.selected_trade_threshold,
         notes=args.notes,
+        oos_predictions_path=oos_predictions_path,
+        experiment_config_path=experiment_config_path,
+        feature_importance_path=feature_importance_path,
     )
 
 

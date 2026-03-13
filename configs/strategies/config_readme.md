@@ -52,7 +52,7 @@ Configs are organized into two sections:
 |-----------|------|---------|-------------|
 | `execution_class` | string | `"SingleModelStrategy"` | Strategy class: `SingleModelStrategy`, `ConservativeEnsembleStrategy`, `AggressiveEnsembleStrategy`, `TieredEnsembleStrategy` |
 | `direction` | string | `"LONG"` | `"LONG"` uses `prob_Buy`, `"SHORT"` uses `prob_Sell` |
-| `models` | object | — | Ensemble only: per-direction thresholds, e.g. `{"long": {"threshold": 0.70}, "short": {"threshold": 0.60}}` |
+| `models` | object | — | Ensemble: per-direction config with `experiment_id` (live model loading), `predictions_path` (backtest auto-resolve), `threshold` |
 
 ### Signal Thresholds
 

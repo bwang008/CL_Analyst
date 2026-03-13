@@ -92,6 +92,25 @@
         "TARGET_TRIPLE_3x1_24H_LONG",
         "TARGET_TRIPLE_3x1_24H_SHORT"
       ]
+    },
+    "set_08": {
+      "name": "Exhaustion Feature Set",
+      "summary": "set_07 features plus exhaustion cluster: cumulative return (EXHAUST_CUM_RET_*), ATR-normalised exhaustion (EXHAUST_CUM_ATR_*), and distance from recent high in ATR units (EXHAUST_DIST_HIGH_*). These help the model detect overextended moves where snap-back is likely.",
+      "windows": [288, 864, 2016, 4032, 10080],
+      "macro_windows": {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160},
+      "new_features": [
+        "EXHAUST_CUM_RET_*",
+        "EXHAUST_CUM_ATR_*",
+        "EXHAUST_DIST_HIGH_*"
+      ],
+      "targets": [
+        "TARGET_TRIPLE_2x1_12H_LONG",
+        "TARGET_TRIPLE_2x1_12H_SHORT",
+        "TARGET_TRIPLE_2x1_24H_LONG",
+        "TARGET_TRIPLE_2x1_24H_SHORT",
+        "TARGET_TRIPLE_3x1_24H_LONG",
+        "TARGET_TRIPLE_3x1_24H_SHORT"
+      ]
     }
   }
 }

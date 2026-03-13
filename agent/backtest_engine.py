@@ -839,15 +839,17 @@ class BacktestEngine:
             prob_buy_lookup: dict[pd.Timestamp, float] = {}
             prob_sell_lookup: dict[pd.Timestamp, float] = {}
 
-            if "prob_Buy" in signals_df.columns:
+            buy_col = _resolve_prob_column(signals_df, "buy")
+            sell_col = _resolve_prob_column(signals_df, "sell")
+            if buy_col:
                 for dt_idx in signals_df.index:
                     prob_buy_lookup[pd.Timestamp(dt_idx)] = float(
-                        signals_df.at[dt_idx, "prob_Buy"]
+                        signals_df.at[dt_idx, buy_col]
                     )
-            if "prob_Sell" in signals_df.columns:
+            if sell_col:
                 for dt_idx in signals_df.index:
                     prob_sell_lookup[pd.Timestamp(dt_idx)] = float(
-                        signals_df.at[dt_idx, "prob_Sell"]
+                        signals_df.at[dt_idx, sell_col]
                     )
             # Legacy column fallback: if only 'side' column, map to probs
             if "side" in signals_df.columns and not prob_buy_lookup and not prob_sell_lookup:
@@ -879,8 +881,9 @@ class BacktestEngine:
                 for dt_idx in signals_df.index:
                     ts = pd.Timestamp(dt_idx)
                     signal_sides[ts] = int(signals_df.at[dt_idx, "side"])
-            elif "prob_Buy" in signals_df.columns:
-                mask = signals_df["prob_Buy"] >= self.prob_threshold
+            elif _resolve_prob_column(signals_df, "buy"):
+                _buy_col = _resolve_prob_column(signals_df, "buy")
+                mask = signals_df[_buy_col] >= self.prob_threshold
                 for dt_idx in signals_df[mask].index:
                     signal_sides[pd.Timestamp(dt_idx)] = 1
             elif "Predicted" in signals_df.columns:
@@ -1432,6 +1435,21 @@ def compare_runs(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_prob_column(df: pd.DataFrame, keyword: str) -> str | None:
+    """Find a column containing `keyword` (case-insensitive).
+
+    Searches for columns matching common patterns like 'prob_buy',
+    'prob_Buy', 'PROB_BUY', 'probability_buy', etc.
+
+    Returns the original column name if found, else None.
+    """
+    keyword_lower = keyword.lower()
+    for col in df.columns:
+        if keyword_lower in col.lower():
+            return col
+    return None
+
+
 def load_predictions(path: str) -> pd.DataFrame:
     """Load vault predictions CSV, returning a DataFrame with DatetimeIndex.
 
@@ -1520,8 +1538,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--predictions",
-        default="reports/vault_predictions.csv",
-        help="Path to vault predictions CSV",
+        default=None,
+        help="Path to predictions CSV. If omitted and --config is given, "
+             "auto-resolves from config's models.*.predictions_path",
     )
     parser.add_argument(
         "--data",
@@ -1567,7 +1586,8 @@ def main() -> None:
 
     # Resolve paths via CL_DATA_ROOT fallback
     from src.data_paths import resolve_cli_path
-    args.predictions = resolve_cli_path(args.predictions)
+    if args.predictions:
+        args.predictions = resolve_cli_path(args.predictions)
     args.data = resolve_cli_path(args.data)
     if args.live_data:
         args.live_data = resolve_cli_path(args.live_data)
@@ -1617,10 +1637,62 @@ def main() -> None:
             contract_multiplier=args.contract_multiplier,
         )
 
-    # Run A: Historical data
-    print(f"Loading predictions from {args.predictions}...")
-    preds = load_predictions(args.predictions)
+    # Auto-resolve predictions from config if not explicitly provided
+    if args.predictions is None and strategy_cfg is not None:
+        models_cfg = strategy_cfg.get("models", {})
+        long_preds_path = models_cfg.get("long", {}).get("predictions_path")
+        short_preds_path = models_cfg.get("short", {}).get("predictions_path")
 
+        if long_preds_path and short_preds_path:
+            # Dual-model: auto-merge long + short predictions
+            long_preds_path = resolve_cli_path(long_preds_path)
+            short_preds_path = resolve_cli_path(short_preds_path)
+            print(f"Auto-resolving predictions from config (dual-model):")
+            print(f"  Long:  {long_preds_path}")
+            print(f"  Short: {short_preds_path}")
+            long_df = load_predictions(long_preds_path)
+            short_df = load_predictions(short_preds_path)
+            # Find probability columns (case-insensitive, strict validation)
+            long_col = _resolve_prob_column(long_df, "buy")
+            short_col = _resolve_prob_column(short_df, "sell")
+            if long_col is None:
+                raise ValueError(
+                    f"Long model predictions ({long_preds_path}) have no column "
+                    f"containing 'buy' (found: {list(long_df.columns)}). "
+                    f"Cannot silently use another column as prob_buy."
+                )
+            if short_col is None:
+                raise ValueError(
+                    f"Short model predictions ({short_preds_path}) have no column "
+                    f"containing 'sell' (found: {list(short_df.columns)}). "
+                    f"Cannot silently use another column as prob_sell."
+                )
+            long_probs = long_df[[long_col]].rename(columns={long_col: "prob_Buy"})
+            short_probs = short_df[[short_col]].rename(columns={short_col: "prob_Sell"})
+            preds = long_probs.join(short_probs, how="outer").fillna(0.0)
+            print(f"  Merged: {len(preds):,} rows ({preds['prob_Buy'].gt(0).sum():,} buy signals, {preds['prob_Sell'].gt(0).sum():,} sell signals)")
+        elif long_preds_path:
+            long_preds_path = resolve_cli_path(long_preds_path)
+            print(f"Auto-resolving predictions from config: {long_preds_path}")
+            preds = load_predictions(long_preds_path)
+        elif short_preds_path:
+            short_preds_path = resolve_cli_path(short_preds_path)
+            print(f"Auto-resolving predictions from config: {short_preds_path}")
+            preds = load_predictions(short_preds_path)
+        else:
+            print("WARNING: No predictions_path in config and no --predictions flag. Using default.")
+            args.predictions = resolve_cli_path("reports/vault_predictions.csv")
+            preds = load_predictions(args.predictions)
+    elif args.predictions is None:
+        # No config and no predictions — use legacy default
+        args.predictions = resolve_cli_path("reports/vault_predictions.csv")
+        print(f"Loading predictions from {args.predictions}...")
+        preds = load_predictions(args.predictions)
+    else:
+        print(f"Loading predictions from {args.predictions}...")
+        preds = load_predictions(args.predictions)
+
+    # Run A: Historical data
     print(f"Loading historical OHLCV from {args.data}...")
     ohlcv_a = load_ohlcv(args.data)
 
@@ -1630,7 +1702,7 @@ def main() -> None:
     report_text = format_report(
         result_a,
         config=strategy_cfg_for_report,
-        predictions_path=args.predictions,
+        predictions_path=args.predictions or "(auto-resolved from config)",
         data_path=args.data,
     )
     print()
@@ -1641,6 +1713,21 @@ def main() -> None:
         with open(args.report_file, "w", encoding="utf-8") as rf:
             rf.write(report_text + "\n")
         print(f"\nReport saved to {args.report_file}")
+
+    # Auto-save report to model registry if experiment_id is available from config
+    if strategy_cfg is not None:
+        models_cfg = strategy_cfg.get("models", {})
+        exp_id = (
+            models_cfg.get("long", {}).get("experiment_id")
+            or models_cfg.get("short", {}).get("experiment_id")
+        )
+        if exp_id:
+            registry_dir = os.path.join("models", "registry", exp_id)
+            if os.path.isdir(registry_dir):
+                registry_report = os.path.join(registry_dir, "backtest_report.txt")
+                with open(registry_report, "w", encoding="utf-8") as rf:
+                    rf.write(report_text + "\n")
+                print(f"Report auto-saved to registry: {registry_report}")
 
     # Run B: Live session data (optional)
     if args.live_data and os.path.exists(args.live_data):

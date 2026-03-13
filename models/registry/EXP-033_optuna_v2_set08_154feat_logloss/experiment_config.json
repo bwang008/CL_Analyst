@@ -1,0 +1,33 @@
+{
+    "experiment_id": "EXP-033",
+    "strategy": "optuna_v2_set08_154feat_logloss",
+    "hypothesis": "Retrain LONG model on 154-feature set_08 (with 15 EXHAUST features). Uses EXP-031 Optuna hyperparams. Previous EXP-031 was trained on 139-feature set_08 before EXHAUST features were added.",
+    "data_path": "C:\\CL_Analyst_Data\\data\\processed\\CL_set_08.parquet",
+    "target_name": "TARGET_TRIPLE_2x1_24H_LONG",
+    "method": "walk_forward",
+    "balance_mode": "downsample",
+    "train_cutoff_date": "2022-01-01",
+    "threshold": 0.02,
+    "model_params": {
+        "num_leaves": 46,
+        "min_child_samples": 287,
+        "learning_rate": 0.060177,
+        "feature_fraction": 0.462144,
+        "bagging_fraction": 0.835886,
+        "bagging_freq": 6,
+        "reg_alpha": 0.24139,
+        "reg_lambda": 0.837497,
+        "max_depth": 8,
+        "min_gain_to_split": 0.020805,
+        "n_estimators": 1200,
+        "objective": "binary",
+        "use_focal": true,
+        "metric": "binary_logloss",
+        "validation_fraction": 0.1,
+        "class_weight": null
+    },
+    "optuna_provenance": {
+        "source": "EXP-031 hyperparams (Optuna wf_v2_long_logloss_set08, trial #86)",
+        "note": "Hyperparams from EXP-031 reused on corrected 154-feature set_08 with EXHAUST features"
+    }
+}

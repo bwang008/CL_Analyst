@@ -1,4 +1,4 @@
-﻿# CL_Analyst
+# CL_Analyst
 
 Machine learning pipeline for predicting significant price movements in Crude Oil (CL) futures using 5-minute OHLCV data.
 
@@ -35,6 +35,96 @@ python main.py train
    - friction-aware PnL, long/short compatible (commission + slippage + CL multiplier)
    - supports `--config configs/strategies/*.json` for strategy-driven backtests
    - sizing tiers, trailing stops, concurrent positions, ensemble strategies
+
+## Experiment Pipeline
+
+The model improvement pipeline has three phases: hyperparameter search, training, and backtesting.
+
+### Phase 1: Hyperparameter Search (Optuna)
+
+```bash
+# Run 100-trial search for a specific metric (logloss, f1, f0.5, sharpe)
+python agent/optuna_lgbm_search_v2.py --ml-metric logloss --n-trials 100 \
+  --data C:\CL_Analyst_Data\data\processed\CL_set_07.parquet \
+  --target TARGET_TRIPLE_2x1_24H_LONG \
+  --study-name wf_v2_long_logloss_set07
+
+# Check progress of a running or completed study
+python agent/check_optuna_db.py models/optuna_studies/wf_v2_long_logloss_set07.db
+```
+
+**Output:** Best hyperparameters saved to `models/optuna_studies/` (SQLite DB) and `reports/optuna_best_params_*.json`.
+
+### Phase 2: Train Model (Experiment Runner)
+
+Create a config file under `configs/experiments/` (see `EXP-030.json` as template):
+
+```json
+{
+    "experiment_id": "EXP-030",
+    "strategy": "optuna_v2_set07_logloss",
+    "hypothesis": "Description of what you're testing",
+    "data_path": "C:\\CL_Analyst_Data\\data\\processed\\CL_set_07.parquet",
+    "target_name": "TARGET_TRIPLE_2x1_24H_LONG",
+    "method": "walk_forward",
+    "balance_mode": "downsample",
+    "train_cutoff_date": "2022-01-01",
+    "model_params": { "...paste best params from Optuna..." }
+}
+```
+
+```bash
+# Config-driven training (recommended — outputs isolated to reports/EXP-030/)
+python agent/experiment_runner.py --config configs/experiments/EXP-030.json
+
+# Legacy direct CLI (outputs go to reports/ directly, will overwrite)
+python agent/experiment_runner.py --id EXP-030 --data ... --target ... --train-cutoff-date 2022-01-01
+```
+
+**Output:** When using `--config`, files are isolated per experiment:
+- `reports/EXP-030/oos_predictions.csv` — OOS probability predictions (used for backtesting)
+- `reports/EXP-030/vault_predictions.csv` — Vault holdout predictions (pre-cutoff diagnostics)
+- `reports/EXP-030/metrics_predictions.csv` — Walk-forward fold predictions (in-sample diagnostics)
+- `models/EXP-030/final_model.pkl` — Trained model artifact
+
+### Phase 3: Backtest
+
+```bash
+# Single-model: auto-resolves predictions from config's models.long.predictions_path
+python agent/backtest_engine.py \
+  --config configs/strategies/OPTUNA_EXP-030_Set07.json \
+  --data C:\CL_Analyst_Data\data\processed\CL_set_07.parquet
+
+# Dual-model: auto-merges long + short predictions (outer join on DateTime)
+python agent/backtest_engine.py \
+  --config configs/strategies/ensemble2_alt.json \
+  --data C:\CL_Analyst_Data\data\processed\CL_set_07.parquet
+
+# Override auto-resolve with explicit predictions file
+python agent/backtest_engine.py \
+  --config configs/strategies/OPTUNA_EXP-030_Set07.json \
+  --predictions reports/oos_predictions.csv \
+  --data C:\CL_Analyst_Data\data\processed\CL_set_07.parquet
+```
+
+**Auto-resolve**: When `--predictions` is omitted and `--config` is given, the backtest engine reads `predictions_path` from `models.long` and/or `models.short`. For dual-model configs with both long and short `predictions_path`, it auto-merges them (outer join, NaN→0.0).
+
+**Note:** The backtest engine does NOT load the model. It reads pre-computed predictions from the CSV and applies trade management rules (TP/SL/trailing/cooldown) from the strategy config.
+
+### Phase 4: Archive & Deploy
+
+When using `--config` mode, the experiment runner **automatically archives** to `models/registry/{EXP_ID}/` after training — no separate archive step needed.
+
+```bash
+# Manual archive (if needed)
+python agent/archive_model.py --experiment-id EXP-030 \
+  --oos-predictions-path reports/oos_predictions.csv \
+  --experiment-config-path configs/experiments/EXP-030.json
+
+# Deploy to live trading (uses strategy config to load model from registry)
+python -m src.live_execution.live_trader --config configs/strategies/OPTUNA_EXP-030_Set07.json --dry-run
+```
+
 
 ### Prediction + backtest file conventions
 This is the shared contract so prediction files can be used across backtesters.
@@ -162,7 +252,7 @@ CL_Analyst/
 |   +-- walk_forward.py            # Walk-forward validation framework
 |   +-- visualizer.py              # Plotting and visualization
 |   +-- features/
-|   |   +-- alpha_factory.py       # Feature generation engine (80 features)
+|   |   +-- alpha_factory.py       # Feature generation engine (159 features in set_07, 174 in set_08)
 |   +-- live_execution/
 |       +-- data_manager.py        # Three-Tier data manager (seed -> cache -> backfill)
 |       +-- ibkr_client.py         # IBKR connection, data, front-month, orders
@@ -175,21 +265,30 @@ CL_Analyst/
 |       +-- utils/
 |           +-- time_utils.py      # IBKR duration string utilities
 +-- configs/
-|   +-- strategies/                # Strategy JSON configs
+|   +-- strategies/                # Strategy JSON configs (trade management + model refs)
 |       +-- manatee.json           # Long strategy (EXP-017, client_id=10)
 |       +-- koala.json             # Short strategy (EXP-020, client_id=11)
 |       +-- manatee_single.json    # Single-model variant (client_id=12)
 |       +-- ensemble_conservative.json  # Dual-model ensemble (client_id=13)
 |       +-- config_readme.md       # Full attribute reference
+|   +-- experiments/               # Experiment config JSONs (model params + data + target)
+|       +-- EXP-030.json           # Template: Optuna v2 logloss bake-off
 +-- models/
-|   +-- registry/                  # Archived model bundles
+|   +-- registry/                  # Archived model bundles (source of truth)
 |   |   +-- EXP-017_S_Ultimate/
 |   |   +-- EXP-020_S_Ultimate_Short/
+|   |   +-- EXP-030_optuna_v2_set07_logloss/  # Model + predictions + configs
+|   +-- optuna_studies/             # Optuna SQLite study DBs
 |   +-- final_model.pkl            # Current production model
 +-- data/
 |   +-- raw/                       # Source OHLCV CSVs (cl-5m_bk.csv = immutable seed)
 |   +-- processed/                 # ML-ready parquet + warm_start_cache.parquet
-+-- agent/                         # Automation scripts (backtester, sweeps, etc.)
++-- agent/                         # Automation scripts
+|   +-- experiment_runner.py       # Config-driven training + auto-archive
+|   +-- backtest_engine.py         # FSM backtester with auto-resolve predictions
+|   +-- archive_model.py           # Archive model bundles to registry
+|   +-- optuna_lgbm_search_v2.py   # Hyperparameter search (Optuna)
+|   +-- check_optuna_db.py         # Check Optuna study progress
 +-- scripts/                       # Utility scripts (shadow log, parity validation)
 +-- tests/                         # Pytest test suite (350+ tests)
 +-- reports/                       # Evaluation outputs

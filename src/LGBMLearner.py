@@ -165,7 +165,11 @@ class LGBMLearner:
                                    "focal_gamma")}
         if self.params.get("use_focal", False):
             lgb_params["objective"] = self._focal_loss_obj
-            # Keep focal_gamma accessible for the objective function
+            # Remove num_class for binary focal loss — the default of 3
+            # conflicts with binary_logloss metric.
+            orig_obj = self.params.get("objective", "multiclass")
+            if orig_obj != "multiclass":
+                lgb_params.pop("num_class", None)
         elif lgb_params.get("objective") == "multiclass":
             if "num_class" not in lgb_params:
                 lgb_params["num_class"] = self.params.get("num_class", 3)

@@ -209,6 +209,7 @@ class AlphaFactory:
             if include_extended:
                 self.add_return_distribution_cluster(window=window)
                 self.add_stochastic_cluster(window=window)
+                self.add_exhaustion_cluster(window=window)
             if log_progress:
                 print(f"[AlphaFactory] Window {window} done at {datetime.now().isoformat(timespec='seconds')}")
 
@@ -490,6 +491,37 @@ class AlphaFactory:
 
         # %D: smoothed stochastic (3-bar SMA of %K)
         self.df[f"MOM_STOCH_D{suffix}"] = stoch_k.rolling(3).mean()
+
+        return self.df
+
+    def add_exhaustion_cluster(self, window: int) -> pd.DataFrame:
+        """Move-exhaustion features: cumulative return, ATR-normalised, and
+        distance from recent high.
+
+        These help the model detect overextended moves where a snap-back
+        is more likely than continuation.
+        """
+        suffix = f"_{window}"
+
+        # 1) Cumulative log-return over the window
+        cum_ret = self.df["log_ret"].rolling(window).sum()
+        self.df[f"EXHAUST_CUM_RET{suffix}"] = cum_ret
+
+        # 2) Cumulative return normalised by ATR (scale-invariant)
+        atr_col = "ATR_14"
+        if atr_col not in self.df.columns:
+            import pandas_ta as _ta  # noqa: F811
+            self.df[atr_col] = self.df.ta.atr(length=14)
+        atr = self.df[atr_col].replace(0, np.nan)
+        # Convert cum log-return to price-space move, then /ATR
+        price_move = cum_ret * self.close  # approx price change
+        self.df[f"EXHAUST_CUM_ATR{suffix}"] = price_move / atr
+
+        # 3) Distance from recent high in ATR units (≤ 0 normally)
+        recent_high = self.close.rolling(window).max()
+        self.df[f"EXHAUST_DIST_HIGH{suffix}"] = (
+            (self.close - recent_high) / atr
+        )
 
         return self.df
 

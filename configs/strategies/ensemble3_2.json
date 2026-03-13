@@ -1,11 +1,11 @@
 {
-    "nickname": "Ensemble2_Alt",
-    "description": "Ensemble combining user-selected Manatee2 (trial #59) + Koala2 (trial #458)",
+    "nickname": "Ensemble3_v2",
+    "description": "Hybrid: best long (Manatee3/EXP-031 set_08) + best short (Koala2_Alt/EXP-026 set_06). Cherry-picks the stronger model per side.",
     "execution_class": "ConservativeEnsembleStrategy",
     "models": {
         "long": {
-            "experiment_id": "EXP-025_retrain_S_Ultimate_OOS_retrain",
-            "predictions_path": "models/registry/EXP-025_retrain_S_Ultimate_OOS_retrain/oos_predictions.csv",
+            "experiment_id": "EXP-031_optuna_v2_set08_logloss",
+            "predictions_path": "models/registry/EXP-031_optuna_v2_set08_logloss/oos_predictions.csv",
             "threshold": 0.60
         },
         "short": {
@@ -28,13 +28,13 @@
         "0.60": 1
     },
     "live_config": {
-        "client_id": 15,
+        "client_id": 19,
         "entry_mode": "marketable_limit",
         "exit_mode": "marketable_limit"
     },
     "optuna_info": {
-        "long_source": "manatee2_alt.json (trial #59)",
-        "short_source": "koala2_alt.json (trial #458)",
-        "note": "Uses balanced-trade-count configs. Both thresholds=0.60, shared TP/SL from manatee2 trial 59 (SL averaged with koala2)."
+        "long_source": "EXP-031 (set_08, Optuna v2 logloss, trial #86) — Manatee3",
+        "short_source": "EXP-026 retrain (set_06, pre-Optuna params) — Koala2_Alt",
+        "note": "Hybrid ensemble: Optuna-tuned long + original selective short. Long uses set_08 predictions, short uses set_06 predictions."
     }
 }

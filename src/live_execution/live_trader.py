@@ -445,6 +445,9 @@ class LiveTrader:
         self._position_side: int = 0  # +1 long, -1 short
         self._highest_high: float = 0.0
         self._lowest_low: float = float("inf")
+        # Per-trade overrides (reset each trade via _reset_position_state)
+        self._trade_trailing_atr_mult: Optional[float] = None
+        self._trade_max_hold_bars: Optional[int] = None
         self._run_id = (
             f"live-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}-"
             f"{uuid.uuid4().hex[:8]}"

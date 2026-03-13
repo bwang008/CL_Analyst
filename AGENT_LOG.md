@@ -2,6 +2,185 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
+## 2026-03-13 — GCP Cloud Deployment for Optuna Searches
+
+### Goal
+Run Optuna hyperparameter searches on GCP high-CPU VMs instead of local i9 (16-24 cores). Reduces 16+ hour local runs to ~2-3 hours. Fire-and-forget: launch search, close laptop, results auto-upload to GCS.
+
+### How the VM Lifecycle Works
+1. **VM as a cloud computer** — it runs Ubuntu Linux with a terminal/shell just like your PC. You interact via `gcloud compute ssh` (remote shell) or see it in GCP Console → Compute Engine → VM Instances.
+2. **tmux for persistence** — the Optuna script runs inside a `tmux` session on the VM. Even if your SSH/internet drops, tmux keeps running. Reconnect anytime with `gcloud compute ssh optuna-runner --command='tmux attach -t optuna'`.
+3. **GCS for result safety** — when the search finishes, `vm_run_optuna.sh` auto-uploads results (.db, .json, .csv, logs) to `gs://cltrainer-optuna-results`. Even if the VM is deleted, results persist in GCS.
+4. **Console visibility** — the VM appears in GCP Console with status (RUNNING/STOPPED/TERMINATED). You can start/stop it from the console UI too.
+5. **Teardown** — `gcp_teardown.ps1` downloads results from VM + GCS, then deletes the VM. The GCS bucket persists for future runs.
+
+### Scripts Created (`gcp/`)
+
+| Script | Runs On | Purpose |
+|--------|---------|---------|
+| `gcp_setup.ps1` | Local (PowerShell) | Creates VM + GCS bucket, installs deps (~3 min) |
+| `gcp_deploy_run.ps1` | Local (PowerShell) | Uploads 8 essential files + data, launches tmux search |
+| `gcp_check_status.ps1` | Local (PowerShell) | Check progress, attach tmux, download .db mid-run |
+| `gcp_teardown.ps1` | Local (PowerShell) | Downloads results + deletes VM |
+| `vm_startup.sh` | VM (bash) | Boot-time installer: Python venv + ML packages |
+| `vm_run_optuna.sh` | VM (bash) | Tmux runner: executes Optuna, auto-uploads to GCS |
+| `requirements-gcp.txt` | VM | Minimal pip deps (lightgbm, optuna, pandas, numpy, sklearn, pyarrow, sqlalchemy) |
+
+### Key Fixes During Setup
+1. **Inlined experiment log functions** into `optuna_lgbm_search_v2.py` — removed `import agent.experiment_runner` which transitively pulled in `main.py`, `data_processor.py`, `pandas_ta`, etc. The 3 functions (`load_experiment_log`, `generate_experiment_id`, `_append_to_log`) are simple JSON helpers now defined inline.
+2. **Removed `pandas_ta`** from `requirements-gcp.txt` and `vm_startup.sh` — not needed for Optuna search, caused pip install failure on Ubuntu 22.04.
+3. **Fixed venv permissions** — startup script creates venv as root, SSH user needs write access (chmod 777).
+4. **Minimal file upload** — `gcp_deploy_run.ps1` uploads only 8 Python files (~130KB) instead of entire project directories (hundreds of trial configs were being uploaded before).
+5. **gcloud PATH** — Google Cloud SDK bin dir not in default terminal PATH; scripts auto-detect at `C:\Users\bwang\AppData\Local\Google\Cloud SDK\google-cloud-sdk\bin`.
+6. **PowerShell string escaping** — backslashes in double-quoted Write-Host strings broke parser; switched to single-quoted strings.
+
+### Quota Issues
+- **C3 machines** (c3-highcpu-44/88): quota 0 on free trial, even after "activate full account"
+- **N2/E2 spot**: also blocked on quota
+- **E2 on-demand**: `e2-highcpu-8` worked (8 vCPUs)
+- **Fix**: Request quota increase in GCP Console → IAM & Admin → Quotas → filter by "C3 CPUs"
+
+### Smoke Test
+- Launched 2-trial smoke test on `e2-highcpu-8` VM
+- Data loaded: 916K rows, 154 features, 10 sampled WF folds
+- Optuna started successfully, `smoke_test_v2.db` created
+- Full verification pending (interrupted for Google Cloud MCP install)
+
+### Documentation
+- Created `docs/GCP_OPTUNA_GUIDE.md` — step-by-step quick start guide with cost estimates, examples, troubleshooting
+
+### Optuna v2 Searches on Set_08
+
+**Long model (set_08):**
+- 126 trials, `--n-jobs 2`, study `wf_v2_long_logloss_set08`
+- Best trial #86: logloss=-0.564705, F1=0.5945
+- Process crashed twice with `--n-jobs 3` (SQLite locking on Windows); stable with `--n-jobs 2`
+- Added error logging to `optuna_lgbm_search_v2.py`: try/except + error log file + re-raise
+
+**Short model (set_08):**
+- 106 trials, `--n-jobs 2`, study `wf_v2_short_logloss_set08`
+- Best trial #91: logloss=-0.559181, F1=0.6055
+
+**Set_07 vs Set_08 A/B comparison (Optuna-level):**
+- Logloss: set_07 slightly better (-0.5629 vs -0.5647)
+- F1: set_08 slightly better (0.5945 vs 0.5884)
+- Conclusion: essentially a tie at Optuna level; set_08 model is more selective (fewer leaves, lower feature_fraction)
+
+### EXP-031: Long Model (Set_08)
+- Trained with best Optuna params from trial #86
+- Backtest: **$1,551K PnL, 3.45 PF, 44.2% WR, 9,842 trades, -$6,437 MDD**
+- Every month profitable
+- Compared to EXP-030 (set_07): Less PnL ($-119K) but better PF (3.45 vs 2.96) and WR (44.2% vs 41.9%)
+
+### EXP-032: Short Model (Set_08)
+- Trained with best Optuna params from trial #91
+- Backtest: **$694K PnL, 1.53 PF, 34.3% WR, 12,199 trades, -$12,052 MDD**
+- 6 red months — weaker than the long model
+
+### Ensemble3 (Long + Short Set_08)
+- Combined EXP-031 (long) + EXP-032 (short)
+- Backtest: **$2,600K PnL, 3.88 PF, 45.9% WR, 14,324 trades, -$7,079 MDD**
+- Every month profitable, balanced long/short (7,316 buys / 7,008 sells)
+
+### Strategy Configs Created
+- `configs/strategies/manatee3.json` — EXP-031 long (client_id=16)
+- `configs/strategies/koala3.json` — EXP-032 short (client_id=17)
+- `configs/strategies/ensemble3.json` — Combined (client_id=18)
+- `configs/strategies/OPTUNA_EXP-031_Set08.json` — Long backtest config
+
+### EXP-025/026 Retrain (in progress)
+- **Why:** Original EXP-025 (long) and EXP-026 (short) predictions were never archived to the registry. Both used `CL_set_06` with pre-Optuna manually-tuned params. Need their OOS predictions regenerated so we can backtest `ensemble2_alt.json` and do a fair comparison with `ensemble3.json`.
+- Configs: `configs/experiments/EXP-025_retrain.json`, `configs/experiments/EXP-026_retrain.json`
+- Both use identical model params to original (copied from registry `config.json`)
+
+### Pipeline Improvements
+- `agent/optuna_lgbm_search_v2.py` — error handling: try/except around `study.optimize()` with traceback logging to `{study_name}_errors.log` and re-raise to stop process
+- `docs/EXPLORATION_BACKLOG.md` — new file documenting 6 exploration topics: wider search ranges, metric bake-off, more trials, additional search dims, multi-objective, full walk-forward Optuna
+
+## 2026-03-11 — EXP-030 Logloss Bake-off & Registry-Centric Pipeline
+
+### EXP-030: Optuna v2 Logloss (set_07, Long)
+
+- **Optuna search**: 119 trials on `CL_set_07`, metric=`binary_logloss`, best trial #114
+- **Bug fix**: `LGBMLearner.py` — removed `num_class=3` when `use_focal=True` with binary objective (was causing `multiclass objective and metrics don't match` error)
+- **Training**: walk-forward, 68 folds, 53.67 min wall time
+- **OOS backtest** (2022-01 → 2026-02): **$1.67M PnL, 2.96 PF, 41.9% WR, 10,427 trades, -$6,415 MDD**
+- Every month profitable across 4+ years
+- Top features: Time_Sin, Time_Cos, STRUC_ENTROPY_100, STRUC_HURST_100, MOM_ADX_14
+
+### Registry-centric pipeline redesign
+
+Made `models/registry/{EXP_ID}/` the single source of truth for experiments.
+
+#### Files changed
+- `agent/archive_model.py` — added `oos_predictions_path`, `experiment_config_path`, `feature_importance_path` params
+- `agent/experiment_runner.py` — added `--config` flag (reads `configs/experiments/*.json`), auto-calls `archive_model.py` after training
+- `agent/backtest_engine.py` — auto-resolves predictions from config's `models.*.predictions_path` when `--predictions` is omitted; dual-model auto-merge (outer join) eliminates manual `merge_predictions.py` step
+- `configs/strategies/OPTUNA_EXP-030_Set07.json` — strategy config with `predictions_path` pointing to registry
+- `configs/strategies/ensemble2_alt.json` — added `predictions_path` for both long + short models
+- `configs/experiments/EXP-030.json` — experiment config template
+
+#### Registry bundle contents (EXP-030)
+```
+models/registry/EXP-030_optuna_v2_set07_logloss/
+  ├── final_model.pkl          # Trained model
+  ├── oos_predictions.csv      # OOS predictions (291K rows)
+  ├── experiment_config.json   # Training config (for reproduction)
+  ├── feature_importance.csv   # Walk-forward feature importance
+  ├── config.json              # Experiment metadata
+  ├── metrics.json             # Classification + backtest metrics
+  ├── vault_metrics.json       # Vault holdout metrics
+  └── backtest.csv             # Summary row
+```
+
+#### Pipeline flow (new)
+```
+Optuna search → configs/experiments/EXP-XXX.json
+                    ↓
+experiment_runner.py --config → trains model → auto-archives to models/registry/EXP-XXX/
+                                                    ↓
+configs/strategies/OPTUNA_EXP-XXX.json (predictions_path → registry)
+                    ↓
+backtest_engine.py --config (auto-resolves predictions, auto-merges dual-model)
+```
+
+#### Dual-model merge logic
+When a strategy config has both `models.long.predictions_path` and `models.short.predictions_path`, the backtest engine:
+1. Loads both CSVs independently
+2. Extracts `prob_Buy` from long, `prob_Sell` from short
+3. Outer-joins on DateTime index, fills NaN with 0.0
+4. Runs backtest on the merged DataFrame
+
+This eliminates the manual `scripts/merge_predictions.py` step.
+
+## 2026-03-10 — Set 08: Exhaustion Features
+
+- **Goal**: Add "move exhaustion" features so the model can learn when a directional move is overextended and a snap-back is more likely than continuation. Addresses the problem of the model shorting into violent rebounds during extreme sell-offs (e.g., -14% day, -5% in 15 min).
+- **Dataset**: `CL_set_08.parquet` — 1,207,895 rows × 174 columns (154 features, +15 vs set_07).
+
+### New features (AlphaFactory `add_exhaustion_cluster`)
+
+| Feature | Formula | Purpose |
+|---------|---------|---------|
+| `EXHAUST_CUM_RET_{w}` | `rolling_sum(log_ret, w)` | Cumulative return — session-level directional magnitude |
+| `EXHAUST_CUM_ATR_{w}` | `cum_ret × Close / ATR_14` | ATR-normalised exhaustion — scale-invariant "how many ATRs moved" |
+| `EXHAUST_DIST_HIGH_{w}` | `(Close - rolling_max) / ATR_14` | Distance from recent high in ATR units (≤ 0) |
+
+Computed at 5 windows: 288, 864, 2016, 4032, 10080 → **15 new features**.
+
+### Files changed
+- `src/features/alpha_factory.py` — new `add_exhaustion_cluster()` method, wired into `add_all_features()` under `include_extended=True`
+- `src/data_processor.py` — new `process_set_08()` method, `set_08` added to `DATASET_VERSIONS` dict + routing
+- `data/DATASETS.json` — set_08 entry added
+
+### Verification
+- **22/22** existing tests pass (no regressions)
+- All 15 exhaustion features present, zero NaN in feature columns
+- `EXHAUST_CUM_RET_288` spot-check: exact match with recomputed `rolling(288).sum(log_ret)`
+- `EXHAUST_DIST_HIGH` max = 0.0 (correct: price at rolling high)
+- Processing wall time: 56:45
+
+
 ## 2026-03-10 — Entry Order TTL (1-Bar Cancel)
 
 - **Goal**: Cancel unfilled entry orders after 1 bar to prevent the position guard from permanently blocking new signals.

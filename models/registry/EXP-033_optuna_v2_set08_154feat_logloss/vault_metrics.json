@@ -1,0 +1,74 @@
+{
+  "accuracy": 0.8322020115557458,
+  "precision": {
+    "Hold": 0.809502208685697,
+    "Buy": 0.918922264400066,
+    "Sell": 0.0
+  },
+  "recall": {
+    "Hold": 0.9744526496437672,
+    "Buy": 0.5580445513543311,
+    "Sell": 0.0
+  },
+  "f1": {
+    "Hold": 0.8843514940562226,
+    "Buy": 0.6943955101722661,
+    "Sell": 0.0
+  },
+  "confusion_matrix": [
+    [
+      74951,
+      1965,
+      0
+    ],
+    [
+      17638,
+      22271,
+      0
+    ],
+    [
+      0,
+      0,
+      0
+    ]
+  ],
+  "n_samples": 116825,
+  "move_analysis": {
+    "Hold": {
+      "count": 92589,
+      "mean_up": 0.01376490176041174,
+      "mean_down": 0.017130455572531386,
+      "median_up": 0.01029132443144064,
+      "median_down": 0.012956632877408428,
+      "std_up": 0.01388588297956179,
+      "std_down": 0.014769498341013656,
+      "hit_threshold_up_pct": 0.22600956917128384,
+      "hit_threshold_down_pct": 0.31110607091555154,
+      "correct_count": 74951,
+      "correct_mean_up": 0.013236128427854354,
+      "correct_mean_down": 0.0178570801224325
+    },
+    "Buy": {
+      "count": 24236,
+      "mean_up": 0.018865881097335908,
+      "mean_down": 0.011619814289297333,
+      "median_up": 0.015840726524341334,
+      "median_down": 0.00740610324646829,
+      "std_up": 0.013971965945536227,
+      "std_down": 0.012951880708953204,
+      "hit_threshold_up_pct": 0.35913517082026736,
+      "hit_threshold_down_pct": 0.19013038455190626,
+      "correct_count": 22271,
+      "correct_mean_up": 0.018846939478507848,
+      "correct_mean_down": 0.011596996709802122
+    },
+    "Sell": {
+      "count": 0,
+      "mean_up": null,
+      "mean_down": null,
+      "correct_count": 0,
+      "correct_mean_up": null,
+      "correct_mean_down": null
+    }
+  }
+}
