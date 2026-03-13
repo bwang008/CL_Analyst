@@ -246,6 +246,190 @@ def plot_comparison_grid(
 
 
 # ---------------------------------------------------------------------------
+# Temporal Breakdown Plotting
+# ---------------------------------------------------------------------------
+
+# CL futures trading hours (CME Globex) — map hour to readable session labels
+_SESSION_LABELS = {
+    18: "Open", 19: "", 20: "", 21: "", 22: "", 23: "",
+    0: "", 1: "", 2: "", 3: "", 4: "", 5: "", 6: "", 7: "",
+    8: "NY Open", 9: "", 10: "", 11: "", 12: "", 13: "", 14: "",
+    15: "", 16: "Close", 17: "Settle",
+}
+
+DAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def plot_temporal_breakdown(
+    model_name: str,
+    df: pd.DataFrame,
+    prob_col: str,
+    output_path: Path,
+    threshold: float = DEFAULT_THRESHOLD,
+) -> plt.Figure:
+    """
+    Generate a 2x2 grid showing temporal patterns of signal bars (prob >= threshold).
+
+    Panels:
+        1. Signal frequency by hour of day
+        2. Signal frequency by day of week
+        3. Signal count by calendar month (time series)
+        4. Year × Month heatmap of signal density
+    """
+    direction = infer_direction(prob_col)
+
+    # Parse datetime and derive signal mask
+    df = df.copy()
+    df["DateTime"] = pd.to_datetime(df["DateTime"])
+    df["hour"] = df["DateTime"].dt.hour
+    df["day_name"] = df["DateTime"].dt.day_name()
+    df["month"] = df["DateTime"].dt.month
+    df["year"] = df["DateTime"].dt.year
+    df["year_month"] = df["DateTime"].dt.to_period("M")
+
+    signals = df[df[prob_col] >= threshold]
+    total_bars = len(df)
+    n_signals = len(signals)
+
+    if n_signals == 0:
+        # Still generate a plot but with a "no signals" message
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.text(0.5, 0.5, f"No signals above {threshold:.2f}\n(max prob = {df[prob_col].max():.4f})",
+                ha="center", va="center", fontsize=16, color="#e74c3c",
+                transform=ax.transAxes)
+        ax.set_title(f"Temporal Breakdown — {model_name} ({direction})", fontweight="bold")
+        ax.set_axis_off()
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return fig
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    # --- Panel 1: Hourly breakdown ---
+    ax1 = axes[0, 0]
+    hourly_all = df.groupby("hour").size()
+    hourly_sig = signals.groupby("hour").size()
+    hours = range(24)
+    all_counts = [hourly_all.get(h, 0) for h in hours]
+    sig_counts = [hourly_sig.get(h, 0) for h in hours]
+    # Signal rate per hour
+    sig_rates = [sig_counts[h] / all_counts[h] * 100 if all_counts[h] > 0 else 0 for h in hours]
+
+    bars = ax1.bar(hours, sig_counts, color="#3498db", alpha=0.75, edgecolor="white", linewidth=0.3)
+    ax1.set_xlabel("Hour (UTC)", fontsize=10)
+    ax1.set_ylabel("Signal Count", fontsize=10, color="#3498db")
+    ax1.set_title("Signals by Hour of Day", fontsize=11, fontweight="bold")
+    ax1.set_xticks(range(0, 24, 2))
+    ax1.grid(True, alpha=0.2, axis="y")
+
+    # Overlay signal rate on secondary axis
+    ax1b = ax1.twinx()
+    ax1b.plot(hours, sig_rates, color="#e74c3c", linewidth=1.5, marker=".", markersize=4, alpha=0.8)
+    ax1b.set_ylabel("Signal Rate (%)", fontsize=10, color="#e74c3c")
+    ax1b.tick_params(axis="y", labelcolor="#e74c3c")
+
+    # Highlight peak hour
+    peak_hour = max(hours, key=lambda h: sig_counts[h])
+    ax1.annotate(
+        f"Peak: {peak_hour}:00\n({sig_counts[peak_hour]:,})",
+        xy=(peak_hour, sig_counts[peak_hour]),
+        xytext=(peak_hour + 2, max(sig_counts) * 0.9),
+        fontsize=8, ha="center",
+        arrowprops=dict(arrowstyle="->", color="gray", lw=0.8),
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow", alpha=0.9),
+    )
+
+    # --- Panel 2: Day of week ---
+    ax2 = axes[0, 1]
+    dow_all = df.groupby("day_name").size()
+    dow_sig = signals.groupby("day_name").size()
+    dow_counts = [dow_sig.get(d, 0) for d in DAY_ORDER]
+    dow_totals = [dow_all.get(d, 0) for d in DAY_ORDER]
+    dow_rates = [dow_counts[i] / dow_totals[i] * 100 if dow_totals[i] > 0 else 0 for i in range(len(DAY_ORDER))]
+
+    colors = ["#2ecc71" if c > np.mean(dow_counts) else "#3498db" for c in dow_counts]
+    ax2.bar(range(len(DAY_ORDER)), dow_counts, color=colors, alpha=0.75, edgecolor="white", linewidth=0.3)
+    ax2.set_xticks(range(len(DAY_ORDER)))
+    ax2.set_xticklabels([d[:3] for d in DAY_ORDER], fontsize=9)
+    ax2.set_ylabel("Signal Count", fontsize=10)
+    ax2.set_title("Signals by Day of Week", fontsize=11, fontweight="bold")
+    ax2.grid(True, alpha=0.2, axis="y")
+
+    # Add rate labels on top of bars
+    for i, (c, r) in enumerate(zip(dow_counts, dow_rates)):
+        ax2.text(i, c + max(dow_counts) * 0.02, f"{r:.1f}%", ha="center", fontsize=8, color="#555")
+
+    # --- Panel 3: Monthly signal count (time series) ---
+    ax3 = axes[1, 0]
+    monthly_sig = signals.groupby("year_month").size()
+    monthly_all = df.groupby("year_month").size()
+
+    x_labels = [str(p) for p in monthly_sig.index]
+    ax3.bar(range(len(x_labels)), monthly_sig.values, color="#9b59b6", alpha=0.7, edgecolor="white", linewidth=0.3)
+    ax3.set_xlabel("Month", fontsize=10)
+    ax3.set_ylabel("Signal Count", fontsize=10)
+    ax3.set_title("Signal Count by Month", fontsize=11, fontweight="bold")
+
+    # Show only every Nth label to avoid crowding
+    n_months = len(x_labels)
+    step = max(1, n_months // 12)
+    ax3.set_xticks(range(0, n_months, step))
+    ax3.set_xticklabels([x_labels[i] for i in range(0, n_months, step)], rotation=45, ha="right", fontsize=7)
+    ax3.grid(True, alpha=0.2, axis="y")
+
+    # Mean line
+    mean_monthly = monthly_sig.mean()
+    ax3.axhline(mean_monthly, color="#e74c3c", linestyle="--", linewidth=1, alpha=0.7,
+                label=f"Mean: {mean_monthly:.0f}/mo")
+    ax3.legend(fontsize=8, loc="upper right")
+
+    # --- Panel 4: Year × Month heatmap ---
+    ax4 = axes[1, 1]
+    # Build pivot table: signal rate (signals / total bars) by year × month
+    df["_sig"] = (df[prob_col] >= threshold).astype(int)
+    pivot = df.pivot_table(values="_sig", index="year", columns="month", aggfunc="mean") * 100
+
+    years = sorted(pivot.index)
+    months = range(1, 13)
+    heatmap_data = np.full((len(years), 12), np.nan)
+    for i, y in enumerate(years):
+        for m in months:
+            if m in pivot.columns and y in pivot.index:
+                heatmap_data[i, m - 1] = pivot.loc[y, m]
+
+    im = ax4.imshow(heatmap_data, cmap="YlOrRd", aspect="auto", interpolation="nearest")
+    ax4.set_xticks(range(12))
+    ax4.set_xticklabels(MONTH_NAMES, fontsize=8)
+    ax4.set_yticks(range(len(years)))
+    ax4.set_yticklabels(years, fontsize=8)
+    ax4.set_title("Signal Rate (%) — Year × Month", fontsize=11, fontweight="bold")
+
+    # Annotate cells
+    for i in range(len(years)):
+        for j in range(12):
+            val = heatmap_data[i, j]
+            if not np.isnan(val):
+                color = "white" if val > np.nanmax(heatmap_data) * 0.6 else "black"
+                ax4.text(j, i, f"{val:.1f}", ha="center", va="center", fontsize=7, color=color)
+
+    fig.colorbar(im, ax=ax4, fraction=0.046, pad=0.04, label="Signal Rate %")
+
+    # Suptitle
+    fig.suptitle(
+        f"Temporal Signal Breakdown — {model_name} ({direction})\n"
+        f"Threshold ≥ {threshold:.2f}  |  {n_signals:,} signals / {total_bars:,} bars ({n_signals/total_bars*100:.1f}%)",
+        fontsize=13, fontweight="bold",
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -292,20 +476,10 @@ def main():
     skipped = 0
 
     for model_name, csv_path in models:
-        output_path = OUTPUT_DIR / f"{model_name}.png"
+        dist_path = OUTPUT_DIR / f"{model_name}.png"
+        temporal_path = OUTPUT_DIR / f"{model_name}_temporal.png"
 
-        # Skip if exists and not forcing
-        if output_path.exists() and not args.force:
-            print(f"  SKIP  {model_name}  (PNG exists, use --force to regenerate)")
-            # Still load for comparison grid
-            df = pd.read_csv(csv_path)
-            prob_col = find_prob_column(df.columns.tolist())
-            if prob_col:
-                model_data_for_grid.append((model_name, df[prob_col].dropna().values, prob_col))
-            skipped += 1
-            continue
-
-        # Load CSV
+        # Load CSV (needed for both plots and grid)
         df = pd.read_csv(csv_path)
         prob_col = find_prob_column(df.columns.tolist())
 
@@ -315,16 +489,28 @@ def main():
             continue
 
         probs = df[prob_col].dropna().values
-
         if len(probs) == 0:
             print(f"  SKIP  {model_name}  (empty probability column)")
             skipped += 1
             continue
 
-        print(f"  GEN   {model_name}  ({len(probs):,} predictions, col={prob_col})")
-        plot_single_model(model_name, probs, prob_col, output_path, threshold=args.threshold)
         model_data_for_grid.append((model_name, probs, prob_col))
-        generated += 1
+
+        # --- Distribution plot ---
+        if dist_path.exists() and not args.force:
+            print(f"  SKIP  {model_name}  (distribution PNG exists)")
+        else:
+            print(f"  GEN   {model_name}  ({len(probs):,} predictions, col={prob_col})")
+            plot_single_model(model_name, probs, prob_col, dist_path, threshold=args.threshold)
+            generated += 1
+
+        # --- Temporal breakdown plot ---
+        if temporal_path.exists() and not args.force:
+            print(f"  SKIP  {model_name}_temporal  (temporal PNG exists)")
+        else:
+            print(f"  GEN   {model_name}_temporal")
+            plot_temporal_breakdown(model_name, df, prob_col, temporal_path, threshold=args.threshold)
+            generated += 1
 
     # Combined comparison grid
     grid_path = OUTPUT_DIR / "all_models_comparison.png"
@@ -341,3 +527,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

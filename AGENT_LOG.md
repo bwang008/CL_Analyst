@@ -2,7 +2,33 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
-## 2026-03-13 — Prediction Probability Distribution Visualizer
+## 2026-03-13 — Model Investigation, Bug Fixes & Feature Importance Tooling
+
+### Bugs Fixed
+
+1. **Archive path bug** (`experiment_runner.py`): Archival used hardcoded `models/final_model.pkl` instead of experiment-specific isolated output, causing stale models to be archived. Fixed + staleness guard added to `archive_model.py`.
+2. **SingleModelStrategy threshold** (`execution_models.py`): Ignored `models.{direction}.threshold` and `entry_threshold`, hardcoded 0.45. Fixed: reads model-specific → `entry_threshold` → defaults to 1.0 (no trades) with loud warning.
+3. **Case-insensitive prediction columns** (`backtest_engine.py`): Added `_resolve_prob_column()` for case-insensitive matching (`prob_Buy`, `prob_buy`, etc.). Applied in strategy path, legacy path, and dual-model merge.
+4. **Silent column substitution** (`backtest_engine.py`): Dual-model merge silently used `prob_Sell` as `prob_Buy` if no matching column found. Now raises `ValueError`.
+5. **PerformanceWarning spam** (`alpha_factory.py`): Suppressed pandas DataFrame fragmentation warnings from 30+ EXHAUST feature column insertions.
+
+### New Tools
+
+- **`scripts/extract_feature_importance.py`** — CLI tool to extract feature importance from any PKL in the registry. Handles dict-wrapped Boosters and LGBMClassifier objects. Options: `--top N`, `--filter EXHAUST`, `--save`, `--all`.
+- **Auto-extraction in `archive_model.py`** — When no `feature_importance.csv` is provided during archive, auto-extracts from the PKL. Every archived model now gets a correct, complete feature importance CSV.
+
+### Ensemble3_3 (Current Best Config)
+- EXP-033 (LONG, set_08) + EXP-032 (SHORT, set_08) with `ConservativeEnsembleStrategy`
+- **$2,657,674 PnL**, 4.01 PF, 46.1% WR, ~14,200 trades, -$6,566 MDD over 50 months (~$53K/month avg)
+- Both models have 154 features including 15 EXHAUST features
+- Top EXHAUST feature: `EXHAUST_DIST_HIGH_288` ranked #15 (SHORT) / #13 (LONG)
+
+### Key Findings
+- **EXP-025 retrain LONG is dead**: max prob=0.547, never crosses 0.60 threshold
+- **Feature importance CSVs were truncated**: Registry CSVs showed 80/139 features; actual PKLs contain all 154. Auto-extraction fixes this.
+- **Dataset feature counts**: set_06=82, set_07=141, set_08=156 features
+
+
 
 ### Goal
 Quickly identify models with compressed probability distributions (all predictions near 0.50, never reaching the 0.60 trading threshold) versus models with healthy spreads that produce actionable signals.
@@ -20,6 +46,7 @@ Quickly identify models with compressed probability distributions (all predictio
 - **Distribution shape classification**: Uses `scipy.signal.find_peaks` + `scipy.stats.skew` to label unimodal/bimodal/skewed
 - **Combined comparison grid**: All models in a single 2×3 grid figure
 - **CLI**: `--force` (regenerate all), `--threshold` (override primary threshold)
+- **Temporal breakdown (2×2 grid per model)**: Signals by hour of day (count + rate), day of week, monthly time series with mean line, year×month heatmap with annotated signal rates. Handles zero-signal models gracefully (EXP-025 shows "No signals above 0.60").
 
 ### Key Findings
 
