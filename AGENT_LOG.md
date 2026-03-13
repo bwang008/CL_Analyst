@@ -2,6 +2,42 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
+## 2026-03-13 — Prediction Probability Distribution Visualizer
+
+### Goal
+Quickly identify models with compressed probability distributions (all predictions near 0.50, never reaching the 0.60 trading threshold) versus models with healthy spreads that produce actionable signals.
+
+### Script Created
+- `scripts/plot_prediction_distributions.py` — standalone diagnostic tool (no new dependencies beyond scipy/matplotlib/numpy/pandas)
+
+### Features
+- **Auto-discovery**: Scans `models/registry/*/oos_predictions.csv`, skips models without prediction files
+- **Skip-if-exists**: Won't regenerate PNGs unless `--force` is used
+- **Case-insensitive column detection**: Handles `prob_Buy`, `prob_Sell`, `prob_buy`, etc.
+- **Per-model individual plots**: Histogram (50 bins) + KDE overlay, color-coded green (≥ threshold) / red (< threshold)
+- **Threshold lines**: Primary 0.60 (black dashed) + secondary 0.45 (gray dotted)
+- **Stats annotation**: Model name, direction, N, min/max/mean/median, % above threshold, distribution shape
+- **Distribution shape classification**: Uses `scipy.signal.find_peaks` + `scipy.stats.skew` to label unimodal/bimodal/skewed
+- **Combined comparison grid**: All models in a single 2×3 grid figure
+- **CLI**: `--force` (regenerate all), `--threshold` (override primary threshold)
+
+### Key Findings
+
+| Model | Direction | Max Prob | ≥ 0.60 | Shape |
+|-------|-----------|----------|--------|-------|
+| EXP-025 retrain | LONG | 0.547 | **0.0%** | bimodal |
+| EXP-026 retrain | SHORT | 0.931 | 12.1% | unimodal |
+| EXP-030 (set_07) | LONG | 0.964 | 25.9% | unimodal |
+| EXP-031 (set_08) | LONG | 0.922 | 22.4% | unimodal |
+| EXP-032 (set_08 short) | SHORT | 0.940 | 20.9% | unimodal |
+| EXP-033 (set_08 154feat) | LONG | 0.945 | 22.1% | unimodal |
+
+- **EXP-025** confirmed entirely compressed (max=0.547, 0% actionable signals) — this model is dead
+- All Optuna models (EXP-030 through EXP-033) have healthy distributions with 20-26% above 0.60
+
+### Output
+- 6 individual model PNGs + 1 `all_models_comparison.png` in `reports/prediction_distributions/`
+
 ## 2026-03-13 — GCP Cloud Deployment for Optuna Searches
 
 ### Goal

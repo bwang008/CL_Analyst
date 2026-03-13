@@ -1,7 +1,14 @@
+import warnings
+
 import numpy as np
 import pandas as pd
 import pandas_ta as ta  # noqa: F401
 from datetime import datetime
+
+# Suppress pandas PerformanceWarning about DataFrame fragmentation.
+# Feature generation naturally assigns many columns one at a time;
+# the fragmentation is harmless and the warnings spam the live log.
+warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
 try:
     from numba import njit  # type: ignore[import]

@@ -126,6 +126,32 @@ python -m src.live_execution.live_trader --config configs/strategies/OPTUNA_EXP-
 ```
 
 
+### Diagnostics: Prediction Distribution Visualizer
+
+Quickly identify models with compressed probability distributions (never reaching the trading threshold) versus models with healthy spreads.
+
+```bash
+# Generate distribution plots for all models in the registry
+python scripts/plot_prediction_distributions.py
+
+# Force regenerate all plots (even if PNGs already exist)
+python scripts/plot_prediction_distributions.py --force
+
+# Use a custom probability threshold (default: 0.60)
+python scripts/plot_prediction_distributions.py --threshold 0.55
+```
+
+**What it does:**
+- Auto-discovers all `models/registry/*/oos_predictions.csv` files
+- Generates per-model histogram + KDE plots with threshold lines (0.60 primary, 0.45 secondary)
+- Color-codes green (≥ threshold) vs red (< threshold)
+- Annotates each plot with: direction, N, min/max/mean/median, % above threshold, distribution shape (unimodal/bimodal/skewed)
+- Generates a combined comparison grid of all models
+- Skips models without prediction files; skips existing PNGs unless `--force`
+
+**Output:** `reports/prediction_distributions/` — individual PNGs per model + `all_models_comparison.png`
+
+
 ### Prediction + backtest file conventions
 This is the shared contract so prediction files can be used across backtesters.
 
@@ -289,7 +315,8 @@ CL_Analyst/
 |   +-- archive_model.py           # Archive model bundles to registry
 |   +-- optuna_lgbm_search_v2.py   # Hyperparameter search (Optuna)
 |   +-- check_optuna_db.py         # Check Optuna study progress
-+-- scripts/                       # Utility scripts (shadow log, parity validation)
++-- scripts/                       # Utility scripts
+|   +-- plot_prediction_distributions.py  # Distribution visualizer (histogram+KDE per model)
 +-- tests/                         # Pytest test suite (350+ tests)
 +-- reports/                       # Evaluation outputs
 ```
