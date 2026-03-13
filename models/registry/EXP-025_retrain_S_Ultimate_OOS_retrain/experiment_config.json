@@ -1,0 +1,29 @@
+{
+    "experiment_id": "EXP-025_retrain",
+    "strategy": "S_Ultimate_OOS_retrain",
+    "hypothesis": "Retrain EXP-025 long model to regenerate OOS predictions for ensemble2_alt backtest comparison",
+    "data_path": "C:\\CL_Analyst_Data\\data\\processed\\CL_set_06.parquet",
+    "target_name": "TARGET_TRIPLE_2x1_24H_LONG",
+    "method": "walk_forward",
+    "balance_mode": "downsample",
+    "train_cutoff_date": "2022-01-01",
+    "threshold": 0.02,
+    "model_params": {
+        "num_leaves": 31,
+        "min_child_samples": 166,
+        "learning_rate": 0.05242702195760322,
+        "feature_fraction": 0.6940065346564026,
+        "bagging_fraction": 0.6483459770074159,
+        "bagging_freq": 1,
+        "reg_alpha": 2.737488884954343,
+        "reg_lambda": 7.378557513409711,
+        "max_depth": 4,
+        "min_gain_to_split": 0.9901794009928347,
+        "n_estimators": 1000,
+        "objective": "binary",
+        "use_focal": true,
+        "metric": "binary_logloss",
+        "validation_fraction": 0.1,
+        "class_weight": null
+    }
+}

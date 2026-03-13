@@ -2,6 +2,56 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
+## 2026-03-12 — Set_08 Models, Ensemble3 & EXP-025/026 Retrain
+
+### Optuna v2 Searches on Set_08
+
+**Long model (set_08):**
+- 126 trials, `--n-jobs 2`, study `wf_v2_long_logloss_set08`
+- Best trial #86: logloss=-0.564705, F1=0.5945
+- Process crashed twice with `--n-jobs 3` (SQLite locking on Windows); stable with `--n-jobs 2`
+- Added error logging to `optuna_lgbm_search_v2.py`: try/except + error log file + re-raise
+
+**Short model (set_08):**
+- 106 trials, `--n-jobs 2`, study `wf_v2_short_logloss_set08`
+- Best trial #91: logloss=-0.559181, F1=0.6055
+
+**Set_07 vs Set_08 A/B comparison (Optuna-level):**
+- Logloss: set_07 slightly better (-0.5629 vs -0.5647)
+- F1: set_08 slightly better (0.5945 vs 0.5884)
+- Conclusion: essentially a tie at Optuna level; set_08 model is more selective (fewer leaves, lower feature_fraction)
+
+### EXP-031: Long Model (Set_08)
+- Trained with best Optuna params from trial #86
+- Backtest: **$1,551K PnL, 3.45 PF, 44.2% WR, 9,842 trades, -$6,437 MDD**
+- Every month profitable
+- Compared to EXP-030 (set_07): Less PnL ($-119K) but better PF (3.45 vs 2.96) and WR (44.2% vs 41.9%)
+
+### EXP-032: Short Model (Set_08)
+- Trained with best Optuna params from trial #91
+- Backtest: **$694K PnL, 1.53 PF, 34.3% WR, 12,199 trades, -$12,052 MDD**
+- 6 red months — weaker than the long model
+
+### Ensemble3 (Long + Short Set_08)
+- Combined EXP-031 (long) + EXP-032 (short)
+- Backtest: **$2,600K PnL, 3.88 PF, 45.9% WR, 14,324 trades, -$7,079 MDD**
+- Every month profitable, balanced long/short (7,316 buys / 7,008 sells)
+
+### Strategy Configs Created
+- `configs/strategies/manatee3.json` — EXP-031 long (client_id=16)
+- `configs/strategies/koala3.json` — EXP-032 short (client_id=17)
+- `configs/strategies/ensemble3.json` — Combined (client_id=18)
+- `configs/strategies/OPTUNA_EXP-031_Set08.json` — Long backtest config
+
+### EXP-025/026 Retrain (in progress)
+- **Why:** Original EXP-025 (long) and EXP-026 (short) predictions were never archived to the registry. Both used `CL_set_06` with pre-Optuna manually-tuned params. Need their OOS predictions regenerated so we can backtest `ensemble2_alt.json` and do a fair comparison with `ensemble3.json`.
+- Configs: `configs/experiments/EXP-025_retrain.json`, `configs/experiments/EXP-026_retrain.json`
+- Both use identical model params to original (copied from registry `config.json`)
+
+### Pipeline Improvements
+- `agent/optuna_lgbm_search_v2.py` — error handling: try/except around `study.optimize()` with traceback logging to `{study_name}_errors.log` and re-raise to stop process
+- `docs/EXPLORATION_BACKLOG.md` — new file documenting 6 exploration topics: wider search ranges, metric bake-off, more trials, additional search dims, multi-objective, full walk-forward Optuna
+
 ## 2026-03-11 — EXP-030 Logloss Bake-off & Registry-Centric Pipeline
 
 ### EXP-030: Optuna v2 Logloss (set_07, Long)

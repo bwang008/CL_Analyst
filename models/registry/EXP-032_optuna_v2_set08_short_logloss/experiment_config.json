@@ -1,0 +1,37 @@
+{
+    "experiment_id": "EXP-032",
+    "strategy": "optuna_v2_set08_short_logloss",
+    "hypothesis": "OOS training with Optuna v2 logloss-optimized SHORT hyperparams on set_08 (trial #91, 106 trials, exhaustion features)",
+    "data_path": "C:\\CL_Analyst_Data\\data\\processed\\CL_set_08.parquet",
+    "target_name": "TARGET_TRIPLE_2x1_24H_SHORT",
+    "method": "walk_forward",
+    "balance_mode": "downsample",
+    "train_cutoff_date": "2022-01-01",
+    "threshold": 0.02,
+    "model_params": {
+        "num_leaves": 59,
+        "min_child_samples": 250,
+        "learning_rate": 0.038946,
+        "feature_fraction": 0.826189,
+        "bagging_fraction": 0.853469,
+        "bagging_freq": 1,
+        "reg_alpha": 0.214946,
+        "reg_lambda": 0.107693,
+        "max_depth": 8,
+        "min_gain_to_split": 0.000395,
+        "n_estimators": 1900,
+        "objective": "binary",
+        "use_focal": true,
+        "metric": "binary_logloss",
+        "validation_fraction": 0.1,
+        "class_weight": null
+    },
+    "optuna_provenance": {
+        "study_db": "models/optuna_studies/wf_v2_short_logloss_set08.db",
+        "study_name": "wf_v2_short_logloss_set08",
+        "metric": "logloss",
+        "best_trial": 91,
+        "total_trials": 106,
+        "best_value": -0.559181
+    }
+}
