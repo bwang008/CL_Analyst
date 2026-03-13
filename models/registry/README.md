@@ -42,3 +42,4 @@ python agent/archive_model.py --experiment-id EXP-017 --model-path models/final_
 | 2026-03-12 | EXP-032 | TARGET_TRIPLE_2x1_24H_SHORT | Short | N/A | N/A | OOS training with Optuna v2 logloss-optimized SHORT hyperparams on set_08 (trial #91, 106 trials, exhaustion features) |
 | 2026-03-12 | EXP-025_retrain | TARGET_TRIPLE_2x1_24H_LONG | Long | N/A | N/A | Retrain EXP-025 long model to regenerate OOS predictions for ensemble2_alt backtest comparison |
 | 2026-03-12 | EXP-026_retrain | TARGET_TRIPLE_2x1_24H_SHORT | Short | N/A | N/A | Retrain EXP-026 short model to regenerate OOS predictions for ensemble2_alt backtest comparison |
+| 2026-03-13 | EXP-033 | TARGET_TRIPLE_2x1_24H_LONG | Long | N/A | N/A | Retrain LONG model on 154-feature set_08 (with 15 EXHAUST features). Uses EXP-031 Optuna hyperparams. Previous EXP-031 was trained on 139-feature set_08 before EXHAUST features were added. |

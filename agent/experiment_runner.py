@@ -422,12 +422,15 @@ if __name__ == "__main__":
             safe_target = target_name.replace(" ", "_")
             safe_balance = balance_mode.replace(" ", "_")
             fi_name = f"walk_forward_feature_importance_{safe_target}_{safe_balance}.csv"
-            fi_path = os.path.join("reports", fi_name)
+            # Use isolated output dirs when isolate_outputs is enabled
+            _model_dir = os.path.join("models", exp_id) if not cli_args.no_isolate else "models"
+            _report_dir = os.path.join("reports", exp_id) if not cli_args.no_isolate else "reports"
+            fi_path = os.path.join(_report_dir, fi_name)
             try:
                 bundle_dir = _archive_experiment(
                     experiment_id=exp_id,
-                    model_path=Path(os.path.join("models", "final_model.pkl")),
-                    vault_metrics_path=Path(os.path.join("reports", "vault_metrics.json")),
+                    model_path=Path(os.path.join(_model_dir, "final_model.pkl")),
+                    vault_metrics_path=Path(os.path.join(_report_dir, "vault_metrics.json")),
                     oos_predictions_path=Path(oos_path) if oos_path else None,
                     experiment_config_path=Path(config_path),
                     feature_importance_path=Path(fi_path) if os.path.exists(fi_path) else None,

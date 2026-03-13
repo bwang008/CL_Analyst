@@ -30,12 +30,11 @@ pip install --no-cache-dir --quiet \
     'pandas>=1.5.0' \
     'numpy>=1.21.0' \
     'scikit-learn>=1.0.0' \
-    'pandas_ta>=0.3.0' \
     'pyarrow>=10.0.0' \
     'sqlalchemy>=1.4.0'
 
-# Make venv accessible to all users
-chmod -R 755 /opt/optuna-env
+# Make venv accessible to all users (SSH user needs write access)
+chmod -R 777 /opt/optuna-env
 
 # Signal completion
 touch /tmp/startup_done

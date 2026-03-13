@@ -69,11 +69,35 @@ from sklearn.metrics import (
 )
 
 import src.util as util
-from agent.experiment_runner import (
-    load_experiment_log,
-    generate_experiment_id,
-    _append_to_log,
-)
+
+# ---------------------------------------------------------------------------
+# Experiment log helpers (inlined to avoid heavy experiment_runner imports)
+# ---------------------------------------------------------------------------
+
+_EXPERIMENT_LOG_PATH = os.path.join(PROJECT_ROOT, "agent", "experiment_log.json")
+
+
+def load_experiment_log():
+    """Load the experiment log, or create a fresh one."""
+    if os.path.exists(_EXPERIMENT_LOG_PATH):
+        with open(_EXPERIMENT_LOG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"experiments": []}
+
+
+def generate_experiment_id(log_data):
+    """Generate the next experiment ID."""
+    existing = log_data.get("experiments", [])
+    return f"EXP-{len(existing) + 1:03d}"
+
+
+def _append_to_log(record):
+    """Append an experiment record to the log file."""
+    log_data = load_experiment_log()
+    log_data["experiments"].append(record)
+    os.makedirs(os.path.dirname(_EXPERIMENT_LOG_PATH), exist_ok=True)
+    with open(_EXPERIMENT_LOG_PATH, "w", encoding="utf-8") as f:
+        json.dump(log_data, f, indent=2, default=str)
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 

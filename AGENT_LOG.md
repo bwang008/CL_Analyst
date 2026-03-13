@@ -2,7 +2,52 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
-## 2026-03-12 — Set_08 Models, Ensemble3 & EXP-025/026 Retrain
+## 2026-03-13 — GCP Cloud Deployment for Optuna Searches
+
+### Goal
+Run Optuna hyperparameter searches on GCP high-CPU VMs instead of local i9 (16-24 cores). Reduces 16+ hour local runs to ~2-3 hours. Fire-and-forget: launch search, close laptop, results auto-upload to GCS.
+
+### How the VM Lifecycle Works
+1. **VM as a cloud computer** — it runs Ubuntu Linux with a terminal/shell just like your PC. You interact via `gcloud compute ssh` (remote shell) or see it in GCP Console → Compute Engine → VM Instances.
+2. **tmux for persistence** — the Optuna script runs inside a `tmux` session on the VM. Even if your SSH/internet drops, tmux keeps running. Reconnect anytime with `gcloud compute ssh optuna-runner --command='tmux attach -t optuna'`.
+3. **GCS for result safety** — when the search finishes, `vm_run_optuna.sh` auto-uploads results (.db, .json, .csv, logs) to `gs://cltrainer-optuna-results`. Even if the VM is deleted, results persist in GCS.
+4. **Console visibility** — the VM appears in GCP Console with status (RUNNING/STOPPED/TERMINATED). You can start/stop it from the console UI too.
+5. **Teardown** — `gcp_teardown.ps1` downloads results from VM + GCS, then deletes the VM. The GCS bucket persists for future runs.
+
+### Scripts Created (`gcp/`)
+
+| Script | Runs On | Purpose |
+|--------|---------|---------|
+| `gcp_setup.ps1` | Local (PowerShell) | Creates VM + GCS bucket, installs deps (~3 min) |
+| `gcp_deploy_run.ps1` | Local (PowerShell) | Uploads 8 essential files + data, launches tmux search |
+| `gcp_check_status.ps1` | Local (PowerShell) | Check progress, attach tmux, download .db mid-run |
+| `gcp_teardown.ps1` | Local (PowerShell) | Downloads results + deletes VM |
+| `vm_startup.sh` | VM (bash) | Boot-time installer: Python venv + ML packages |
+| `vm_run_optuna.sh` | VM (bash) | Tmux runner: executes Optuna, auto-uploads to GCS |
+| `requirements-gcp.txt` | VM | Minimal pip deps (lightgbm, optuna, pandas, numpy, sklearn, pyarrow, sqlalchemy) |
+
+### Key Fixes During Setup
+1. **Inlined experiment log functions** into `optuna_lgbm_search_v2.py` — removed `import agent.experiment_runner` which transitively pulled in `main.py`, `data_processor.py`, `pandas_ta`, etc. The 3 functions (`load_experiment_log`, `generate_experiment_id`, `_append_to_log`) are simple JSON helpers now defined inline.
+2. **Removed `pandas_ta`** from `requirements-gcp.txt` and `vm_startup.sh` — not needed for Optuna search, caused pip install failure on Ubuntu 22.04.
+3. **Fixed venv permissions** — startup script creates venv as root, SSH user needs write access (chmod 777).
+4. **Minimal file upload** — `gcp_deploy_run.ps1` uploads only 8 Python files (~130KB) instead of entire project directories (hundreds of trial configs were being uploaded before).
+5. **gcloud PATH** — Google Cloud SDK bin dir not in default terminal PATH; scripts auto-detect at `C:\Users\bwang\AppData\Local\Google\Cloud SDK\google-cloud-sdk\bin`.
+6. **PowerShell string escaping** — backslashes in double-quoted Write-Host strings broke parser; switched to single-quoted strings.
+
+### Quota Issues
+- **C3 machines** (c3-highcpu-44/88): quota 0 on free trial, even after "activate full account"
+- **N2/E2 spot**: also blocked on quota
+- **E2 on-demand**: `e2-highcpu-8` worked (8 vCPUs)
+- **Fix**: Request quota increase in GCP Console → IAM & Admin → Quotas → filter by "C3 CPUs"
+
+### Smoke Test
+- Launched 2-trial smoke test on `e2-highcpu-8` VM
+- Data loaded: 916K rows, 154 features, 10 sampled WF folds
+- Optuna started successfully, `smoke_test_v2.db` created
+- Full verification pending (interrupted for Google Cloud MCP install)
+
+### Documentation
+- Created `docs/GCP_OPTUNA_GUIDE.md` — step-by-step quick start guide with cost estimates, examples, troubleshooting
 
 ### Optuna v2 Searches on Set_08
 

@@ -839,15 +839,17 @@ class BacktestEngine:
             prob_buy_lookup: dict[pd.Timestamp, float] = {}
             prob_sell_lookup: dict[pd.Timestamp, float] = {}
 
-            if "prob_Buy" in signals_df.columns:
+            buy_col = _resolve_prob_column(signals_df, "buy")
+            sell_col = _resolve_prob_column(signals_df, "sell")
+            if buy_col:
                 for dt_idx in signals_df.index:
                     prob_buy_lookup[pd.Timestamp(dt_idx)] = float(
-                        signals_df.at[dt_idx, "prob_Buy"]
+                        signals_df.at[dt_idx, buy_col]
                     )
-            if "prob_Sell" in signals_df.columns:
+            if sell_col:
                 for dt_idx in signals_df.index:
                     prob_sell_lookup[pd.Timestamp(dt_idx)] = float(
-                        signals_df.at[dt_idx, "prob_Sell"]
+                        signals_df.at[dt_idx, sell_col]
                     )
             # Legacy column fallback: if only 'side' column, map to probs
             if "side" in signals_df.columns and not prob_buy_lookup and not prob_sell_lookup:
@@ -879,8 +881,9 @@ class BacktestEngine:
                 for dt_idx in signals_df.index:
                     ts = pd.Timestamp(dt_idx)
                     signal_sides[ts] = int(signals_df.at[dt_idx, "side"])
-            elif "prob_Buy" in signals_df.columns:
-                mask = signals_df["prob_Buy"] >= self.prob_threshold
+            elif _resolve_prob_column(signals_df, "buy"):
+                _buy_col = _resolve_prob_column(signals_df, "buy")
+                mask = signals_df[_buy_col] >= self.prob_threshold
                 for dt_idx in signals_df[mask].index:
                     signal_sides[pd.Timestamp(dt_idx)] = 1
             elif "Predicted" in signals_df.columns:
@@ -1432,6 +1435,21 @@ def compare_runs(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_prob_column(df: pd.DataFrame, keyword: str) -> str | None:
+    """Find a column containing `keyword` (case-insensitive).
+
+    Searches for columns matching common patterns like 'prob_buy',
+    'prob_Buy', 'PROB_BUY', 'probability_buy', etc.
+
+    Returns the original column name if found, else None.
+    """
+    keyword_lower = keyword.lower()
+    for col in df.columns:
+        if keyword_lower in col.lower():
+            return col
+    return None
+
+
 def load_predictions(path: str) -> pd.DataFrame:
     """Load vault predictions CSV, returning a DataFrame with DatetimeIndex.
 
@@ -1634,9 +1652,21 @@ def main() -> None:
             print(f"  Short: {short_preds_path}")
             long_df = load_predictions(long_preds_path)
             short_df = load_predictions(short_preds_path)
-            # Find probability columns
-            long_col = "prob_Buy" if "prob_Buy" in long_df.columns else long_df.columns[0]
-            short_col = "prob_Sell" if "prob_Sell" in short_df.columns else short_df.columns[0]
+            # Find probability columns (case-insensitive, strict validation)
+            long_col = _resolve_prob_column(long_df, "buy")
+            short_col = _resolve_prob_column(short_df, "sell")
+            if long_col is None:
+                raise ValueError(
+                    f"Long model predictions ({long_preds_path}) have no column "
+                    f"containing 'buy' (found: {list(long_df.columns)}). "
+                    f"Cannot silently use another column as prob_buy."
+                )
+            if short_col is None:
+                raise ValueError(
+                    f"Short model predictions ({short_preds_path}) have no column "
+                    f"containing 'sell' (found: {list(short_df.columns)}). "
+                    f"Cannot silently use another column as prob_sell."
+                )
             long_probs = long_df[[long_col]].rename(columns={long_col: "prob_Buy"})
             short_probs = short_df[[short_col]].rename(columns={short_col: "prob_Sell"})
             preds = long_probs.join(short_probs, how="outer").fillna(0.0)

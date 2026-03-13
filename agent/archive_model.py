@@ -193,6 +193,15 @@ def archive_experiment(
             "Pass --model-path explicitly."
         )
 
+    # Guard: check for stale model file and suggest isolated output if available
+    import time as _time
+    model_age_hours = (_time.time() - selected_model_path.stat().st_mtime) / 3600
+    if model_age_hours > 2:
+        print(f"  [WARN] Model file is {model_age_hours:.1f}h old — may be stale from a prior experiment!")
+    isolated_model = PROJECT_ROOT / "models" / experiment_id / "final_model.pkl"
+    if isolated_model.exists() and selected_model_path != isolated_model:
+        print(f"  [WARN] Isolated model found at {isolated_model} — consider using it instead of {selected_model_path}")
+
     # 1) Trained model artifact (.pkl)
     archived_model_path = bundle_dir / selected_model_path.name
     shutil.copy2(selected_model_path, archived_model_path)

@@ -1,0 +1,91 @@
+{
+  "experiment_id": "EXP-033",
+  "strategy": "optuna_v2_set08_154feat_logloss",
+  "timestamp": "2026-03-13T00:15:35",
+  "target_name": "TARGET_TRIPLE_2x1_24H_LONG",
+  "type": "Long",
+  "dataset_path": "C:\\CL_Analyst_Data\\data\\processed\\CL_set_08.parquet",
+  "training_threshold": 0.02,
+  "optimized_probability_threshold": null,
+  "selected_trade_threshold": null,
+  "features_summary": "Unknown",
+  "model_params": {
+    "num_leaves": 46,
+    "min_child_samples": 287,
+    "learning_rate": 0.060177,
+    "feature_fraction": 0.462144,
+    "bagging_fraction": 0.835886,
+    "bagging_freq": 6,
+    "reg_alpha": 0.24139,
+    "reg_lambda": 0.837497,
+    "max_depth": 8,
+    "min_gain_to_split": 0.020805,
+    "n_estimators": 1200,
+    "objective": "binary",
+    "use_focal": true,
+    "metric": "binary_logloss",
+    "validation_fraction": 0.1,
+    "class_weight": null
+  },
+  "model_file": {
+    "archived_name": "final_model.pkl",
+    "source_path": "models\\final_model.pkl",
+    "source_modified_utc": "2026-03-11T15:08:12+00:00"
+  },
+  "source_experiment_record": {
+    "id": "EXP-033",
+    "timestamp": "2026-03-13T00:15:35",
+    "strategy": "optuna_v2_set08_154feat_logloss",
+    "hypothesis": "Retrain LONG model on 154-feature set_08 (with 15 EXHAUST features). Uses EXP-031 Optuna hyperparams. Previous EXP-031 was trained on 139-feature set_08 before EXHAUST features were added.",
+    "changes": {
+      "target_name": "TARGET_TRIPLE_2x1_24H_LONG",
+      "data_path": "C:\\CL_Analyst_Data\\data\\processed\\CL_set_08.parquet",
+      "method": "walk_forward",
+      "balance_mode": "downsample",
+      "train_cutoff_date": "2022-01-01"
+    },
+    "config": {
+      "data_path": "C:\\CL_Analyst_Data\\data\\processed\\CL_set_08.parquet",
+      "target_name": "TARGET_TRIPLE_2x1_24H_LONG",
+      "threshold": 0.02,
+      "horizon": 576,
+      "method": "walk_forward",
+      "balance_mode": "downsample",
+      "model_params": {
+        "num_leaves": 46,
+        "min_child_samples": 287,
+        "learning_rate": 0.060177,
+        "feature_fraction": 0.462144,
+        "bagging_fraction": 0.835886,
+        "bagging_freq": 6,
+        "reg_alpha": 0.24139,
+        "reg_lambda": 0.837497,
+        "max_depth": 8,
+        "min_gain_to_split": 0.020805,
+        "n_estimators": 1200,
+        "objective": "binary",
+        "use_focal": true,
+        "metric": "binary_logloss",
+        "validation_fraction": 0.1,
+        "class_weight": null
+      },
+      "train_cutoff_date": "2022-01-01"
+    },
+    "metrics": {
+      "vault_accuracy": 0.8322020115557458,
+      "signal_precision_buy": 0.918922264400066,
+      "signal_recall_buy": 0.5580445513543311,
+      "signal_f1_buy": 0.6943955101722661,
+      "signal_precision_sell": 0.0,
+      "signal_recall_sell": 0.0,
+      "signal_f1_sell": 0.0,
+      "hold_precision": 0.809502208685697,
+      "hold_recall": 0.9744526496437672,
+      "hold_f1": 0.8843514940562226,
+      "n_samples": 116825,
+      "wall_time_seconds": 2154.7651294999814
+    },
+    "verdict": "promising",
+    "oos_predictions_path": "reports\\EXP-033\\oos_predictions.csv"
+  }
+}
