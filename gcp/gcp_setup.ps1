@@ -12,7 +12,7 @@
 
 param(
     [string]$VmName = "optuna-runner",
-    [string]$MachineType = "c3-highcpu-44",
+    [string]$MachineType = "c2d-highcpu-56",
     [string]$Zone = "us-central1-a",
     [int]$DiskSizeGB = 50,
     [string]$Project = "cltrainer"
@@ -30,7 +30,7 @@ Write-Host "  VM Name:      $VmName"
 Write-Host "  Machine Type: $MachineType"
 Write-Host "  Zone:         $Zone"
 Write-Host "  Disk:         ${DiskSizeGB}GB SSD"
-Write-Host "  Pricing:      SPOT (preemptible, ~70% off)"
+Write-Host "  Pricing:      On-demand (~$1.30/hr for c2d-highcpu-56)"
 Write-Host "  Project:      $Project"
 Write-Host "=====================================================" -ForegroundColor Cyan
 
@@ -75,8 +75,8 @@ gcloud compute instances create $VmName `
 if ($LASTEXITCODE -ne 0) {
     Write-Host "`nERROR: Failed to create VM." -ForegroundColor Red
     Write-Host "Common causes:" -ForegroundColor Yellow
-    Write-Host "  - CPU quota exceeded (free trial limits ~24 CPUs)"
-    Write-Host "  - Try: -MachineType c3-highcpu-22"
+    Write-Host "  - CPU quota exceeded (CPUS_ALL_REGIONS limit)"
+    Write-Host "  - Try: -MachineType e2-highcpu-8"
     Write-Host "  - Check quota: gcloud compute regions describe us-central1 --format='table(quotas)'"
     exit 1
 }
@@ -124,6 +124,6 @@ Write-Host 'Next step - deploy code and start a search:' -ForegroundColor Cyan
 Write-Host '  .\gcp\gcp_deploy_run.ps1 `'
 Write-Host '      -DataPath ''C:\CL_Analyst_Data\data\processed\CL_set_08.parquet'''
 Write-Host ""
-Write-Host 'VM hourly cost (spot): ~$0.28/hr (c3-highcpu-44)' -ForegroundColor Gray
+Write-Host 'VM hourly cost: ~$1.30/hr (c2d-highcpu-56)' -ForegroundColor Gray
 Write-Host 'Remember to tear down when done: .\gcp\gcp_teardown.ps1' -ForegroundColor Gray
 Write-Host ""

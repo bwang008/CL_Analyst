@@ -1882,6 +1882,76 @@ class LiveTrader:
 
 
 # ---------------------------------------------------------------------------
+# Legacy cache migration
+# ---------------------------------------------------------------------------
+
+def _merge_legacy_cid_caches(shared_cache_path: str) -> None:
+    """Merge any per-client_id warm-start caches into the shared cache.
+
+    Prior versions created separate caches per client_id
+    (warm_start_cache_cid18.parquet, etc.). This function detects those
+    files, merges new bars into the shared cache, and renames the old
+    files so they aren't re-processed.
+    """
+    import glob as _glob
+
+    shared = Path(shared_cache_path)
+    cache_dir = shared.parent
+    pattern = str(cache_dir / "warm_start_cache_cid*.parquet")
+    legacy_files = sorted(_glob.glob(pattern))
+
+    if not legacy_files:
+        return
+
+    log.info(
+        "Found %d legacy per-client cache(s) — merging into shared cache",
+        len(legacy_files),
+    )
+
+    # Load the shared cache if it exists
+    if shared.exists():
+        shared_df = pd.read_parquet(shared, engine="pyarrow")
+        if "DateTime" in shared_df.columns:
+            shared_df["DateTime"] = pd.to_datetime(shared_df["DateTime"])
+    else:
+        shared_df = pd.DataFrame(
+            columns=["DateTime", "Open", "High", "Low", "Close", "Volume"]
+        )
+
+    # Merge bars from each legacy file
+    merged_count = 0
+    for legacy_path in legacy_files:
+        try:
+            ldf = pd.read_parquet(legacy_path, engine="pyarrow")
+            if "DateTime" in ldf.columns:
+                ldf["DateTime"] = pd.to_datetime(ldf["DateTime"])
+            before = len(shared_df)
+            shared_df = pd.concat([shared_df, ldf], ignore_index=True)
+            shared_df = shared_df.drop_duplicates(subset="DateTime", keep="last")
+            new_bars = len(shared_df) - before
+            merged_count += new_bars
+            log.info(
+                "  Merged %s: %d bars (%d new)",
+                Path(legacy_path).name, len(ldf), new_bars,
+            )
+            # Rename legacy file so it isn't re-processed
+            backup = Path(legacy_path).with_suffix(".parquet.migrated")
+            Path(legacy_path).rename(backup)
+            log.info("  Renamed -> %s", backup.name)
+        except Exception as e:
+            log.warning("  Failed to merge %s: %s", legacy_path, e)
+
+    if merged_count > 0:
+        shared_df = shared_df.sort_values("DateTime").reset_index(drop=True)
+        shared.parent.mkdir(parents=True, exist_ok=True)
+        shared_df.to_parquet(shared, engine="pyarrow", index=False)
+        log.info(
+            "Shared cache updated: %d total bars (%d new from migration)",
+            len(shared_df), merged_count,
+        )
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -1980,29 +2050,28 @@ def main() -> None:
         resolved_client_id = config_client_id
 
     # ── Per-strategy isolation ────────────────────────────────────
-    # Derive per-client_id cache and DB paths to prevent concurrent
-    # write conflicts when running multiple LiveTrader instances.
+    # Telemetry DB is per-client (contains strategy-specific signals,
+    # predictions, trades). OHLCV warm-start cache is SHARED — all
+    # strategies receive the same CL continuous bars.
     resolved_db_path = args.db_path
-    resolved_cache_path = args.cache_path
+    resolved_cache_path = args.cache_path  # always shared (no cid suffix)
 
     if resolved_client_id != 1:
         cid_suffix = f"_cid{resolved_client_id}"
 
-        # Only override if user hasn't explicitly set a custom path
+        # Only override DB path if user hasn't explicitly set a custom path
         if resolved_db_path == _DEFAULT_DB_PATH:
             resolved_db_path = str(
                 _dp_data_root() / f"live_telemetry{cid_suffix}.db"
             )
 
-        if resolved_cache_path == _DEFAULT_CACHE_PATH:
-            resolved_cache_path = str(
-                _dp_data_root() / "processed"
-                / f"warm_start_cache{cid_suffix}.parquet"
-            )
+        # Merge any existing per-client caches into the shared cache
+        # so no historical bars are lost from prior per-cid runs.
+        _merge_legacy_cid_caches(resolved_cache_path)
 
         log.info(
             "Multi-instance isolation: client_id=%d  "
-            "db=%s  cache=%s",
+            "db=%s  cache=%s (shared)",
             resolved_client_id,
             Path(resolved_db_path).name,
             Path(resolved_cache_path).name,
