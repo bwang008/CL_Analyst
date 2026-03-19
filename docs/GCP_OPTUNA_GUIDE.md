@@ -1,159 +1,158 @@
-# GCP Optuna Search — Quick Start Guide
+# GCP Optuna Deployment Guide
 
-Run Optuna hyperparameter searches on high-CPU GCP VMs. Fire-and-forget: launch the search, close your laptop, results auto-upload when done.
+> Run Optuna hyperparameter searches on GCP high-CPU VMs instead of your local machine.
+
+## Quick Reference
+
+| Item | Value |
+|------|-------|
+| **VM Name** | `optuna-runner` |
+| **Machine Type** | `c2d-highcpu-56` (56 vCPUs, AMD EPYC Milan) |
+| **Zone** | `us-central1-a` |
+| **Project** | `cltrainer` |
+| **GCS Bucket** | `gs://cltrainer-optuna-results` |
+| **Cost** | ~$1.30/hr on-demand |
+| **Scripts** | `gcp/` directory |
 
 ## Prerequisites
 
-1. **gcloud CLI installed** and authenticated:
+1. **Google Cloud SDK** installed and authenticated:
    ```powershell
    gcloud auth login
    gcloud config set project cltrainer
    ```
+2. **Compute Engine API** enabled (already done for this project)
+3. **CPU Quota** ≥ 56 for `CPUS_ALL_REGIONS` and `C2D_CPUS` in `us-central1`
 
-2. **Compute Engine API enabled** (should already be active — you see the VM dashboard in GCP Console)
+## Workflow Overview
 
-## Quick Start (3 commands)
-
-```powershell
-# 1. Create VM (one-time, takes ~3 min)
-.\gcp\gcp_setup.ps1
-
-# 2. Deploy code + data, launch search
-.\gcp\gcp_deploy_run.ps1 -DataPath "C:\CL_Analyst_Data\data\processed\CL_set_08.parquet"
-
-# 3. When done — download results + delete VM
-.\gcp\gcp_teardown.ps1
+```
+[1] gcp_setup.ps1        → Create VM + install deps (~1 min)
+[2] gcp_deploy_run.ps1   → Upload code + data, launch Optuna in tmux
+[3] gcp_check_status.ps1 → Monitor progress (safe to disconnect)
+[4] gcp_teardown.ps1     → Download results + delete VM
 ```
 
-That's it. Step 2 launches the search in a detached tmux session — safe to close your terminal.
+## Step-by-Step
 
----
-
-## Detailed Usage
-
-### Step 1: Create the VM
+### 1. Create the VM
 
 ```powershell
-# Default: c3-highcpu-44 (44 vCPUs, spot pricing ~$0.28/hr)
 .\gcp\gcp_setup.ps1
-
-# Bigger VM (if quota allows):
-.\gcp\gcp_setup.ps1 -MachineType c3-highcpu-88
-
-# Custom zone:
-.\gcp\gcp_setup.ps1 -Zone us-west1-b
+# Override machine type:
+.\gcp\gcp_setup.ps1 -MachineType c2d-highcpu-32
 ```
 
-> [!NOTE]
-> The free trial may limit you to 24 CPUs per region. If `c3-highcpu-44` fails, try `c3-highcpu-22`. Check your quota in GCP Console under **IAM & Admin → Quotas** → filter "CPUs".
+This creates the VM, installs Python + ML packages via startup script, and creates a GCS bucket for results.
 
-### Step 2: Deploy & Run
+### 2. Deploy & Run
 
 ```powershell
-# Standard logloss search (recommended defaults: 4 workers, 100 trials)
-.\gcp\gcp_deploy_run.ps1 `
-    -DataPath "C:\CL_Analyst_Data\data\processed\CL_set_08.parquet"
-
-# Custom parameters
+# Long model search
 .\gcp\gcp_deploy_run.ps1 `
     -DataPath "C:\CL_Analyst_Data\data\processed\CL_set_08.parquet" `
-    -NTrials 150 `
-    -NJobs 8 `
-    -StudyName "exp_wide_logloss" `
-    -MlMetric logloss
+    -Target "TARGET_TRIPLE_2x1_24H_LONG" `
+    -MlMetric logloss `
+    -NTrials 100 `
+    -NJobs 4
 
-# Short target
+# Short model search
 .\gcp\gcp_deploy_run.ps1 `
     -DataPath "C:\CL_Analyst_Data\data\processed\CL_set_08.parquet" `
     -Target "TARGET_TRIPLE_2x1_24H_SHORT" `
-    -StudyName "wf_v2_short_logloss_set08"
+    -MlMetric logloss `
+    -NTrials 100 `
+    -NJobs 4
 
-# Sharpe metric (requires strategy config)
-.\gcp\gcp_deploy_run.ps1 `
-    -DataPath "C:\CL_Analyst_Data\data\processed\CL_set_08.parquet" `
-    -MlMetric sharpe `
-    -StrategyConfig "ensemble3.json"
+# Skip data re-upload (already on VM)
+.\gcp\gcp_deploy_run.ps1 -DataPath "..." -SkipDataUpload
 ```
 
-### Step 3: Monitor
+### 3. Monitor (Safe to Disconnect)
+
+The search runs in a `tmux` session on the VM. You can close your laptop and come back later.
 
 ```powershell
-# Quick status check (shows recent output)
+# Check status
 .\gcp\gcp_check_status.ps1
 
-# Attach to live output (Ctrl+B then D to detach)
-.\gcp\gcp_check_status.ps1 -Attach
+# View live output
+gcloud compute ssh optuna-runner --command="tmux attach -t optuna"
+# (Ctrl+B then D to detach without stopping)
 
-# Download latest .db mid-run
-.\gcp\gcp_check_status.ps1 -DownloadDb
+# Check from any machine
+gcloud compute instances describe optuna-runner --zone=us-central1-a --format="get(status)"
 ```
 
-### Step 4: Get Results + Tear Down
+### 4. Download Results & Tear Down
 
 ```powershell
-# Downloads all results, then deletes the VM
 .\gcp\gcp_teardown.ps1
-
-# Just delete VM (if you already downloaded)
-.\gcp\gcp_teardown.ps1 -SkipDownload
-
-# Delete everything including GCS bucket
-.\gcp\gcp_teardown.ps1 -CleanAll
+# Downloads results from VM + GCS to local, then deletes VM
 ```
 
-Results are downloaded to your local project:
-- `models/optuna_studies/<study_name>.db` — Optuna SQLite database
-- `reports/optuna_best_params_*.json` — Best hyperparameters
-- `reports/optuna_trials_*.csv` — All trial results
+## How It Works
 
----
+### File Upload (Minimal)
+Only **8 Python files** (~130KB) are uploaded — not the entire project:
+- `agent/optuna_lgbm_search_v2.py` — main search script
+- `agent/experiment_runner.py` — experiment logging (not imported, kept for reference)
+- `agent/backtest_engine.py` — for sharpe mode
+- `agent/__init__.py`, `src/__init__.py` — package inits
+- `src/util.py` — feature/target column helpers
+- `experiments.json` — experiment log
+- `gcp/vm_run_optuna.sh` — tmux runner
 
-## Cost Estimates
+Plus the data parquet file (~1.3GB, takes ~16 min to upload).
 
-| VM Type | vCPUs | Spot $/hr | 100 trials (~) | Recommended `--n-jobs` |
-|---------|:-----:|:---------:|:---------------:|:---------------------:|
-| c3-highcpu-22 | 22 | ~$0.15 | ~2.5 hrs = **$0.38** | 2-3 |
-| **c3-highcpu-44** | **44** | **~$0.28** | **~1.5 hrs = $0.42** | **4** |
-| c3-highcpu-88 | 88 | ~$0.55 | ~50 min = $0.46 | 8 |
+### tmux Persistence
+The Optuna script runs inside a `tmux` session, so it survives SSH disconnections. Even if your internet drops or you close your laptop, the search continues.
 
-> [!TIP]
-> The 88-vCPU VM gives the fastest wall time and only costs ~$0.50 for a full 100-trial search. Use it if your quota allows.
+### Result Safety (GCS Auto-Upload)
+When the search finishes, `vm_run_optuna.sh` automatically uploads results to GCS:
+- `.db` file (Optuna study database)
+- `.json` reports (best params, trial summary)
+- `.csv` reports
+- Log files
 
-## Spotting / Preemption
+Results persist in GCS even if the VM is deleted.
 
-VMs use spot pricing (70% off). If Google reclaims the VM:
-- The VM **stops** (not deleted) — your disk and data persist
-- Restart with: `gcloud compute instances start optuna-runner`
-- Re-run `gcp_deploy_run.ps1` — Optuna resumes from the SQLite DB automatically
+### VM Console
+See your VM at: [GCP Console → Compute Engine → VM Instances](https://console.cloud.google.com/compute/instances?project=cltrainer)
+
+## Cost Guide
+
+| Machine | vCPUs | $/hr | 100-trial est. time | 100-trial est. cost |
+|---------|:-----:|:----:|:-------------------:|:-------------------:|
+| e2-highcpu-8 | 8 | $0.20 | ~50 hrs | $10.00 |
+| c2d-highcpu-32 | 32 | $0.75 | ~12 hrs | $9.00 |
+| **c2d-highcpu-56** | **56** | **$1.30** | **~7 hrs** | **$9.10** |
+| c3-highcpu-88 | 88 | $3.00 | ~3 hrs | $9.00 |
+
+Total cost is roughly the same (~$9) regardless of machine size — bigger machines finish proportionally faster.
+
+**Stop vs Delete:**
+- **Stop** the VM when not in use → ~$4/month for disk storage only
+- **Delete** the VM when done → $0 (results safe in GCS)
 
 ## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
-| "Quota exceeded" | Try smaller VM: `-MachineType c3-highcpu-22` |
-| SSH hangs | Wait 1 min after VM creation for SSH keys to propagate |
-| "startup script not done" | Check: `gcloud compute ssh optuna-runner --command='cat /tmp/startup.log'` |
-| Preempted mid-run | Restart VM → re-run `gcp_deploy_run.ps1` (Optuna resumes) |
-| Want to reuse VM | Skip `gcp_setup.ps1`, just run `gcp_deploy_run.ps1` again |
+| `Quota exceeded` | Increase quota in GCP Console → IAM → Quotas |
+| `gcloud not found` | Add to PATH: `$env:PATH = "C:\Users\bwang\AppData\Local\Google\Cloud SDK\google-cloud-sdk\bin;" + $env:PATH` |
+| SSH timeout | The search takes time; check with `gcloud compute ssh optuna-runner --command="tail /tmp/smoke.log"` |
+| Startup not complete | Wait 1-2 min, check: `gcloud compute ssh optuna-runner --command="cat /tmp/startup.log"` |
+| Data upload slow | ~1.4 MB/s is normal for compressed SCP; use `--compress` flag |
 
-## Available Parameters
+## Scripts Reference
 
-### gcp_setup.ps1
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `-VmName` | optuna-runner | VM instance name |
-| `-MachineType` | c3-highcpu-44 | GCP machine type |
-| `-Zone` | us-central1-a | GCP zone |
-| `-DiskSizeGB` | 50 | Boot disk size |
-
-### gcp_deploy_run.ps1
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `-DataPath` | *(required)* | Path to parquet dataset |
-| `-Target` | TARGET_TRIPLE_2x1_24H_LONG | Target column |
-| `-MlMetric` | logloss | f1, f0.5, logloss, or sharpe |
-| `-NTrials` | 100 | Number of Optuna trials |
-| `-NJobs` | 4 | Parallel workers |
-| `-StudyName` | *(auto-generated)* | Optuna study name |
-| `-TrainCutoffDate` | 2022-01-01 | Gym/vault split date |
-| `-StrategyConfig` | *(none)* | Strategy JSON (required for sharpe) |
+| File | Location | Purpose |
+|------|----------|---------|
+| `gcp_setup.ps1` | `gcp/` | Create VM + GCS bucket |
+| `gcp_deploy_run.ps1` | `gcp/` | Upload code/data + launch search |
+| `gcp_check_status.ps1` | `gcp/` | Monitor progress |
+| `gcp_teardown.ps1` | `gcp/` | Download results + delete VM |
+| `vm_startup.sh` | `gcp/` | VM boot-time package installer |
+| `vm_run_optuna.sh` | `gcp/` | tmux runner + GCS auto-upload |
+| `requirements-gcp.txt` | `gcp/` | Minimal pip dependencies |

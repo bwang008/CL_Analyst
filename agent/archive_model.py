@@ -224,10 +224,40 @@ def archive_experiment(
         shutil.copy2(experiment_config_path, bundle_dir / "experiment_config.json")
         print(f"  Archived experiment config: {experiment_config_path}")
 
-    # Copy feature importance
+    # Copy feature importance (if provided explicitly)
     if feature_importance_path and feature_importance_path.exists():
         shutil.copy2(feature_importance_path, bundle_dir / "feature_importance.csv")
         print(f"  Archived feature importance: {feature_importance_path}")
+    else:
+        # Auto-extract feature importance from the archived model PKL
+        try:
+            import joblib
+            pkg = joblib.load(archived_model_path)
+            if isinstance(pkg, dict):
+                model_inner = pkg.get("model", pkg)
+                feat_names = pkg.get("feature_names", [])
+            else:
+                model_inner = pkg
+                feat_names = getattr(model_inner, "feature_name_", [])
+
+            if hasattr(model_inner, "feature_importance"):
+                imp = model_inner.feature_importance(importance_type="gain")
+            elif hasattr(model_inner, "feature_importances_"):
+                imp = model_inner.feature_importances_
+            else:
+                imp = None
+
+            if imp is not None and feat_names:
+                import pandas as _pd
+                fi_df = _pd.DataFrame({
+                    "feature": feat_names,
+                    "mean_importance": imp,
+                }).sort_values("mean_importance", ascending=False)
+                fi_csv = bundle_dir / "feature_importance.csv"
+                fi_df.to_csv(fi_csv, index=False)
+                print(f"  Auto-extracted feature importance: {fi_csv} ({len(fi_df)} features)")
+        except Exception as e:
+            print(f"  [WARN] Could not auto-extract feature importance: {e}")
 
     # 2) Experiment-specific config and metadata
     report_text = _read_text(REPORT_LOG)

@@ -148,8 +148,9 @@ python scripts/plot_prediction_distributions.py --threshold 0.55
 - Annotates each plot with: direction, N, min/max/mean/median, % above threshold, distribution shape (unimodal/bimodal/skewed)
 - Generates a combined comparison grid of all models
 - Skips models without prediction files; skips existing PNGs unless `--force`
+- **Temporal breakdown** (2×2 grid per model): hourly signal frequency + rate, day of week, monthly time series, year×month heatmap
 
-**Output:** `reports/prediction_distributions/` — individual PNGs per model + `all_models_comparison.png`
+**Output:** `reports/prediction_distributions/` — per-model distribution + temporal PNGs + `all_models_comparison.png`
 
 
 ### Prediction + backtest file conventions

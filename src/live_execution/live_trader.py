@@ -876,6 +876,114 @@ class LiveTrader:
         self._reset_position_state()
         return True
 
+    def _place_bracket_children_on_fill(
+        self,
+        *,
+        order_id: int,
+        fill_price: float,
+        action_str: str,
+        qty: float,
+        contract,
+    ) -> None:
+        """Place TP/SL child orders after entry fill, using actual fill price.
+
+        Phase 2 of two-phase order placement.  Computes bracket prices
+        from the fill price + stored ATR offsets so the SL/TP are always
+        correctly positioned relative to the real entry.
+        """
+        ctx = self._last_decision_context_by_order_id.get(order_id)
+        if ctx is None:
+            log.warning(
+                "BRACKET CHILDREN: no decision context for orderId=%d "
+                "— cannot place TP/SL children",
+                order_id,
+            )
+            return
+
+        tp_offset = ctx.get("tp_offset")
+        sl_offset = ctx.get("sl_offset")
+        entry_action = ctx.get("entry_action")
+        lots = int(ctx.get("lots", qty))
+
+        if tp_offset is None or sl_offset is None or entry_action is None:
+            log.warning(
+                "BRACKET CHILDREN: missing tp_offset/sl_offset/entry_action "
+                "in context for orderId=%d — cannot place children",
+                order_id,
+            )
+            return
+
+        # Compute bracket prices from fill price
+        exit_action = "SELL" if entry_action == "BUY" else "BUY"
+        if entry_action == "BUY":
+            tp_price = round(fill_price + tp_offset, 2)
+            sl_price = round(fill_price - sl_offset, 2)
+        else:  # SELL (short)
+            tp_price = round(fill_price - tp_offset, 2)
+            sl_price = round(fill_price + sl_offset, 2)
+
+        log.info(
+            "[TRADE] BRACKET CHILDREN: fill=%.2f  TP=%.2f  SL=%.2f  "
+            "(tp_offset=%.4f, sl_offset=%.4f)",
+            fill_price, tp_price, sl_price, tp_offset, sl_offset,
+        )
+
+        try:
+            child_trades = self.manager.place_child_orders(
+                contract=contract,
+                parent_order_id=order_id,
+                action=exit_action,
+                quantity=lots,
+                tp_price=tp_price,
+                sl_price=sl_price,
+            )
+            # Update entry price to actual fill (for trailing stop)
+            self._entry_price = fill_price
+
+            # Log tradebook events for the children
+            decision_ctx = ctx
+            for child_trade in child_trades:
+                child_order = getattr(child_trade, "order", None)
+                child_contract = getattr(child_trade, "contract", None)
+                if child_order is None:
+                    continue
+                child_order_id = getattr(child_order, "orderId", None)
+                if child_order_id is not None:
+                    self._last_decision_context_by_order_id[child_order_id] = decision_ctx
+                event_ts = self._utc_iso_now()
+                event_id = self._build_event_id(
+                    event_type="ORDER_SUBMITTED",
+                    event_ts=event_ts,
+                    order_id=child_order_id,
+                )
+                self.telemetry.log_tradebook_event(
+                    event_id=event_id,
+                    event_type="ORDER_SUBMITTED",
+                    event_timestamp_utc=event_ts,
+                    order_id=child_order_id,
+                    perm_id=getattr(child_order, "permId", None),
+                    parent_order_id=getattr(child_order, "parentId", None),
+                    account=getattr(child_order, "account", None),
+                    symbol=getattr(child_contract, "symbol", None),
+                    local_symbol=getattr(child_contract, "localSymbol", None),
+                    contract_month=self._extract_contract_month(child_contract),
+                    side=getattr(child_order, "action", None),
+                    action=getattr(child_order, "action", None),
+                    order_type=getattr(child_order, "orderType", None),
+                    time_in_force=getattr(child_order, "tif", None),
+                    status="SUBMITTED",
+                    order_qty=float(getattr(child_order, "totalQuantity", 0) or 0),
+                    limit_price=float(getattr(child_order, "lmtPrice", 0) or 0),
+                    stop_price=float(getattr(child_order, "auxPrice", 0) or 0),
+                    **self._base_tradebook_fields(decision_ctx=decision_ctx),
+                )
+        except Exception:
+            log.exception(
+                "BRACKET CHILDREN: failed to place TP/SL children "
+                "for orderId=%d (fill=%.2f)",
+                order_id, fill_price,
+            )
+
     def _on_order_status(self, trade) -> None:
         """Log order status transitions as append-only tradebook events."""
         try:
@@ -928,6 +1036,16 @@ class LiveTrader:
                     )
                     self._pending_entry_order_id = None
                     self._pending_entry_bar_time = None
+                    # Phase 2: place TP/SL children from actual fill price
+                    order_id = getattr(order, "orderId", None)
+                    if order_id is not None:
+                        self._place_bracket_children_on_fill(
+                            order_id=order_id,
+                            fill_price=avg_price,
+                            action_str=action_str,
+                            qty=qty,
+                            contract=contract,
+                        )
 
             order_id = getattr(order, "orderId", None)
             ctx = self._last_decision_context_by_order_id.get(order_id)
@@ -1690,20 +1808,24 @@ class LiveTrader:
         if self._front_month_contract is None:
             log.error("Cannot place order: front-month contract not resolved")
             return
+        # Compute TP/SL offsets (ATR * mult) as dollar amounts.
+        # These are stored in the decision context so the fill callback
+        # can compute bracket prices from any fill price.
+        tp_offset = abs(signal.tp_price - current_price)
+        sl_offset = abs(signal.sl_price - current_price)
+
         try:
-            # HOTFIX: Route execution to front-month contract, not continuous,
-            # to prevent IBKR auto-resolution errors.
-            trades = self.manager.place_bracket_order(
+            # Phase 1: Submit entry order only (no TP/SL children).
+            # TP/SL are placed in Phase 2 from _on_order_status fill callback
+            # using the actual fill price to avoid SL/TP mispricing.
+            parent_trade = self.manager.place_entry_order(
                 contract=self._front_month_contract,
                 action=signal.action,
                 quantity=signal.lots,
                 limit_price=current_price,
-                tp_price=signal.tp_price,
-                sl_price=signal.sl_price,
                 entry_mode=self.entry_mode,
                 adaptive_priority=self.adaptive_priority,
             )
-            parent_trade = trades[0]
             order_id = parent_trade.order.orderId
             parent_order = parent_trade.order
             order_type_str = getattr(parent_order, "orderType", "???")
@@ -1715,7 +1837,7 @@ class LiveTrader:
             # Track pending entry for TTL cancellation
             self._pending_entry_order_id = order_id
             self._pending_entry_bar_time = bar_time
-            # Capture trailing stop context at entry
+            # Capture trailing stop context at entry (will be updated on fill)
             self._entry_price = current_price
             self._atr_at_entry = atr_value
             self._position_side = 1 if signal.action == "BUY" else -1
@@ -1730,11 +1852,12 @@ class LiveTrader:
             )
             log.info(
                 "[TRADE] ENTRY: %s %d %s @ %s  "
-                "TP=%.2f  SL=%.2f  (prob=%.2f, orderId=%d)",
+                "TP=%.2f  SL=%.2f  (prob=%.2f, orderId=%d)  "
+                "[offsets: tp=%.4f sl=%.4f — children placed on fill]",
                 signal.action, signal.lots, local_sym,
                 order_type_str,
                 signal.tp_price, signal.sl_price, signal.probability,
-                order_id,
+                order_id, tp_offset, sl_offset,
             )
             self.telemetry.log_signal(
                 timestamp=bar_time,
@@ -1751,49 +1874,48 @@ class LiveTrader:
                 decision_id=decision_id,
                 decision_timestamp_utc=decision_timestamp_utc,
             )
+            # Store decision context with offsets for fill callback
             decision_ctx = {
                 "signal_id": signal_id,
                 "decision_id": decision_id,
                 "decision_timestamp_utc": decision_timestamp_utc,
                 "current_price": current_price,
+                "tp_offset": tp_offset,
+                "sl_offset": sl_offset,
+                "entry_action": signal.action,
+                "lots": signal.lots,
             }
-            for trade in trades:
-                order = getattr(trade, "order", None)
-                contract = getattr(trade, "contract", None)
-                if order is None:
-                    continue
-                child_order_id = getattr(order, "orderId", None)
-                if child_order_id is not None:
-                    self._last_decision_context_by_order_id[child_order_id] = decision_ctx
-                event_ts = self._utc_iso_now()
-                event_id = self._build_event_id(
-                    event_type="ORDER_SUBMITTED",
-                    event_ts=event_ts,
-                    order_id=child_order_id,
-                )
-                self.telemetry.log_tradebook_event(
-                    event_id=event_id,
-                    event_type="ORDER_SUBMITTED",
-                    event_timestamp_utc=event_ts,
-                    order_id=child_order_id,
-                    perm_id=getattr(order, "permId", None),
-                    parent_order_id=getattr(order, "parentId", None),
-                    account=getattr(order, "account", None),
-                    symbol=getattr(contract, "symbol", None),
-                    local_symbol=getattr(contract, "localSymbol", None),
-                    contract_month=self._extract_contract_month(contract),
-                    side=getattr(order, "action", None),
-                    action=getattr(order, "action", None),
-                    order_type=getattr(order, "orderType", None),
-                    time_in_force=getattr(order, "tif", None),
-                    status="SUBMITTED",
-                    order_qty=float(getattr(order, "totalQuantity", 0) or 0),
-                    limit_price=float(getattr(order, "lmtPrice", 0) or 0),
-                    stop_price=float(getattr(order, "auxPrice", 0) or 0),
-                    **self._base_tradebook_fields(decision_ctx=decision_ctx),
-                )
+            self._last_decision_context_by_order_id[order_id] = decision_ctx
+            # Log tradebook event for parent entry
+            event_ts = self._utc_iso_now()
+            event_id = self._build_event_id(
+                event_type="ORDER_SUBMITTED",
+                event_ts=event_ts,
+                order_id=order_id,
+            )
+            self.telemetry.log_tradebook_event(
+                event_id=event_id,
+                event_type="ORDER_SUBMITTED",
+                event_timestamp_utc=event_ts,
+                order_id=order_id,
+                perm_id=getattr(parent_order, "permId", None),
+                parent_order_id=getattr(parent_order, "parentId", None),
+                account=getattr(parent_order, "account", None),
+                symbol=getattr(self._front_month_contract, "symbol", None),
+                local_symbol=getattr(self._front_month_contract, "localSymbol", None),
+                contract_month=self._extract_contract_month(self._front_month_contract),
+                side=getattr(parent_order, "action", None),
+                action=getattr(parent_order, "action", None),
+                order_type=getattr(parent_order, "orderType", None),
+                time_in_force=getattr(parent_order, "tif", None),
+                status="SUBMITTED",
+                order_qty=float(getattr(parent_order, "totalQuantity", 0) or 0),
+                limit_price=float(getattr(parent_order, "lmtPrice", 0) or 0),
+                stop_price=float(getattr(parent_order, "auxPrice", 0) or 0),
+                **self._base_tradebook_fields(decision_ctx=decision_ctx),
+            )
         except Exception as exc:
-            log.error("Failed to place bracket order: %s", exc)
+            log.error("Failed to place entry order: %s", exc)
             self.telemetry.log_signal(
                 timestamp=bar_time,
                 signal=signal.signal_label,
@@ -1879,6 +2001,76 @@ class LiveTrader:
                 time.sleep(_POLL_INTERVAL)
 
         log.info("Event loop exited.")
+
+
+# ---------------------------------------------------------------------------
+# Legacy cache migration
+# ---------------------------------------------------------------------------
+
+def _merge_legacy_cid_caches(shared_cache_path: str) -> None:
+    """Merge any per-client_id warm-start caches into the shared cache.
+
+    Prior versions created separate caches per client_id
+    (warm_start_cache_cid18.parquet, etc.). This function detects those
+    files, merges new bars into the shared cache, and renames the old
+    files so they aren't re-processed.
+    """
+    import glob as _glob
+
+    shared = Path(shared_cache_path)
+    cache_dir = shared.parent
+    pattern = str(cache_dir / "warm_start_cache_cid*.parquet")
+    legacy_files = sorted(_glob.glob(pattern))
+
+    if not legacy_files:
+        return
+
+    log.info(
+        "Found %d legacy per-client cache(s) — merging into shared cache",
+        len(legacy_files),
+    )
+
+    # Load the shared cache if it exists
+    if shared.exists():
+        shared_df = pd.read_parquet(shared, engine="pyarrow")
+        if "DateTime" in shared_df.columns:
+            shared_df["DateTime"] = pd.to_datetime(shared_df["DateTime"])
+    else:
+        shared_df = pd.DataFrame(
+            columns=["DateTime", "Open", "High", "Low", "Close", "Volume"]
+        )
+
+    # Merge bars from each legacy file
+    merged_count = 0
+    for legacy_path in legacy_files:
+        try:
+            ldf = pd.read_parquet(legacy_path, engine="pyarrow")
+            if "DateTime" in ldf.columns:
+                ldf["DateTime"] = pd.to_datetime(ldf["DateTime"])
+            before = len(shared_df)
+            shared_df = pd.concat([shared_df, ldf], ignore_index=True)
+            shared_df = shared_df.drop_duplicates(subset="DateTime", keep="last")
+            new_bars = len(shared_df) - before
+            merged_count += new_bars
+            log.info(
+                "  Merged %s: %d bars (%d new)",
+                Path(legacy_path).name, len(ldf), new_bars,
+            )
+            # Rename legacy file so it isn't re-processed
+            backup = Path(legacy_path).with_suffix(".parquet.migrated")
+            Path(legacy_path).rename(backup)
+            log.info("  Renamed -> %s", backup.name)
+        except Exception as e:
+            log.warning("  Failed to merge %s: %s", legacy_path, e)
+
+    if merged_count > 0:
+        shared_df = shared_df.sort_values("DateTime").reset_index(drop=True)
+        shared.parent.mkdir(parents=True, exist_ok=True)
+        shared_df.to_parquet(shared, engine="pyarrow", index=False)
+        log.info(
+            "Shared cache updated: %d total bars (%d new from migration)",
+            len(shared_df), merged_count,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1980,29 +2172,28 @@ def main() -> None:
         resolved_client_id = config_client_id
 
     # ── Per-strategy isolation ────────────────────────────────────
-    # Derive per-client_id cache and DB paths to prevent concurrent
-    # write conflicts when running multiple LiveTrader instances.
+    # Telemetry DB is per-client (contains strategy-specific signals,
+    # predictions, trades). OHLCV warm-start cache is SHARED — all
+    # strategies receive the same CL continuous bars.
     resolved_db_path = args.db_path
-    resolved_cache_path = args.cache_path
+    resolved_cache_path = args.cache_path  # always shared (no cid suffix)
 
     if resolved_client_id != 1:
         cid_suffix = f"_cid{resolved_client_id}"
 
-        # Only override if user hasn't explicitly set a custom path
+        # Only override DB path if user hasn't explicitly set a custom path
         if resolved_db_path == _DEFAULT_DB_PATH:
             resolved_db_path = str(
                 _dp_data_root() / f"live_telemetry{cid_suffix}.db"
             )
 
-        if resolved_cache_path == _DEFAULT_CACHE_PATH:
-            resolved_cache_path = str(
-                _dp_data_root() / "processed"
-                / f"warm_start_cache{cid_suffix}.parquet"
-            )
+        # Merge any existing per-client caches into the shared cache
+        # so no historical bars are lost from prior per-cid runs.
+        _merge_legacy_cid_caches(resolved_cache_path)
 
         log.info(
             "Multi-instance isolation: client_id=%d  "
-            "db=%s  cache=%s",
+            "db=%s  cache=%s (shared)",
             resolved_client_id,
             Path(resolved_db_path).name,
             Path(resolved_cache_path).name,

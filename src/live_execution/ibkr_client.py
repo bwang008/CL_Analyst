@@ -838,6 +838,126 @@ class IBKRConnectionManager:
 
         return trades
 
+    def place_entry_order(
+        self,
+        contract: Contract,
+        action: str,
+        quantity: int,
+        limit_price: float,
+        *,
+        entry_mode: str = "adaptive",
+        adaptive_priority: str = "Normal",
+    ) -> Trade:
+        """Submit only the parent entry order (no TP/SL children).
+
+        Phase 1 of two-phase order placement.  TP/SL children are placed
+        separately via ``place_child_orders`` after the entry fills, so
+        their prices can be computed from the actual fill price.
+
+        Args:
+            contract: Qualified IBKR contract.
+            action: 'BUY' or 'SELL'.
+            quantity: Number of contracts.
+            limit_price: Limit price for the entry (bar close).
+            entry_mode: "adaptive", "marketable_limit", or "market".
+            adaptive_priority: Urgency for Adaptive Algo.
+
+        Returns:
+            Trade object for the submitted entry order.
+        """
+        self.ensure_connected()
+
+        if entry_mode not in self._VALID_ENTRY_MODES:
+            raise ValueError(
+                f"Invalid entry_mode '{entry_mode}'. "
+                f"Must be one of: {sorted(self._VALID_ENTRY_MODES)}"
+            )
+
+        # Build parent entry order
+        if entry_mode == "adaptive":
+            order = LimitOrder(action, quantity, limit_price)
+            order.algoStrategy = "Adaptive"
+            order.algoParams = [
+                TagValue("adaptivePriority", adaptive_priority),
+            ]
+            log.info(
+                "Entry mode: ADAPTIVE (priority=%s, limit=%.2f)",
+                adaptive_priority, limit_price,
+            )
+
+        elif entry_mode == "marketable_limit":
+            tick2 = 2 * self._CL_TICK_SIZE  # $0.02
+            if action.upper() == "BUY":
+                ml_price = round(limit_price + tick2, 2)
+            else:
+                ml_price = round(limit_price - tick2, 2)
+            order = LimitOrder(action, quantity, ml_price)
+            log.info(
+                "Entry mode: MARKETABLE_LIMIT %s "
+                "(price=%.2f, limit=%.2f, buffer=%.2f)",
+                action, limit_price, ml_price, tick2,
+            )
+
+        else:  # market
+            order = MarketOrder(action, quantity)
+            log.info("Entry mode: MARKET")
+
+        order.outsideRth = True
+        order.tif = "GTC"
+        order.transmit = True
+
+        trade = self.ib.placeOrder(contract, order)
+        return trade
+
+    def place_child_orders(
+        self,
+        contract: Contract,
+        parent_order_id: int,
+        action: str,
+        quantity: int,
+        tp_price: float,
+        sl_price: float,
+    ) -> list[Trade]:
+        """Submit TP and SL child orders linked to a filled parent.
+
+        Phase 2 of two-phase order placement.  Called from the fill
+        callback after the entry order fills so prices are computed
+        from the actual fill price.
+
+        Args:
+            contract: Same contract as the parent entry order.
+            parent_order_id: orderId of the filled parent entry.
+            action: Exit action — opposite of entry ('BUY' if entry
+                was SELL, 'SELL' if entry was BUY).
+            quantity: Number of contracts (matches entry).
+            tp_price: Take-profit limit price (computed from fill price).
+            sl_price: Stop-loss trigger price (computed from fill price).
+
+        Returns:
+            list[Trade]: [tp_trade, sl_trade].
+        """
+        self.ensure_connected()
+
+        # Take-profit child (LMT)
+        tp_order = LimitOrder(action, quantity, tp_price)
+        tp_order.parentId = parent_order_id
+        tp_order.outsideRth = True
+        tp_order.tif = "GTC"
+        tp_order.transmit = False  # hold until SL is also submitted
+
+        # Stop-loss child (STP)
+        sl_order = StopOrder(action, quantity, sl_price)
+        sl_order.parentId = parent_order_id
+        sl_order.outsideRth = True
+        sl_order.tif = "GTC"
+        sl_order.triggerMethod = 1  # native exchange trigger (double bid/ask)
+        sl_order.transmit = True   # transmit both children together
+
+        tp_trade = self.ib.placeOrder(contract, tp_order)
+        sl_trade = self.ib.placeOrder(contract, sl_order)
+
+        return [tp_trade, sl_trade]
+
 
 def ib_bars_to_dataframe(
     bars: Iterable,

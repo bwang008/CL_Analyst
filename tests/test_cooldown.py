@@ -96,6 +96,22 @@ def _make_trader_stub(
     trader._callbacks_registered = False
     trader._last_decision_context_by_order_id = {}
 
+    # Entry order TTL state
+    trader._pending_entry_order_id = None
+    trader._pending_entry_bar_time = None
+
+    # Trailing stop state
+    trader._trailing_activated = False
+    trader._entry_price = None
+    trader._atr_at_entry = None
+    trader._position_side = 0
+    trader._highest_high = 0.0
+    trader._lowest_low = float("inf")
+    trader._trade_trailing_atr_mult = None
+    trader._trade_max_hold_bars = None
+    trader._trailing_atr_mult = 100.0
+    trader._trailing_sl_atr_offset = 0.25
+
     return trader
 
 
@@ -109,53 +125,96 @@ class TestCooldownEnforcement:
 
     @patch("src.live_execution.live_trader.build_live_features")
     def test_cooldown_skips_entry(self, mock_features):
-        """When cooldown is active, _on_new_bar returns early without evaluating."""
+        """When cooldown is active, _on_new_bar evaluates but skips execution."""
+        from src.live_execution.strategy import TradeSignal
         trader = _make_trader_stub(cooldown_bars=10)
         trader._cooldown_remaining = 5
+
+        # Features and strategy ARE called during cooldown (for INFERENCE logs)
+        mock_features.return_value = pd.DataFrame(
+            {"ATR_14": [0.5], "MACD": [0.1]}
+        )
+        trader.strategy.evaluate.return_value = TradeSignal(
+            action="HOLD",
+            probability=0.4,
+            confidence_pct=40.0,
+            signal_label="Hold",
+            skip_reason="BELOW_THRESHOLD",
+            buy_prob=0.4,
+            sell_prob=0.1,
+        )
 
         bar_time = pd.Timestamp("2026-03-02 18:00:00")
         trader._on_new_bar(bar_time)
 
-        # Feature generation should NOT be called during cooldown
-        mock_features.assert_not_called()
-        # Strategy evaluate should NOT be called
-        trader.strategy.evaluate.assert_not_called()
+        # Features and strategy SHOULD be called during cooldown
+        mock_features.assert_called_once()
+        trader.strategy.evaluate.assert_called_once()
+        # But telemetry should log COOLDOWN action
+        trader.telemetry.log_signal.assert_called_once()
+        call_kwargs = trader.telemetry.log_signal.call_args[1]
+        assert call_kwargs["action_taken"] == "COOLDOWN"
 
     @patch("src.live_execution.live_trader.build_live_features")
     def test_cooldown_counts_down(self, mock_features):
         """Cooldown decrements each bar and eventually allows entry."""
+        from src.live_execution.strategy import TradeSignal
         trader = _make_trader_stub(cooldown_bars=3)
         trader._cooldown_remaining = 3
 
+        hold_signal = TradeSignal(
+            action="HOLD",
+            probability=0.4,
+            confidence_pct=40.0,
+            signal_label="Hold",
+            skip_reason="BELOW_THRESHOLD",
+            buy_prob=0.4,
+            sell_prob=0.1,
+        )
+        mock_features.return_value = pd.DataFrame(
+            {"ATR_14": [0.5], "MACD": [0.1]}
+        )
+        trader.strategy.evaluate.return_value = hold_signal
+
         bar_time = pd.Timestamp("2026-03-02 18:00:00")
 
-        # Bar 1: cooldown=3 → skip
+        # Bar 1: cooldown=3 → evaluate but skip execution
         trader._on_new_bar(bar_time)
         assert trader._cooldown_remaining == 2
-        mock_features.assert_not_called()
 
-        # Bar 2: cooldown=2 → skip
+        # Bar 2: cooldown=2 → evaluate but skip execution
         trader._on_new_bar(bar_time)
         assert trader._cooldown_remaining == 1
-        mock_features.assert_not_called()
 
-        # Bar 3: cooldown=1 → skip
+        # Bar 3: cooldown=1 → evaluate but skip execution
         trader._on_new_bar(bar_time)
         assert trader._cooldown_remaining == 0
-        mock_features.assert_not_called()
 
-        # Bar 4: cooldown=0 → evaluate normally
-        mock_features.return_value = None  # Will exit early but proves it was called
+        # Bar 4: cooldown=0 → normal evaluation
         trader._on_new_bar(bar_time)
-        mock_features.assert_called_once()
+        assert mock_features.call_count == 4
+        assert trader.strategy.evaluate.call_count == 4
 
     @patch("src.live_execution.live_trader.build_live_features")
     def test_zero_cooldown_disabled(self, mock_features):
         """cooldown_bars=0 means no cooldown — backward compatible."""
+        from src.live_execution.strategy import TradeSignal
         trader = _make_trader_stub(cooldown_bars=0)
         trader._cooldown_remaining = 0
 
-        mock_features.return_value = None
+        mock_features.return_value = pd.DataFrame(
+            {"ATR_14": [0.5], "MACD": [0.1]}
+        )
+        trader.strategy.evaluate.return_value = TradeSignal(
+            action="HOLD",
+            probability=0.4,
+            confidence_pct=40.0,
+            signal_label="Hold",
+            skip_reason="BELOW_THRESHOLD",
+            buy_prob=0.4,
+            sell_prob=0.1,
+        )
+
         bar_time = pd.Timestamp("2026-03-02 18:00:00")
         trader._on_new_bar(bar_time)
 
