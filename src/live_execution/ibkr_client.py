@@ -480,16 +480,25 @@ class IBKRConnectionManager:
 
         return summary
 
+    # IBKR blocks trading on physically-delivered futures near expiry.
+    # CL contracts within this buffer (days) are skipped in favour of
+    # the next month to avoid Error 201 rejections.
+    _EXPIRY_BUFFER_DAYS = 3
+
     def get_front_month_contract(self) -> tuple[Contract, str]:
         """
         Resolve the current front-month CL futures contract.
 
         Uses reqContractDetails to find the nearest-expiry CL contract
-        that is still tradable.
+        that is still tradable.  Contracts expiring within
+        ``_EXPIRY_BUFFER_DAYS`` are skipped to avoid IBKR's
+        near-expiration physical delivery restrictions.
 
         Returns:
             tuple: (qualified Contract, contract_month string e.g. '202504')
         """
+        from datetime import datetime, timedelta
+
         self.ensure_connected()
         # Use a generic CL Future to search for available contracts
         search = Future(symbol="CL", exchange="NYMEX", currency="USD")
@@ -500,15 +509,38 @@ class IBKRConnectionManager:
                 "Could not retrieve CL contract details from IBKR."
             )
 
-        # Sort by expiry and pick the nearest one
+        # Sort by expiry and pick the nearest one that isn't too close
         details.sort(key=lambda d: d.contract.lastTradeDateOrContractMonth)
-        front = details[0]
+
+        cutoff = datetime.utcnow() + timedelta(days=self._EXPIRY_BUFFER_DAYS)
+        cutoff_str = cutoff.strftime("%Y%m%d")
+
+        # Filter out near-expiry contracts
+        tradable = [
+            d for d in details
+            if d.contract.lastTradeDateOrContractMonth >= cutoff_str
+        ]
+
+        if tradable:
+            front = tradable[0]
+        else:
+            # Fallback: all contracts are near-expiry (shouldn't happen)
+            log.warning(
+                "All CL contracts expire within %d days — "
+                "using nearest available",
+                self._EXPIRY_BUFFER_DAYS,
+            )
+            front = details[0]
+
         contract = front.contract
         month_str = contract.lastTradeDateOrContractMonth[:6]  # YYYYMM
 
         log.info(
-            "Front-month CL contract: %s (conId=%d, month=%s)",
+            "Front-month CL contract: %s (conId=%d, month=%s, "
+            "expiry=%s, buffer=%dd)",
             contract.localSymbol, contract.conId, month_str,
+            contract.lastTradeDateOrContractMonth,
+            self._EXPIRY_BUFFER_DAYS,
         )
         return contract, month_str
 
