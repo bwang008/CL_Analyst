@@ -112,6 +112,11 @@ def _make_trader_stub(
     trader._trailing_atr_mult = 100.0
     trader._trailing_sl_atr_offset = 0.25
 
+    # Consecutive signal threshold state
+    trader._consecutive_signal_threshold = 0
+    trader._consecutive_buy_count = 0
+    trader._consecutive_sell_count = 0
+
     return trader
 
 

@@ -381,6 +381,13 @@ class LiveTrader:
             strategy_config.get("sl_cooldown_bars", _cd_fallback)
         )
         self._cooldown_remaining: int = 0
+        # Consecutive signal threshold: require N consecutive above-threshold
+        # signals before executing a trade (0 = disabled, immediate entry).
+        self._consecutive_signal_threshold: int = int(
+            strategy_config.get("consecutive_signal_threshold", 0)
+        )
+        self._consecutive_buy_count: int = 0
+        self._consecutive_sell_count: int = 0
         # Trailing stop config (parity with backtest engine)
         self._trailing_atr_mult: float = float(
             strategy_config.get("trailing_atr_mult", 100.0)
@@ -1754,6 +1761,10 @@ class LiveTrader:
 
         # 4. Handle HOLD signals
         if signal.action == "HOLD":
+            # No active signal — reset consecutive counters
+            if self._consecutive_signal_threshold > 0:
+                self._consecutive_buy_count = 0
+                self._consecutive_sell_count = 0
             action_taken = signal.skip_reason or "HOLD"
             if signal.skip_reason == "POSITION_OPEN":
                 log.info(
@@ -1775,6 +1786,58 @@ class LiveTrader:
                 atr_value=atr_value,
             )
             return
+
+        # 4b. Consecutive signal filter (parity with backtest engine)
+        if self._consecutive_signal_threshold > 0:
+            if signal.action == "BUY":
+                self._consecutive_buy_count += 1
+                self._consecutive_sell_count = 0
+                if self._consecutive_buy_count < self._consecutive_signal_threshold:
+                    log.info(
+                        "CONSECUTIVE FILTER: BUY signal %d/%d — waiting for more",
+                        self._consecutive_buy_count,
+                        self._consecutive_signal_threshold,
+                    )
+                    self.telemetry.log_signal(
+                        timestamp=bar_time,
+                        signal=signal.signal_label,
+                        confidence_pct=signal.confidence_pct,
+                        action_taken="CONSECUTIVE_WAIT",
+                        current_price=current_price,
+                        atr_value=atr_value,
+                    )
+                    return
+                # Threshold met — reset counter and proceed to execute
+                log.info(
+                    "CONSECUTIVE FILTER: BUY threshold met (%d/%d) — executing",
+                    self._consecutive_buy_count,
+                    self._consecutive_signal_threshold,
+                )
+                self._consecutive_buy_count = 0
+            elif signal.action == "SELL":
+                self._consecutive_sell_count += 1
+                self._consecutive_buy_count = 0
+                if self._consecutive_sell_count < self._consecutive_signal_threshold:
+                    log.info(
+                        "CONSECUTIVE FILTER: SELL signal %d/%d — waiting for more",
+                        self._consecutive_sell_count,
+                        self._consecutive_signal_threshold,
+                    )
+                    self.telemetry.log_signal(
+                        timestamp=bar_time,
+                        signal=signal.signal_label,
+                        confidence_pct=signal.confidence_pct,
+                        action_taken="CONSECUTIVE_WAIT",
+                        current_price=current_price,
+                        atr_value=atr_value,
+                    )
+                    return
+                log.info(
+                    "CONSECUTIVE FILTER: SELL threshold met (%d/%d) — executing",
+                    self._consecutive_sell_count,
+                    self._consecutive_signal_threshold,
+                )
+                self._consecutive_sell_count = 0
 
         # 5. Active signal (BUY or SELL) — bracket already logged above
 
