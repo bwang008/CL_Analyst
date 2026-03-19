@@ -1,0 +1,41 @@
+{
+    "nickname": "Ensemble3_5",
+    "description": "Ensemble3_3 variant with consecutive_signal_threshold=2. Requires 2 consecutive above-threshold signals before a trade executes. Sweet spot between noise filtering and trade volume.",
+    "execution_class": "ConservativeEnsembleStrategy",
+    "models": {
+        "long": {
+            "experiment_id": "EXP-033_optuna_v2_set08_154feat_logloss",
+            "predictions_path": "models/registry/EXP-033_optuna_v2_set08_154feat_logloss/oos_predictions.csv",
+            "threshold": 0.60
+        },
+        "short": {
+            "experiment_id": "EXP-032_optuna_v2_set08_short_logloss",
+            "predictions_path": "models/registry/EXP-032_optuna_v2_set08_short_logloss/oos_predictions.csv",
+            "threshold": 0.60
+        }
+    },
+    "tp_atr_mult": 3.5,
+    "sl_atr_mult": 2.5,
+    "trailing_atr_mult": 1.5,
+    "tp_cooldown_bars": 0,
+    "sl_cooldown_bars": 5,
+    "max_hold_bars": 288,
+    "allow_concurrent": false,
+    "max_concurrent": 1,
+    "consecutive_signal_threshold": 2,
+    "sizing_tiers": {
+        "0.80": 3,
+        "0.70": 2,
+        "0.60": 1
+    },
+    "live_config": {
+        "client_id": 18,
+        "entry_mode": "marketable_limit",
+        "exit_mode": "marketable_limit"
+    },
+    "optuna_info": {
+        "long_source": "EXP-033 (set_08, 154 features, Optuna v2 logloss, EXP-031 hyperparams)",
+        "short_source": "EXP-032 (set_08, 154 features, Optuna v2 logloss, trial #91)",
+        "note": "Same models as ensemble3_3, but with 2-bar consecutive signal confirmation."
+    }
+}

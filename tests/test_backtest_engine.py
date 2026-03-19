@@ -1409,3 +1409,160 @@ class TestTieredWithEngine:
         strategy = create_execution_strategy(config)
         assert isinstance(strategy, TieredEnsembleStrategy)
 
+
+# ---------------------------------------------------------------------------
+# Consecutive Signal Threshold Tests
+# ---------------------------------------------------------------------------
+
+
+def _make_multi_prob_signal(
+    ohlcv: pd.DataFrame,
+    bar_indices: list[int],
+    prob_buy: float = 0.0,
+    prob_sell: float = 0.0,
+) -> pd.DataFrame:
+    """Create a signals DataFrame with prob_Buy/prob_Sell at multiple bars."""
+    prob_buy_col = [0.0] * len(ohlcv)
+    prob_sell_col = [0.0] * len(ohlcv)
+    for idx in bar_indices:
+        prob_buy_col[idx] = prob_buy
+        prob_sell_col[idx] = prob_sell
+    return pd.DataFrame(
+        {"prob_Buy": prob_buy_col, "prob_Sell": prob_sell_col},
+        index=ohlcv.index,
+    )
+
+
+class TestConsecutiveSignalThreshold:
+    """Consecutive signal threshold delays entry until N consecutive signals."""
+
+    def test_threshold_zero_immediate_entry(self) -> None:
+        """Default threshold=0 fires on the first signal (no delay)."""
+        config = {
+            "nickname": "NoDelay",
+            "execution_class": "ConservativeEnsembleStrategy",
+            "models": {
+                "long": {"threshold": 0.60},
+                "short": {"threshold": 0.60},
+            },
+            "tp_atr_mult": 2.0,
+            "sl_atr_mult": 1.0,
+            "consecutive_signal_threshold": 0,
+        }
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+        highs[25] = 65.05  # TP hit
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        # Single signal at bar 20
+        signals = _make_multi_prob_signal(ohlcv, [20], prob_buy=0.75)
+
+        bt = _bt_with_strategy(config)
+        result = bt.run(signals, ohlcv)
+
+        assert result.trade_count == 1
+        assert result.trades[0].side == 1
+
+    def test_threshold_blocks_until_consecutive(self) -> None:
+        """With threshold=3, trade fires only after 3 consecutive signals."""
+        config = {
+            "nickname": "Delay3",
+            "execution_class": "ConservativeEnsembleStrategy",
+            "models": {
+                "long": {"threshold": 0.60},
+                "short": {"threshold": 0.60},
+            },
+            "tp_atr_mult": 2.0,
+            "sl_atr_mult": 1.0,
+            "consecutive_signal_threshold": 3,
+        }
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+        highs[30] = 65.05  # TP hit
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        # 3 consecutive signals at bars 20, 21, 22 — should fire on bar 22
+        signals = _make_multi_prob_signal(ohlcv, [20, 21, 22], prob_buy=0.75)
+
+        bt = _bt_with_strategy(config)
+        result = bt.run(signals, ohlcv)
+
+        assert result.trade_count == 1
+        trade = result.trades[0]
+        assert trade.side == 1
+        # Entry happens on the 3rd consecutive signal (bar 22)
+        assert trade.entry_dt == ohlcv.index[22]
+
+    def test_counter_resets_on_no_signal(self) -> None:
+        """If signal drops below threshold mid-streak, counter resets."""
+        config = {
+            "nickname": "ResetTest",
+            "execution_class": "ConservativeEnsembleStrategy",
+            "models": {
+                "long": {"threshold": 0.60},
+                "short": {"threshold": 0.60},
+            },
+            "tp_atr_mult": 2.0,
+            "sl_atr_mult": 1.0,
+            "consecutive_signal_threshold": 3,
+        }
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        # 2 signals at bars 20-21, gap, then 2 more at 23-24 → never 3 consecutive
+        signals = _make_multi_prob_signal(ohlcv, [20, 21, 23, 24], prob_buy=0.75)
+
+        bt = _bt_with_strategy(config)
+        result = bt.run(signals, ohlcv)
+
+        # No trade should fire — never had 3 consecutive signals
+        assert result.trade_count == 0
+
+    def test_single_signal_not_enough(self) -> None:
+        """With threshold=3, a single signal is not enough to trigger entry."""
+        config = {
+            "nickname": "Single",
+            "execution_class": "ConservativeEnsembleStrategy",
+            "models": {
+                "long": {"threshold": 0.60},
+                "short": {"threshold": 0.60},
+            },
+            "tp_atr_mult": 2.0,
+            "sl_atr_mult": 1.0,
+            "consecutive_signal_threshold": 3,
+        }
+        n = 40
+        prices = [65.0] * n
+        highs = [65.01] * n
+        lows = [64.99] * n
+
+        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        signals = _make_multi_prob_signal(ohlcv, [20], prob_buy=0.75)
+
+        bt = _bt_with_strategy(config)
+        result = bt.run(signals, ohlcv)
+
+        assert result.trade_count == 0
+
+    def test_from_config_reads_threshold(self) -> None:
+        """from_config correctly reads consecutive_signal_threshold."""
+        cfg = {
+            "nickname": "CfgTest",
+            "consecutive_signal_threshold": 5,
+        }
+        bt = BacktestEngine.from_config(cfg)
+        assert bt.consecutive_signal_threshold == 5
+
+    def test_from_config_defaults_to_zero(self) -> None:
+        """from_config defaults consecutive_signal_threshold to 0 when absent."""
+        cfg = {"nickname": "NoThreshold"}
+        bt = BacktestEngine.from_config(cfg)
+        assert bt.consecutive_signal_threshold == 0
+
