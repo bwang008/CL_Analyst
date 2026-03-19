@@ -271,6 +271,7 @@ class BacktestEngine:
         allow_concurrent: bool = False,
         max_concurrent: int = 1,
         execution_strategy: Optional[BaseExecutionStrategy] = None,
+        consecutive_signal_threshold: int = 0,
     ) -> None:
         self.tp_atr_mult = tp_atr_mult
         self.sl_atr_mult = sl_atr_mult
@@ -287,6 +288,10 @@ class BacktestEngine:
         self.prob_threshold = prob_threshold
         self.allow_concurrent = allow_concurrent
         self.max_concurrent = max(1, max_concurrent)
+
+        # Consecutive signal threshold: require N consecutive above-threshold
+        # signals before executing a trade (0 = disabled, immediate entry).
+        self.consecutive_signal_threshold = consecutive_signal_threshold
 
         # Pluggable execution strategy (None = legacy signal_sides fallback)
         self._execution_strategy = execution_strategy
@@ -343,6 +348,9 @@ class BacktestEngine:
             "max_horizon": cfg.get("max_hold_bars", 288),
             "execution_strategy": strategy,
         }
+        kwargs["consecutive_signal_threshold"] = cfg.get(
+            "consecutive_signal_threshold", 0
+        )
         kwargs.update(overrides)
         return cls(**kwargs)
 
@@ -368,6 +376,10 @@ class BacktestEngine:
         self._open_positions = []
         self._trade_max_horizon = self.max_horizon
         self._trade_trailing_atr_mult = self.trailing_atr_mult
+
+        # Consecutive signal counters
+        self._consecutive_buy_count: int = 0
+        self._consecutive_sell_count: int = 0
 
         # Reset mutable engine state
         self._engine_state.position = 0
@@ -1032,9 +1044,29 @@ class BacktestEngine:
                 # Dispatch orders to existing FSM entry point
                 for order in orders:
                     if order.action in ("BUY", "SELL"):
+                        # Consecutive signal filter
+                        if self.consecutive_signal_threshold > 0:
+                            if order.action == "BUY":
+                                self._consecutive_buy_count += 1
+                                self._consecutive_sell_count = 0
+                                if self._consecutive_buy_count < self.consecutive_signal_threshold:
+                                    break  # suppress entry, wait for more signals
+                                self._consecutive_buy_count = 0  # reset after firing
+                            else:  # SELL
+                                self._consecutive_sell_count += 1
+                                self._consecutive_buy_count = 0
+                                if self._consecutive_sell_count < self.consecutive_signal_threshold:
+                                    break
+                                self._consecutive_sell_count = 0
+
                         sig = order.side
                         self._on_flat(ts, row, sig, atr, lots=order.lots, order=order)
                         break  # single-position: only one entry per bar
+                else:
+                    # No BUY/SELL order this bar — reset counters
+                    if self.consecutive_signal_threshold > 0:
+                        self._consecutive_buy_count = 0
+                        self._consecutive_sell_count = 0
 
             elif self._state == TradeState.IN_POSITION:
                 self._on_in_position(ts, row.Open, row.High, row.Low)
@@ -1090,14 +1122,37 @@ class BacktestEngine:
             )
 
             # 4. Dispatch orders
+            dispatched = False
             for order in orders:
                 if order.action in ("BUY", "SELL"):
+                    # Consecutive signal filter
+                    if self.consecutive_signal_threshold > 0:
+                        if order.action == "BUY":
+                            self._consecutive_buy_count += 1
+                            self._consecutive_sell_count = 0
+                            if self._consecutive_buy_count < self.consecutive_signal_threshold:
+                                dispatched = True
+                                break
+                            self._consecutive_buy_count = 0
+                        else:  # SELL
+                            self._consecutive_sell_count += 1
+                            self._consecutive_buy_count = 0
+                            if self._consecutive_sell_count < self.consecutive_signal_threshold:
+                                dispatched = True
+                                break
+                            self._consecutive_sell_count = 0
+
                     if (
                         not (np.isnan(atr) if isinstance(atr, float) else False)
                         and atr > 0
                         and len(self._open_positions) < self.max_concurrent
                     ):
                         self._open_new_position(ts, row, order.side, atr, lots=order.lots, order=order)
+                        dispatched = True
+            if not dispatched and self.consecutive_signal_threshold > 0:
+                # No BUY/SELL order this bar — reset counters
+                self._consecutive_buy_count = 0
+                self._consecutive_sell_count = 0
 
             # 5. Record equity: realized + floating
             self._equity_curve.append(
