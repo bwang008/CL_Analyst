@@ -132,39 +132,26 @@ class TestRolloverDetection:
 
 
 # ---------------------------------------------------------------------------
-# Cache validation (direct unit tests via monkeypatch)
+# Roll delta computation (Panama Canal method)
 # ---------------------------------------------------------------------------
 
-class TestCacheValidation:
-    def test_empty_cache_returns_false(self, dm):
-        """Validating an empty cache returns False (stale)."""
+class TestComputeRollDelta:
+    def test_empty_cache_returns_none(self, dm):
+        """Computing delta with empty cache returns None."""
         dm._df = None
-        assert dm._validate_cache_after_roll() is False
+        assert dm._compute_roll_delta() is None
 
-    def test_matching_prices_returns_true(self, dm, seed_csv, monkeypatch):
-        """Cache is valid when prices match IBKR data."""
+    def test_correct_delta_computed(self, dm, seed_csv, monkeypatch):
+        """Roll delta is the median difference between IBKR and cache Close."""
         dm._df = dm._seed_from_csv()
         overlap_idx = dm._df.index[-20:]
+
+        # IBKR data shifted by exactly $1.50
         mock_ibkr_df = dm._df.loc[overlap_idx].copy()
-
-        mock_manager = MagicMock()
-        mock_manager.qualify_contract.return_value = MagicMock()
-        mock_manager._request_historical_data.return_value = ["bar"]
-        dm.ibkr_manager = mock_manager
-
-        # Patch the imports used inside _validate_cache_after_roll
-        import src.live_execution.ibkr_client as ibkr_mod
-        monkeypatch.setattr(ibkr_mod, "build_cl_contract", lambda **kw: MagicMock())
-        monkeypatch.setattr(ibkr_mod, "ib_bars_to_dataframe", lambda bars: mock_ibkr_df)
-
-        assert dm._validate_cache_after_roll()
-
-    def test_shifted_prices_returns_false(self, dm, seed_csv, monkeypatch):
-        """Cache is stale when prices differ from IBKR data."""
-        dm._df = dm._seed_from_csv()
-        overlap_idx = dm._df.index[-20:]
-        mock_ibkr_df = dm._df.loc[overlap_idx].copy()
-        mock_ibkr_df["Close"] += 0.50  # $0.50 shift
+        mock_ibkr_df["Open"] += 1.50
+        mock_ibkr_df["High"] += 1.50
+        mock_ibkr_df["Low"] += 1.50
+        mock_ibkr_df["Close"] += 1.50
 
         mock_manager = MagicMock()
         mock_manager.qualify_contract.return_value = MagicMock()
@@ -175,13 +162,28 @@ class TestCacheValidation:
         monkeypatch.setattr(ibkr_mod, "build_cl_contract", lambda **kw: MagicMock())
         monkeypatch.setattr(ibkr_mod, "ib_bars_to_dataframe", lambda bars: mock_ibkr_df)
 
-        assert not dm._validate_cache_after_roll()
+        delta = dm._compute_roll_delta()
+        assert delta is not None
+        assert abs(delta - 1.50) < 0.01, f"Expected delta ~1.50, got {delta}"
 
-    def test_no_overlap_returns_false(self, dm, seed_csv, monkeypatch):
-        """No overlapping timestamps = assume stale."""
+    def test_no_ibkr_data_returns_none(self, dm, seed_csv, monkeypatch):
+        """If IBKR returns no bars, delta is None."""
         dm._df = dm._seed_from_csv()
 
-        # IBKR data with completely different timestamps
+        mock_manager = MagicMock()
+        mock_manager.qualify_contract.return_value = MagicMock()
+        mock_manager._request_historical_data.return_value = []
+        dm.ibkr_manager = mock_manager
+
+        import src.live_execution.ibkr_client as ibkr_mod
+        monkeypatch.setattr(ibkr_mod, "build_cl_contract", lambda **kw: MagicMock())
+
+        assert dm._compute_roll_delta() is None
+
+    def test_no_overlap_returns_none(self, dm, seed_csv, monkeypatch):
+        """No overlapping timestamps = None (cannot compute delta)."""
+        dm._df = dm._seed_from_csv()
+
         future_base = pd.Timestamp("2025-06-01 09:00")
         mock_ibkr_df = pd.DataFrame(
             {
@@ -207,30 +209,140 @@ class TestCacheValidation:
         monkeypatch.setattr(ibkr_mod, "build_cl_contract", lambda **kw: MagicMock())
         monkeypatch.setattr(ibkr_mod, "ib_bars_to_dataframe", lambda bars: mock_ibkr_df)
 
-        assert not dm._validate_cache_after_roll()
+        assert dm._compute_roll_delta() is None
 
-    def test_no_ibkr_data_returns_false(self, dm, seed_csv, monkeypatch):
-        """If IBKR returns no bars, assume stale."""
+
+# ---------------------------------------------------------------------------
+# Back-adjustment (Panama Canal shift)
+# ---------------------------------------------------------------------------
+
+class TestBackAdjustCache:
+    def test_ohlc_shifted_by_delta(self, dm, seed_csv):
+        """OHLC columns should be shifted by delta after back-adjustment."""
+        dm._df = dm._seed_from_csv()
+        original_close = dm._df["Close"].copy()
+        original_open = dm._df["Open"].copy()
+        delta = 2.50
+
+        dm._back_adjust_cache(delta)
+
+        # All OHLC shifted
+        assert abs(dm._df["Close"].iloc[0] - (original_close.iloc[0] + delta)) < 0.001
+        assert abs(dm._df["Open"].iloc[0] - (original_open.iloc[0] + delta)) < 0.001
+
+    def test_volume_untouched(self, dm, seed_csv):
+        """Volume column should NOT be modified by back-adjustment."""
+        dm._df = dm._seed_from_csv()
+        original_volume = dm._df["Volume"].copy()
+
+        dm._back_adjust_cache(1.50)
+
+        pd.testing.assert_series_equal(
+            dm._df["Volume"], original_volume, check_names=False,
+        )
+
+    def test_bar_count_preserved(self, dm, seed_csv):
+        """Back-adjustment should not add or remove bars."""
+        dm._df = dm._seed_from_csv()
+        n_before = len(dm._df)
+
+        dm._back_adjust_cache(1.50)
+
+        assert len(dm._df) == n_before
+
+    def test_zero_delta_noop(self, dm, seed_csv):
+        """Delta of 0 should leave data unchanged."""
+        dm._df = dm._seed_from_csv()
+        original_close = dm._df["Close"].copy()
+
+        dm._back_adjust_cache(0.0)
+
+        pd.testing.assert_series_equal(
+            dm._df["Close"], original_close, check_names=False,
+        )
+
+    def test_ibkr_overlap_overwrites_shifted_bars(self, dm, seed_csv):
+        """When IBKR overlap data exists, those bars use IBKR values exactly."""
+        dm._df = dm._seed_from_csv()
+        overlap_idx = dm._df.index[-10:]
+
+        # Set up IBKR overlap with specific prices
+        ibkr_df = dm._df.loc[overlap_idx].copy()
+        ibkr_df["Close"] = 99.99
+        ibkr_df["Open"] = 99.00
+
+        dm._ibkr_overlap_df = ibkr_df
+
+        dm._back_adjust_cache(1.50)
+
+        # The overlap bars should have IBKR values, not shifted values
+        assert abs(dm._df.loc[overlap_idx[-1], "Close"] - 99.99) < 0.001
+        assert abs(dm._df.loc[overlap_idx[-1], "Open"] - 99.00) < 0.001
+
+    def test_stores_roll_delta(self, dm, seed_csv):
+        """Back-adjustment should store the delta for metadata/ledger use."""
         dm._df = dm._seed_from_csv()
 
-        mock_manager = MagicMock()
-        mock_manager.qualify_contract.return_value = MagicMock()
-        mock_manager._request_historical_data.return_value = []  # No bars
-        dm.ibkr_manager = mock_manager
+        dm._back_adjust_cache(2.75)
 
-        import src.live_execution.ibkr_client as ibkr_mod
-        monkeypatch.setattr(ibkr_mod, "build_cl_contract", lambda **kw: MagicMock())
-
-        assert dm._validate_cache_after_roll() is False
+        assert dm._roll_delta == 2.75
 
 
 # ---------------------------------------------------------------------------
-# Cache rebuild
+# Roll metadata history
 # ---------------------------------------------------------------------------
 
-class TestCacheRebuild:
-    def test_rebuild_deletes_and_reseeds(self, dm, seed_csv):
-        """Rebuild removes stale cache and re-seeds from CSV."""
+class TestRollMetadataHistory:
+    def test_roll_history_accumulated(self, dm, tmp_dir):
+        """Roll history entries accumulate across multiple rolls."""
+        meta_file = tmp_dir / ".roll_metadata.json"
+        with patch(
+            "src.live_execution.data_manager._ROLL_METADATA_PATH",
+            str(meta_file),
+        ):
+            # First roll
+            dm.front_month_id = "CLK6"
+            dm._roll_detected = True
+            dm._roll_delta = 1.50
+            dm._save_roll_metadata()
+
+            meta = dm._load_roll_metadata()
+            assert len(meta["roll_history"]) == 1
+            assert meta["roll_history"][0]["delta"] == 1.50
+            assert meta["cumulative_delta"] == 1.50
+
+            # Second roll
+            dm.front_month_id = "CLM6"
+            dm._roll_delta = 0.80
+            dm._save_roll_metadata()
+
+            meta = dm._load_roll_metadata()
+            assert len(meta["roll_history"]) == 2
+            assert abs(meta["cumulative_delta"] - 2.30) < 0.01
+
+    def test_no_history_without_roll(self, dm, tmp_dir):
+        """No roll history entry added when no roll was detected."""
+        meta_file = tmp_dir / ".roll_metadata.json"
+        with patch(
+            "src.live_execution.data_manager._ROLL_METADATA_PATH",
+            str(meta_file),
+        ):
+            dm._roll_detected = False
+            dm._roll_delta = 0.0
+            dm._save_roll_metadata()
+
+            meta = dm._load_roll_metadata()
+            assert meta.get("roll_history", []) == []
+            assert meta.get("cumulative_delta", 0.0) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Full rebuild fallback
+# ---------------------------------------------------------------------------
+
+class TestFullRebuildFallback:
+    def test_full_rebuild_deletes_and_reseeds(self, dm, seed_csv):
+        """Full rebuild (fallback) removes stale cache and re-seeds from CSV."""
         dm._df = dm._seed_from_csv()
         dm.save_cache()
         assert dm.cache_path.exists()
@@ -240,7 +352,7 @@ class TestCacheRebuild:
         dm._df = pd.concat([dm._df, dm._df])
         assert len(dm._df) != original_len
 
-        dm._rebuild_cache()
+        dm._full_rebuild_cache()
         assert len(dm._df) == original_len
 
 

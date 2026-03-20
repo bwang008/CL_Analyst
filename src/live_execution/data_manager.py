@@ -121,6 +121,7 @@ class DataManager:
         self._df: Optional[pd.DataFrame] = None
         self._bars_since_flush: int = 0
         self._roll_detected: bool = False
+        self._roll_delta: float = 0.0  # Panama Canal shift applied this session
 
     # ------------------------------------------------------------------
     # Public API
@@ -155,20 +156,22 @@ class DataManager:
                 self._df.index.max(),
             )
 
-        # Step 2: Detect rollover and validate cache
+        # Step 2: Detect rollover and apply Panama Canal back-adjustment
         if self.ibkr_manager is not None and self.front_month_id is not None:
             self._roll_detected = self._detect_rollover()
             if self._roll_detected:
                 log.warning(
-                    "CONTRACT ROLLOVER DETECTED — validating cache..."
+                    "CONTRACT ROLLOVER DETECTED — computing roll delta..."
                 )
-                if self._validate_cache_after_roll():
-                    log.info("Cache prices match IBKR — no rebuild needed.")
+                roll_delta = self._compute_roll_delta()
+                if roll_delta is not None and abs(roll_delta) > _ROLL_PRICE_TOLERANCE:
+                    self._back_adjust_cache(roll_delta)
                 else:
-                    log.warning(
-                        "Cache prices are STALE after rollover — rebuilding..."
+                    log.info(
+                        "Roll detected but delta within tolerance "
+                        "($%.4f) — no adjustment needed.",
+                        roll_delta if roll_delta is not None else 0.0,
                     )
-                    self._rebuild_cache()
 
         # Step 3: Backfill any gap from IBKR
         if self.ibkr_manager is not None:
@@ -466,18 +469,38 @@ class DataManager:
         return {}
 
     def _save_roll_metadata(self) -> None:
-        """Save the current front-month ID to metadata file."""
+        """Save the current front-month ID and roll history to metadata file."""
         meta_path = Path(_ROLL_METADATA_PATH)
         meta_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Load existing metadata to preserve roll history
+        existing = self._load_roll_metadata()
+        roll_history = existing.get("roll_history", [])
+        cumulative_delta = existing.get("cumulative_delta", 0.0)
+
+        # Append this roll event if a delta was applied
+        if self._roll_detected and abs(self._roll_delta) > _ROLL_PRICE_TOLERANCE:
+            old_fm = existing.get("last_front_month", "unknown")
+            roll_history.append({
+                "from": old_fm,
+                "to": self.front_month_id,
+                "delta": round(self._roll_delta, 6),
+                "timestamp": datetime.now().isoformat(),
+            })
+            cumulative_delta += self._roll_delta
+
         meta = {
             "last_front_month": self.front_month_id,
             "updated_at": datetime.now().isoformat(),
+            "roll_history": roll_history,
+            "cumulative_delta": round(cumulative_delta, 6),
         }
         try:
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(meta, f, indent=2)
             log.info(
-                "Roll metadata saved: front_month=%s", self.front_month_id
+                "Roll metadata saved: front_month=%s  cumulative_delta=$%.4f",
+                self.front_month_id, cumulative_delta,
             )
         except OSError as exc:
             log.warning("Could not save roll metadata: %s", exc)
@@ -509,18 +532,23 @@ class DataManager:
         )
         return True
 
-    def _validate_cache_after_roll(self) -> bool:
+    def _compute_roll_delta(self) -> Optional[float]:
         """
-        After a rollover, check if cached prices match IBKR continuous data.
+        Compute the Panama Canal roll delta between cached and IBKR prices.
 
-        Fetches the most recent bars from IBKR and compares Close prices
-        with the cache at matching timestamps.
+        Fetches recent bars from IBKR's continuous contract (which is now
+        back-adjusted to the new front month) and compares Close prices
+        with our cache (still on the old back-adjustment basis).
 
-        Returns True if prices match (cache is still valid).
+        Returns:
+            The median price delta (ibkr - cache), or None if comparison
+            is not possible.
         """
+        import numpy as np
+
         if self._df is None or len(self._df) == 0:
-            log.warning("Cannot validate empty cache.")
-            return False
+            log.warning("Cannot compute roll delta — empty cache.")
+            return None
 
         from src.live_execution.ibkr_client import (
             build_cl_contract,
@@ -544,10 +572,10 @@ class DataManager:
         )
         if not bars:
             log.warning(
-                "No bars returned from IBKR for validation — "
-                "assuming cache is stale."
+                "No bars returned from IBKR for roll delta — "
+                "cannot compute delta."
             )
-            return False
+            return None
 
         ibkr_df = ib_bars_to_dataframe(bars)
 
@@ -556,40 +584,109 @@ class DataManager:
         if len(overlap) == 0:
             log.warning(
                 "No overlapping timestamps between cache and IBKR — "
-                "assuming cache is stale."
+                "cannot compute roll delta."
             )
-            return False
+            return None
 
-        # Compare up to _ROLL_VALIDATION_BARS of overlapping bars
+        # Use the most recent overlapping bars for a robust delta
         sample = overlap[-_ROLL_VALIDATION_BARS:]
         cache_close = self._df.loc[sample, "Close"].values
         ibkr_close = ibkr_df.loc[sample, "Close"].values
 
-        max_diff = abs(cache_close - ibkr_close).max()
+        deltas = ibkr_close - cache_close
+        median_delta = float(np.median(deltas))
+        mean_delta = float(np.mean(deltas))
+        max_spread = float(np.max(np.abs(deltas - median_delta)))
+
         log.info(
-            "Roll validation: compared %d bars, max price diff = $%.4f "
-            "(tolerance = $%.4f)",
-            len(sample), max_diff, _ROLL_PRICE_TOLERANCE,
+            "Roll delta: compared %d bars — "
+            "median=$%.4f  mean=$%.4f  max_spread=$%.4f",
+            len(sample), median_delta, mean_delta, max_spread,
         )
 
-        return max_diff <= _ROLL_PRICE_TOLERANCE
+        # Store the IBKR data for use by _back_adjust_cache
+        self._ibkr_overlap_df = ibkr_df
 
-    def _rebuild_cache(self) -> None:
-        """
-        Delete the stale cache and rebuild from seed + full IBKR backfill.
-        """
-        log.warning("REBUILDING cache from seed + IBKR backfill...")
+        return median_delta
 
-        # Delete stale cache
+    def _back_adjust_cache(self, delta: float) -> None:
+        """
+        Apply Panama Canal back-adjustment to the entire cache.
+
+        Shifts all OHLC prices by `delta` to align with the new
+        continuous contract. Volume is untouched. Then overwrites
+        any overlapping bars with fresh IBKR data for a clean seam.
+
+        Args:
+            delta: The price shift to apply (ibkr_price - cache_price).
+        """
+        if self._df is None or len(self._df) == 0:
+            log.warning("Cannot back-adjust — empty cache.")
+            return
+
+        n_bars = len(self._df)
+        log.info(
+            "PANAMA CANAL BACK-ADJUSTMENT: shifting %d bars by $%.4f",
+            n_bars, delta,
+        )
+
+        # Step 1: Shift all OHLC columns by delta
+        for col in ("Open", "High", "Low", "Close"):
+            if col in self._df.columns:
+                self._df[col] = self._df[col] + delta
+
+        # Step 2: Overwrite overlapping bars with fresh IBKR data
+        # for a perfectly clean seam at the transition
+        ibkr_df = getattr(self, "_ibkr_overlap_df", None)
+        if ibkr_df is not None and len(ibkr_df) > 0:
+            overlap = self._df.index.intersection(ibkr_df.index)
+            if len(overlap) > 0:
+                for col in ("Open", "High", "Low", "Close", "Volume"):
+                    if col in ibkr_df.columns and col in self._df.columns:
+                        self._df.loc[overlap, col] = ibkr_df.loc[overlap, col]
+                log.info(
+                    "Overwrote %d overlapping bars with fresh IBKR data.",
+                    len(overlap),
+                )
+            # Clean up temporary reference
+            del self._ibkr_overlap_df
+
+        # Step 3: Store delta for training ledger update and metadata
+        self._roll_delta = delta
+
+        # Step 4: Save the adjusted cache
+        self.save_cache()
+
+        log.info(
+            "Back-adjustment complete: %d bars shifted by $%.4f. "
+            "Range: %s → %s",
+            n_bars, delta,
+            self._df.index.min(),
+            self._df.index.max(),
+        )
+
+    def _full_rebuild_cache(self) -> None:
+        """
+        FALLBACK: Delete and rebuild cache from seed + IBKR backfill.
+
+        WARNING: This requires IBKR to serve enough historical data to
+        bridge the gap from the seed CSV to present.  IBKR's 5-min bar
+        limit is ~60 days. If the gap exceeds this, the rebuild will fail.
+
+        Prefer _back_adjust_cache() for rollovers.
+        """
+        log.warning(
+            "FULL REBUILD (FALLBACK): deleting cache and re-seeding. "
+            "This requires IBKR historical data to bridge the gap."
+        )
+
         if self.cache_path.exists():
             self.cache_path.unlink()
             log.info("Deleted stale cache: %s", self.cache_path)
 
-        # Re-seed from CSV
         self._df = self._seed_from_csv()
         self.save_cache()
 
-        # Full backfill will happen in the next step (Step 3 of initialize)
         log.info(
             "Cache rebuilt from seed: %d bars, range %s → %s. "
             "Backfill will follow.",
@@ -639,41 +736,40 @@ class DataManager:
                 len(ledger), ledger.index.min(), ledger.index.max(),
             )
 
-        if self._roll_detected:
-            # After rollover: re-fetch the IBKR-sourced portion with
-            # updated back-adjusted prices.
+        if self._roll_detected and abs(self._roll_delta) > _ROLL_PRICE_TOLERANCE:
+            # After rollover: apply Panama Canal shift to ENTIRE ledger.
+            # Every single row (back to 2008) gets the delta applied.
+            # This is the institutional standard — negative absolute
+            # prices in deep history are expected and harmless because
+            # the model uses relative features (ATR, MACD, returns).
             log.warning(
-                "Re-fetching IBKR portion of ledger for back-adjustment..."
+                "PANAMA CANAL: shifting ENTIRE ledger (%d bars) by $%.4f",
+                len(ledger), self._roll_delta,
             )
-            # Find where the seed data ends (approximately)
-            seed_end = self._get_seed_end_timestamp(ledger)
-            # Keep the seed portion (before IBKR data started)
-            seed_portion = ledger.loc[ledger.index <= seed_end]
-            # Re-fetch everything from seed_end to now from IBKR
-            ibkr_portion = self._fetch_ibkr_range(seed_end)
-            if ibkr_portion is not None and len(ibkr_portion) > 0:
-                ledger = pd.concat([seed_portion, ibkr_portion])
-                ledger = ledger[
-                    ~ledger.index.duplicated(keep="last")
-                ].sort_index()
-                log.info(
-                    "Ledger re-adjusted: %d seed bars + %d IBKR bars = %d total",
-                    len(seed_portion), len(ibkr_portion), len(ledger),
-                )
-        else:
-            # Normal startup: just append new bars
-            ibkr_new = self._fetch_ibkr_range(ledger.index.max())
-            if ibkr_new is not None and len(ibkr_new) > 0:
-                n_before = len(ledger)
-                ledger = pd.concat([ledger, ibkr_new])
-                ledger = ledger[
-                    ~ledger.index.duplicated(keep="last")
-                ].sort_index()
-                n_new = len(ledger) - n_before
-                log.info(
-                    "Ledger appended: %d new bars (total: %d)",
-                    n_new, len(ledger),
-                )
+            for col in ("Open", "High", "Low", "Close"):
+                if col in ledger.columns:
+                    ledger[col] = ledger[col] + self._roll_delta
+            log.info(
+                "Ledger shifted: %d bars by $%.4f. "
+                "New range: $%.2f → $%.2f",
+                len(ledger), self._roll_delta,
+                ledger["Close"].min(), ledger["Close"].max(),
+            )
+
+        # Always append any new bars from IBKR (covers both roll and
+        # normal startup cases)
+        ibkr_new = self._fetch_ibkr_range(ledger.index.max())
+        if ibkr_new is not None and len(ibkr_new) > 0:
+            n_before = len(ledger)
+            ledger = pd.concat([ledger, ibkr_new])
+            ledger = ledger[
+                ~ledger.index.duplicated(keep="last")
+            ].sort_index()
+            n_new = len(ledger) - n_before
+            log.info(
+                "Ledger appended: %d new bars (total: %d)",
+                n_new, len(ledger),
+            )
 
         # Save the ledger
         self._save_ledger(ledger)
