@@ -2,6 +2,58 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
+## 2026-03-19 — Panama Canal Rollover & Cache Backup
+
+### Problem
+After CLJ6 → CLK6 contract rollover, the live trader's destructive cache rebuild (delete → re-seed from CSV → IBKR backfill) mixed two different back-adjustment bases, causing features to diverge massively. buy_prob/sell_prob collapsed from 0.89 → 0.49, producing zero trade signals.
+
+### Root Cause
+IBKR's continuous contract retroactively back-adjusts all historical prices when a roll happens. The old cache had pre-roll prices; the rebuild fetched post-roll prices. Despite the splice being smooth ($0.01 jump), features like ATR_14 doubled, DIST_ZSCORE flipped sign, and VOLFLOW features increased 10x.
+
+### Fix: Non-Destructive Panama Canal Back-Adjustment
+Refactored `data_manager.py` to use the institutional-standard Panama Canal method:
+
+| Old (Destructive) | New (Panama Canal) |
+|---|---|
+| Delete cache on rollover | Keep cache intact |
+| Re-seed from CSV (old prices) | Fetch 3-day overlap from IBKR |
+| Full IBKR backfill (limited to ~60 days) | Compute median price delta |
+| Broke after gap > 60 days | Shift all OHLC by delta — works indefinitely |
+
+**New methods:**
+- `_compute_roll_delta()` — returns median Close difference (float) instead of boolean validation
+- `_back_adjust_cache(delta)` — shifts all OHLC by delta, overwrites overlap with fresh IBKR data
+- `_full_rebuild_cache()` — renamed fallback with warning about IBKR 60-day limit
+- `_backup_cache_to_repo()` — timestamped snapshot to `data/cache_backups/` on every rollover + first run
+
+**Updated methods:**
+- `initialize()` — uses `_compute_roll_delta()` + `_back_adjust_cache()` instead of validate + rebuild
+- `_update_training_ledger()` — applies roll delta to entire 1.2M-row ledger (back to 2008)
+- `_save_roll_metadata()` — stores `roll_history[]` and `cumulative_delta` for auditability
+
+### Roll Metadata Format
+```json
+{
+  "last_front_month": "CLK6",
+  "cumulative_delta": 0.03,
+  "roll_history": [{"from": "CLJ6", "to": "CLK6", "delta": 0.03, "timestamp": "..."}]
+}
+```
+
+### Cache Backup Feature
+- Timestamped snapshots saved to `data/cache_backups/` in the git repo
+- Triggers on every contract rollover + first run (when no backups exist)
+- Backs up both cache parquet (~2.5 MB) and roll metadata JSON
+- File size is negligible (~5 MB/year growth), safe for GitHub
+
+### Test Results
+- **22 passed** in `test_rollover.py` (13 new tests: TestComputeRollDelta, TestBackAdjustCache, TestRollMetadataHistory, TestFullRebuildFallback)
+- **422 passed** full suite, 7 pre-existing failures (unrelated)
+
+### Files Changed
+- `src/live_execution/data_manager.py` — core rollover refactor + backup method
+- `tests/test_rollover.py` — replaced 5 old tests with 13 new ones
+
 ## 2026-03-13 — Model Investigation, Bug Fixes & Feature Importance Tooling
 
 ### Bugs Fixed

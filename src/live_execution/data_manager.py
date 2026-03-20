@@ -82,6 +82,9 @@ _ROLL_VALIDATION_BARS = 50
 # Maximum price difference ($) before considering cache stale.
 _ROLL_PRICE_TOLERANCE = 0.01
 
+# Directory in the repo for cache backups (tracked by git).
+_CACHE_BACKUP_DIR = _PROJECT_ROOT / "data" / "cache_backups"
+
 
 def _mirror_to_root(src_path: Path, project_root: Path) -> None:
     """Copy a file to the other data location (shared ↔ repo-local)."""
@@ -189,6 +192,12 @@ class DataManager:
         # Step 5: Save rollover metadata
         if self.front_month_id is not None:
             self._save_roll_metadata()
+
+        # Step 6: Backup cache to repo on rollover (or first run)
+        if self._roll_detected or not any(_CACHE_BACKUP_DIR.glob("*.parquet")):
+            self._backup_cache_to_repo(
+                reason="rollover" if self._roll_detected else "initial"
+            )
 
         return self._df
 
@@ -504,6 +513,44 @@ class DataManager:
             )
         except OSError as exc:
             log.warning("Could not save roll metadata: %s", exc)
+
+    def _backup_cache_to_repo(self, reason: str = "rollover") -> None:
+        """
+        Save a timestamped snapshot of the cache to the git repo.
+
+        Creates data/cache_backups/ in the project root and copies:
+          - warm_start_cache_<timestamp>.parquet
+          - roll_metadata_<timestamp>.json
+
+        Args:
+            reason: Why the backup was triggered (for the log filename).
+        """
+        backup_dir = _CACHE_BACKUP_DIR
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Backup cache
+        if self._df is not None and len(self._df) > 0:
+            cache_backup = backup_dir / f"warm_start_cache_{ts}_{reason}.parquet"
+            try:
+                self._df.to_parquet(str(cache_backup), engine="pyarrow")
+                log.info(
+                    "Cache backup saved: %s (%d bars)",
+                    cache_backup.name, len(self._df),
+                )
+            except Exception as exc:
+                log.warning("Failed to backup cache: %s", exc)
+
+        # Backup roll metadata
+        meta_src = Path(_ROLL_METADATA_PATH)
+        if meta_src.exists():
+            meta_backup = backup_dir / f"roll_metadata_{ts}_{reason}.json"
+            try:
+                shutil.copy2(str(meta_src), str(meta_backup))
+                log.info("Roll metadata backup saved: %s", meta_backup.name)
+            except Exception as exc:
+                log.warning("Failed to backup roll metadata: %s", exc)
 
     def _detect_rollover(self) -> bool:
         """
