@@ -1,14 +1,15 @@
 # HANDOFF
 
 ## Current Branch
-- `main`
+- `live_trader_test` (merged from `development` 2026-03-21)
 
 ## Last Completed Task
-- **Train-Serve Skew Investigation (2026-03-20)**: Completed 4-task diagnostic investigation. Found MACRO resample lookahead bug (CRITICAL — `MACRO_POS_1M` is #1 feature), NaN fill mismatch (MODERATE), and confirmed signal drop is market-driven (not a bug). Full report in `INVESTIGATION_RESULTS.md`.
+- **Train-Serve Skew Fixes & Causally Safe Datasets (2026-03-21)**: Fixed MACRO resample lookahead (`alpha_factory.py`), removed `bfill()` lookahead from `cleanup()`, added NaN cold-start warning + cache depth validation. Generated `set_09` (1,207,895 rows — fixed MACRO only) and `set_10` (705,834 rows — fixed MACRO + causal cleanup, no bfill). See `AGENT_LOG.md` for full details.
 
 ## Current Known Bugs / Issues
-- **MACRO resample lookahead bias (CRITICAL)**: `alpha_factory.py` `add_macro_context()` uses `resample("1h")` which leaks up to 55 minutes of future data in training (complete hourly bars get forward-filled to 5-min resolution). `MACRO_POS_1M` is EXP-032's #1 feature. Fix: replace with bar-level rolling windows. Must retrain after fix.
-- **NaN fill mismatch (MODERATE)**: Training drops NaN rows via `dropna()`, live uses `fillna(0)`. Model never saw 0-filled features during training. Low risk currently (cache depth is sufficient) but latent bug during cold start.
+- **~~MACRO resample lookahead bias~~** ✅ FIXED (2026-03-21): Replaced `resample("1h")` with bar-level `rolling(hours*12, min_periods=1)` + `ffill()` + `.clip(lower=1e-8)`.
+- **~~NaN fill mismatch~~** ✅ MITIGATED (2026-03-21): Added cold-start zero-fill warning in `live_trader.py`. Training pipeline now uses ffill-only (no bfill).
+- **~~bfill() lookahead in cleanup()~~** ✅ FIXED (2026-03-21): Removed `.bfill()`, increased warmup from 10,500 to 26,000 bars.
 - **`trailing_atr_mult = 0.0` bug**: Setting this to 0 does not disable the trailing stop as expected — it triggers immediately. Workaround: set to a large value (e.g. 99.0) to effectively disable.
 - **Evaluator naming**: `reports/vault_metrics.json` uses class names `{1: "Buy", 2: "Sell"}` even for binary short targets. For `TARGET_TRIPLE_2x1_24H_SHORT`, the "Buy" slot corresponds to the positive short label.
 - **Binary probabilities**: With focal loss custom objective, LightGBM `predict()` may emit logits (not 0-1). The live trader applies sigmoid transform; use `agent/threshold_sweep_binary.py` (sigmoid-aware) for binary sweeps.
@@ -138,11 +139,16 @@ Configs are in `configs/strategies/`. Reference: `configs/strategies/config_read
 | C2D_CPUS | 100 | 56 ✅ |
 | C3_CPUS | 8 | 88 ❌ (request increase for future) |
 
+## Available Datasets
+| Dataset | Rows | Date Range | MACRO | Cleanup | Div-by-Zero | Use For |
+|---------|------|------------|-------|---------|-------------|---------|
+| set_08 | 1,207,895 | 2009→2026 | resample (buggy) | bfill (buggy) | `.replace(0, np.nan)` | Legacy only |
+| set_09 | 1,207,895 | 2009→2026 | bar-level rolling ✅ | bfill (buggy) | `.replace(0, np.nan)` | Intermediate |
+| **set_10** | **1,192,395** | 2009→2026 | bar-level rolling ✅ | ffill-only ✅ | `.clip(lower=1e-8)` ✅ | **Retrain target** |
+
 ## Immediate Next Steps
-- **Fix MACRO lookahead bug** in `alpha_factory.py` — replace `resample("1h")` with bar-level rolling windows, update both training and live pipelines
-- **Harmonize NaN fill handling** between training and live pipelines
-- **Retrain EXP-032/EXP-033** on fixed set_08 data after MACRO fix
-- **Rebuild and backtest ensemble3** with retrained models to verify no performance regression
+- **Retrain EXP-032/EXP-033** on **set_10** data — models are deprecated (trained on leaky set_08)
+- **Rebuild and backtest ensemble3/ensemble4** with retrained models
 - Complete Optuna smoke test on GCP VM and verify result download to local
 - Run remaining bake-off metrics (f1, f0.5, sharpe) on winning dataset (see `docs/EXPLORATION_BACKLOG.md`)
 - Address `trailing_atr_mult = 0.0` bug (should disable trailing stop, currently triggers immediately)

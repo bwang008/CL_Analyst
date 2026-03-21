@@ -2,6 +2,72 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
+## 2026-03-21 — Train-Serve Skew Fixes & Causally Safe Dataset (set_09, set_10)
+
+### Goal
+Implement the fixes identified in the 2026-03-20 investigation and generate new causally-safe training datasets.
+
+### Fix 1: MACRO Resample Lookahead (CRITICAL)
+**File**: `alpha_factory.py` `add_macro_context()`
+
+Replaced `resample("1h")` → `reindex(method="ffill")` with bar-level rolling:
+- `df["High"].ffill().rolling(window=hours*12, min_periods=1).max()` — direct 5-min bar rolling
+- `min_periods=1` — instant warmup from row 1 (no NaN propagation)
+- `.clip(lower=1e-8)` — bulletproof division-by-zero protection (`.replace()` misses float zeros)
+- Removed `_add_macro_donchian()` helper (no longer needed)
+
+### Fix 2: NaN Cold-Start Warning
+**File**: `live_trader.py` `build_live_features()`
+
+Detects which features were zero-filled from NaN during cold start and logs:
+`COLD START: N features zero-filled from NaN (model never saw 0 during training)`
+
+### Fix 3: Cache Depth Validation
+**File**: `live_trader.py` `build_live_features()`
+
+Warning when cache depth < `MIN_RECOMMENDED_BARS = 26,000` (insufficient for MACRO_3M warmup).
+
+### Fix 4: bfill() Lookahead Removal
+**File**: `data_processor.py` `cleanup()`
+
+Removed `.bfill()` from the cleanup pipeline — backward fill copies future values into past rows (lookahead bias). Replaced with:
+- Dynamic warmup: `MAX_WARMUP_BARS = 26,000` (covers MACRO_3M = 25,920 bars, VOL_VOLVOL_10080 = 20,160 bars)
+- Forward-fill only: `df[non_target_cols].ffill()` — strictly causal
+- Corrupted row dropna with warning
+
+### Fix 5: Division-by-Zero NaN Poisoning in Feature Generators
+**File**: `alpha_factory.py` — 6 methods patched
+
+Root cause of set_10 initial 705K-row dataset: `VOLFLOW_CMF` used `(High - Low).replace(0, np.nan)` as denominator. On flat bars (High == Low, 2.8% of 2008-09 data), this created NaN that propagated through `rolling(10080).sum()` for years. The diagnostic identified exactly 5 VOLFLOW_CMF columns as the sole offenders (486,561 NaN rows in CMF_10080 alone).
+
+**Fix**: Replaced all `.replace(0, np.nan)` denominators with `.clip(lower=1e-8)` in:
+- `add_liquidity_cluster()` — `dollar_vol`
+- `add_microstructure_cluster()` — `candle_range = (High - Low)`
+- `add_trend_cluster()` — `range_span = (roll_max - roll_min)`
+- `add_volume_flow_cluster()` — `vol_sum`, CLV `(High - Low)`, CMF volume denominator
+- `add_stochastic_cluster()` — `range_span = (roll_high - roll_low)`
+
+### Datasets Generated
+
+| Dataset | Rows | Columns | Date Range | Changes |
+|---------|------|---------|------------|---------|
+| set_08 | 1,207,895 | 174 | 2009-01-15 → 2026-02-15 | Original (resample MACRO, bfill cleanup, div-by-zero NaN) |
+| set_09 | 1,207,895 | 174 | 2009-01-15 → 2026-02-15 | Fixed MACRO rolling only (bfill still present) |
+| **set_10** | **1,192,395** | 174 | 2009-04-03 → 2026-02-15 | Fixed MACRO + causal cleanup + div-by-zero fix (100% clean) |
+
+- set_10 rows: exactly 1,218,395 raw − 26,000 warmup = 1,192,395 (zero dropna casualties)
+- All feature columns: **0 NaN** in set_10
+- All 2,592 NaN are in TARGET columns at dataset tail (expected)
+
+### Files Changed
+- `src/features/alpha_factory.py` — MACRO bar-level rolling fix + `.clip(lower=1e-8)` on all 6 div-by-zero sites
+- `src/live_execution/live_trader.py` — NaN warning + cache depth validation
+- `src/data_processor.py` — bfill removal, 26K warmup, set_09/set_10 routing
+- `data/DATASETS.json` — set_09 and set_10 entries
+
+### Test Results
+- **167/168 passed** (1 pre-existing failure: `test_marketable_limit_sell_to_zero` — `64.98 == 64.96`)
+
 ## 2026-03-20 — Train-Serve Feature Skew Investigation
 
 ### Goal
