@@ -387,41 +387,30 @@ class AlphaFactory:
         return self.df
 
     def add_macro_context(self, macro_windows: dict[str, int] | None = None) -> pd.DataFrame:
-        """Macro context features via resampled windows."""
-        if not isinstance(self.df.index, pd.DatetimeIndex):
-            raise ValueError("AlphaFactory requires a DatetimeIndex for resampling.")
+        """Macro context features via causally-safe bar-level rolling windows.
 
+        Each macro window is specified in hours and converted to 5-min bars
+        (hours × 12). Donchian channel position and width are computed
+        directly on the bar-level High/Low/Close — no resample, no
+        lookahead.
+
+        Previous implementation used ``resample("1h")`` which created
+        complete hourly bars from all 12 five-minute bars in the hour,
+        then forward-filled back to 5-min resolution. This leaked up to
+        55 minutes of future data into training features. Fixed 2026-03-20.
+        """
         if macro_windows is None:
             macro_windows = {"1M": 840, "3M": 2160}
 
-        ohlcv = {
-            "Open": "first",
-            "High": "max",
-            "Low": "min",
-            "Close": "last",
-            "Volume": "sum",
-        }
+        for label, hours in macro_windows.items():
+            bars = hours * 12  # Convert hours to 5-min bars
+            roll_max = self.high.rolling(bars).max()
+            roll_min = self.low.rolling(bars).min()
+            range_span = (roll_max - roll_min).replace(0, np.nan)
+            self.df[f"MACRO_WIDTH_{label}"] = range_span / self.close
+            self.df[f"MACRO_POS_{label}"] = (self.close - roll_min) / range_span
 
-        hourly = self.df.resample("1h").agg(ohlcv).dropna()
-        macro_frames = []
-        for label, window in macro_windows.items():
-            macro_frames.append(self._add_macro_donchian(hourly, window=window, label=label))
-
-        macro = pd.concat(macro_frames, axis=1)
-        macro = macro.reindex(self.df.index, method="ffill")
-        self.df = self.df.join(macro)
         return self.df
-
-    def _add_macro_donchian(self, df: pd.DataFrame, window: int, label: str) -> pd.DataFrame:
-        roll_max = df["High"].rolling(window).max()
-        roll_min = df["Low"].rolling(window).min()
-        range_span = roll_max - roll_min
-
-        width_col = f"MACRO_WIDTH_{label}"
-        pos_col = f"MACRO_POS_{label}"
-        df[width_col] = range_span / df["Close"]
-        df[pos_col] = (df["Close"] - roll_min) / range_span
-        return df[[width_col, pos_col]]
 
     def add_momentum_cluster(self) -> pd.DataFrame:
         """Momentum indicators via pandas_ta."""

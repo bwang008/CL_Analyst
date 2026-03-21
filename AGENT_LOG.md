@@ -2,6 +2,47 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
+## 2026-03-20 — Train-Serve Feature Skew Investigation
+
+### Goal
+Identify all sources of train-serve skew (feature mismatch between training-time and live-inference-time computation) in the CL_Analyst live trading pipeline. Diagnostic-only — no code changes.
+
+### Key Finding: Signal Drop is Market-Driven
+The sell signal dropping from 0.99 (Mar 17) to 0.48 (Mar 20) is a **correct model response** to a bullish market regime shift, not a pipeline bug. 99/154 features changed >10% between those timestamps, with short-term trend/momentum/volume features flipping from bearish to bullish. The SHORT model correctly refuses to short in bullish conditions.
+
+### Bug #1: MACRO Resample Lookahead Bias (CRITICAL)
+**Location**: `alpha_factory.py` `add_macro_context()` (line 389-413)
+
+`resample("1h")` creates complete hourly bars using all 12 five-minute bars. The 10:00 hourly bar knows H/L through 10:55. `reindex(method="ffill")` assigns this to the 10:05 bar — leaking up to 55 minutes of future data in training. In live, no lookahead exists because the DataFrame ends at the current bar.
+
+**Impact**: MACRO_POS_1M is EXP-032's #1 feature (importance=1032). Leak magnitude: ~4% for MACRO_1D, ~1.4% for 3D, ~0.12% for 1M, ~0.05% for 3M.
+
+**Fix**: Replace hourly resample with causally-safe bar-level rolling windows (e.g., `rolling(840 * 12)` for 1M).
+
+### Bug #2: NaN Fill Mismatch (MODERATE)
+**Training** (`data_processor.py` `cleanup()`): Drops first 10,500 warmup rows → `ffill().bfill()` → `dropna()`. Model never sees zero-filled features.
+
+**Live** (`live_trader.py` `build_live_features()`): `ffill() → bfill() → fillna(0)`. Cold-start features get filled with 0, a value the model never saw.
+
+**Current risk**: Low — cache has 35K bars (sufficient). Latent bug if cache is ever corrupted or reset.
+
+### Feature Drift Analysis
+Compared 1,233 live telemetry records (Mar 13–20) against 1.2M training records:
+- **50/154 features drifted** (live mean outside training [5th, 95th] percentile)
+- Dominant pattern: elevated volatility (VOL_ROC_4032 at z=+9.66, VOL_VOLVOL_4032 at z=+7.53)
+- **MACRO_POS_1M (#1 feature) is NOT drifted** (z=+0.23) — model's primary input is in-distribution
+- Drift is a normal market regime shift, not a pipeline bug
+
+### No Additional Lookahead Found
+Full audit of `alpha_factory.py` confirmed:
+- Zero `shift(-N)` (no forward-looking shift)
+- Zero `rolling(center=True)`
+- Zero `resample()` beyond the known MACRO bug
+- All `pandas_ta` functions (RSI, ADX, MACD, BBands, ATR) use only past data
+
+### Output
+- `INVESTIGATION_RESULTS.md` — full report with severity ratings, data tables, and specific fix instructions
+
 ## 2026-03-19 — Panama Canal Rollover & Cache Backup
 
 ### Problem

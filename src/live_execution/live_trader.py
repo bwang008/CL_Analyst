@@ -249,6 +249,17 @@ def build_live_features(
         )
         return None
 
+    # Warn if cache depth is below recommended minimum for long-window
+    # features (MACRO_3M needs 2160h × 12 = 25,920 bars + warmup).
+    _MIN_RECOMMENDED_BARS = 26_000
+    if len(df) < _MIN_RECOMMENDED_BARS:
+        log.warning(
+            "Cache depth %d below recommended %d — "
+            "long-window features (MACRO_3M, VOL_ROC_10080) may be "
+            "unreliable due to insufficient warmup history",
+            len(df), _MIN_RECOMMENDED_BARS,
+        )
+
     # Work on a copy to avoid mutating the rolling window
     work = df.copy()
 
@@ -296,9 +307,24 @@ def build_live_features(
     #    Final fillna(0) catches features that are all-NaN during cold start
     #    (e.g., VOL_VOLVOL_10080 needs 2×10080 bars, MACRO_3M needs ~25K bars).
     work.replace([np.inf, -np.inf], np.nan, inplace=True)
+    # Snapshot which cells in the last row are NaN BEFORE fill — these are
+    # the features that lack sufficient warmup history.
+    _pre_fill_nan = work[feature_names].iloc[-1].isna() if set(feature_names).issubset(work.columns) else None
     work.ffill(inplace=True)
     work.bfill(inplace=True)
     work.fillna(0, inplace=True)
+
+    # Detect which features were zero-filled from NaN (cold-start warning)
+    if _pre_fill_nan is not None:
+        _post_fill_zero = work[feature_names].iloc[-1] == 0
+        _zero_filled = _pre_fill_nan & _post_fill_zero
+        if _zero_filled.any():
+            _zero_cols = _zero_filled[_zero_filled].index.tolist()
+            log.warning(
+                "COLD START: %d features zero-filled from NaN "
+                "(model never saw 0 during training): %s",
+                len(_zero_cols), _zero_cols,
+            )
 
     # 6. Extract the last complete row with the model's expected columns
     missing_cols = set(feature_names) - set(work.columns)

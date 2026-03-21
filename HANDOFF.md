@@ -4,9 +4,11 @@
 - `main`
 
 ## Last Completed Task
-- **Panama Canal Rollover & Cache Backup (2026-03-19)**: Replaced destructive cache rebuild with Panama Canal non-destructive back-adjustment. Contract rollovers now shift all OHLC by the median roll delta instead of deleting and re-seeding. Added `data/cache_backups/` with timestamped snapshots on every rollover. 422/429 tests pass.
+- **Train-Serve Skew Investigation (2026-03-20)**: Completed 4-task diagnostic investigation. Found MACRO resample lookahead bug (CRITICAL — `MACRO_POS_1M` is #1 feature), NaN fill mismatch (MODERATE), and confirmed signal drop is market-driven (not a bug). Full report in `INVESTIGATION_RESULTS.md`.
 
 ## Current Known Bugs / Issues
+- **MACRO resample lookahead bias (CRITICAL)**: `alpha_factory.py` `add_macro_context()` uses `resample("1h")` which leaks up to 55 minutes of future data in training (complete hourly bars get forward-filled to 5-min resolution). `MACRO_POS_1M` is EXP-032's #1 feature. Fix: replace with bar-level rolling windows. Must retrain after fix.
+- **NaN fill mismatch (MODERATE)**: Training drops NaN rows via `dropna()`, live uses `fillna(0)`. Model never saw 0-filled features during training. Low risk currently (cache depth is sufficient) but latent bug during cold start.
 - **`trailing_atr_mult = 0.0` bug**: Setting this to 0 does not disable the trailing stop as expected — it triggers immediately. Workaround: set to a large value (e.g. 99.0) to effectively disable.
 - **Evaluator naming**: `reports/vault_metrics.json` uses class names `{1: "Buy", 2: "Sell"}` even for binary short targets. For `TARGET_TRIPLE_2x1_24H_SHORT`, the "Buy" slot corresponds to the positive short label.
 - **Binary probabilities**: With focal loss custom objective, LightGBM `predict()` may emit logits (not 0-1). The live trader applies sigmoid transform; use `agent/threshold_sweep_binary.py` (sigmoid-aware) for binary sweeps.
@@ -137,7 +139,10 @@ Configs are in `configs/strategies/`. Reference: `configs/strategies/config_read
 | C3_CPUS | 8 | 88 ❌ (request increase for future) |
 
 ## Immediate Next Steps
+- **Fix MACRO lookahead bug** in `alpha_factory.py` — replace `resample("1h")` with bar-level rolling windows, update both training and live pipelines
+- **Harmonize NaN fill handling** between training and live pipelines
+- **Retrain EXP-032/EXP-033** on fixed set_08 data after MACRO fix
+- **Rebuild and backtest ensemble3** with retrained models to verify no performance regression
 - Complete Optuna smoke test on GCP VM and verify result download to local
-- Complete EXP-025/026 retrain to regenerate OOS predictions → backtest ensemble2_alt for comparison with ensemble3
 - Run remaining bake-off metrics (f1, f0.5, sharpe) on winning dataset (see `docs/EXPLORATION_BACKLOG.md`)
 - Address `trailing_atr_mult = 0.0` bug (should disable trailing stop, currently triggers immediately)
