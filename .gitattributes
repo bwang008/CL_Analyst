@@ -1,0 +1,5 @@
+# Union merge for agent log files — prevents merge conflicts when
+# multiple agents append to these files from separate branches.
+# Git will stack both additions instead of raising a conflict.
+AGENT_LOG.md merge=union
+HANDOFF.md merge=union

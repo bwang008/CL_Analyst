@@ -2,6 +2,74 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
+## 2026-03-21 — E2E Alpha Factory Pipeline
+
+### Goal
+Upgrade the GCP Optuna pipeline from a simple hyperparameter search into a full End-to-End Alpha Factory that automatically trains final models, runs backtests, creates registry bundles, and packages artifacts — all on the VM.
+
+### Changes
+
+**`agent/optuna_lgbm_search_v2.py`** — Search space upgrades:
+- Hardcoded `num_threads=8` (was dynamic `cpu_count // n_jobs`), paired with `n_jobs=12` (12×8 = 96 cores)
+- Wider ranges: `num_leaves` 15→90, `max_depth` 4→10, `learning_rate` 0.005→0.1, `n_estimators` 500→3000, `reg_alpha/lambda` 0.01→10.0, `feature_fraction` 0.3→1.0
+- New search dimensions: `boosting_type` {gbdt, goss}, `path_smooth` [0.0–10.0]
+- New metric: `average_precision` (PR-AUC via `sklearn.metrics.average_precision_score`)
+- GOSS guard: `bagging_fraction`/`bagging_freq` only suggested when `boosting_type=gbdt`
+- **NOT added**: `scale_pos_weight` (conflicts with focal loss gradient math), `dart` boosting (5-10× slower)
+
+**`gcp/vm_e2e_pipeline.py`** — **[NEW]** Self-contained E2E orchestrator (~400 lines):
+1. Extracts `study.best_params` from Optuna `.db` files
+2. Trains final LightGBM models with focal loss on train split
+3. Generates OOS predictions on vault data
+4. Runs `BacktestEngine` with `ensemble4.json` (TP=2.5, SL=1.5, consecutive_signal=2)
+5. Creates registry-compatible bundles (same format as EXP-033)
+6. Zips all artifacts → uploads to GCS → optionally shuts down VM
+
+**`gcp/vm_run_optuna.sh`** — Rewritten with `--e2e` and `--shutdown` flags. Chains `vm_e2e_pipeline.py` after Optuna. Backward compatible without flags.
+
+**`gcp/gcp_deploy_run.ps1`** — Updated defaults:
+- `NJobs=12`, `NTrials=200`, `StrategyConfig=ensemble4.json`
+- New flags: `-E2E`, `-Shutdown`
+- Uploads 14 files (was 8): added `vm_e2e_pipeline.py`, `execution_models.py`, strategies dir, `ensemble4.json`
+
+**`configs/strategies/ensemble4.json`** — **[NEW]** Copy of ensemble3_5 with conservative ATR mults (TP=2.5, SL=1.5), used for E2E backtest evaluation.
+
+### Production Config
+- **Dataset**: `set_10` (`cl-5m_bk_set_10.parquet`, uploaded to GCS at `gs://cltrainer-optuna-results/data/`)
+- **Metrics**: logloss, f0.5, average_precision (dropped f1)
+- **Workers**: 12 Optuna workers × 8 LGB threads = 96 cores (100% utilization)
+- **Trials**: 200 per study
+- **Backtest config**: `ensemble4.json` (TP=2.5, SL=1.5, consecutive_signal_threshold=2)
+
+### GCS Data Staging
+- Dataset uploaded to `gs://cltrainer-optuna-results/data/cl-5m_bk_set_10.parquet` (1.3 GB)
+- `vm_production_run.sh` auto-downloads from GCS on startup if not already on disk (~30s within GCP vs 16 min SCP from local)
+- Any VM in the `cltrainer` project can access the same dataset — no per-VM SCP upload needed
+- Cost: ~$0.03/month for 1.3 GB in GCS
+
+### Preemption Recovery
+- SPOT VM was preempted during first production run at 83/200 trials (LONG logloss)
+- Fixed `vm_production_run.sh` with smart resume: counts existing completed trials in `.db`, computes remaining, skips completed searches
+- Intermediate `.db` files are uploaded to GCS after each search completion
+- tmux sessions do NOT survive preemption — script must be relaunched after VM restart
+
+### Bugs Fixed During Testing
+- **Study name mismatch (critical)**: E2E pipeline couldn't find `.db` files — added `--study-prefix` passthrough + directory scan fallback
+- **Shutdown gap**: VM stayed running if E2E crashed with `--shutdown` — added fallback shutdown in bash
+- **`set -e` + PIPESTATUS**: Script exited before capturing exit code — switched to `|| true` pattern
+- **NaN target crash**: Vault data had NaN targets — added `dropna()` + `fillna(-1)` safety
+- **Optuna resume**: Was running 200 NEW trials on restart instead of resuming — fixed with existing trial count check
+
+### Files Changed
+- `agent/optuna_lgbm_search_v2.py` — search space + metrics + threading
+- `gcp/vm_e2e_pipeline.py` — **[NEW]** E2E orchestrator
+- `gcp/vm_run_optuna.sh` — rewritten with E2E chaining
+- `gcp/vm_production_run.sh` — **[NEW]** preemption-safe 6-search wrapper with GCS data staging
+- `gcp/gcp_deploy_run.ps1` — E2E mode + new file uploads
+- `configs/strategies/ensemble4.json` — **[NEW]** backtest config
+- `HANDOFF.md` — updated GCP section
+- `docs/GCP_OPTUNA_GUIDE.md` — updated with E2E workflow
+
 ## 2026-03-20 — Train-Serve Feature Skew Investigation
 
 ### Goal
