@@ -12,7 +12,7 @@
 
 param(
     [string]$VmName = "optuna-runner",
-    [string]$MachineType = "c2d-highcpu-56",
+    [string]$MachineType = "n2-highcpu-96",
     [string]$Zone = "us-central1-a",
     [int]$DiskSizeGB = 50,
     [string]$Project = "cltrainer"
