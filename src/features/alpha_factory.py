@@ -283,7 +283,7 @@ class AlphaFactory:
 
     def add_liquidity_cluster(self, window: int = 24) -> pd.DataFrame:
         """Liquidity proxies from OHLCV data."""
-        dollar_vol = (self.close * self.volume).replace(0, np.nan)
+        dollar_vol = (self.close * self.volume).clip(lower=1e-8)
         suffix = f"_{window}"
         self.df[f"LIQ_AMIHUD{suffix}"] = (
             (self.df["log_ret"].abs() / dollar_vol).rolling(window).mean() * 1e6
@@ -323,7 +323,7 @@ class AlphaFactory:
         if "STRUC_BODY_RATIO" in self.df.columns:
             return self.df
 
-        candle_range = (self.high - self.low).replace(0, np.nan)
+        candle_range = (self.high - self.low).clip(lower=1e-8)
         body = (self.close - self.open).abs()
         
         self.df["STRUC_BODY_RATIO"] = body / candle_range
@@ -340,7 +340,7 @@ class AlphaFactory:
         suffix = f"_{window}"
         roll_max = self.close.rolling(window).max()
         roll_min = self.close.rolling(window).min()
-        range_span = (roll_max - roll_min).replace(0, np.nan)
+        range_span = (roll_max - roll_min).clip(lower=1e-8)
         self.df[f"TREND_DONCHIAN_POS{suffix}"] = (self.close - roll_min) / range_span
 
         prices = self.close.to_numpy(dtype=np.float64)
@@ -370,18 +370,18 @@ class AlphaFactory:
                 self.df[f"VOLFLOW_OBV_SLOPE{suffix}"] - price_slope_series
             )
 
-        vol_sum = self.volume.rolling(window).sum()
-        vwap = (self.close * self.volume).rolling(window).sum() / vol_sum.replace(0, np.nan)
+        vol_sum = self.volume.rolling(window).sum().clip(lower=1e-8)
+        vwap = (self.close * self.volume).rolling(window).sum() / vol_sum
         self.df[f"VOLFLOW_VWAP_DIST{suffix}"] = (self.close - vwap) / vwap
 
         # Chaikin Money Flow (A5): volume-weighted close position
         clv = ((self.close - self.low) - (self.high - self.close)) / (
             self.high - self.low
-        ).replace(0, np.nan)
+        ).clip(lower=1e-8)
         mf_volume = clv * self.volume
         self.df[f"VOLFLOW_CMF{suffix}"] = (
             mf_volume.rolling(window).sum()
-            / self.volume.rolling(window).sum().replace(0, np.nan)
+            / self.volume.rolling(window).sum().clip(lower=1e-8)
         )
 
         return self.df
@@ -487,7 +487,7 @@ class AlphaFactory:
 
         roll_low = self.low.rolling(window).min()
         roll_high = self.high.rolling(window).max()
-        range_span = (roll_high - roll_low).replace(0, np.nan)
+        range_span = (roll_high - roll_low).clip(lower=1e-8)
 
         # %K: raw stochastic (Close relative to High-Low range)
         stoch_k = (self.close - roll_low) / range_span

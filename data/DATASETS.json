@@ -127,6 +127,22 @@
         "TARGET_TRIPLE_3x1_24H_LONG",
         "TARGET_TRIPLE_3x1_24H_SHORT"
       ]
+    },
+    "set_10": {
+      "name": "Causally Safe Dataset",
+      "summary": "Identical features to set_09 (fixed MACRO rolling) but with causally-safe cleanup: bfill() removed (was a lookahead bias), warmup increased from 10,500 to 26,000 rows to cover MACRO_3M (25,920 bars) and VOL_VOLVOL_10080 (20,160 bars). Forward-fill only.",
+      "windows": [288, 864, 2016, 4032, 10080],
+      "macro_windows": {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160},
+      "change_from_set_09": "Cleanup method only — bfill removed, warmup 10500→26000",
+      "new_features": [],
+      "targets": [
+        "TARGET_TRIPLE_2x1_12H_LONG",
+        "TARGET_TRIPLE_2x1_12H_SHORT",
+        "TARGET_TRIPLE_2x1_24H_LONG",
+        "TARGET_TRIPLE_2x1_24H_SHORT",
+        "TARGET_TRIPLE_3x1_24H_LONG",
+        "TARGET_TRIPLE_3x1_24H_SHORT"
+      ]
     }
   }
 }

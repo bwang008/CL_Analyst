@@ -41,6 +41,7 @@ DATASET_VERSIONS = {
     'set_07': 'Extended features (set_05 + new clusters + expanded macro + 1D window)',
     'set_08': 'Exhaustion features (set_07 + cumulative return, ATR-normalised exhaustion, distance from high)',
     'set_09': 'MACRO fix (set_08 features with causally-safe bar-level MACRO rolling — no hourly resample lookahead)',
+    'set_10': 'Causal cleanup (set_09 + removed bfill lookahead, 26K warmup — 100% causally safe)',
 }
 
 
@@ -594,29 +595,39 @@ class DataProcessor:
             df = df.drop(columns=cols_existing)
             print(f"  - Dropped raw columns: {cols_existing}")
         
-        # Drop initial warmup rows to avoid rolling window NaNs
-        if warmup_rows and len(df) > warmup_rows:
-            df = df.iloc[warmup_rows:]
-            print(f"  - Dropped first {warmup_rows} warmup rows")
+        # --- Causally-safe warmup & NaN handling ---
+        # Drop the maximum warmup period required by our longest features:
+        #   MACRO_3M:       840h × 12 = 10,080 bars
+        #   VOL_VOLVOL_10080: 2 × 10,080 = 20,160 bars
+        #   Safety margin for gap handling: 26,000 bars
+        MAX_WARMUP_BARS = 26_000
+        effective_warmup = max(warmup_rows, MAX_WARMUP_BARS)
+        if len(df) > effective_warmup:
+            df = df.iloc[effective_warmup:].copy()
+            print(f"  - Dropped first {effective_warmup} warmup rows")
 
-        # Fill small gaps for non-target columns, then drop any remaining NaNs
+        # Forward fill ONLY — never backward fill.
+        # bfill() is a lookahead bias: it copies future values into past rows.
         target_cols = [c for c in df.columns if c.startswith('TARGET_')]
         non_target_cols = [c for c in df.columns if c not in target_cols]
-        df[non_target_cols] = df[non_target_cols].ffill().bfill()
+        df[non_target_cols] = df[non_target_cols].ffill()
+
+        # Drop any rows that still contain NaN in non-target columns.
+        # If NaNs survived the warmup drop + forward fill, the data is
+        # corrupt (e.g., features that are entirely NaN for some reason).
         rows_before_dropna = len(df)
         df = df.dropna(subset=non_target_cols)
         rows_after_dropna = len(df)
         dropped_after_fill = rows_before_dropna - rows_after_dropna
-        if rows_before_dropna > 0:
-            dropped_pct = dropped_after_fill / rows_before_dropna
-            if dropped_pct > 0.01:
-                print(
-                    f"  WARNING: Dropped {dropped_after_fill} rows after fill "
-                    f"({dropped_pct:.2%} of remaining data)"
-                )
-        
+        if dropped_after_fill > 0:
+            print(
+                f"  WARNING: Dropped {dropped_after_fill} corrupted rows "
+                f"that contained NaN after ffill "
+                f"({dropped_after_fill / rows_before_dropna:.2%} of remaining data)"
+            )
+
         rows_after = len(df)
-        print(f"  - Dropped {rows_before - rows_after} rows with NaN values")
+        print(f"  - Dropped {rows_before - rows_after} total rows (warmup + NaN)")
         print(f"  - Remaining rows: {rows_after}")
         
         # Convert target columns to nullable integers (preserve NaNs where needed)
@@ -725,6 +736,11 @@ class DataProcessor:
             # set_09 uses the same pipeline as set_08 — the difference is
             # in AlphaFactory.add_macro_context() which now uses bar-level
             # rolling instead of hourly resample (no more lookahead bias).
+            return self.process_set_08()
+        elif self.dataset_version == "set_10":
+            # set_10 = set_09 features + causally-safe cleanup:
+            # - No bfill (removed lookahead bias)
+            # - 26,000 warmup rows (covers MACRO_3M + VOL_VOLVOL_10080)
             return self.process_set_08()
         else:
             raise ValueError(f"Unknown dataset version: {self.dataset_version}. "
