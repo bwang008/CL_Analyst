@@ -69,6 +69,35 @@ Upgrade the GCP Optuna pipeline from a simple hyperparameter search into a full 
 - `configs/strategies/ensemble4.json` — **[NEW]** backtest config
 - `HANDOFF.md` — updated GCP section
 - `docs/GCP_OPTUNA_GUIDE.md` — updated with E2E workflow
+## 2026-03-21 — HourSet_01: 1-Hour Macro Swing-Trading Dataset
+
+### Goal
+Build a completely independent macro swing-trading dataset on 1-hour bars resampled from the raw 5-min data.
+
+### Changes
+- **`alpha_factory.py`**: Added `bars_per_hour` parameter to `AlphaFactory.__init__()` (default=12 for 5-min, set to 1 for 1H). Updated `add_macro_context()` to use `self.bars_per_hour` instead of hardcoded 12.
+- **`data_processor.py`**: Added `resample_to_hourly()` static method (OHLCV aggregation), `process_hourset_01()` pipeline, `max_warmup_bars` parameter in `cleanup()`, and HourSet_01 routing.
+- **`DATASETS.json`**: Added HourSet_01 entry.
+
+### Pipeline
+1. Load 1,218,395 5-min bars → resample to **103,461** 1H bars
+2. AlphaFactory(bars_per_hour=1) with windows [24, 72, 168, 336, 840] hours
+3. Macro windows: 1W, 2W, 1M, 3M, 6M
+4. Triple-barrier targets: 72H and 120H horizons × 1.5x, 2.0x, 2.5x ATR
+5. Cleanup: 2,200 bar warmup (1H equivalent of 26K 5-min)
+
+### Result
+| Metric | Value |
+|--------|-------|
+| Rows | **101,261** |
+| Columns | 176 |
+| Feature NaN | **0** |
+| MACRO NaN | **0** (all 10 columns) |
+| Targets | 20 (6 horizons × 3 + 2 return) |
+| Date range | 2009-03-31 → 2026-02-15 |
+| Build time | **37 seconds** |
+| Output | `cl-5m_bk_HourSet_01.parquet` |
+
 ## 2026-03-21 — Train-Serve Skew Fixes & Causally Safe Dataset (set_09, set_10)
 
 ### Goal
