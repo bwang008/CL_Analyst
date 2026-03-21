@@ -143,6 +143,21 @@
         "TARGET_TRIPLE_3x1_24H_LONG",
         "TARGET_TRIPLE_3x1_24H_SHORT"
       ]
+    },
+    "HourSet_01": {
+      "name": "1-Hour Macro Swing-Trading Dataset",
+      "summary": "5-min bars resampled to 1H. Swing-trading targets at 72H and 120H horizons with 1.5x, 2.0x, 2.5x ATR multipliers. AlphaFactory runs with bars_per_hour=1. Feature windows: 24H, 72H, 168H, 336H, 840H. Macro windows: 1W, 2W, 1M, 3M, 6M.",
+      "bar_frequency": "1H",
+      "windows": [24, 72, 168, 336, 840],
+      "macro_windows": {"1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320},
+      "targets": [
+        "TARGET_TRIPLE_1p5x1_72H_LONG", "TARGET_TRIPLE_1p5x1_72H_SHORT",
+        "TARGET_TRIPLE_2p0x1_72H_LONG", "TARGET_TRIPLE_2p0x1_72H_SHORT",
+        "TARGET_TRIPLE_2p5x1_72H_LONG", "TARGET_TRIPLE_2p5x1_72H_SHORT",
+        "TARGET_TRIPLE_1p5x1_120H_LONG", "TARGET_TRIPLE_1p5x1_120H_SHORT",
+        "TARGET_TRIPLE_2p0x1_120H_LONG", "TARGET_TRIPLE_2p0x1_120H_SHORT",
+        "TARGET_TRIPLE_2p5x1_120H_LONG", "TARGET_TRIPLE_2p5x1_120H_SHORT"
+      ]
     }
   }
 }

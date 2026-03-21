@@ -42,6 +42,7 @@ DATASET_VERSIONS = {
     'set_08': 'Exhaustion features (set_07 + cumulative return, ATR-normalised exhaustion, distance from high)',
     'set_09': 'MACRO fix (set_08 features with causally-safe bar-level MACRO rolling — no hourly resample lookahead)',
     'set_10': 'Causal cleanup (set_09 + removed bfill lookahead, 26K warmup — 100% causally safe)',
+    'HourSet_01': '1-Hour bar macro swing-trading dataset: 5-min resampled to 1H, 72H/120H triple-barrier targets',
 }
 
 
@@ -539,6 +540,7 @@ class DataProcessor:
         drop_raw_returns: bool = True,
         warmup_rows: int = 10500,
         keep_ohlcv: Optional[bool] = None,
+        max_warmup_bars: int = 26_000,
     ) -> pd.DataFrame:
         """
         Clean up the DataFrame by removing raw columns and NaN rows.
@@ -561,6 +563,9 @@ class DataProcessor:
                              These are "noise" for 48-hour predictions but were
                              needed to calculate regime features.
             keep_ohlcv: If True, keep Open/High/Low/Close/Volume and add DateTime column.
+            max_warmup_bars: Maximum warmup rows for the bar frequency.
+                            Default 26,000 for 5-min bars. Set lower for
+                            coarser timeframes (e.g. 2,200 for 1H bars).
             
         Returns:
             pd.DataFrame: Cleaned DataFrame ready for training
@@ -596,12 +601,10 @@ class DataProcessor:
             print(f"  - Dropped raw columns: {cols_existing}")
         
         # --- Causally-safe warmup & NaN handling ---
-        # Drop the maximum warmup period required by our longest features:
-        #   MACRO_3M:       840h × 12 = 10,080 bars
-        #   VOL_VOLVOL_10080: 2 × 10,080 = 20,160 bars
-        #   Safety margin for gap handling: 26,000 bars
-        MAX_WARMUP_BARS = 26_000
-        effective_warmup = max(warmup_rows, MAX_WARMUP_BARS)
+        # Drop the maximum warmup period required by our longest features.
+        # For 5-min bars: MACRO_3M=10,080 + VOL_VOLVOL=20,160 → 26,000.
+        # For 1H bars: longest window ~4,320 → 2,200 warmup is sufficient.
+        effective_warmup = max(warmup_rows, max_warmup_bars)
         if len(df) > effective_warmup:
             df = df.iloc[effective_warmup:].copy()
             print(f"  - Dropped first {effective_warmup} warmup rows")
@@ -742,6 +745,8 @@ class DataProcessor:
             # - No bfill (removed lookahead bias)
             # - 26,000 warmup rows (covers MACRO_3M + VOL_VOLVOL_10080)
             return self.process_set_08()
+        elif self.dataset_version == "HourSet_01":
+            return self.process_hourset_01()
         else:
             raise ValueError(f"Unknown dataset version: {self.dataset_version}. "
                            f"Available: {list(DATASET_VERSIONS.keys())}")
@@ -1412,6 +1417,156 @@ class DataProcessor:
         # Step 8: Save
         saved_path = self.save(df)
         print(f"  [100%] Saved output at {datetime.now().isoformat(timespec='seconds')}")
+
+        print("=" * 60)
+        print("Processing Complete!")
+        print(f"Output: {saved_path}")
+        print(f"Shape: {df.shape}")
+        print(f"Columns: {list(df.columns)}")
+        duration = datetime.now() - start_time
+        print(f"Wall time: {str(duration).split('.')[0]}")
+        print("=" * 60)
+
+        self.df = df
+        return df
+
+    # ------------------------------------------------------------------
+    # Hourly resampling
+    # ------------------------------------------------------------------
+    @staticmethod
+    def resample_to_hourly(df: pd.DataFrame) -> pd.DataFrame:
+        """Resample 5-minute OHLCV bars to 1-hour bars.
+
+        Aggregation rules:
+            Open  → first
+            High  → max
+            Low   → min
+            Close → last
+            Volume → sum
+
+        Args:
+            df: DataFrame with DatetimeIndex and OHLCV columns.
+
+        Returns:
+            DataFrame with 1-hour bars.
+        """
+        agg = {
+            "Open": "first",
+            "High": "max",
+            "Low": "min",
+            "Close": "last",
+            "Volume": "sum",
+        }
+        df_h = df.resample("1h").agg(agg).dropna(subset=["Close"])
+        print(f"  Resampled 5-min → 1H: {len(df)} → {len(df_h)} bars")
+        return df_h
+
+    # ------------------------------------------------------------------
+    # HourSet_01: 1-Hour macro swing-trading dataset
+    # ------------------------------------------------------------------
+    def process_hourset_01(self) -> pd.DataFrame:
+        """1-Hour swing-trading dataset.
+
+        Pipeline:
+        1. Load raw 5-min CSV → resample to 1H bars
+        2. Time features (cyclical hour + day-of-week)
+        3. AlphaFactory with bars_per_hour=1
+           - Feature windows: 24, 72, 168, 336, 840 bars (=hours)
+           - Macro windows: 1W, 2W, 1M, 3M, 6M (hours)
+        4. Triple-barrier targets for swing trading:
+           - 72H and 120H horizons
+           - 1.5x, 2.0x, 2.5x ATR multipliers
+        5. Normalize, cleanup (26K 5-min ≈ 2,200 1H bars warmup)
+        """
+        start_time = datetime.now()
+        print("=" * 60)
+        print("Starting Data Processing Pipeline - HOURSET_01")
+        print("  1-Hour bars, swing-trading targets (72H/120H)")
+        print(f"Started at: {start_time.isoformat(timespec='seconds')}")
+        print("=" * 60)
+
+        # Step 1: Load 5-min data and resample to 1H
+        df = self.load_data()
+        print(f"  [10%] Loaded {len(df)} 5-min rows")
+        df = self.resample_to_hourly(df)
+        print(f"  [15%] Resampled to {len(df)} hourly bars at "
+              f"{datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 2: Time features
+        df = self.add_time_features(df, include_day_of_week=True)
+        print(f"  [20%] Time features added")
+
+        # Step 3: AlphaFactory — bars_per_hour=1 for 1H data
+        # Windows in hourly bars (same real-time spans as set_10 windows):
+        #   24H (1 day), 72H (3 days), 168H (1 week),
+        #   336H (2 weeks), 840H (35 days ≈ 1 month)
+        windows = [24, 72, 168, 336, 840]
+        macro_windows = {
+            "1W": 168, "2W": 336, "1M": 840,
+            "3M": 2160, "6M": 4320,
+        }
+        df = AlphaFactory(df, bars_per_hour=1).add_all_features(
+            windows=windows,
+            include_momentum=True,
+            include_macro=True,
+            include_extended=True,
+            macro_windows=macro_windows,
+            log_progress=True,
+        )
+        print(f"  [60%] AlphaFactory features added at "
+              f"{datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 4: RAW columns for evaluation (120H forward window)
+        raw_horizon = 120  # 120 hours = 5 days
+        future_high = df["High"].iloc[::-1].rolling(
+            window=raw_horizon, min_periods=1
+        ).max().iloc[::-1].shift(-1)
+        future_low = df["Low"].iloc[::-1].rolling(
+            window=raw_horizon, min_periods=1
+        ).min().iloc[::-1].shift(-1)
+        df["RAW_Close"] = df["Close"].copy()
+        df["RAW_Future_High"] = future_high
+        df["RAW_Future_Low"] = future_low
+        print("  - Added RAW_Close, RAW_Future_High, RAW_Future_Low")
+
+        # Step 5: Swing-trading triple-barrier targets
+        # 72H horizon (3 days) — 1.5x, 2.0x, 2.5x ATR
+        for tp_mult in [1.5, 2.0, 2.5]:
+            tp_label = str(tp_mult).replace(".", "p")
+            df = self.add_triple_barrier_target(
+                df, prefix=f"TARGET_TRIPLE_{tp_label}x1_72H",
+                tp_atr_mult=tp_mult, sl_atr_mult=1.0,
+                max_horizon=72, atr_period=14,
+            )
+        # 120H horizon (5 days) — 1.5x, 2.0x, 2.5x ATR
+        for tp_mult in [1.5, 2.0, 2.5]:
+            tp_label = str(tp_mult).replace(".", "p")
+            df = self.add_triple_barrier_target(
+                df, prefix=f"TARGET_TRIPLE_{tp_label}x1_120H",
+                tp_atr_mult=tp_mult, sl_atr_mult=1.0,
+                max_horizon=120, atr_period=14,
+            )
+        # Return targets at 72H and 120H
+        df = self.add_return_target(df, horizons=[72, 120])
+        print(f"  [80%] All targets created at "
+              f"{datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 6: Normalize features
+        df = self.normalize_features(df)
+
+        # Step 7: Cleanup — 26K 5-min bars ÷ 12 ≈ 2,167 hourly bars warmup
+        # Use 2,200 as the warmup for 1H data
+        df = self.cleanup(
+            df, drop_raw_returns=True,
+            warmup_rows=2200,
+            max_warmup_bars=2200,
+            keep_ohlcv=self.keep_ohlcv,
+        )
+
+        # Step 8: Save
+        saved_path = self.save(df)
+        print(f"  [100%] Saved output at "
+              f"{datetime.now().isoformat(timespec='seconds')}")
 
         print("=" * 60)
         print("Processing Complete!")

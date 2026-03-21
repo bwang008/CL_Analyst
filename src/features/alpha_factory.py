@@ -160,13 +160,14 @@ class AlphaFactory:
 
     REQUIRED_COLUMNS = {"Open", "High", "Low", "Close", "Volume"}
 
-    def __init__(self, df: pd.DataFrame):
+    def __init__(self, df: pd.DataFrame, bars_per_hour: int = 12):
         missing = self.REQUIRED_COLUMNS - set(df.columns)
         if missing:
             missing_list = ", ".join(sorted(missing))
             raise ValueError(f"Missing required columns: {missing_list}")
 
         self.df = df.copy()
+        self.bars_per_hour = bars_per_hour
         self.open = self.df["Open"]
         self.high = self.df["High"]
         self.low = self.df["Low"]
@@ -389,8 +390,9 @@ class AlphaFactory:
     def add_macro_context(self, macro_windows: dict[str, int] | None = None) -> pd.DataFrame:
         """Macro context features via causally-safe bar-level rolling windows.
 
-        Each macro window is specified in hours and converted to 5-min bars
-        (hours × 12). Donchian channel position and width are computed
+        Each macro window is specified in hours and converted to bars
+        using ``self.bars_per_hour`` (12 for 5-min data, 1 for 1H data).
+        Donchian channel position and width are computed
         directly on the bar-level High/Low/Close — no resample, no
         lookahead.
 
@@ -403,7 +405,7 @@ class AlphaFactory:
             macro_windows = {"1M": 840, "3M": 2160}
 
         for label, hours in macro_windows.items():
-            bars = int(hours * 12)  # Convert hours to 5-min bars
+            bars = int(hours * self.bars_per_hour)
 
             # ffill raw data to prevent NaN propagation from holiday gaps,
             # then roll with min_periods=1 so the window warms up from row 1.
