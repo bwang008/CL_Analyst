@@ -40,6 +40,7 @@ DATASET_VERSIONS = {
     'set_06': 'Ultimate dataset (set_05 features + targets)',
     'set_07': 'Extended features (set_05 + new clusters + expanded macro + 1D window)',
     'set_08': 'Exhaustion features (set_07 + cumulative return, ATR-normalised exhaustion, distance from high)',
+    'set_09': 'MACRO fix (set_08 features with causally-safe bar-level MACRO rolling — no hourly resample lookahead)',
 }
 
 
@@ -719,6 +720,11 @@ class DataProcessor:
         elif self.dataset_version == "set_07":
             return self.process_set_07()
         elif self.dataset_version == "set_08":
+            return self.process_set_08()
+        elif self.dataset_version == "set_09":
+            # set_09 uses the same pipeline as set_08 — the difference is
+            # in AlphaFactory.add_macro_context() which now uses bar-level
+            # rolling instead of hourly resample (no more lookahead bias).
             return self.process_set_08()
         else:
             raise ValueError(f"Unknown dataset version: {self.dataset_version}. "

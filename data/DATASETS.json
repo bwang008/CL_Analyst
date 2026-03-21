@@ -111,6 +111,22 @@
         "TARGET_TRIPLE_3x1_24H_LONG",
         "TARGET_TRIPLE_3x1_24H_SHORT"
       ]
+    },
+    "set_09": {
+      "name": "MACRO Lookahead Fix",
+      "summary": "Identical to set_08 but with fixed MACRO features: replaced resample('1h') lookahead with causally-safe bar-level rolling windows. MACRO_POS_* and MACRO_WIDTH_* are now computed directly on 5-min bars using rolling(hours × 12). No hourly resample, no forward-fill, no lookahead bias.",
+      "windows": [288, 864, 2016, 4032, 10080],
+      "macro_windows": {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160},
+      "change_from_set_08": "MACRO feature computation only — all other features identical",
+      "new_features": [],
+      "targets": [
+        "TARGET_TRIPLE_2x1_12H_LONG",
+        "TARGET_TRIPLE_2x1_12H_SHORT",
+        "TARGET_TRIPLE_2x1_24H_LONG",
+        "TARGET_TRIPLE_2x1_24H_SHORT",
+        "TARGET_TRIPLE_3x1_24H_LONG",
+        "TARGET_TRIPLE_3x1_24H_SHORT"
+      ]
     }
   }
 }

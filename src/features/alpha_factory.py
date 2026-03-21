@@ -403,10 +403,18 @@ class AlphaFactory:
             macro_windows = {"1M": 840, "3M": 2160}
 
         for label, hours in macro_windows.items():
-            bars = hours * 12  # Convert hours to 5-min bars
-            roll_max = self.high.rolling(bars).max()
-            roll_min = self.low.rolling(bars).min()
-            range_span = (roll_max - roll_min).replace(0, np.nan)
+            bars = int(hours * 12)  # Convert hours to 5-min bars
+
+            # ffill raw data to prevent NaN propagation from holiday gaps,
+            # then roll with min_periods=1 so the window warms up from row 1.
+            roll_max = self.df["High"].ffill().rolling(window=bars, min_periods=1).max()
+            roll_min = self.df["Low"].ffill().rolling(window=bars, min_periods=1).min()
+
+            range_span = roll_max - roll_min
+            # Bulletproof protection against floating-point 0s and division
+            # by zero.  .replace(0, x) can miss float zeros; .clip() is safe.
+            range_span = range_span.clip(lower=1e-8)
+
             self.df[f"MACRO_WIDTH_{label}"] = range_span / self.close
             self.df[f"MACRO_POS_{label}"] = (self.close - roll_min) / range_span
 
