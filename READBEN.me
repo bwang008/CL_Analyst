@@ -434,3 +434,16 @@ This project runs on Windows with PowerShell. Key differences from bash:
 
 # Generate data for set_07
 conda run -n trader --no-capture-output python -c "from main import get_processed_cl_df; df = get_processed_cl_df(input_path=r'C:\CL_Analyst_Data\data\raw\CL.csv', dataset_version='set_07', force_reprocess=True); print(f'Shape: {df.shape}'); print(f'Columns: {list(df.columns)}')"
+
+
+####### gcp ######
+
+#Run GPC to train
+
+.\gcp\gcp_deploy_run.ps1 `
+    -DataPath "C:\CL_Analyst_Data\data\processed\cl-5m_bk_set_09.parquet" `
+    -Target "TARGET_TRIPLE_2x1_24H_LONG" `
+    -MlMetric logloss -E2E
+
+#Check instances 
+gcloud compute instances list --format=json(name,zone,machineType,status,scheduling.provisioningModel)

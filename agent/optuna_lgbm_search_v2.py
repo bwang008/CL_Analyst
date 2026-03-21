@@ -1,13 +1,15 @@
 """
 Optuna LightGBM Hyperparameter Search v2 — Walk-Forward Bake-Off.
 
-Upgrades over v1:
-- Supports four ML-metric modes via --ml-metric for bake-off comparison:
-    f1      — average Buy F1 across WF folds (v1 baseline)
-    f0.5    — average F-Beta(0.5) – emphasizes precision over recall
-    logloss — average binary_logloss – produces best-calibrated probabilities
-    sharpe  — average Sharpe ratio from BacktestEngine on each fold's OOS
+E2E Alpha Factory Edition:
+- Supports three ML-metric modes via --ml-metric for bake-off comparison:
+    logloss           — average binary_logloss – best-calibrated probabilities
+    f0.5              — average F-Beta(0.5) – emphasizes precision over recall
+    average_precision — PR-AUC – rewards ranking highly confident positives
+- Also supports sharpe (requires --strategy-config).
 - Binary classification with focal loss (consistent with production).
+- Hardcoded LGB num_threads=8 for optimal per-model performance.
+- Wider search ranges with boosting_type (gbdt/goss) and path_smooth.
 - Persists study to SQLite for visualization and resume.
 - Does NOT touch the final OOS holdout (2022-2026). That set is reserved
   for a single untouched evaluation after the search completes.
@@ -17,22 +19,20 @@ Architecture (Quant Desk Standard):
            WF folds. The "Brain" optimization.
   Phase 2 (strategy_optimizer.py): Threshold/strategy sweep on vault set
            or last gym slice. The "Trigger" optimization.
-  Phase 3 (experiment_runner.py): Train final model on all pre-cutoff data,
-           one-shot evaluation on untouched OOS.
+  Phase 3 (experiment_runner.py or vm_e2e_pipeline.py): Train final model on
+           all pre-cutoff data, one-shot evaluation on untouched OOS.
 
 Usage:
-    # Run the logloss bake-off (recommended)
+    # Run the logloss bake-off (recommended, 12 workers on 96-core VM)
     python agent/optuna_lgbm_search_v2.py \\
         --target TARGET_TRIPLE_2x1_24H_LONG \\
-        --data C:\\CL_Analyst_Data\\data\\processed\\CL_set_07.parquet \\
-        --ml-metric logloss --n-trials 100
+        --data /home/bwang/data/CL_set_09.parquet \\
+        --ml-metric logloss --n-trials 200 --n-jobs 12
 
-    # Full bake-off: run all four and compare
-    python agent/optuna_lgbm_search_v2.py --ml-metric f1 --n-trials 100 ...
-    python agent/optuna_lgbm_search_v2.py --ml-metric f0.5 --n-trials 100 ...
-    python agent/optuna_lgbm_search_v2.py --ml-metric logloss --n-trials 100 ...
-    python agent/optuna_lgbm_search_v2.py --ml-metric sharpe --n-trials 100 \\
-        --strategy-config configs/strategies/ensemble2_alt.json ...
+    # Full bake-off: run all three metrics and compare
+    python agent/optuna_lgbm_search_v2.py --ml-metric logloss --n-trials 200 ...
+    python agent/optuna_lgbm_search_v2.py --ml-metric f0.5 --n-trials 200 ...
+    python agent/optuna_lgbm_search_v2.py --ml-metric average_precision --n-trials 200 ...
 
 Author: CL Analyst
 """
@@ -61,6 +61,7 @@ os.chdir(PROJECT_ROOT)
 import lightgbm as lgb
 import optuna
 from sklearn.metrics import (
+    average_precision_score,
     f1_score,
     fbeta_score,
     log_loss,
@@ -219,6 +220,16 @@ def evaluate_fold_logloss(y_true: np.ndarray, probs: np.ndarray) -> float:
     return -float(log_loss(y_true, probs_clipped))
 
 
+def evaluate_fold_avg_precision(y_true: np.ndarray, probs: np.ndarray) -> float:
+    """Average Precision (PR-AUC) — rewards ranking highly confident positive signals.
+
+    Higher is better (directly compatible with Optuna maximize direction).
+    """
+    if len(np.unique(y_true)) < 2:
+        return 0.0  # Skip degenerate folds with single class
+    return float(average_precision_score(y_true, probs))
+
+
 def evaluate_fold_sharpe(
     probs: np.ndarray,
     fold_df: pd.DataFrame,
@@ -257,6 +268,7 @@ METRIC_EVALUATORS = {
     "f1": evaluate_fold_f1,
     "f0.5": evaluate_fold_fbeta05,
     "logloss": evaluate_fold_logloss,
+    "average_precision": evaluate_fold_avg_precision,
     # "sharpe" handled separately (needs extra data)
 }
 
@@ -277,6 +289,10 @@ def make_objective(
     ohlcv_gym: pd.DataFrame | None = None,
     strategy_cfg: dict | None = None,
     n_jobs: int = 1,
+    max_depth_range: tuple[int, int] = (4, 10),
+    num_leaves_range: tuple[int, int] = (15, 90),
+    max_n_estimators: int = 3000,
+    early_stopping_rounds: int = 100,
 ):
     """Create the Optuna objective closure.
 
@@ -294,23 +310,30 @@ def make_objective(
         prob_col = "prob_Signal"
 
     def objective(trial: optuna.Trial) -> float:
-        # ---- Suggest hyperparameters ----
+        # ---- Suggest hyperparameters (E2E Alpha Factory wide ranges) ----
+        boosting_type = trial.suggest_categorical("boosting_type", ["gbdt", "goss"])
+
         params = {
-            "boosting_type": "gbdt",
+            "boosting_type": boosting_type,
             "verbose": -1,
-            "num_threads": max(1, _CPU_COUNT // n_jobs),
-            "num_leaves": trial.suggest_int("num_leaves", 15, 63),
-            "min_child_samples": trial.suggest_int("min_child_samples", 50, 300),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
-            "feature_fraction": trial.suggest_float("feature_fraction", 0.4, 0.9),
-            "bagging_fraction": trial.suggest_float("bagging_fraction", 0.4, 0.9),
-            "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
-            "reg_alpha": trial.suggest_float("reg_alpha", 0.1, 10.0, log=True),
-            "reg_lambda": trial.suggest_float("reg_lambda", 0.1, 10.0, log=True),
-            "max_depth": trial.suggest_int("max_depth", 3, 8),
+            "num_threads": 8,  # Hardcoded: 12 workers × 8 threads = 96 cores
+            "num_leaves": trial.suggest_int("num_leaves", num_leaves_range[0], num_leaves_range[1]),
+            "min_child_samples": trial.suggest_int("min_child_samples", 20, 300),
+            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
+            "feature_fraction": trial.suggest_float("feature_fraction", 0.3, 1.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 0.01, 10.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 0.01, 10.0, log=True),
+            "max_depth": trial.suggest_int("max_depth", max_depth_range[0], max_depth_range[1]),
             "min_gain_to_split": trial.suggest_float("min_gain_to_split", 0.0, 2.0),
+            "path_smooth": trial.suggest_float("path_smooth", 0.0, 10.0),
         }
-        n_estimators = trial.suggest_int("n_estimators", 500, 2000, step=100)
+
+        # GOSS uses gradient-based sampling — bagging params are ignored
+        if boosting_type == "gbdt":
+            params["bagging_fraction"] = trial.suggest_float("bagging_fraction", 0.3, 1.0)
+            params["bagging_freq"] = trial.suggest_int("bagging_freq", 1, 7)
+
+        n_estimators = trial.suggest_int("n_estimators", 500, max_n_estimators, step=100)
 
         # Disable built-in metric — we use focal_eval for early stopping
         params["metric"] = "None"
@@ -349,7 +372,7 @@ def make_objective(
 
             callbacks = [
                 lgb.log_evaluation(period=0),  # silent
-                lgb.early_stopping(stopping_rounds=100, verbose=False),
+                lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=False),
             ]
 
             try:
@@ -445,6 +468,10 @@ def run_search(
     gym_fraction: float = 0.85,
     study_name: str | None = None,
     db_dir: str = "models/optuna_studies",
+    max_depth_range: tuple[int, int] = (4, 10),
+    num_leaves_range: tuple[int, int] = (15, 90),
+    max_n_estimators: int = 3000,
+    early_stopping_rounds: int = 100,
 ):
     """Run the Walk-Forward Optuna search (Phase 1: Brain Optimization).
 
@@ -484,7 +511,7 @@ def run_search(
     print(f"  Target:          {target_name}")
     print(f"  ML metric:       {ml_metric}")
     print(f"  Trials:          {n_trials}")
-    print(f"  Workers:         {n_jobs}  (LGB threads/worker: {max(1, _CPU_COUNT // n_jobs)})")
+    print(f"  Workers:         {n_jobs}  (LGB threads/worker: 8 hardcoded)")
     print(f"  Balance:         {balance_mode}")
     if train_cutoff_date:
         print(f"  Cutoff:          {train_cutoff_date} (date-based gym)")
@@ -578,6 +605,10 @@ def run_search(
         ohlcv_gym=ohlcv_gym,
         strategy_cfg=strategy_cfg,
         n_jobs=n_jobs,
+        max_depth_range=max_depth_range,
+        num_leaves_range=num_leaves_range,
+        max_n_estimators=max_n_estimators,
+        early_stopping_rounds=early_stopping_rounds,
     )
 
     # Progress callback
@@ -791,9 +822,9 @@ def main():
     )
     parser.add_argument(
         "--ml-metric",
-        choices=["f1", "f0.5", "logloss", "sharpe"],
+        choices=["f1", "f0.5", "logloss", "average_precision", "sharpe"],
         default="logloss",
-        help="Optimization metric: f1, f0.5, logloss, or sharpe (default: logloss)",
+        help="Optimization metric: logloss, f0.5, average_precision, f1, or sharpe (default: logloss)",
     )
     parser.add_argument(
         "--n-trials", type=int, default=100,
@@ -830,6 +861,24 @@ def main():
         help="Number of parallel Optuna workers (default: 1). "
              "LightGBM num_threads auto-scales to cpu_count/n_jobs.",
     )
+    parser.add_argument(
+        "--max-depth-range", type=int, nargs=2, default=[4, 10],
+        metavar=("MIN", "MAX"),
+        help="Search range for max_depth (default: 4 10)",
+    )
+    parser.add_argument(
+        "--num-leaves-range", type=int, nargs=2, default=[15, 90],
+        metavar=("MIN", "MAX"),
+        help="Search range for num_leaves (default: 15 90)",
+    )
+    parser.add_argument(
+        "--max-n-estimators", type=int, default=3000,
+        help="Maximum n_estimators for search (default: 3000)",
+    )
+    parser.add_argument(
+        "--early-stopping-rounds", type=int, default=100,
+        help="Early stopping rounds (default: 100)",
+    )
     args = parser.parse_args()
 
     run_search(
@@ -844,6 +893,10 @@ def main():
         gym_fraction=args.gym_fraction,
         study_name=args.study_name,
         db_dir=args.db_dir,
+        max_depth_range=tuple(args.max_depth_range),
+        num_leaves_range=tuple(args.num_leaves_range),
+        max_n_estimators=args.max_n_estimators,
+        early_stopping_rounds=args.early_stopping_rounds,
     )
 
 

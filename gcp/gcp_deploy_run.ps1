@@ -1,13 +1,14 @@
 <#
 .SYNOPSIS
-    Uploads code and data to the GCP VM and launches an Optuna search.
+    Uploads code and data to the GCP VM and launches the E2E Alpha Factory pipeline.
 .DESCRIPTION
-    Uploads ONLY the files needed for Optuna search (not the entire project).
+    Uploads ONLY the files needed for Optuna search + E2E pipeline (not the entire project).
     Launches the search in a detached tmux session. Safe to disconnect after.
+    With -E2E flag, automatically trains final models and runs backtests after Optuna.
 .EXAMPLE
-    .\gcp_deploy_run.ps1 -DataPath "C:\CL_Analyst_Data\data\processed\CL_set_08.parquet"
-    .\gcp_deploy_run.ps1 -DataPath "..." -NTrials 150 -NJobs 4 -StudyName "exp_wide"
-    .\gcp_deploy_run.ps1 -DataPath "..." -MlMetric sharpe -StrategyConfig ensemble3.json
+    .\gcp_deploy_run.ps1 -DataPath "C:\CL_Analyst_Data\data\processed\cl-5m_bk_set_09.parquet" -E2E
+    .\gcp_deploy_run.ps1 -DataPath "..." -NTrials 200 -NJobs 12 -E2E -Shutdown
+    .\gcp_deploy_run.ps1 -DataPath "..." -MlMetric f0.5 -StrategyConfig ensemble4.json -E2E
 #>
 
 param(
@@ -18,13 +19,15 @@ param(
     [string]$Zone = "us-central1-a",
     [string]$Target = "TARGET_TRIPLE_2x1_24H_LONG",
     [string]$MlMetric = "logloss",
-    [int]$NTrials = 100,
-    [int]$NJobs = 4,
+    [int]$NTrials = 200,
+    [int]$NJobs = 12,
     [string]$StudyName = "",
     [string]$TrainCutoffDate = "2022-01-01",
-    [string]$StrategyConfig = "",
+    [string]$StrategyConfig = "ensemble4.json",
     [string]$ProjectDir = "",
-    [switch]$SkipDataUpload
+    [switch]$SkipDataUpload,
+    [switch]$E2E,
+    [switch]$Shutdown
 )
 
 # Add gcloud to PATH if not already there
@@ -56,7 +59,8 @@ $RemoteDataPath = "${RemoteHome}/data/${DataFileName}"
 if (-not $StudyName) {
     $dataset = [System.IO.Path]::GetFileNameWithoutExtension($DataFileName)
     $dirTag = if ($Target -match "LONG$") { "long" } elseif ($Target -match "SHORT$") { "short" } else { "multi" }
-    $StudyName = "wf_v2_${dirTag}_${MlMetric}_${dataset}"
+    $prefix = if ($E2E) { "e2e" } else { "wf_v2" }
+    $StudyName = "${prefix}_${dirTag}_${MlMetric}_${dataset}"
 }
 
 Write-Host ""
@@ -71,6 +75,13 @@ Write-Host "  Trials:     $NTrials"
 Write-Host "  Workers:    $NJobs"
 Write-Host "  Study:      $StudyName"
 Write-Host "  Cutoff:     $TrainCutoffDate"
+if ($E2E) {
+    Write-Host "  E2E Mode:   YES (train + backtest after Optuna)" -ForegroundColor Magenta
+    Write-Host "  Strategy:   $StrategyConfig"
+}
+if ($Shutdown) {
+    Write-Host "  Auto-Stop:  YES (VM shuts down after completion)" -ForegroundColor Yellow
+}
 Write-Host "=====================================================" -ForegroundColor Cyan
 
 # --- [1/5] Check VM is running ---
@@ -98,9 +109,9 @@ Write-Host "`n[2/5] Uploading code (minimal file set)..."
 
 # Create directory structure on VM
 gcloud compute ssh $VmName --zone=$Zone --quiet `
-    --command="mkdir -p $RemoteProject/agent $RemoteProject/src $RemoteProject/gcp $RemoteProject/models/optuna_studies $RemoteProject/reports $RemoteHome/data" 2>$null
+    --command="mkdir -p $RemoteProject/agent $RemoteProject/src/live_execution/strategies $RemoteProject/gcp $RemoteProject/configs/strategies $RemoteProject/models/optuna_studies $RemoteProject/reports $RemoteHome/data" 2>$null
 
-# Exact files needed for Optuna search
+# Exact files needed for Optuna search + E2E pipeline
 $codeFiles = @(
     @{ Local = "agent\optuna_lgbm_search_v2.py"; Remote = "agent/" },
     @{ Local = "agent\experiment_runner.py";     Remote = "agent/" },
@@ -108,8 +119,13 @@ $codeFiles = @(
     @{ Local = "agent\__init__.py";              Remote = "agent/" },
     @{ Local = "src\util.py";                    Remote = "src/" },
     @{ Local = "src\__init__.py";                Remote = "src/" },
-    @{ Local = "experiments.json";               Remote = "" },
-    @{ Local = "gcp\vm_run_optuna.sh";           Remote = "gcp/" }
+    @{ Local = "src\live_execution\__init__.py";                   Remote = "src/live_execution/" },
+    @{ Local = "src\live_execution\strategies\__init__.py";        Remote = "src/live_execution/strategies/" },
+    @{ Local = "src\live_execution\strategies\execution_models.py"; Remote = "src/live_execution/strategies/" },
+    @{ Local = "src\live_execution\strategies\configurable_strategy.py"; Remote = "src/live_execution/strategies/" },
+    @{ Local = "src\live_execution\strategies\buy70_sized_manatee.py"; Remote = "src/live_execution/strategies/" },
+    @{ Local = "gcp\vm_run_optuna.sh";           Remote = "gcp/" },
+    @{ Local = "gcp\vm_e2e_pipeline.py";         Remote = "gcp/" }
 )
 
 foreach ($file in $codeFiles) {
@@ -121,19 +137,19 @@ foreach ($file in $codeFiles) {
     }
 }
 
-# Upload strategy config if sharpe mode
+# Upload strategy config (always for E2E mode, or if explicitly provided)
 if ($StrategyConfig) {
-    gcloud compute ssh $VmName --zone=$Zone --quiet `
-        --command="mkdir -p $RemoteProject/configs/strategies" 2>$null
     $configPath = Join-Path $ProjectDir "configs\strategies\$StrategyConfig"
     if (Test-Path $configPath) {
         gcloud compute scp "$configPath" "${VmName}:${RemoteProject}/configs/strategies/" `
             --zone=$Zone --quiet 2>$null
         Write-Host "  Uploaded strategy config: $StrategyConfig"
+    } else {
+        Write-Host "  WARNING: Strategy config not found: $configPath" -ForegroundColor Yellow
     }
 }
 
-Write-Host "  Code uploaded! (8 files)" -ForegroundColor Green
+Write-Host "  Code uploaded!" -ForegroundColor Green
 
 # --- [3/5] Upload dataset ---
 if (-not $SkipDataUpload) {
@@ -153,6 +169,12 @@ Write-Host "`n[4/5] Launching Optuna in detached tmux session..."
 $optunaArgs = "--target $Target --data $RemoteDataPath --ml-metric $MlMetric --n-trials $NTrials --n-jobs $NJobs --study-name $StudyName --train-cutoff-date $TrainCutoffDate"
 if ($StrategyConfig) {
     $optunaArgs += " --strategy-config configs/strategies/$StrategyConfig"
+}
+if ($E2E) {
+    $optunaArgs += " --e2e"
+}
+if ($Shutdown) {
+    $optunaArgs += " --shutdown"
 }
 
 $launchCmd = "tmux kill-session -t optuna 2>/dev/null; tmux new-session -d -s optuna 'bash $RemoteProject/gcp/vm_run_optuna.sh $optunaArgs'"

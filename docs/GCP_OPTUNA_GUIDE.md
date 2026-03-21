@@ -1,6 +1,6 @@
-# GCP Optuna Deployment Guide
+# GCP Optuna Deployment Guide — E2E Alpha Factory Edition
 
-> Run Optuna hyperparameter searches on GCP high-CPU VMs instead of your local machine.
+> Run Optuna hyperparameter searches + automated training + backtesting on GCP high-CPU VMs.
 
 ## Quick Reference
 
@@ -49,24 +49,23 @@ This creates the VM, installs Python + ML packages via startup script, and creat
 ### 2. Deploy & Run
 
 ```powershell
-# Long model search
+# E2E mode: Optuna search → train final models → backtest → package → GCS
 .\gcp\gcp_deploy_run.ps1 `
-    -DataPath "C:\CL_Analyst_Data\data\processed\CL_set_08.parquet" `
+    -DataPath "C:\CL_Analyst_Data\data\processed\cl-5m_bk_set_09.parquet" `
     -Target "TARGET_TRIPLE_2x1_24H_LONG" `
-    -MlMetric logloss `
-    -NTrials 100 `
-    -NJobs 4
+    -MlMetric logloss -E2E
 
-# Short model search
+# Optuna-only mode (no -E2E flag, legacy behavior)
 .\gcp\gcp_deploy_run.ps1 `
-    -DataPath "C:\CL_Analyst_Data\data\processed\CL_set_08.parquet" `
-    -Target "TARGET_TRIPLE_2x1_24H_SHORT" `
-    -MlMetric logloss `
-    -NTrials 100 `
-    -NJobs 4
+    -DataPath "C:\CL_Analyst_Data\data\processed\cl-5m_bk_set_09.parquet" `
+    -Target "TARGET_TRIPLE_2x1_24H_LONG" `
+    -MlMetric logloss
 
 # Skip data re-upload (already on VM)
-.\gcp\gcp_deploy_run.ps1 -DataPath "..." -SkipDataUpload
+.\gcp\gcp_deploy_run.ps1 -DataPath "..." -SkipDataUpload -E2E
+
+# Auto-shutdown VM after completion
+.\gcp\gcp_deploy_run.ps1 -DataPath "..." -E2E -Shutdown
 ```
 
 ### 3. Monitor (Safe to Disconnect)
@@ -94,28 +93,39 @@ gcloud compute instances describe optuna-runner --zone=us-central1-a --format="g
 
 ## How It Works
 
-### File Upload (Minimal)
-Only **8 Python files** (~130KB) are uploaded — not the entire project:
+### File Upload
+The deploy script uploads **14 Python/shell files** + strategy config + data parquet to the VM:
 - `agent/optuna_lgbm_search_v2.py` — main search script
-- `agent/experiment_runner.py` — experiment logging (not imported, kept for reference)
-- `agent/backtest_engine.py` — for sharpe mode
+- `agent/backtest_engine.py` — for backtesting in E2E mode
+- `agent/experiment_runner.py` — experiment logging
 - `agent/__init__.py`, `src/__init__.py` — package inits
 - `src/util.py` — feature/target column helpers
-- `experiments.json` — experiment log
-- `gcp/vm_run_optuna.sh` — tmux runner
+- `src/live_execution/strategies/execution_models.py` — BacktestEngine dependency
+- `src/live_execution/strategies/configurable_strategy.py` — strategy registry
+- `gcp/vm_run_optuna.sh` — tmux runner with E2E chaining
+- `gcp/vm_e2e_pipeline.py` — E2E orchestrator (train + backtest + package)
+- `configs/strategies/ensemble4.json` — backtest strategy config
 
 Plus the data parquet file (~1.3GB, takes ~16 min to upload).
 
+### E2E Pipeline Flow (when -E2E flag is used)
+```
+[Phase 1] Optuna search (200 trials, 12 workers × 8 threads)
+    ↓
+[Phase 2] vm_e2e_pipeline.py:
+    → Extract best_params from .db
+    → Train final models (focal loss, downsample, early stopping)
+    → Generate OOS predictions on vault data
+    → Run BacktestEngine (uses ensemble4.json execution params)
+    → Create registry-compatible bundles
+    → Zip → upload production_artifacts.zip to GCS
+    → Optionally shutdown VM
+```
+
 ### tmux Persistence
-The Optuna script runs inside a `tmux` session, so it survives SSH disconnections. Even if your internet drops or you close your laptop, the search continues.
+The search runs inside a `tmux` session, so it survives SSH disconnections.
 
 ### Result Safety (GCS Auto-Upload)
-When the search finishes, `vm_run_optuna.sh` automatically uploads results to GCS:
-- `.db` file (Optuna study database)
-- `.json` reports (best params, trial summary)
-- `.csv` reports
-- Log files
-
 Results persist in GCS even if the VM is deleted.
 
 ### VM Console
@@ -151,9 +161,10 @@ Use SPOT pricing for best value. The n2-highcpu-96 with `n_jobs=12` (12 workers 
 | File | Location | Purpose |
 |------|----------|---------|
 | `gcp_setup.ps1` | `gcp/` | Create VM + GCS bucket |
-| `gcp_deploy_run.ps1` | `gcp/` | Upload code/data + launch search |
+| `gcp_deploy_run.ps1` | `gcp/` | Upload code/data + launch search (with `-E2E` flag for full pipeline) |
 | `gcp_check_status.ps1` | `gcp/` | Monitor progress |
 | `gcp_teardown.ps1` | `gcp/` | Download results + delete VM |
 | `vm_startup.sh` | `gcp/` | VM boot-time package installer |
-| `vm_run_optuna.sh` | `gcp/` | tmux runner + GCS auto-upload |
+| `vm_run_optuna.sh` | `gcp/` | tmux runner + E2E chaining + GCS auto-upload |
+| `vm_e2e_pipeline.py` | `gcp/` | **[NEW]** E2E orchestrator (train + backtest + package) |
 | `requirements-gcp.txt` | `gcp/` | Minimal pip dependencies |
