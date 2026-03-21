@@ -7,11 +7,12 @@
 | Item | Value |
 |------|-------|
 | **VM Name** | `optuna-runner` |
-| **Machine Type** | `c2d-highcpu-56` (56 vCPUs, AMD EPYC Milan) |
+| **Machine Type** | `n2-highcpu-96` (96 vCPUs, Intel Cascade Lake) |
 | **Zone** | `us-central1-a` |
 | **Project** | `cltrainer` |
 | **GCS Bucket** | `gs://cltrainer-optuna-results` |
-| **Cost** | ~$1.30/hr on-demand |
+| **Cost** | ~$2.35/hr on-demand, ~$1.08/hr SPOT |
+| **Recommended Workers** | `n_jobs=12` (12 workers × 8 LGB threads = 96 cores) |
 | **Scripts** | `gcp/` directory |
 
 ## Prerequisites
@@ -122,14 +123,14 @@ See your VM at: [GCP Console → Compute Engine → VM Instances](https://consol
 
 ## Cost Guide
 
-| Machine | vCPUs | $/hr | 100-trial est. time | 100-trial est. cost |
+| Machine | vCPUs | $/hr (SPOT) | 100-trial est. time | 100-trial est. cost |
 |---------|:-----:|:----:|:-------------------:|:-------------------:|
-| e2-highcpu-8 | 8 | $0.20 | ~50 hrs | $10.00 |
-| c2d-highcpu-32 | 32 | $0.75 | ~12 hrs | $9.00 |
-| **c2d-highcpu-56** | **56** | **$1.30** | **~7 hrs** | **$9.10** |
-| c3-highcpu-88 | 88 | $3.00 | ~3 hrs | $9.00 |
+| e2-highcpu-8 | 8 | $0.06 | ~50 hrs | $3.00 |
+| c2d-highcpu-32 | 32 | $0.34 | ~12 hrs | $4.08 |
+| c2d-highcpu-56 | 56 | $0.59 | ~7 hrs | $4.13 |
+| **n2-highcpu-96** | **96** | **$1.08** | **~1.5 hrs** | **~$1.62** |
 
-Total cost is roughly the same (~$9) regardless of machine size — bigger machines finish proportionally faster.
+Use SPOT pricing for best value. The n2-highcpu-96 with `n_jobs=12` (12 workers × 8 LGB threads) is the recommended config.
 
 **Stop vs Delete:**
 - **Stop** the VM when not in use → ~$4/month for disk storage only
