@@ -53,6 +53,8 @@ Refactored `data_manager.py` to use the institutional-standard Panama Canal meth
 ### Files Changed
 - `src/live_execution/data_manager.py` — core rollover refactor + backup method
 - `tests/test_rollover.py` — replaced 5 old tests with 13 new ones
+- `scripts/diagnose_data_health.py` — **[NEW]** standalone data health diagnostic: checks cache integrity, price continuity, feature ranges (ATR_14, Volume_Log), roll metadata, cache backups, telemetry signal health, feature drift detection. Run via `/diagnose` workflow or directly with `python scripts/diagnose_data_health.py --verbose --telemetry`
+- `.agents/workflows/diagnose.md` — added data health check as step 1
 
 ## 2026-03-13 — Model Investigation, Bug Fixes & Feature Importance Tooling
 
