@@ -680,6 +680,12 @@ class DataProcessor:
         saved_path = self.output_path
         if self.output_path.endswith('.parquet'):
             try:
+                # Downcast float64 → float32 to halve memory/disk usage.
+                # LightGBM uses float32 internally anyway, so no model impact.
+                float64_cols = df.select_dtypes(include=['float64']).columns
+                if len(float64_cols) > 0:
+                    df[float64_cols] = df[float64_cols].astype(np.float32)
+                    print(f"  - Downcast {len(float64_cols)} float64 cols → float32")
                 df.to_parquet(self.output_path)
                 print(f"Saved processed data to {self.output_path}")
             except ImportError:
