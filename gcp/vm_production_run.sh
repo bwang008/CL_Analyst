@@ -29,12 +29,14 @@ DATA="/home/$(whoami)/data/${DATASET_NAME}"
 GCS_DATA="gs://cltrainer-optuna-results/data/${DATASET_NAME}"
 CUTOFF="2022-01-01"
 N_TRIALS=100
-N_JOBS=12
+N_JOBS=4
+NUM_THREADS=12
 DB_DIR="models/optuna_studies"
 BUCKET="gs://cltrainer-optuna-results"
 STRATEGY="configs/strategies/ensemble4.json"
 LOG="optuna_production_$(date +%Y%m%d_%H%M%S).log"
 SHUTDOWN=false
+AGENT_ID="${AGENT_ID:-production_bot}"
 
 # ---------- GCS Data Staging ----------
 # Pull dataset from GCS if not already on disk (fast: ~30s within GCP)
@@ -51,8 +53,23 @@ fi
 for arg in "$@"; do
     case "$arg" in
         --shutdown) SHUTDOWN=true ;;
+        --agent-id=*) AGENT_ID="${arg#*=}" ;;
     esac
 done
+
+# ---------- CPU VALIDATION ----------
+SYSTEM_CPUS=$(nproc)
+REQUIRED_CPUS=$((N_JOBS * NUM_THREADS))
+if [ "$REQUIRED_CPUS" -ne "$SYSTEM_CPUS" ]; then
+    echo "" | tee "$LOG"
+    echo "FATAL: CPU mismatch!" | tee -a "$LOG"
+    echo "  System CPUs:   $SYSTEM_CPUS" | tee -a "$LOG"
+    echo "  Required:      $REQUIRED_CPUS (N_JOBS=$N_JOBS × NUM_THREADS=$NUM_THREADS)" | tee -a "$LOG"
+    echo "  Fix: adjust N_JOBS and NUM_THREADS in this script to match the machine." | tee -a "$LOG"
+    echo "" | tee -a "$LOG"
+    gsutil cp "$LOG" "$BUCKET/logs/" 2>/dev/null || true
+    exit 1
+fi
 
 # -------------------------------------------------------------------
 # Helper: count existing trials in a study .db file
@@ -95,10 +112,14 @@ START_TIME=$(date +%s)
 echo "============================================================" | tee "$LOG"
 echo " E2E ALPHA FACTORY — PRODUCTION RUN (Preemption-Safe)" | tee -a "$LOG"
 echo "============================================================" | tee -a "$LOG"
+echo "  Timestamp:  $(date -Iseconds)" | tee -a "$LOG"
+echo "  Agent:      $AGENT_ID" | tee -a "$LOG"
+echo "  Hostname:   $(hostname)" | tee -a "$LOG"
+echo "  CPUs:       $SYSTEM_CPUS (verified: $N_JOBS workers × $NUM_THREADS threads)" | tee -a "$LOG"
 echo "  Data:       $DATA" | tee -a "$LOG"
 echo "  Cutoff:     $CUTOFF" | tee -a "$LOG"
 echo "  Trials:     $N_TRIALS per search (resumes from existing)" | tee -a "$LOG"
-echo "  Workers:    $N_JOBS (× 8 LGB threads = $((N_JOBS * 8)) cores)" | tee -a "$LOG"
+echo "  Workers:    $N_JOBS (× $NUM_THREADS LGB threads = $((N_JOBS * NUM_THREADS)) cores)" | tee -a "$LOG"
 echo "  Searches:   $TOTAL (3 metrics × 2 directions)" | tee -a "$LOG"
 echo "  Strategy:   $STRATEGY" | tee -a "$LOG"
 echo "  Shutdown:   $SHUTDOWN" | tee -a "$LOG"
@@ -130,7 +151,7 @@ for i in "${!COMBOS[@]}"; do
 
     echo "" | tee -a "$LOG"
     echo "============================================================" | tee -a "$LOG"
-    echo " SEARCH ${SEARCH_NUM}/${TOTAL}: ${DIR^^} ${METRIC}" | tee -a "$LOG"
+    echo " [$(date -Iseconds)] SEARCH ${SEARCH_NUM}/${TOTAL}: ${DIR^^} ${METRIC}" | tee -a "$LOG"
     echo " Study: $STUDY" | tee -a "$LOG"
     echo " Existing trials: ${EXISTING}/${N_TRIALS}" | tee -a "$LOG"
 
@@ -157,6 +178,7 @@ for i in "${!COMBOS[@]}"; do
         --db-dir "$DB_DIR" \
         --train-cutoff-date "$CUTOFF" \
         --max-n-estimators 2000 \
+        --num-threads $NUM_THREADS \
         2>&1 | tee -a "$LOG" || true
 
     SEARCH_EXIT=${PIPESTATUS[0]}
@@ -174,6 +196,10 @@ for i in "${!COMBOS[@]}"; do
     gsutil -m cp reports/optuna_*_${DIR}_${METRIC}.* "$BUCKET/reports/" 2>/dev/null || true
     gsutil cp "$LOG" "$BUCKET/logs/" 2>/dev/null || true
     echo "  Uploaded ${STUDY}.db to GCS" | tee -a "$LOG"
+
+    # Upload STATUS.json for monitor polling
+    echo "{\"completed\": $COMPLETED, \"failed\": $FAILED, \"total\": $TOTAL, \"current\": \"${DIR}_${METRIC}\", \"agent\": \"$AGENT_ID\", \"skipped\": $SKIPPED, \"last_update\": \"$(date -Iseconds)\"}" | \
+        gsutil cp - "$BUCKET/STATUS.json" 2>/dev/null || true
 done
 
 SEARCH_ELAPSED=$(( $(date +%s) - START_TIME ))

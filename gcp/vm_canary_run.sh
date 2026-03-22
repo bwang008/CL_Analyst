@@ -22,16 +22,18 @@ PROJECT_DIR="/home/$(whoami)/project"
 cd "$PROJECT_DIR"
 
 # Configuration — CANARY OVERRIDES
-DATA="/home/$(whoami)/data/cl-5m_bk_set_10.parquet"
+DATA="/home/$(whoami)/data/cl-5m_bk_set_08.parquet"
 CUTOFF="2022-01-01"
 N_TRIALS=20
-N_JOBS=12
+N_JOBS=4
+NUM_THREADS=12
 DB_DIR="models/optuna_studies"
 BUCKET="gs://cltrainer-optuna-results"
 CANARY_PREFIX="canary"
 STRATEGY="configs/strategies/ensemble4.json"
 LOG="canary_run_$(date +%Y%m%d_%H%M%S).log"
 SHUTDOWN=false
+AGENT_ID="${AGENT_ID:-canary_bot}"
 
 # Search space constraints (fast canary)
 MAX_DEPTH_MIN=3
@@ -40,20 +42,34 @@ NUM_LEAVES_MIN=15
 NUM_LEAVES_MAX=31
 MAX_N_ESTIMATORS=500
 EARLY_STOPPING=20
+MAX_FOLDS=5
 
 # Parse args
 for arg in "$@"; do
     case "$arg" in
         --shutdown) SHUTDOWN=true ;;
+        --agent-id=*) AGENT_ID="${arg#*=}" ;;
     esac
 done
+
+# ---------- CPU VALIDATION ----------
+SYSTEM_CPUS=$(nproc)
+REQUIRED_CPUS=$((N_JOBS * NUM_THREADS))
+if [ "$REQUIRED_CPUS" -ne "$SYSTEM_CPUS" ]; then
+    echo "" | tee "$LOG"
+    echo "FATAL: CPU mismatch!" | tee -a "$LOG"
+    echo "  System CPUs:   $SYSTEM_CPUS" | tee -a "$LOG"
+    echo "  Required:      $REQUIRED_CPUS (N_JOBS=$N_JOBS × NUM_THREADS=$NUM_THREADS)" | tee -a "$LOG"
+    echo "  Fix: adjust N_JOBS and NUM_THREADS in this script to match the machine." | tee -a "$LOG"
+    echo "" | tee -a "$LOG"
+    gsutil cp "$LOG" "$BUCKET/$CANARY_PREFIX/logs/" 2>/dev/null || true
+    exit 1
+fi
 
 # Only run logloss and f0.5 (skip average_precision)
 COMBOS=(
     "TARGET_TRIPLE_2x1_24H_LONG logloss"
-    "TARGET_TRIPLE_2x1_24H_LONG f0.5"
     "TARGET_TRIPLE_2x1_24H_SHORT logloss"
-    "TARGET_TRIPLE_2x1_24H_SHORT f0.5"
 )
 
 TOTAL=${#COMBOS[@]}
@@ -64,10 +80,14 @@ START_TIME=$(date +%s)
 echo "============================================================" | tee "$LOG"
 echo " E2E ALPHA FACTORY — CANARY (LIGHT) RUN" | tee -a "$LOG"
 echo "============================================================" | tee -a "$LOG"
+echo "  Timestamp:  $(date -Iseconds)" | tee -a "$LOG"
+echo "  Agent:      $AGENT_ID" | tee -a "$LOG"
+echo "  Hostname:   $(hostname)" | tee -a "$LOG"
+echo "  CPUs:       $SYSTEM_CPUS (verified: $N_JOBS workers × $NUM_THREADS threads)" | tee -a "$LOG"
 echo "  Data:       $DATA" | tee -a "$LOG"
 echo "  Cutoff:     $CUTOFF" | tee -a "$LOG"
 echo "  Trials:     $N_TRIALS per search (CANARY)" | tee -a "$LOG"
-echo "  Workers:    $N_JOBS (× 8 LGB threads = $((N_JOBS * 8)) cores)" | tee -a "$LOG"
+echo "  Workers:    $N_JOBS (× $NUM_THREADS LGB threads = $((N_JOBS * NUM_THREADS)) cores)" | tee -a "$LOG"
 echo "  Searches:   $TOTAL (2 metrics × 2 directions)" | tee -a "$LOG"
 echo "  Strategy:   $STRATEGY" | tee -a "$LOG"
 echo "  Shutdown:   $SHUTDOWN" | tee -a "$LOG"
@@ -101,11 +121,19 @@ for i in "${!COMBOS[@]}"; do
 
     echo "" | tee -a "$LOG"
     echo "============================================================" | tee -a "$LOG"
-    echo " SEARCH ${SEARCH_NUM}/${TOTAL}: ${DIR^^} ${METRIC} (CANARY)" | tee -a "$LOG"
+    echo " [$(date -Iseconds)] SEARCH ${SEARCH_NUM}/${TOTAL}: ${DIR^^} ${METRIC} (CANARY)" | tee -a "$LOG"
     echo " Study: $STUDY" | tee -a "$LOG"
     echo "============================================================" | tee -a "$LOG"
     echo "" | tee -a "$LOG"
 
+    # Clean up any stale journal file from previous runs to avoid resuming RUNNING trials
+    if [ -f "${DB_DIR}/${STUDY}.journal" ]; then
+        echo "  Removing stale journal: ${DB_DIR}/${STUDY}.journal" | tee -a "$LOG"
+        rm -f "${DB_DIR}/${STUDY}.journal"
+    fi
+
+    # Run search — capture exit code properly (|| true masks PIPESTATUS, so use set +e)
+    set +e
     python agent/optuna_lgbm_search_v2.py \
         --target "$TARGET" \
         --data "$DATA" \
@@ -119,9 +147,12 @@ for i in "${!COMBOS[@]}"; do
         --num-leaves-range $NUM_LEAVES_MIN $NUM_LEAVES_MAX \
         --max-n-estimators $MAX_N_ESTIMATORS \
         --early-stopping-rounds $EARLY_STOPPING \
-        2>&1 | tee -a "$LOG" || true
+        --num-threads $NUM_THREADS \
+        --max-folds $MAX_FOLDS \
+        2>&1 | tee -a "$LOG"
 
     SEARCH_EXIT=${PIPESTATUS[0]}
+    set -e
 
     if [ $SEARCH_EXIT -eq 0 ]; then
         COMPLETED=$((COMPLETED + 1))
@@ -132,9 +163,13 @@ for i in "${!COMBOS[@]}"; do
     fi
 
     # Upload intermediate results to canary GCS folder
-    gsutil -m cp ${DB_DIR}/${STUDY}.db "$BUCKET/$CANARY_PREFIX/studies/" 2>/dev/null || true
+    gsutil -m cp ${DB_DIR}/${STUDY}.journal "$BUCKET/$CANARY_PREFIX/studies/" 2>/dev/null || true
     gsutil -m cp reports/optuna_*_${DIR}_${METRIC}.* "$BUCKET/$CANARY_PREFIX/reports/" 2>/dev/null || true
     echo "  Uploaded ${STUDY} results to GCS ($CANARY_PREFIX/)" | tee -a "$LOG"
+
+    # Upload STATUS.json for monitor polling
+    echo "{\"completed\": $COMPLETED, \"failed\": $FAILED, \"total\": $TOTAL, \"current\": \"${DIR}_${METRIC}\", \"agent\": \"$AGENT_ID\", \"last_update\": \"$(date -Iseconds)\"}" | \
+        gsutil cp - "$BUCKET/$CANARY_PREFIX/STATUS.json" 2>/dev/null || true
 done
 
 # Upload log after all searches

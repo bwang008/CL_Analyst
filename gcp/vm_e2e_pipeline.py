@@ -95,11 +95,17 @@ def focal_eval(preds: np.ndarray, val_set: lgb.Dataset):
 
 
 def extract_best_params(db_path: str, study_name: str) -> dict:
-    """Load an Optuna study from SQLite and extract the best trial params."""
-    storage = optuna.storages.RDBStorage(
-        url=f"sqlite:///{db_path}",
-        engine_kwargs={"connect_args": {"timeout": 10}},
-    )
+    """Load an Optuna study from JournalStorage and extract the best trial params."""
+    # Support both journal (new) and SQLite (legacy)
+    if db_path.endswith(".journal"):
+        storage = optuna.storages.JournalStorage(
+            optuna.storages.journal.JournalFileBackend(db_path),
+        )
+    else:
+        storage = optuna.storages.RDBStorage(
+            url=f"sqlite:///{db_path}",
+            engine_kwargs={"connect_args": {"timeout": 10}},
+        )
     study = optuna.load_study(study_name=study_name, storage=storage)
     best = study.best_trial
 
@@ -411,7 +417,7 @@ def run_pipeline(
         targets = [(t, "long" if t.endswith("_LONG") else "short") for t in targets]
 
     print("=" * 70)
-    print("E2E ALPHA FACTORY PIPELINE")
+    print("[E2E] ALPHA FACTORY PIPELINE")
     print("=" * 70)
     print(f"  Data:        {data_path}")
     print(f"  Cutoff:      {train_cutoff_date}")
@@ -467,8 +473,9 @@ def run_pipeline(
             # Build list of candidate study names (most specific → least specific)
             candidate_names = []
             if study_prefix:
-                # study_prefix is the full name passed from deploy script
-                # e.g. "e2e_long_logloss_cl-5m_bk_set_09"
+                # Canary/prefixed runs use: prefix_direction_metric
+                candidate_names.append(f"{study_prefix}_{direction}_{metric_name}")
+                # Also try the prefix alone (legacy)
                 candidate_names.append(study_prefix)
             candidate_names.extend([
                 f"e2e_{direction}_{metric_name}",
@@ -476,23 +483,29 @@ def run_pipeline(
                 f"production_{direction}_{metric_name}",
             ])
 
-            # Try each candidate
+            # Try each candidate — check .journal first (new), then .db (legacy)
             db_path = None
             study_name = None
             for name in candidate_names:
-                path = os.path.join(db_dir, f"{name}.db")
-                if os.path.exists(path):
-                    db_path = path
-                    study_name = name
+                for ext in [".journal", ".db"]:
+                    path = os.path.join(db_dir, f"{name}{ext}")
+                    if os.path.exists(path):
+                        db_path = path
+                        study_name = name
+                        break
+                if db_path:
                     break
 
-            # Ultimate fallback: scan directory for any .db containing direction and metric
+            # Ultimate fallback: scan directory for any .journal/.db containing direction and metric
             if db_path is None:
-                for f_name in os.listdir(db_dir):
-                    if f_name.endswith(".db") and direction in f_name and metric_name in f_name:
-                        db_path = os.path.join(db_dir, f_name)
-                        study_name = f_name.replace(".db", "")
-                        print(f"  Found via directory scan: {f_name}")
+                for ext in [".journal", ".db"]:
+                    for f_name in os.listdir(db_dir):
+                        if f_name.endswith(ext) and direction in f_name and metric_name in f_name:
+                            db_path = os.path.join(db_dir, f_name)
+                            study_name = f_name.replace(ext, "")
+                            print(f"  Found via directory scan: {f_name}")
+                            break
+                    if db_path:
                         break
 
             if db_path is None:
@@ -539,8 +552,13 @@ def run_pipeline(
             )
             all_reports[combo_name] = report
 
-            # Create registry bundle
-            bundle_name = f"E2E_set09_{direction}_{metric_name}"
+            # Derive dataset tag from data filename
+            # e.g. "cl-5m_bk_set_10.parquet" → "set_10", "cl-5m_bk_HourSet_01.parquet" → "HourSet_01"
+            import re
+            data_basename = os.path.splitext(os.path.basename(data_path))[0]  # "cl-5m_bk_set_10"
+            match = re.search(r'bk_(.+)$', data_basename)
+            dataset_tag = match.group(1) if match else data_basename
+            bundle_name = f"E2E_{dataset_tag}_{direction}_{metric_name}"
             bundle_dir = os.path.join(output_dir, "registry", bundle_name)
             create_registry_bundle(
                 bundle_dir=bundle_dir,

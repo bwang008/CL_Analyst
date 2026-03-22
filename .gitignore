@@ -15,7 +15,7 @@
 *.joblib
 *.png
 *.log
-reports/checkpoints/
+reports/
 
 # ----- Keep these in git -----
 # Model registry (configs + trained models, ~5 MB total)

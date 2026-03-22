@@ -1,170 +1,130 @@
 # GCP Optuna Deployment Guide — E2E Alpha Factory Edition
 
-> Run Optuna hyperparameter searches + automated training + backtesting on GCP high-CPU VMs.
+> Run Optuna hyperparameter searches + automated training + backtesting on GCP VMs.
 
 ## Quick Reference
 
 | Item | Value |
 |------|-------|
-| **VM Name** | `optuna-runner` |
-| **Machine Type** | `n2-highcpu-96` (96 vCPUs, Intel Cascade Lake) |
+| **Canary VM** | `optuna-runner-canary` |
+| **Production VM** | `optuna-runner` |
+| **Machine Type** | `n2-standard-64` (64 vCPUs, 256 GB RAM) |
 | **Zone** | `us-central1-a` |
 | **Project** | `cltrainer` |
 | **GCS Bucket** | `gs://cltrainer-optuna-results` |
-| **Cost** | ~$2.35/hr on-demand, ~$1.08/hr SPOT |
-| **Recommended Workers** | `n_jobs=12` (12 workers × 8 LGB threads = 96 cores) |
-| **Scripts** | `gcp/` directory |
-
-## Prerequisites
-
-1. **Google Cloud SDK** installed and authenticated:
-   ```powershell
-   gcloud auth login
-   gcloud config set project cltrainer
-   ```
-2. **Compute Engine API** enabled (already done for this project)
-3. **CPU Quota** ≥ 56 for `CPUS_ALL_REGIONS` and `C2D_CPUS` in `us-central1`
+| **Cost** | ~$3.40/hr STANDARD, ~$1.02/hr SPOT |
+| **Workers** | `N_JOBS=8` × `NUM_THREADS=8` = 64 cores |
+| **Data** | `C:\CL_Analyst_Data\data\processed\cl-5m_bk_set_10.parquet` (GCS: `gs://cltrainer-optuna-results/data/`) |
 
 ## Workflow Overview
 
+### Canary (Light) Run — 20 trials × 4 searches (~30 min)
 ```
-[1] gcp_setup.ps1        → Create VM + install deps (~1 min)
-[2] gcp_deploy_run.ps1   → Upload code + data, launch Optuna in tmux
-[3] gcp_check_status.ps1 → Monitor progress (safe to disconnect)
-[4] gcp_teardown.ps1     → Download results + delete VM
+[1] gcp_deploy_canary.ps1   → Create VM + upload code + data + launch
+[2] gcp_monitor.ps1         → Auto-monitor, download results when done
 ```
 
-## Step-by-Step
+### Production Run — 200 trials × 4 searches (~3-4 hours)
+```
+[1] gcp_deploy_run.ps1      → Create VM + upload code + data + launch
+[2] gcp_monitor.ps1         → Auto-monitor, download results when done
+```
 
-### 1. Create the VM
+## Canary Run (Recommended First)
+
+### 1. Deploy & Launch
 
 ```powershell
-.\gcp\gcp_setup.ps1
-# Override machine type:
-.\gcp\gcp_setup.ps1 -MachineType c2d-highcpu-32
+# STANDARD pricing (guaranteed, no preemption) — recommended for canary
+.\gcp\gcp_deploy_canary.ps1 -ProvisioningModel STANDARD
+
+# SPOT pricing (cheaper, can be preempted) — use for low-priority runs
+.\gcp\gcp_deploy_canary.ps1
 ```
 
-This creates the VM, installs Python + ML packages via startup script, and creates a GCS bucket for results.
-
-### 2. Deploy & Run
+### 2. Monitor (Local Wrapper)
 
 ```powershell
-# E2E mode: Optuna search → train final models → backtest → package → GCS
-.\gcp\gcp_deploy_run.ps1 `
-    -DataPath "C:\CL_Analyst_Data\data\processed\cl-5m_bk_set_09.parquet" `
-    -Target "TARGET_TRIPLE_2x1_24H_LONG" `
-    -MlMetric logloss -E2E
-
-# Optuna-only mode (no -E2E flag, legacy behavior)
-.\gcp\gcp_deploy_run.ps1 `
-    -DataPath "C:\CL_Analyst_Data\data\processed\cl-5m_bk_set_09.parquet" `
-    -Target "TARGET_TRIPLE_2x1_24H_LONG" `
-    -MlMetric logloss
-
-# Skip data re-upload (already on VM)
-.\gcp\gcp_deploy_run.ps1 -DataPath "..." -SkipDataUpload -E2E
-
-# Auto-shutdown VM after completion
-.\gcp\gcp_deploy_run.ps1 -DataPath "..." -E2E -Shutdown
+# Auto-polls VM status, downloads artifacts when done, generates report
+.\gcp\gcp_monitor.ps1 -VmName optuna-runner-canary -GcsPrefix canary -PollIntervalSeconds 120
 ```
 
-### 3. Monitor (Safe to Disconnect)
+The monitor will:
+- Poll VM status every N seconds
+- Read `STATUS.json` heartbeat from GCS (shows search progress)
+- Auto-download logs, studies, reports, and artifacts zip when VM terminates
+- Parse logs for pass/fail, OOM detection, agent ID
+- Generate `reports/canary/run_report.md`
 
-The search runs in a `tmux` session on the VM. You can close your laptop and come back later.
+### 3. Review Results
+
+After the monitor finishes:
+- **Report**: `reports/canary/run_report.md`
+- **Logs**: `reports/canary/logs/`
+- **Studies**: `reports/canary/studies/`
+- **Artifacts**: `reports/canary/registry/` (unzipped models + predictions)
+
+## Production Run
 
 ```powershell
-# Check status
-.\gcp\gcp_check_status.ps1
+# Deploy production
+.\gcp\gcp_deploy_run.ps1 -DataPath "C:\CL_Analyst_Data\data\processed\cl-5m_bk_set_10.parquet" -E2E -Shutdown
 
-# View live output
-gcloud compute ssh optuna-runner --command="tmux attach -t optuna"
-# (Ctrl+B then D to detach without stopping)
-
-# Check from any machine
-gcloud compute instances describe optuna-runner --zone=us-central1-a --format="get(status)"
+# Monitor
+.\gcp\gcp_monitor.ps1 -VmName optuna-runner -GcsPrefix production -PollIntervalSeconds 300
 ```
 
-### 4. Download Results & Tear Down
+## Memory Optimization
 
-```powershell
-.\gcp\gcp_teardown.ps1
-# Downloads results from VM + GCS to local, then deletes VM
-```
+The Optuna search includes these memory-saving measures (in `optuna_lgbm_search_v2.py`):
+1. **float32 downcast** — Features loaded as float32 instead of float64 (~50% RAM savings)
+2. **free_raw_data=True** — LightGBM releases pandas copies after building histograms
+3. **gc.collect()** — Aggressive garbage collection per-fold and per-trial
 
-## How It Works
+### CPU Validation
+Both `vm_canary_run.sh` and `vm_production_run.sh` validate that `N_JOBS × NUM_THREADS == nproc`. If there's a mismatch (e.g., running on a different machine type), the script will **FATAL error** and exit.
 
-### File Upload
-The deploy script uploads **14 Python/shell files** + strategy config + data parquet to the VM:
-- `agent/optuna_lgbm_search_v2.py` — main search script
-- `agent/backtest_engine.py` — for backtesting in E2E mode
-- `agent/experiment_runner.py` — experiment logging
-- `agent/__init__.py`, `src/__init__.py` — package inits
-- `src/util.py` — feature/target column helpers
-- `src/live_execution/strategies/execution_models.py` — BacktestEngine dependency
-- `src/live_execution/strategies/configurable_strategy.py` — strategy registry
-- `gcp/vm_run_optuna.sh` — tmux runner with E2E chaining
-- `gcp/vm_e2e_pipeline.py` — E2E orchestrator (train + backtest + package)
-- `configs/strategies/ensemble4.json` — backtest strategy config
+> **Important**: If you change the machine type, you MUST update `N_JOBS` and `NUM_THREADS` in both shell scripts to match.
 
-Plus the data parquet file (~1.3GB, takes ~16 min to upload).
+## Structured Logging
 
-### E2E Pipeline Flow (when -E2E flag is used)
-```
-[Phase 1] Optuna search (200 trials, 12 workers × 8 threads)
-    ↓
-[Phase 2] vm_e2e_pipeline.py:
-    → Extract best_params from .db
-    → Train final models (focal loss, downsample, early stopping)
-    → Generate OOS predictions on vault data
-    → Run BacktestEngine (uses ensemble4.json execution params)
-    → Create registry-compatible bundles
-    → Zip → upload production_artifacts.zip to GCS
-    → Optionally shutdown VM
-```
-
-### tmux Persistence
-The search runs inside a `tmux` session, so it survives SSH disconnections.
-
-### Result Safety (GCS Auto-Upload)
-Results persist in GCS even if the VM is deleted.
-
-### VM Console
-See your VM at: [GCP Console → Compute Engine → VM Instances](https://console.cloud.google.com/compute/instances?project=cltrainer)
+Every run logs:
+- **ISO timestamps** on each search header
+- **Agent ID** (`canary_bot` or `production_bot`)
+- **STATUS.json** uploaded to GCS after each search (for monitor polling)
+- **CPU validation** results
 
 ## Cost Guide
 
-| Machine | vCPUs | $/hr (SPOT) | 100-trial est. time | 100-trial est. cost |
-|---------|:-----:|:----:|:-------------------:|:-------------------:|
-| e2-highcpu-8 | 8 | $0.06 | ~50 hrs | $3.00 |
-| c2d-highcpu-32 | 32 | $0.34 | ~12 hrs | $4.08 |
-| c2d-highcpu-56 | 56 | $0.59 | ~7 hrs | $4.13 |
-| **n2-highcpu-96** | **96** | **$1.08** | **~1.5 hrs** | **~$1.62** |
+| Machine | vCPUs | RAM | $/hr (STANDARD) | $/hr (SPOT) | Workers Config | RAM/Worker |
+|---------|:-----:|:---:|:---:|:---:|:---:|:---:|
+| **n2-standard-64** | **64** | **256 GB** | **$3.40** | **$1.02** | **8×8** | **~32 GB** |
+| n2-highcpu-96 | 96 | 96 GB | $3.44 | $1.03 | 6×16 | ~16 GB |
+| n2-standard-48 | 48 | 192 GB | $2.55 | $0.77 | 3×16 | ~64 GB |
 
-Use SPOT pricing for best value. The n2-highcpu-96 with `n_jobs=12` (12 workers × 8 LGB threads) is the recommended config.
+> **SPOT warning**: SPOT VMs can be preempted at any time. Use STANDARD for runs that must complete. Use SPOT for fault-tolerant jobs with resume logic.
 
-**Stop vs Delete:**
-- **Stop** the VM when not in use → ~$4/month for disk storage only
-- **Delete** the VM when done → $0 (results safe in GCS)
+## Scripts Reference
+
+| File | Purpose |
+|------|---------|
+| `gcp_deploy_canary.ps1` | Deploy canary VM (20 trials, 4 searches) |
+| `gcp_deploy_run.ps1` | Deploy production VM (200 trials) |
+| `gcp_monitor.ps1` | **Local monitor wrapper** — polls, downloads, reports |
+| `gcp_check_status.ps1` | Quick status check |
+| `gcp_setup.ps1` | Create VM + GCS bucket (standalone) |
+| `gcp_teardown.ps1` | Download results + delete VM |
+| `vm_canary_run.sh` | Canary run orchestrator (on VM) |
+| `vm_production_run.sh` | Production run orchestrator (on VM) |
+| `vm_e2e_pipeline.py` | E2E pipeline (train + backtest + package) |
+| `vm_startup.sh` | VM boot-time package installer |
 
 ## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
 | `Quota exceeded` | Increase quota in GCP Console → IAM → Quotas |
-| `gcloud not found` | Add to PATH: `$env:PATH = "C:\Users\bwang\AppData\Local\Google\Cloud SDK\google-cloud-sdk\bin;" + $env:PATH` |
-| SSH timeout | The search takes time; check with `gcloud compute ssh optuna-runner --command="tail /tmp/smoke.log"` |
-| Startup not complete | Wait 1-2 min, check: `gcloud compute ssh optuna-runner --command="cat /tmp/startup.log"` |
-| Data upload slow | ~1.4 MB/s is normal for compressed SCP; use `--compress` flag |
-
-## Scripts Reference
-
-| File | Location | Purpose |
-|------|----------|---------|
-| `gcp_setup.ps1` | `gcp/` | Create VM + GCS bucket |
-| `gcp_deploy_run.ps1` | `gcp/` | Upload code/data + launch search (with `-E2E` flag for full pipeline) |
-| `gcp_check_status.ps1` | `gcp/` | Monitor progress |
-| `gcp_teardown.ps1` | `gcp/` | Download results + delete VM |
-| `vm_startup.sh` | `gcp/` | VM boot-time package installer |
-| `vm_run_optuna.sh` | `gcp/` | tmux runner + E2E chaining + GCS auto-upload |
-| `vm_e2e_pipeline.py` | `gcp/` | **[NEW]** E2E orchestrator (train + backtest + package) |
-| `requirements-gcp.txt` | `gcp/` | Minimal pip dependencies |
+| Exit 139 (SIGKILL/OOM) | Reduce `N_JOBS` or switch to higher-memory machine |
+| `instance-termination-action` error | Use `STANDARD` provisioning (flag only valid for SPOT) |
+| SPOT preempted quickly | Switch to `-ProvisioningModel STANDARD` |
+| `gcloud not found` | `$env:PATH = "C:\Users\bwang\AppData\Local\Google\Cloud SDK\google-cloud-sdk\bin;" + $env:PATH` |

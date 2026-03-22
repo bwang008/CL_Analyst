@@ -125,7 +125,8 @@ $codeFiles = @(
     @{ Local = "src\live_execution\strategies\configurable_strategy.py"; Remote = "src/live_execution/strategies/" },
     @{ Local = "src\live_execution\strategies\buy70_sized_manatee.py"; Remote = "src/live_execution/strategies/" },
     @{ Local = "gcp\vm_run_optuna.sh";           Remote = "gcp/" },
-    @{ Local = "gcp\vm_e2e_pipeline.py";         Remote = "gcp/" }
+    @{ Local = "gcp\vm_e2e_pipeline.py";         Remote = "gcp/" },
+    @{ Local = "gcp\vm_production_run.sh";       Remote = "gcp/" }
 )
 
 foreach ($file in $codeFiles) {
