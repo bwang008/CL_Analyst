@@ -2,7 +2,56 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
-## 2026-03-22 — Canary Pipeline, Process Parallelism & New Dataset Experiments
+## 2026-03-23 — Volatility Straddle Optimization, Asymmetric Drawdown Target & Metric Architecture Change
+
+### Goal
+Optimize the Breakout Straddle strategy parameters, engineer a new strict "Easy Money" directional target, and replace the F0.5 ML metric with PR-AUC for rare-event targets.
+
+### Breakout Straddle Optimization (Volatility Expansion)
+- Ran 213 Optuna trials via `strategy_optimizer.py` (full FSM backtest per trial, ~30s each)
+- **Best config (Trial 200)**: `entry_threshold=0.65`, `breakout_window=18`, `tp_atr_mult=8.5`, `sl_atr_mult=3.0`, `trailing_atr_mult=3.5`
+- **Results**: +$13,763 PnL, PF 1.47, 33.9% WR, 112 trades, -$8,866 MDD
+- Frozen to `configs/strategies/volatility_breakout.json` and committed
+
+### Asymmetric Drawdown Target ("Easy Money" Setup)
+- **Script**: `scripts/generate_asymmetric_target.py` — **[NEW]**
+- **LONG label = 1**: Max(High) over next 24H > 2.0× ATR **AND** Max(Drawdown) < 0.5× ATR
+- **SHORT label = 1**: Inverse (downside > 2.0× ATR, upside < 0.5× ATR)
+- **Distribution on set_11**: LONG 3.46% positive (41,278 / 1.19M), SHORT 3.23% (38,522)
+- Dataset saved as `CL_set_11_asym.parquet` (797 MB), uploaded to GCS
+
+### ⚠️ CRITICAL: ML Metric Change — f0.5 → average_precision (PR-AUC)
+
+**Problem**: F0.5 uses a hard 0.50 threshold to convert probabilities to Yes/No predictions. On a 3% positive target, LightGBM outputs low raw probabilities (e.g., max 0.15). F0.5 grades everything as 0.00 — Optuna goes completely blind.
+
+**Fix**: Replaced `f0.5` with `average_precision` (PR-AUC) in `vm_canary_run.sh` default metrics:
+```diff
+-METRICS="logloss,f0.5"
++METRICS="logloss,average_precision"
+```
+
+**Two-Tier Metric Architecture (going forward)**:
+| Tier | Purpose | Metrics | Threshold? |
+|------|---------|---------|------------|
+| **Tier 1: ML Brain** (Optuna) | Rank setups by confidence | `logloss` + `average_precision` | ❌ Threshold-free |
+| **Tier 2: Execution Trigger** (Backtester) | Find optimal trading threshold | `F0.5` + `Profit Factor` | ✅ Sweep 0.50–0.95 |
+
+**Impact**: F0.5 is NOT removed from the codebase — it remains a valid metric for Tier 2 threshold sweeps and for targets with >15% positive rate. For rare targets (<5% positive rate), always use `average_precision` in the Optuna loop.
+
+### Cloud Training Deployed
+- VM: `optuna-runner-directed` (n2-highcpu-48, STANDARD)
+- 4 parallel searches: `{LONG, SHORT} × {logloss, average_precision}` × 20 trials
+- GCS: `gs://cltrainer-optuna-results/data/CL_set_11_asym.parquet`
+
+### Files Changed
+- `scripts/generate_asymmetric_target.py` — **[NEW]** Asymmetric Drawdown target engineering
+- `gcp/vm_canary_run.sh` — default METRICS changed: `f0.5` → `average_precision`
+- `configs/strategies/volatility_breakout.json` — frozen with optimized Optuna params
+- `agent/strategy_optimizer.py` — wider SL/TP search bounds + `breakout_window` parameter
+- `src/live_execution/strategies/execution_models.py` — `BreakoutStraddleStrategy` + `override_entry_price`
+- `agent/backtest_engine.py` — `override_entry_price` support in trade entry
+
+
 
 ### Goal
 Fix LightGBM SIGSEGV crashes with multi-threaded Optuna workers, build a lightweight canary pipeline for rapid experiment validation, and test new datasets (set_11, HourSet_02) for signal detection.
