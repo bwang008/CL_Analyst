@@ -1,0 +1,13 @@
+==========================================================================================
+                             BACKTEST REPORT: Ensemble (f0.5)                             
+==========================================================================================
+  Strategy:       E2E_CL_set_11_f0.5_ensemble
+  Models:         E2E_CL_set_11_long_f0.5 (Long) + E2E_CL_set_11_short_f0.5 (Short)
+  Threshold:      Buy >= 0.6, Sell >= 0.6
+  TP / SL:        2.5x / 1.5x ATR
+  Trailing:       1.5x
+  Predictions:    long: canary_output/oos_predictions_long_f0.5.csv, short: canary_output/oos_predictions_short_f0.5.csv
+  Data:           /home/bwang/data/CL_set_11.parquet
+==========================================================================================
+  No trades simulated.
+==========================================================================================

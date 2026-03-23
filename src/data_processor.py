@@ -44,6 +44,7 @@ DATASET_VERSIONS = {
     'set_09': 'MACRO fix (set_08 features with causally-safe bar-level MACRO rolling — no hourly resample lookahead)',
     'set_10': 'Causal cleanup (set_09 + removed bfill lookahead, 26K warmup — 100% causally safe)',
     'set_11': 'Macro-augmented (set_10 + FRED macro regime + CFTC COT positioning features)',
+    'set_11c': 'Spread-Adjusted Momentum variant (set_11 + Spread-adj RSI)',
     'HourSet_01': '1-Hour bar macro swing-trading dataset: 5-min resampled to 1H, 72H/120H triple-barrier targets',
     'HourSet_02': '1-Hour macro-augmented (HourSet_01 + FRED macro regime + CFTC COT positioning features)',
 }
@@ -1592,6 +1593,14 @@ class DataProcessor:
 
         self.df = df
         return df
+
+    # ------------------------------------------------------------------
+    # set_11c: set_11 variant with Spread-Adjusted Momentum features
+    # ------------------------------------------------------------------
+    def process_set_11c(self) -> pd.DataFrame:
+        """set_11 variant C for Iteration 4: Spread-Adjusted Momentum."""
+        self.dataset_version = "set_11c"
+        return self.process_set_11()
 
     # ------------------------------------------------------------------
     # set_11: set_10 + macro features (FRED + COT)

@@ -1,6 +1,6 @@
 {
-    "nickname": "Ensemble4",
-    "description": "Copy of ensemble3_5 but with more conservative atr mult for testing",
+    "nickname": "Ensemble6",
+    "description": "Iteration 4: Spread-Adjusted Momentum with tp_atr_mult=3.5",
     "execution_class": "ConservativeEnsembleStrategy",
     "models": {
         "long": {
@@ -14,7 +14,7 @@
             "threshold": 0.60
         }
     },
-    "tp_atr_mult": 2.5,
+    "tp_atr_mult": 3.5,
     "sl_atr_mult": 1.5,
     "trailing_atr_mult": 1.5,
     "tp_cooldown_bars": 0,

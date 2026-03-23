@@ -62,6 +62,7 @@ for arg in "$@"; do
         --metrics=*) METRICS="${arg#*=}" ;;
         --target-long=*) TARGET_LONG="${arg#*=}" ;;
         --target-short=*) TARGET_SHORT="${arg#*=}" ;;
+        --strategy=*) STRATEGY="configs/strategies/${arg#*=}" ;;
     esac
 done
 

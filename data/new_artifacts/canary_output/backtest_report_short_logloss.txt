@@ -1,0 +1,18 @@
+============================================================
+BACKTEST REPORT — SHORT
+============================================================
+
+Strategy Config: Ensemble3_5
+TP/SL ATR Mult:  2.5/1.5
+Consec. Signal:  2
+
+Trade Count:     886
+Total PnL:       $-60,694.75
+Win Rate:        33.8%
+Profit Factor:   0.7034
+Max Drawdown:    $-65,971.50
+
+Exit Distribution:
+  SL: 415 (46.8%)
+  TP: 263 (29.7%)
+  TRAILING_BE: 208 (23.5%)

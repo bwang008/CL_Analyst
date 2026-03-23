@@ -457,6 +457,12 @@ class AlphaFactory:
             self.df["MOM_MACD_Signal"] = macd.iloc[:, 1]
             self.df["MOM_MACD_Hist"] = macd.iloc[:, 2]
 
+        # Iteration 4: Spread-Adjusted Momentum Interaction
+        if "MOM_RSI_14" in self.df.columns and "LIQ_CORWIN_24" in self.df.columns:
+            corwin_spread = self.df["LIQ_CORWIN_24"].fillna(0.0).clip(lower=0.0)
+            # Scale spread by 100 so a typical 0.005 spread becomes 0.5 denominator penalty
+            self.df["MOM_RSI_14_SPREAD_ADJ"] = self.df["MOM_RSI_14"] / (1.0 + corwin_spread * 100.0)
+
         return self.df
 
     # ------------------------------------------------------------------

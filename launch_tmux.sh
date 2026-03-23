@@ -1,0 +1,1 @@
+tmux new-session -d -s canary 'bash gcp/vm_canary_run.sh --dataset=CL_set_11 --strategy=ensemble4.json --metrics=logloss,f0.5 --target-long=TARGET_TRIPLE_1.5x0.75_12H_LONG --target-short=TARGET_TRIPLE_1.5x0.75_12H_SHORT'
