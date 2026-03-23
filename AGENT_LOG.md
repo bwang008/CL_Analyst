@@ -2,6 +2,74 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
+## 2026-03-22 — Canary Pipeline, Process Parallelism & New Dataset Experiments
+
+### Goal
+Fix LightGBM SIGSEGV crashes with multi-threaded Optuna workers, build a lightweight canary pipeline for rapid experiment validation, and test new datasets (set_11, HourSet_02) for signal detection.
+
+### LightGBM SIGSEGV Fix (Process-Level Parallelism)
+- **Problem**: Optuna with `n_jobs > 1` crashed with `exit 139 (SIGSEGV)` — LightGBM's `Booster.__boost()` is not thread-safe when multiple workers call `lgb.train()` concurrently in the same process.
+- **Solution 1 (Trial-Level)**: 4 OS processes per search, each running a subset of trials. Fixed the crash but suboptimal for Bayesian optimization.
+- **Solution 2 (Search-Level, Final)**: All 4 Optuna searches (LONG/SHORT × logloss/f0.5) launched simultaneously as separate OS background processes. Each search runs its full 20 trials sequentially (`n_jobs=1`). Best of both worlds: parallel CPU utilization + sequential Bayesian optimization.
+- **Wall clock**: 15 min on `n2-highcpu-48` (vs 22 min sequential, same as trial-parallel).
+
+### Canary Pipeline Infrastructure
+
+**`gcp/vm_canary_run.sh`** — **[NEW]** Lightweight 20-trial canary script:
+- 4 parallel searches (LONG/SHORT × logloss/f0.5) via background processes
+- `--target-long` / `--target-short` args for custom target columns (e.g., HourSet_02's 120H targets)
+- Chains E2E pipeline after searches with `--targets` passthrough
+- Auto-shutdown after completion
+
+**`gcp/gcp_deploy_canary.ps1`** — **[NEW]** One-command canary deployment:
+- Creates VM (`n2-highcpu-48`, STANDARD pricing ~$1.63/hr)
+- Uploads code + downloads data from GCS
+- Launches tmux canary session
+- `-TargetLong` / `-TargetShort` params for custom targets
+- `-NoShutdown` for debugging
+
+**`gcp/gcp_monitor.ps1`** — **[NEW]** Automated monitoring:
+- Polls VM status + GCS heartbeat every 90s
+- Detects VM termination, auto-downloads artifacts from GCS
+- Worker-specific log coloring (`[W1]`–`[W4]`)
+
+**`gcp/vm_e2e_pipeline.py`** — Enhanced:
+- Step 4c: Ensemble backtest (combines long + short OOS predictions per metric)
+- Direct CSV loading + in-memory merge (no dependency on backtest_engine CLI internals)
+- `--targets` arg for custom target columns
+
+### Dataset Experiment Results (Canary, 20 trials each)
+
+| Dataset | Timeframe | Model | Trades | WR | PF | PnL | Signal? |
+|---------|-----------|-------|--------|-----|------|-----|---------|
+| **set_08** (leaky) | 5-min | logloss ensemble | 13,065 | 64.1% | **4.59** | **$2.15M** | ✅ Strong |
+| **set_08** (leaky) | 5-min | f0.5 ensemble | 9,772 | 71.1% | **6.56** | **$1.75M** | ✅ Strong |
+| **set_10** (clean) | 5-min | all models | **0** | — | — | $0 | ❌ None |
+| **set_11** (clean+feat) | 5-min | long_logloss | 319 | 35.7% | 0.84 | -$8,913 | ❌ Unprofitable |
+| **set_11** (clean+feat) | 5-min | short_f0.5 | 5 | 40% | 1.04 | $51 | ❌ Marginal |
+| **HourSet_02** | 1-hour | long_f0.5 | 2 | 50% | 1.19 | $290 | ❌ Marginal |
+| **HourSet_02** | 1-hour | short_logloss | 24 | 50% | 0.89 | -$1,055 | ❌ Unprofitable |
+| **HourSet_02** | 1-hour | short_f0.5 | 38 | 42.1% | 0.74 | -$6,251 | ❌ Unprofitable |
+
+### Key Insight
+**Only set_08 (which has lookahead leakage) produces strong trading signals.** All causally-safe datasets (set_10, set_11, HourSet_02) produce either zero or unprofitable signals. The "alpha" in set_08 comes from the MACRO resample lookahead and bfill leakage — not from genuine market patterns. This is the most important finding: the model architecture and feature set need fundamental changes to find real alpha without leakage.
+
+### GCS Data Staging
+- `set_11`: `gs://cltrainer-optuna-results/data/cl-5m_bk_set_11.parquet` (809 MB)
+- `HourSet_02`: `gs://cltrainer-optuna-results/data/cl-1h_bk_HourSet_02.parquet` (88 MB)
+
+### Bugs Fixed
+- **E2E pipeline custom targets**: `vm_canary_run.sh` wasn't passing `--target-long`/`--target-short` to E2E pipeline — HourSet_02's E2E crashed looking for `TARGET_TRIPLE_2x1_24H_LONG` in a dataset that only has `TARGET_TRIPLE_2p0x1_120H_LONG`. Fixed by adding `--targets "$TARGET_LONG" "$TARGET_SHORT"` to E2E_ARGS.
+- **Ensemble backtest import error**: `vm_e2e_pipeline.py` tried importing non-existent `load_predictions` / `load_ohlcv` from backtest_engine. Fixed by directly loading OOS CSVs and merging prob_Buy/prob_Sell columns in-memory.
+- **OOM investigation**: Identified that `n2-highcpu-48` VMs have no swap configured and the startup script didn't install `psutil`. Memory usage (~3-4 GB per worker) is well within 48 GB RAM.
+
+### Files Changed
+- `gcp/vm_canary_run.sh` — **[NEW]** canary pipeline with search-level parallelism + custom targets
+- `gcp/gcp_deploy_canary.ps1` — **[NEW]** one-command canary deployment with target passthrough
+- `gcp/gcp_monitor.ps1` — **[NEW]** automated monitoring + artifact collection
+- `gcp/vm_e2e_pipeline.py` — ensemble backtest step + custom targets + direct CSV loading
+- `agent/optuna_lgbm_search_v2.py` — `--worker-id` arg, tagged logging, worker status files
+
 ## 2026-03-21 — E2E Alpha Factory Pipeline
 
 ### Goal

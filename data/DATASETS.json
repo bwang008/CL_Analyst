@@ -1,6 +1,6 @@
 {
   "description": "Documentation for processed datasets in the CL Analyst ML pipeline",
-  "last_updated": "2026-01-25",
+  "last_updated": "2026-03-22",
   "datasets": {
     "set_01": {
       "name": "Cyclical Time Feature Set",
@@ -150,6 +150,40 @@
       "bar_frequency": "1H",
       "windows": [24, 72, 168, 336, 840],
       "macro_windows": {"1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320},
+      "targets": [
+        "TARGET_TRIPLE_1p5x1_72H_LONG", "TARGET_TRIPLE_1p5x1_72H_SHORT",
+        "TARGET_TRIPLE_2p0x1_72H_LONG", "TARGET_TRIPLE_2p0x1_72H_SHORT",
+        "TARGET_TRIPLE_2p5x1_72H_LONG", "TARGET_TRIPLE_2p5x1_72H_SHORT",
+        "TARGET_TRIPLE_1p5x1_120H_LONG", "TARGET_TRIPLE_1p5x1_120H_SHORT",
+        "TARGET_TRIPLE_2p0x1_120H_LONG", "TARGET_TRIPLE_2p0x1_120H_SHORT",
+        "TARGET_TRIPLE_2p5x1_120H_LONG", "TARGET_TRIPLE_2p5x1_120H_SHORT"
+      ]
+    },
+    "set_11": {
+      "name": "Extended Clean Dataset (Latest 5-min)",
+      "summary": "Extension of set_10 (causally safe) with new features. 199 features total. No leakage. Canary result: long_logloss 319 trades, PF 0.84 (unprofitable). Marginal improvement over set_10 (0 trades) but still no profitable signals.",
+      "bar_frequency": "5min",
+      "features": 199,
+      "rows": 1192395,
+      "windows": [288, 864, 2016, 4032, 10080],
+      "macro_windows": {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160},
+      "change_from_set_10": "Additional features (199 vs 156). Same cleanup and MACRO methods.",
+      "gcs_path": "gs://cltrainer-optuna-results/data/cl-5m_bk_set_11.parquet",
+      "canary_result": "long_logloss: 319 trades, PF 0.84, -$8,913. Others: 0-5 trades.",
+      "targets": [
+        "TARGET_TRIPLE_2x1_24H_LONG",
+        "TARGET_TRIPLE_2x1_24H_SHORT"
+      ]
+    },
+    "HourSet_02": {
+      "name": "Extended 1-Hour Dataset (Latest Hourly)",
+      "summary": "Extension of HourSet_01 with new features. 199 features, ~101K rows. Uses 120H triple-barrier targets with 2.0x ATR. Canary result: short_f0.5 38 trades, PF 0.74 (unprofitable). No profitable signals found.",
+      "bar_frequency": "1H",
+      "features": 199,
+      "windows": [24, 72, 168, 336, 840],
+      "macro_windows": {"1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320},
+      "gcs_path": "gs://cltrainer-optuna-results/data/cl-1h_bk_HourSet_02.parquet",
+      "canary_result": "short_f0.5: 38 trades, PF 0.74, -$6,251. Others: 0-24 trades.",
       "targets": [
         "TARGET_TRIPLE_1p5x1_72H_LONG", "TARGET_TRIPLE_1p5x1_72H_SHORT",
         "TARGET_TRIPLE_2p0x1_72H_LONG", "TARGET_TRIPLE_2p0x1_72H_SHORT",
