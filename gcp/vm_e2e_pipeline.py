@@ -576,12 +576,126 @@ def run_pipeline(
             )
             all_bundles.append(bundle_dir)
 
-    # ---- Summary ----
+    # ---- Summary of individual backtests ----
+    elapsed = time.perf_counter() - start_time
+    print(f"\n{'='*70}")
+    print(f"INDIVIDUAL BACKTESTS COMPLETE — {elapsed:.0f}s ({elapsed/60:.1f} min)")
+    print(f"{'='*70}")
+    print(f"\nPer-Model Backtest Summary:")
+    print(f"{'─'*60}")
+    print(f"{'Model':<30} {'Trades':>7} {'WR':>6} {'PF':>8} {'PnL':>12}")
+    print(f"{'─'*60}")
+    for name, rpt in all_reports.items():
+        print(f"{name:<30} {rpt['trade_count']:>7} {rpt['win_rate']:>5.1f}% "
+              f"{rpt['profit_factor']:>8.4f} ${rpt['total_pnl']:>10,.2f}")
+    print(f"{'─'*60}")
+
+    # ---- Step 4c: Ensemble backtest (combine long + short per metric) ----
+    # Group OOS predictions by metric so we can create ensemble configs
+    ensemble_reports = {}
+    preds_by_metric = {}  # metric → {direction → predictions_path}
+    for target_name, direction in targets:
+        for metric_name in metrics:
+            combo_name = f"{direction}_{metric_name}"
+            preds_path = os.path.join(output_dir, f"oos_predictions_{combo_name}.csv")
+            if os.path.exists(preds_path):
+                if metric_name not in preds_by_metric:
+                    preds_by_metric[metric_name] = {}
+                preds_by_metric[metric_name][direction] = preds_path
+
+    # For each metric that has both long + short, create an ensemble config and run combined backtest
+    for metric_name, direction_paths in preds_by_metric.items():
+        if "long" not in direction_paths or "short" not in direction_paths:
+            print(f"\n  Skipping ensemble for {metric_name} — missing {'long' if 'long' not in direction_paths else 'short'} model")
+            continue
+
+        print(f"\n{'='*60}")
+        print(f"[4c/5] ENSEMBLE BACKTEST — {metric_name.upper()}")
+        print(f"{'='*60}")
+
+        # Create ensemble config from the base strategy config
+        ensemble_cfg = dict(strategy_cfg)
+        # Derive dataset tag
+        import re
+        data_basename = os.path.splitext(os.path.basename(data_path))[0]
+        match = re.search(r'bk_(.+)$', data_basename)
+        dataset_tag = match.group(1) if match else data_basename
+
+        ensemble_cfg["models"] = {
+            "long": {
+                "experiment_id": f"E2E_{dataset_tag}_long_{metric_name}",
+                "predictions_path": direction_paths["long"],
+                "threshold": strategy_cfg.get("models", {}).get("long", {}).get("threshold", 0.60),
+            },
+            "short": {
+                "experiment_id": f"E2E_{dataset_tag}_short_{metric_name}",
+                "predictions_path": direction_paths["short"],
+                "threshold": strategy_cfg.get("models", {}).get("short", {}).get("threshold", 0.60),
+            },
+        }
+        ensemble_cfg["nickname"] = f"E2E_{dataset_tag}_{metric_name}_ensemble"
+
+        # Write temporary ensemble config
+        ensemble_cfg_path = os.path.join(output_dir, f"ensemble_config_{metric_name}.json")
+        with open(ensemble_cfg_path, "w") as f:
+            json.dump(ensemble_cfg, f, indent=2, default=str)
+        print(f"  Ensemble config: {ensemble_cfg_path}")
+        print(f"    Long:  {direction_paths['long']}")
+        print(f"    Short: {direction_paths['short']}")
+
+        # Run combined backtest via BacktestEngine
+        try:
+            from agent.backtest_engine import BacktestEngine, load_predictions, load_ohlcv, format_report
+
+            bt = BacktestEngine.from_config(ensemble_cfg)
+
+            # Load and merge predictions (same logic as backtest_engine.main)
+            preds = load_predictions(ensemble_cfg)
+
+            # Load OHLCV data
+            ohlcv = load_ohlcv(data_path)
+
+            # Run backtest
+            result = bt.run(preds, ohlcv, label=f"Ensemble ({metric_name})")
+
+            # Generate report
+            ensemble_report_path = os.path.join(output_dir, f"ensemble_backtest_{metric_name}.txt")
+            report_text = format_report(
+                result,
+                config=ensemble_cfg,
+                predictions_path=f"long: {direction_paths['long']}, short: {direction_paths['short']}",
+                data_path=data_path,
+            )
+            with open(ensemble_report_path, "w", encoding="utf-8") as rf:
+                rf.write(report_text + "\n")
+
+            ens_report = {
+                "direction": "ensemble",
+                "metric": metric_name,
+                "trade_count": result.trade_count,
+                "total_pnl": round(result.total_pnl, 2),
+                "win_rate": round(result.win_rate * 100, 2),
+                "profit_factor": round(result.profit_factor, 4),
+                "max_drawdown": round(result.max_drawdown, 2),
+            }
+            ensemble_reports[f"ensemble_{metric_name}"] = ens_report
+            all_reports[f"ensemble_{metric_name}"] = ens_report
+
+            print(f"    Trades: {result.trade_count}, WR: {result.win_rate*100:.1f}%, "
+                  f"PF: {result.profit_factor:.4f}, PnL: ${result.total_pnl:,.2f}")
+            print(f"  Report: {ensemble_report_path}")
+
+        except Exception as e:
+            print(f"  ✗ Ensemble backtest failed for {metric_name}: {e}")
+            import traceback
+            traceback.print_exc()
+
+    # ---- Final summary including ensembles ----
     elapsed = time.perf_counter() - start_time
     print(f"\n{'='*70}")
     print(f"E2E PIPELINE COMPLETE — {elapsed:.0f}s ({elapsed/60:.1f} min)")
     print(f"{'='*70}")
-    print(f"\nBacktest Summary:")
+    print(f"\nFull Backtest Summary (Individual + Ensemble):")
     print(f"{'─'*60}")
     print(f"{'Model':<30} {'Trades':>7} {'WR':>6} {'PF':>8} {'PnL':>12}")
     print(f"{'─'*60}")
