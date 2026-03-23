@@ -30,6 +30,8 @@ cd "$PROJECT_DIR"
 # Configuration — CANARY OVERRIDES
 DATASET_NAME="cl-5m_bk_set_10"
 METRICS="logloss,f0.5"
+TARGET_LONG="TARGET_TRIPLE_2x1_24H_LONG"
+TARGET_SHORT="TARGET_TRIPLE_2x1_24H_SHORT"
 CUTOFF="2022-01-01"
 N_TRIALS=20
 N_WORKERS=4
@@ -58,6 +60,8 @@ for arg in "$@"; do
         --agent-id=*) AGENT_ID="${arg#*=}" ;;
         --dataset=*) DATASET_NAME="${arg#*=}" ;;
         --metrics=*) METRICS="${arg#*=}" ;;
+        --target-long=*) TARGET_LONG="${arg#*=}" ;;
+        --target-short=*) TARGET_SHORT="${arg#*=}" ;;
     esac
 done
 
@@ -83,8 +87,8 @@ fi
 COMBOS=()
 IFS=',' read -ra METRIC_LIST <<< "$METRICS"
 for metric in "${METRIC_LIST[@]}"; do
-    COMBOS+=("TARGET_TRIPLE_2x1_24H_LONG $metric")
-    COMBOS+=("TARGET_TRIPLE_2x1_24H_SHORT $metric")
+    COMBOS+=("$TARGET_LONG $metric")
+    COMBOS+=("$TARGET_SHORT $metric")
 done
 
 TOTAL=${#COMBOS[@]}
@@ -240,6 +244,7 @@ if [ $COMPLETED -gt 0 ]; then
         --gcs-prefix "$CANARY_PREFIX"
         --metrics logloss f0.5
         --study-prefix "$CANARY_PREFIX"
+        --targets "$TARGET_LONG" "$TARGET_SHORT"
     )
 
     python gcp/vm_e2e_pipeline.py "${E2E_ARGS[@]}" 2>&1 | tee -a "$LOG" || true

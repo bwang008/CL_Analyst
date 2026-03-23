@@ -645,15 +645,27 @@ def run_pipeline(
 
         # Run combined backtest via BacktestEngine
         try:
-            from agent.backtest_engine import BacktestEngine, load_predictions, load_ohlcv, format_report
+            from agent.backtest_engine import BacktestEngine, format_report
 
             bt = BacktestEngine.from_config(ensemble_cfg)
 
-            # Load and merge predictions (same logic as backtest_engine.main)
-            preds = load_predictions(ensemble_cfg)
+            # Load and merge long/short OOS predictions directly from CSVs
+            long_df = pd.read_csv(direction_paths["long"], index_col=0, parse_dates=True)
+            short_df = pd.read_csv(direction_paths["short"], index_col=0, parse_dates=True)
 
-            # Load OHLCV data
-            ohlcv = load_ohlcv(data_path)
+            # Extract prob columns and merge
+            long_prob_col = [c for c in long_df.columns if "buy" in c.lower() or "Buy" in c]
+            short_prob_col = [c for c in short_df.columns if "sell" in c.lower() or "Sell" in c]
+            if not long_prob_col or not short_prob_col:
+                print(f"  ✗ Cannot find prob columns: long={list(long_df.columns)}, short={list(short_df.columns)}")
+                continue
+            long_probs = long_df[[long_prob_col[0]]].rename(columns={long_prob_col[0]: "prob_Buy"})
+            short_probs = short_df[[short_prob_col[0]]].rename(columns={short_prob_col[0]: "prob_Sell"})
+            preds = long_probs.join(short_probs, how="outer").fillna(0.0)
+            print(f"    Merged: {len(preds):,} rows ({preds['prob_Buy'].gt(0).sum():,} buy, {preds['prob_Sell'].gt(0).sum():,} sell)")
+
+            # Load OHLCV from original parquet
+            ohlcv = pd.read_parquet(data_path)
 
             # Run backtest
             result = bt.run(preds, ohlcv, label=f"Ensemble ({metric_name})")
