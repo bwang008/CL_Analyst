@@ -16,13 +16,14 @@
 
 param(
     [string]$VmName = "optuna-runner-canary",
-    [string]$MachineType = "n2-standard-48",
+    [string]$MachineType = "n2-highcpu-48",
     [string]$Zone = "us-central1-a",
     [int]$DiskSizeGB = 50,
     [string]$Project = "cltrainer",
     [string]$ProvisioningModel = "SPOT",
     [string]$GcsDataPath = "gs://cltrainer-optuna-results/data/cl-5m_bk_set_10.parquet",
     [string]$StrategyConfig = "ensemble4.json",
+    [string]$Metrics = "logloss,f0.5",
     [switch]$NoShutdown,
     [switch]$SkipProvision
 )
@@ -181,7 +182,8 @@ Write-Host "  Data ready on VM!" -ForegroundColor Green
 Write-Host "`n[5/6] Launching canary pipeline in tmux..."
 
 $shutdownFlag = if ($NoShutdown) { "" } else { "--shutdown" }
-$launchCmd = "tmux kill-session -t canary 2>/dev/null; tmux new-session -d -s canary 'bash $RemoteProject/gcp/vm_canary_run.sh $shutdownFlag'"
+$datasetName = [System.IO.Path]::GetFileNameWithoutExtension($DataFileName)
+$launchCmd = "tmux kill-session -t canary 2>/dev/null; tmux new-session -d -s canary 'bash $RemoteProject/gcp/vm_canary_run.sh $shutdownFlag --dataset=$datasetName --metrics=$Metrics'"
 gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd --quiet 2>$null
 
 Write-Host "  Canary pipeline launched!" -ForegroundColor Green

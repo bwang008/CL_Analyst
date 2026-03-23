@@ -40,11 +40,13 @@ Author: CL Analyst
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import os
 import sys
 import time
 import gc
+import threading
 from collections import Counter
 from pathlib import Path
 from typing import Optional
@@ -71,6 +73,64 @@ from sklearn.metrics import (
 )
 
 import src.util as util
+
+
+# ---------------------------------------------------------------------------
+# Memory diagnostics
+# ---------------------------------------------------------------------------
+
+def _get_rss_gb() -> float:
+    """Get current process RSS in GB. Uses /proc on Linux, psutil fallback."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / (1024 * 1024)  # kB → GB
+    except FileNotFoundError:
+        pass
+    try:
+        import psutil
+        return psutil.Process().memory_info().rss / (1024**3)
+    except ImportError:
+        return -1.0
+
+_peak_rss_gb = 0.0
+_rss_lock = threading.Lock()
+_worker_id = 0  # Set by --worker-id CLI arg
+_total_trials = 0  # Set by main() for status file writes
+
+def _wprint(*args, **kwargs):
+    """Print with [W{id}] prefix for multi-process log disambiguation."""
+    prefix = f"[W{_worker_id}]" if _worker_id > 0 else ""
+    msg = " ".join(str(a) for a in args)
+    if prefix:
+        msg = f"{prefix} {msg}"
+    print(msg, **kwargs)
+
+def _log_mem(label: str, **kwargs) -> None:
+    """Log RSS with a label. Thread-safe peak tracking."""
+    global _peak_rss_gb
+    rss = _get_rss_gb()
+    with _rss_lock:
+        if rss > _peak_rss_gb:
+            _peak_rss_gb = rss
+        peak = _peak_rss_gb
+    parts = " ".join(f"{k}={v}" for k, v in kwargs.items())
+    tid = threading.current_thread().name
+    wtag = f"[W{_worker_id}] " if _worker_id > 0 else ""
+    print(f"{wtag}[MEM] {label} RSS={rss:.2f}GB peak={peak:.2f}GB thread={tid} {parts}", flush=True)
+
+def _write_worker_status(trials_done: int, total_trials: int, status: str = "running") -> None:
+    """Write per-worker status file for monitor aggregation."""
+    if _worker_id <= 0:
+        return
+    import json as _json
+    status_path = f"/tmp/worker_W{_worker_id}_status.json"
+    try:
+        with open(status_path, "w") as f:
+            _json.dump({"trials_done": trials_done, "total_trials": total_trials, "status": status, "pid": os.getpid()}, f)
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Experiment log helpers (inlined to avoid heavy experiment_runner imports)
@@ -312,6 +372,7 @@ def make_objective(
         prob_col = "prob_Signal"
 
     def objective(trial: optuna.Trial) -> float:
+        _log_mem("trial_start", trial=trial.number)
         # ---- Suggest hyperparameters (E2E Alpha Factory wide ranges) ----
         boosting_type = trial.suggest_categorical("boosting_type", ["gbdt", "goss"])
 
@@ -369,8 +430,11 @@ def make_objective(
             y_tr, y_val = y_train.iloc[:val_split], y_train.iloc[val_split:]
 
             # Train with early stopping
-            train_data = lgb.Dataset(X_tr, label=y_tr, free_raw_data=True)
-            val_data = lgb.Dataset(X_val, label=y_val, reference=train_data, free_raw_data=True)
+            # free_raw_data=False: avoids C++ deallocation race when multiple
+            # Optuna worker threads build/destroy Datasets concurrently.
+            # Memory cost is negligible (~0.7 GB total for all workers).
+            train_data = lgb.Dataset(X_tr, label=y_tr, free_raw_data=False)
+            val_data = lgb.Dataset(X_val, label=y_val, reference=train_data, free_raw_data=False)
 
             callbacks = [
                 lgb.log_evaluation(period=0),  # silent
@@ -426,6 +490,7 @@ def make_objective(
             # Free model + datasets to prevent memory accumulation across folds
             del model, train_data, val_data, X_tr, X_val, y_tr, y_val
             gc.collect()
+            _log_mem("fold_cleanup", trial=trial.number, fold=fold_idx)
 
         if not fold_scores:
             return -999.0
@@ -460,6 +525,8 @@ def make_objective(
             return objective(trial)
         finally:
             gc.collect()
+            _log_mem("trial_end", trial=trial.number)
+            _write_worker_status(trial.number + 1, _total_trials)
 
     return objective_with_cleanup
 
@@ -535,6 +602,14 @@ def run_search(
     print(f"  Study:           {study_name}")
     print("=" * 70)
 
+    # ---- Enable crash diagnostics ----
+    faulthandler.enable()  # Prints C-level traceback on SIGSEGV (exit 139)
+    try:
+        import signal
+        faulthandler.register(signal.SIGUSR1)  # kill -USR1 <pid> → dump all threads
+    except (AttributeError, OSError):
+        pass  # SIGUSR1 not available on Windows
+
     # ---- Load data ----
     print("\n[1/4] Loading data...")
     df = pd.read_parquet(data_path)
@@ -564,9 +639,10 @@ def run_search(
     print(f"  Features: {len(feature_cols)} (float32)")
     print(f"  Target distribution (gym): {y.value_counts().to_dict()}")
 
-    # Free the full gym DataFrame now that X/y are extracted
-    del df, df_gym
+    # Free the full gym DataFrame and vault (vault only used for print above)
+    del df, df_gym, df_vault
     gc.collect()
+    _log_mem("after_data_load")
 
     # ---- Generate and sample WF folds ----
     print("\n[2/4] Generating walk-forward folds...")
@@ -910,7 +986,17 @@ def main():
         help="Maximum number of walk-forward folds to sample (default: 10). "
              "Fewer folds = faster searches with slightly noisier estimates.",
     )
+    parser.add_argument(
+        "--worker-id", type=int, default=0,
+        help="Worker ID for process-level parallelism (default: 0 = single process). "
+             "When >0, all output is prefixed with [W{id}] for log disambiguation.",
+    )
     args = parser.parse_args()
+
+    # Set global worker ID and total trials for logging
+    global _worker_id, _total_trials
+    _worker_id = args.worker_id
+    _total_trials = args.n_trials
 
     run_search(
         data_path=args.data,

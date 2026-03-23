@@ -21,6 +21,7 @@ param(
     [string]$GcsPrefix = "canary",
     [string]$OutputDir = "reports",
     [int]$PollIntervalSeconds = 60,
+    [int]$StaleThresholdMin = 10,
     [switch]$NoDownload
 )
 
@@ -59,6 +60,8 @@ Write-Host "Monitoring... (Ctrl+C to stop)" -ForegroundColor Gray
 Write-Host ""
 
 $startTime = Get-Date
+$lastHeartbeat = $null          # Track last seen heartbeat timestamp
+$heartbeatUnchangedSince = $null # When we first noticed the heartbeat was stale
 
 
 
@@ -182,6 +185,21 @@ function Get-OomCheck {
 }
 
 
+function Get-VmLogTail {
+    <# SSH into VM and grab the last N lines of the active canary log #>
+    param([int]$Lines = 3)
+    try {
+        $output = gcloud compute ssh $VmName --zone=$Zone `
+            --command="tail -n $Lines /home/*/project/canary_run_*.log 2>/dev/null || tail -n $Lines /home/*/project/production_run_*.log 2>/dev/null" `
+            --quiet 2>$null
+        if ($output -and $LASTEXITCODE -eq 0) {
+            return $output
+        }
+    } catch {}
+    return $null
+}
+
+
 function Save-Artifacts {
     Write-Host "`n  Downloading artifacts from GCS..." -ForegroundColor Yellow
     
@@ -294,8 +312,48 @@ while ($true) {
         if ($gcsStatus.current) { $searchInfo += " (current: $($gcsStatus.current))" }
         $lastUpdate = if ($gcsStatus.last_update) { $gcsStatus.last_update } else { "?" }
         Write-Host "[$now] VM=$vmStatus | $searchInfo | heartbeat=$lastUpdate | elapsed=${elapsed}m" -ForegroundColor Gray
+        
+        # ---- Stale heartbeat detection ----
+        $currentHB = $gcsStatus.last_update
+        if ($currentHB -and $lastHeartbeat -and $currentHB -eq $lastHeartbeat) {
+            # Heartbeat hasn't changed — track how long
+            if (-not $heartbeatUnchangedSince) {
+                $heartbeatUnchangedSince = Get-Date
+            }
+            $staleMins = [math]::Round(((Get-Date) - $heartbeatUnchangedSince).TotalMinutes, 1)
+            if ($staleMins -ge $StaleThresholdMin) {
+                Write-Host "  WARNING: STALE HEARTBEAT - unchanged for ${staleMins}m (threshold: ${StaleThresholdMin}m)" -ForegroundColor Red
+                Write-Host "    The search may have crashed or stalled. Check VM logs below." -ForegroundColor Red
+            }
+        } else {
+            # Heartbeat updated — reset tracker
+            $heartbeatUnchangedSince = $null
+        }
+        $lastHeartbeat = $currentHB
     } else {
         Write-Host "[$now] VM=$vmStatus | no STATUS.json yet | elapsed=${elapsed}m" -ForegroundColor Gray
+    }
+    
+    # ---- Live VM log tail ----
+    if ($vmStatus -eq "RUNNING") {
+        $logTail = Get-VmLogTail -Lines 3
+        if ($logTail) {
+            foreach ($line in $logTail) {
+                $trimmed = $line.Trim()
+                if ($trimmed) {
+                    # Color errors red, passes green, worker info cyan, everything else dim
+                    if ($trimmed -match 'FAILED|Error|Traceback|FileNotFound|exit 139') {
+                        Write-Host "    >> $trimmed" -ForegroundColor Red
+                    } elseif ($trimmed -match 'PASSED|COMPLETE|MEM') {
+                        Write-Host "    >> $trimmed" -ForegroundColor Green
+                    } elseif ($trimmed -match 'Worker W\d|Started worker|completed OK') {
+                        Write-Host "    >> $trimmed" -ForegroundColor Cyan
+                    } else {
+                        Write-Host "    >> $trimmed" -ForegroundColor DarkGray
+                    }
+                }
+            }
+        }
     }
     
     # Check if VM has stopped/terminated

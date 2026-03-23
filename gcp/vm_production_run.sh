@@ -29,8 +29,8 @@ DATA="/home/$(whoami)/data/${DATASET_NAME}"
 GCS_DATA="gs://cltrainer-optuna-results/data/${DATASET_NAME}"
 CUTOFF="2022-01-01"
 N_TRIALS=100
-N_JOBS=4
-NUM_THREADS=12
+N_WORKERS=4
+THREADS_PER_WORKER=12
 DB_DIR="models/optuna_studies"
 BUCKET="gs://cltrainer-optuna-results"
 STRATEGY="configs/strategies/ensemble4.json"
@@ -59,17 +59,18 @@ done
 
 # ---------- CPU VALIDATION ----------
 SYSTEM_CPUS=$(nproc)
-REQUIRED_CPUS=$((N_JOBS * NUM_THREADS))
+REQUIRED_CPUS=$((N_WORKERS * THREADS_PER_WORKER))
 if [ "$REQUIRED_CPUS" -ne "$SYSTEM_CPUS" ]; then
     echo "" | tee "$LOG"
     echo "FATAL: CPU mismatch!" | tee -a "$LOG"
     echo "  System CPUs:   $SYSTEM_CPUS" | tee -a "$LOG"
-    echo "  Required:      $REQUIRED_CPUS (N_JOBS=$N_JOBS × NUM_THREADS=$NUM_THREADS)" | tee -a "$LOG"
-    echo "  Fix: adjust N_JOBS and NUM_THREADS in this script to match the machine." | tee -a "$LOG"
+    echo "  Required:      $REQUIRED_CPUS (N_WORKERS=$N_WORKERS × THREADS_PER_WORKER=$THREADS_PER_WORKER)" | tee -a "$LOG"
+    echo "  Fix: adjust N_WORKERS and THREADS_PER_WORKER in this script to match the machine." | tee -a "$LOG"
     echo "" | tee -a "$LOG"
     gsutil cp "$LOG" "$BUCKET/logs/" 2>/dev/null || true
     exit 1
 fi
+TRIALS_PER_WORKER=$((N_TRIALS / N_WORKERS))
 
 # -------------------------------------------------------------------
 # Helper: count existing trials in a study .db file
@@ -115,11 +116,11 @@ echo "============================================================" | tee -a "$L
 echo "  Timestamp:  $(date -Iseconds)" | tee -a "$LOG"
 echo "  Agent:      $AGENT_ID" | tee -a "$LOG"
 echo "  Hostname:   $(hostname)" | tee -a "$LOG"
-echo "  CPUs:       $SYSTEM_CPUS (verified: $N_JOBS workers × $NUM_THREADS threads)" | tee -a "$LOG"
+echo "  CPUs:       $SYSTEM_CPUS (verified: $N_WORKERS workers × $THREADS_PER_WORKER threads)" | tee -a "$LOG"
 echo "  Data:       $DATA" | tee -a "$LOG"
 echo "  Cutoff:     $CUTOFF" | tee -a "$LOG"
-echo "  Trials:     $N_TRIALS per search (resumes from existing)" | tee -a "$LOG"
-echo "  Workers:    $N_JOBS (× $NUM_THREADS LGB threads = $((N_JOBS * NUM_THREADS)) cores)" | tee -a "$LOG"
+echo "  Trials:     $N_TRIALS per search ($TRIALS_PER_WORKER per worker × $N_WORKERS workers, resumes from existing)" | tee -a "$LOG"
+echo "  Workers:    $N_WORKERS OS processes (× $THREADS_PER_WORKER LGB threads = $((N_WORKERS * THREADS_PER_WORKER)) cores)" | tee -a "$LOG"
 echo "  Searches:   $TOTAL (3 metrics × 2 directions)" | tee -a "$LOG"
 echo "  Strategy:   $STRATEGY" | tee -a "$LOG"
 echo "  Shutdown:   $SHUTDOWN" | tee -a "$LOG"
@@ -168,27 +169,60 @@ for i in "${!COMBOS[@]}"; do
     echo "============================================================" | tee -a "$LOG"
     echo "" | tee -a "$LOG"
 
-    python agent/optuna_lgbm_search_v2.py \
-        --target "$TARGET" \
-        --data "$DATA" \
-        --ml-metric "$METRIC" \
-        --n-trials "$REMAINING" \
-        --n-jobs "$N_JOBS" \
-        --study-name "$STUDY" \
-        --db-dir "$DB_DIR" \
-        --train-cutoff-date "$CUTOFF" \
-        --max-n-estimators 2000 \
-        --num-threads $NUM_THREADS \
-        2>&1 | tee -a "$LOG" || true
+    # Clean up stale worker status files
+    rm -f /tmp/worker_W*_status.json 2>/dev/null || true
 
-    SEARCH_EXIT=${PIPESTATUS[0]}
+    # Distribute REMAINING trials across workers
+    REMAINING_PER_WORKER=$((REMAINING / N_WORKERS))
+    REMAINING_EXTRA=$((REMAINING % N_WORKERS))
 
-    if [ $SEARCH_EXIT -eq 0 ]; then
+    # Launch N_WORKERS parallel OS processes, each running n_jobs=1
+    WORKER_PIDS=()
+    for WORKER_ID in $(seq 1 $N_WORKERS); do
+        # Give extra trials to the first worker if not evenly divisible
+        WORKER_TRIALS=$REMAINING_PER_WORKER
+        if [ $WORKER_ID -le $REMAINING_EXTRA ]; then
+            WORKER_TRIALS=$((WORKER_TRIALS + 1))
+        fi
+        [ $WORKER_TRIALS -le 0 ] && continue
+
+        python agent/optuna_lgbm_search_v2.py \
+            --target "$TARGET" \
+            --data "$DATA" \
+            --ml-metric "$METRIC" \
+            --n-trials "$WORKER_TRIALS" \
+            --n-jobs 1 \
+            --study-name "$STUDY" \
+            --db-dir "$DB_DIR" \
+            --train-cutoff-date "$CUTOFF" \
+            --max-n-estimators 2000 \
+            --num-threads $THREADS_PER_WORKER \
+            --worker-id $WORKER_ID \
+            2>&1 | tee -a "$LOG" &
+        WORKER_PIDS+=($!)
+        echo "  Started worker W${WORKER_ID} (PID $!, $WORKER_TRIALS trials)" | tee -a "$LOG"
+    done
+
+    # Wait for all workers and capture exit codes
+    WORKER_FAILURES=0
+    for idx in "${!WORKER_PIDS[@]}"; do
+        wait ${WORKER_PIDS[$idx]}
+        EXIT_CODE=$?
+        WID=$((idx + 1))
+        if [ $EXIT_CODE -ne 0 ]; then
+            echo "  Worker W${WID} FAILED (exit $EXIT_CODE)" | tee -a "$LOG"
+            WORKER_FAILURES=$((WORKER_FAILURES + 1))
+        else
+            echo "  Worker W${WID} completed OK" | tee -a "$LOG"
+        fi
+    done
+
+    if [ $WORKER_FAILURES -eq 0 ]; then
         COMPLETED=$((COMPLETED + 1))
         echo "  ✓ Search ${SEARCH_NUM}/${TOTAL} PASSED (${DIR} ${METRIC})" | tee -a "$LOG"
     else
         FAILED=$((FAILED + 1))
-        echo "  ✗ Search ${SEARCH_NUM}/${TOTAL} FAILED (exit $SEARCH_EXIT)" | tee -a "$LOG"
+        echo "  ✗ Search ${SEARCH_NUM}/${TOTAL} FAILED ($WORKER_FAILURES/$N_WORKERS workers failed)" | tee -a "$LOG"
     fi
 
     # Upload intermediate results to GCS after each search
