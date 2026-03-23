@@ -324,6 +324,34 @@ while ($true) {
             if ($staleMins -ge $StaleThresholdMin) {
                 Write-Host "  WARNING: STALE HEARTBEAT - unchanged for ${staleMins}m (threshold: ${StaleThresholdMin}m)" -ForegroundColor Red
                 Write-Host "    The search may have crashed or stalled. Check VM logs below." -ForegroundColor Red
+                
+                # Auto-shutdown logic if exceedingly stale (>15 mins) and still running
+                if ($staleMins -ge 15.0 -and $vmStatus -eq "RUNNING") {
+                    Write-Host "  >> Stale for >= 15 mins. Validating if VM is truly idle before issuing shutdown..." -ForegroundColor Yellow
+                    
+                    # Check CPU load average (1-min) via Python3 to avoid quoting/regex hell over SSH
+                    $loadAvgStr = gcloud compute ssh $VmName --zone=$Zone --command="python3 -c `"import os; print(os.getloadavg()[0])`"" --quiet 2>$null
+                    
+                    # Check for active optuna process
+                    $pyProcs = gcloud compute ssh $VmName --zone=$Zone --command="pgrep -f 'optuna' | wc -l" --quiet 2>$null
+                    
+                    $loadAvg = 99.0
+                    if ([double]::TryParse($loadAvgStr.Trim(), [ref]$loadAvg)) {}
+                    
+                    $procCount = 99
+                    if ([int]::TryParse($pyProcs.Trim(), [ref]$procCount)) {}
+                    
+                    Write-Host "  >> 1-Min Load Average: $loadAvg | Optuna Procs: $procCount" -ForegroundColor DarkGray
+                    
+                    # If load avg is < 0.1 OR there are absolutely no Optuna processes
+                    if ($procCount -eq 0 -or $loadAvg -lt 0.1) {
+                        Write-Host "  >> Verified IDLE state. Issuing automated stop command to save costs." -ForegroundColor Red
+                        gcloud compute instances stop $VmName --zone=$Zone --quiet 2>$null
+                        Write-Host "  >> Stop command issued. Status will update on next cycle." -ForegroundColor Yellow
+                    } else {
+                        Write-Host "  >> VM is logically active (CPU or Procs). Awaiting natural termination." -ForegroundColor Yellow
+                    }
+                }
             }
         } else {
             # Heartbeat updated — reset tracker
