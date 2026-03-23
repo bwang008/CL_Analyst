@@ -16,13 +16,14 @@
 
 param(
     [string]$VmName = "optuna-runner-canary",
-    [string]$MachineType = "n2-highcpu-96",
+    [string]$MachineType = "n2-highcpu-48",
     [string]$Zone = "us-central1-a",
     [int]$DiskSizeGB = 50,
     [string]$Project = "cltrainer",
     [string]$ProvisioningModel = "SPOT",
     [string]$GcsDataPath = "gs://cltrainer-optuna-results/data/cl-5m_bk_set_10.parquet",
     [string]$StrategyConfig = "ensemble4.json",
+    [string]$Metrics = "logloss,f0.5",
     [switch]$NoShutdown,
     [switch]$SkipProvision
 )
@@ -58,8 +59,14 @@ if (-not $SkipProvision) {
     Write-Host "`n[1/6] Provisioning canary VM..."
     
     # Check if VM already exists
-    $existingStatus = gcloud compute instances describe $VmName --zone=$Zone `
-        --format="get(status)" 2>$null
+    $existingStatus = $null
+    try {
+        $existingStatus = gcloud compute instances describe $VmName --zone=$Zone `
+            --format="get(status)" 2>&1 | Select-String -Pattern "^(RUNNING|TERMINATED|STOPPED|SUSPENDED)$"
+        if ($existingStatus) { $existingStatus = $existingStatus.ToString().Trim() }
+    } catch {
+        $existingStatus = $null
+    }
     
     if ($existingStatus) {
         Write-Host "  VM already exists (status: $existingStatus)" -ForegroundColor Yellow
@@ -72,21 +79,26 @@ if (-not $SkipProvision) {
         Write-Host "  Creating new VM ($MachineType, $ProvisioningModel)..."
         $startupScript = Join-Path $ScriptDir "vm_startup.sh"
         
-        $termAction = if ($ProvisioningModel -eq "SPOT") { "STOP" } else { "DELETE" }
+        # Build gcloud create args - termination-action only valid for SPOT
+        $createArgs = @(
+            "compute", "instances", "create", $VmName,
+            "--project=$Project",
+            "--zone=$Zone",
+            "--machine-type=$MachineType",
+            "--image-family=ubuntu-2204-lts",
+            "--image-project=ubuntu-os-cloud",
+            "--boot-disk-size=${DiskSizeGB}GB",
+            "--boot-disk-type=pd-ssd",
+            "--metadata-from-file=startup-script=$startupScript",
+            "--scopes=storage-full",
+            "--quiet"
+        )
+        if ($ProvisioningModel -eq "SPOT") {
+            $createArgs += "--provisioning-model=SPOT"
+            $createArgs += "--instance-termination-action=STOP"
+        }
         
-        gcloud compute instances create $VmName `
-            --project=$Project `
-            --zone=$Zone `
-            --machine-type=$MachineType `
-            --provisioning-model=$ProvisioningModel `
-            --instance-termination-action=$termAction `
-            --image-family=ubuntu-2204-lts `
-            --image-project=ubuntu-os-cloud `
-            --boot-disk-size="${DiskSizeGB}GB" `
-            --boot-disk-type=pd-ssd `
-            --metadata-from-file="startup-script=$startupScript" `
-            --scopes=storage-full `
-            --quiet
+        & gcloud @createArgs
         
         if ($LASTEXITCODE -ne 0) {
             Write-Host "`nERROR: Failed to create VM." -ForegroundColor Red
@@ -170,7 +182,8 @@ Write-Host "  Data ready on VM!" -ForegroundColor Green
 Write-Host "`n[5/6] Launching canary pipeline in tmux..."
 
 $shutdownFlag = if ($NoShutdown) { "" } else { "--shutdown" }
-$launchCmd = "tmux kill-session -t canary 2>/dev/null; tmux new-session -d -s canary 'bash $RemoteProject/gcp/vm_canary_run.sh $shutdownFlag'"
+$datasetName = [System.IO.Path]::GetFileNameWithoutExtension($DataFileName)
+$launchCmd = "tmux kill-session -t canary 2>/dev/null; tmux new-session -d -s canary 'bash $RemoteProject/gcp/vm_canary_run.sh $shutdownFlag --dataset=$datasetName --metrics=$Metrics'"
 gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd --quiet 2>$null
 
 Write-Host "  Canary pipeline launched!" -ForegroundColor Green

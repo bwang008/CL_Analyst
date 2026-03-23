@@ -40,10 +40,13 @@ Author: CL Analyst
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import os
 import sys
 import time
+import gc
+import threading
 from collections import Counter
 from pathlib import Path
 from typing import Optional
@@ -70,6 +73,64 @@ from sklearn.metrics import (
 )
 
 import src.util as util
+
+
+# ---------------------------------------------------------------------------
+# Memory diagnostics
+# ---------------------------------------------------------------------------
+
+def _get_rss_gb() -> float:
+    """Get current process RSS in GB. Uses /proc on Linux, psutil fallback."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / (1024 * 1024)  # kB → GB
+    except FileNotFoundError:
+        pass
+    try:
+        import psutil
+        return psutil.Process().memory_info().rss / (1024**3)
+    except ImportError:
+        return -1.0
+
+_peak_rss_gb = 0.0
+_rss_lock = threading.Lock()
+_worker_id = 0  # Set by --worker-id CLI arg
+_total_trials = 0  # Set by main() for status file writes
+
+def _wprint(*args, **kwargs):
+    """Print with [W{id}] prefix for multi-process log disambiguation."""
+    prefix = f"[W{_worker_id}]" if _worker_id > 0 else ""
+    msg = " ".join(str(a) for a in args)
+    if prefix:
+        msg = f"{prefix} {msg}"
+    print(msg, **kwargs)
+
+def _log_mem(label: str, **kwargs) -> None:
+    """Log RSS with a label. Thread-safe peak tracking."""
+    global _peak_rss_gb
+    rss = _get_rss_gb()
+    with _rss_lock:
+        if rss > _peak_rss_gb:
+            _peak_rss_gb = rss
+        peak = _peak_rss_gb
+    parts = " ".join(f"{k}={v}" for k, v in kwargs.items())
+    tid = threading.current_thread().name
+    wtag = f"[W{_worker_id}] " if _worker_id > 0 else ""
+    print(f"{wtag}[MEM] {label} RSS={rss:.2f}GB peak={peak:.2f}GB thread={tid} {parts}", flush=True)
+
+def _write_worker_status(trials_done: int, total_trials: int, status: str = "running") -> None:
+    """Write per-worker status file for monitor aggregation."""
+    if _worker_id <= 0:
+        return
+    import json as _json
+    status_path = f"/tmp/worker_W{_worker_id}_status.json"
+    try:
+        with open(status_path, "w") as f:
+            _json.dump({"trials_done": trials_done, "total_trials": total_trials, "status": status, "pid": os.getpid()}, f)
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Experiment log helpers (inlined to avoid heavy experiment_runner imports)
@@ -289,6 +350,7 @@ def make_objective(
     ohlcv_gym: pd.DataFrame | None = None,
     strategy_cfg: dict | None = None,
     n_jobs: int = 1,
+    num_threads: int = 8,
     max_depth_range: tuple[int, int] = (4, 10),
     num_leaves_range: tuple[int, int] = (15, 90),
     max_n_estimators: int = 3000,
@@ -310,13 +372,14 @@ def make_objective(
         prob_col = "prob_Signal"
 
     def objective(trial: optuna.Trial) -> float:
+        _log_mem("trial_start", trial=trial.number)
         # ---- Suggest hyperparameters (E2E Alpha Factory wide ranges) ----
         boosting_type = trial.suggest_categorical("boosting_type", ["gbdt", "goss"])
 
         params = {
             "boosting_type": boosting_type,
             "verbose": -1,
-            "num_threads": 8,  # Hardcoded: 12 workers × 8 threads = 96 cores
+            "num_threads": num_threads,
             "num_leaves": trial.suggest_int("num_leaves", num_leaves_range[0], num_leaves_range[1]),
             "min_child_samples": trial.suggest_int("min_child_samples", 20, 300),
             "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
@@ -367,8 +430,11 @@ def make_objective(
             y_tr, y_val = y_train.iloc[:val_split], y_train.iloc[val_split:]
 
             # Train with early stopping
-            train_data = lgb.Dataset(X_tr, label=y_tr)
-            val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
+            # free_raw_data=False: avoids C++ deallocation race when multiple
+            # Optuna worker threads build/destroy Datasets concurrently.
+            # Memory cost is negligible (~0.7 GB total for all workers).
+            train_data = lgb.Dataset(X_tr, label=y_tr, free_raw_data=False)
+            val_data = lgb.Dataset(X_val, label=y_val, reference=train_data, free_raw_data=False)
 
             callbacks = [
                 lgb.log_evaluation(period=0),  # silent
@@ -421,6 +487,11 @@ def make_objective(
                 "n_estimators_budget": n_estimators,
             })
 
+            # Free model + datasets to prevent memory accumulation across folds
+            del model, train_data, val_data, X_tr, X_val, y_tr, y_val
+            gc.collect()
+            _log_mem("fold_cleanup", trial=trial.number, fold=fold_idx)
+
         if not fold_scores:
             return -999.0
 
@@ -448,7 +519,16 @@ def make_objective(
 
         return avg_score
 
-    return objective
+    # Wrap objective to force garbage collection between trials
+    def objective_with_cleanup(trial: optuna.Trial) -> float:
+        try:
+            return objective(trial)
+        finally:
+            gc.collect()
+            _log_mem("trial_end", trial=trial.number)
+            _write_worker_status(trial.number + 1, _total_trials)
+
+    return objective_with_cleanup
 
 
 # ---------------------------------------------------------------------------
@@ -468,10 +548,12 @@ def run_search(
     gym_fraction: float = 0.85,
     study_name: str | None = None,
     db_dir: str = "models/optuna_studies",
+    num_threads: int = 8,
     max_depth_range: tuple[int, int] = (4, 10),
     num_leaves_range: tuple[int, int] = (15, 90),
     max_n_estimators: int = 3000,
     early_stopping_rounds: int = 100,
+    max_folds: int = 10,
 ):
     """Run the Walk-Forward Optuna search (Phase 1: Brain Optimization).
 
@@ -520,6 +602,14 @@ def run_search(
     print(f"  Study:           {study_name}")
     print("=" * 70)
 
+    # ---- Enable crash diagnostics ----
+    faulthandler.enable()  # Prints C-level traceback on SIGSEGV (exit 139)
+    try:
+        import signal
+        faulthandler.register(signal.SIGUSR1)  # kill -USR1 <pid> → dump all threads
+    except (AttributeError, OSError):
+        pass  # SIGUSR1 not available on Windows
+
     # ---- Load data ----
     print("\n[1/4] Loading data...")
     df = pd.read_parquet(data_path)
@@ -539,25 +629,32 @@ def run_search(
         df_vault = df.iloc[len(df) - n_vault:].copy()
         print(f"  Using {gym_fraction:.0%} gym / {1-gym_fraction:.0%} vault split")
 
-    X = df_gym[feature_cols]
+    X = df_gym[feature_cols].astype("float32")
     y = df_gym[target_col].astype(int)
+    n_gym = len(X)
+    gym_index = X.index  # lightweight reference for fold time display
 
-    print(f"  Gym:   {len(df_gym):,} rows ({df_gym.index.min()} → {df_gym.index.max()})")
+    print(f"  Gym:   {n_gym:,} rows ({gym_index.min()} → {gym_index.max()})")
     print(f"  Vault: {len(df_vault):,} rows ({df_vault.index.min()} → {df_vault.index.max()}) [UNTOUCHED]")
-    print(f"  Features: {len(feature_cols)}")
+    print(f"  Features: {len(feature_cols)} (float32)")
     print(f"  Target distribution (gym): {y.value_counts().to_dict()}")
+
+    # Free the full gym DataFrame and vault (vault only used for print above)
+    del df, df_gym, df_vault
+    gc.collect()
+    _log_mem("after_data_load")
 
     # ---- Generate and sample WF folds ----
     print("\n[2/4] Generating walk-forward folds...")
-    all_folds = walk_forward_folds(len(df_gym))
-    folds = sample_folds(all_folds)
+    all_folds = walk_forward_folds(n_gym)
+    folds = sample_folds(all_folds, max_folds=max_folds)
     print(f"  Total folds: {len(all_folds)}  |  Sampled: {len(folds)}")
 
     # Show fold time ranges
     for i, (ts, te, vs, ve) in enumerate(folds):
-        train_end_dt = df_gym.index[min(te - 1, len(df_gym) - 1)]
-        val_start_dt = df_gym.index[min(vs, len(df_gym) - 1)]
-        val_end_dt = df_gym.index[min(ve - 1, len(df_gym) - 1)]
+        train_end_dt = gym_index[min(te - 1, n_gym - 1)]
+        val_start_dt = gym_index[min(vs, n_gym - 1)]
+        val_end_dt = gym_index[min(ve - 1, n_gym - 1)]
         print(f"    Fold {i}: train→{train_end_dt.date()} | val {val_start_dt.date()}→{val_end_dt.date()}")
 
     # ---- Load OHLCV if sharpe mode ----
@@ -570,7 +667,7 @@ def run_search(
         if train_cutoff_date:
             ohlcv_gym = ohlcv_full[ohlcv_full.index < cutoff].copy()
         else:
-            ohlcv_gym = ohlcv_full.iloc[:len(df) - n_vault].copy()
+            ohlcv_gym = ohlcv_full.iloc[:n_gym].copy()
         print(f"  OHLCV gym: {len(ohlcv_gym):,} bars")
 
         with open(strategy_config_path) as f:
@@ -581,10 +678,9 @@ def run_search(
     print(f"\n[3/4] Running Optuna search ({n_trials} trials, {len(folds)} folds each)...")
 
     os.makedirs(db_dir, exist_ok=True)
-    db_path = os.path.join(db_dir, f"{study_name}.db")
-    storage = optuna.storages.RDBStorage(
-        url=f"sqlite:///{db_path}",
-        engine_kwargs={"connect_args": {"timeout": 30}},
+    journal_path = os.path.join(db_dir, f"{study_name}.journal")
+    storage = optuna.storages.JournalStorage(
+        optuna.storages.journal.JournalFileBackend(journal_path),
     )
 
     study = optuna.create_study(
@@ -597,7 +693,7 @@ def run_search(
     objective = make_objective(
         X=X,
         y=y,
-        df_gym=df_gym,
+        df_gym=None,  # freed for memory; only needed in sharpe mode
         folds=folds,
         ml_metric=ml_metric,
         target_name=target_name,
@@ -605,6 +701,7 @@ def run_search(
         ohlcv_gym=ohlcv_gym,
         strategy_cfg=strategy_cfg,
         n_jobs=n_jobs,
+        num_threads=num_threads,
         max_depth_range=max_depth_range,
         num_leaves_range=num_leaves_range,
         max_n_estimators=max_n_estimators,
@@ -791,7 +888,7 @@ def run_search(
     _append_to_log(experiment_record)
     print(f"  Logged as {exp_id}")
 
-    print(f"\n  Study DB: {db_path}")
+    print(f"\n  Study journal: {journal_path}")
     print(f"  Resume: --study-name {study_name}")
     print(f"\n  NEXT STEP: Run Phase 2 threshold optimization, then Phase 3 OOS test")
     print(f"  See: python agent/strategy_optimizer.py --help")
@@ -879,7 +976,27 @@ def main():
         "--early-stopping-rounds", type=int, default=100,
         help="Early stopping rounds (default: 100)",
     )
+    parser.add_argument(
+        "--num-threads", type=int, default=8,
+        help="LightGBM num_threads per worker (default: 8). "
+             "Total cores used = n_jobs × num_threads.",
+    )
+    parser.add_argument(
+        "--max-folds", type=int, default=10,
+        help="Maximum number of walk-forward folds to sample (default: 10). "
+             "Fewer folds = faster searches with slightly noisier estimates.",
+    )
+    parser.add_argument(
+        "--worker-id", type=int, default=0,
+        help="Worker ID for process-level parallelism (default: 0 = single process). "
+             "When >0, all output is prefixed with [W{id}] for log disambiguation.",
+    )
     args = parser.parse_args()
+
+    # Set global worker ID and total trials for logging
+    global _worker_id, _total_trials
+    _worker_id = args.worker_id
+    _total_trials = args.n_trials
 
     run_search(
         data_path=args.data,
@@ -893,10 +1010,12 @@ def main():
         gym_fraction=args.gym_fraction,
         study_name=args.study_name,
         db_dir=args.db_dir,
+        num_threads=args.num_threads,
         max_depth_range=tuple(args.max_depth_range),
         num_leaves_range=tuple(args.num_leaves_range),
         max_n_estimators=args.max_n_estimators,
         early_stopping_rounds=args.early_stopping_rounds,
+        max_folds=args.max_folds,
     )
 
 
