@@ -69,6 +69,7 @@ class Order:
     sl_atr_mult: Optional[float] = None
     trailing_atr_mult: Optional[float] = None
     max_hold_bars: Optional[int] = None
+    override_entry_price: Optional[float] = None
 
 
 # Sentinel for "do nothing this bar"
@@ -529,6 +530,88 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
 
         return HOLD
 
+class BreakoutStraddleStrategy(BaseExecutionStrategy):
+    """Non-directional breakout straddle for magnitude prediction models.
+    
+    When prob_buy (magnitude prediction) >= threshold, this strategy
+    records the current bar's High and Low as pending breakout barriers.
+    
+    On subsequent bars (up to breakout_window), if the High exceeds the
+    buy_stop, it returns a BUY order entering exactly at the buy_stop.
+    If the Low pierces the sell_stop, it returns a SELL order exactly at
+    the sell_stop. Whichever triggers first cancels the other.
+    """
+
+    def __init__(self, config: dict) -> None:
+        super().__init__(config)
+        self.threshold: float = config.get("entry_threshold", 0.60)
+        self.breakout_window: int = config.get("breakout_window", 6)
+        
+        # Pending state
+        self.pending = False
+        self.buy_stop: float = 0.0
+        self.sell_stop: float = 0.0
+        self.bars_waiting: int = 0
+        self.trigger_atr: float = 0.0
+
+    def on_bar(
+        self,
+        dt: object,
+        open_: float,
+        high: float,
+        low: float,
+        close: float,
+        atr: float,
+        prob_buy: float,
+        prob_sell: float,
+        state: EngineState,
+    ) -> list[Order]:
+        if np.isnan(prob_buy):
+            prob_buy = 0.0
+            
+        # 1. No pending orders. Should we create them?
+        if not self.pending:
+            if state.position == 0 and prob_buy >= self.threshold:
+                # Signal triggered: setup straddle stops on the NEXT bar
+                self.pending = True
+                self.buy_stop = high
+                self.sell_stop = low
+                self.bars_waiting = 0
+                self.trigger_atr = atr
+            return HOLD
+            
+        # 2. Orders are pending. Check for execution first, then expiration.
+        self.bars_waiting += 1
+        
+        # Did the current bar trigger our pending orders?
+        buy_triggered = high >= self.buy_stop
+        sell_triggered = low <= self.sell_stop
+        
+        if buy_triggered and sell_triggered:
+            # Whipsaw: both hit in same bar. For backtesting safety, pick the worst one,
+            # or realistically, pick random. Let's long for simplicity but note it.
+            self.pending = False
+            return [Order(action="BUY", side=1, lots=1, 
+                          reason=f"STRADDLE_BUY_WHIPSAW wait={self.bars_waiting}",
+                          override_entry_price=self.buy_stop)]
+                          
+        elif buy_triggered:
+            self.pending = False
+            return [Order(action="BUY", side=1, lots=1, 
+                          reason=f"STRADDLE_BUY wait={self.bars_waiting}",
+                          override_entry_price=self.buy_stop)]
+                          
+        elif sell_triggered:
+            self.pending = False
+            return [Order(action="SELL", side=-1, lots=1, 
+                          reason=f"STRADDLE_SELL wait={self.bars_waiting}",
+                          override_entry_price=self.sell_stop)]
+                          
+        # 3. Expiration check
+        if self.bars_waiting >= self.breakout_window:
+            self.pending = False
+            
+        return HOLD
 
 # ---------------------------------------------------------------------------
 # Strategy Registry / Factory
@@ -539,6 +622,7 @@ STRATEGY_REGISTRY: dict[str, type[BaseExecutionStrategy]] = {
     "ConservativeEnsembleStrategy": ConservativeEnsembleStrategy,
     "AggressiveEnsembleStrategy": AggressiveEnsembleStrategy,
     "TieredEnsembleStrategy": TieredEnsembleStrategy,
+    "BreakoutStraddleStrategy": BreakoutStraddleStrategy,
 }
 
 

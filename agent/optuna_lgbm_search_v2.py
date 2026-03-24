@@ -242,6 +242,49 @@ def focal_eval(preds: np.ndarray, val_set: lgb.Dataset):
 
 
 # ---------------------------------------------------------------------------
+# Asymmetric loss objective (Experiment 1: Hyper-Conservative FP penalty)
+# ---------------------------------------------------------------------------
+
+ASYMMETRIC_FP_WEIGHT = 5.0  # False Positive penalty multiplier
+
+
+def asymmetric_obj(preds: np.ndarray, train_set: lgb.Dataset):
+    """Asymmetric binary cross-entropy that penalizes False Positives 5× more.
+
+    When truth=0 but model predicts 1 (FP), the gradient is scaled by
+    fp_weight, mathematically forcing the model toward higher precision.
+    """
+    labels = train_set.get_label().astype(int)
+    p = _sigmoid(preds)
+    w = np.where(labels == 0, ASYMMETRIC_FP_WEIGHT, 1.0)
+    grad = w * (p - labels)
+    hess = w * p * (1 - p)
+    return grad, hess
+
+
+def asymmetric_eval(preds: np.ndarray, val_set: lgb.Dataset):
+    """Asymmetric loss eval metric for early stopping (matches asymmetric_obj).
+
+    Returns (name, value, is_higher_better) for LightGBM custom eval.
+    Lower = better, so is_higher_better=False.
+    """
+    labels = val_set.get_label().astype(int)
+    p = _sigmoid(preds)
+    w = np.where(labels == 0, ASYMMETRIC_FP_WEIGHT, 1.0)
+    # Weighted binary cross-entropy
+    loss = -w * (labels * np.log(np.clip(p, 1e-7, 1.0))
+                 + (1 - labels) * np.log(np.clip(1 - p, 1e-7, 1.0)))
+    return "asymmetric_loss", float(np.mean(loss)), False
+
+
+# Objective registry — maps CLI name to (obj_fn, eval_fn) pair
+OBJECTIVE_REGISTRY = {
+    "focal": (focal_obj, focal_eval),
+    "asymmetric": (asymmetric_obj, asymmetric_eval),
+}
+
+
+# ---------------------------------------------------------------------------
 # Sharpe helper
 # ---------------------------------------------------------------------------
 
@@ -355,6 +398,7 @@ def make_objective(
     num_leaves_range: tuple[int, int] = (15, 90),
     max_n_estimators: int = 3000,
     early_stopping_rounds: int = 100,
+    objective_type: str = "focal",
 ):
     """Create the Optuna objective closure.
 
@@ -398,11 +442,12 @@ def make_objective(
 
         n_estimators = trial.suggest_int("n_estimators", 500, max_n_estimators, step=100)
 
-        # Disable built-in metric — we use focal_eval for early stopping
+        # Disable built-in metric — we use custom eval for early stopping
         params["metric"] = "None"
 
-        # Custom focal loss objective goes in params (LightGBM 4.x API)
-        params["objective"] = focal_obj
+        # Custom loss objective goes in params (LightGBM 4.x API)
+        obj_fn, eval_fn = OBJECTIVE_REGISTRY[objective_type]
+        params["objective"] = obj_fn
 
         # ---- Evaluate across sampled folds ----
         fold_scores = []
@@ -448,7 +493,7 @@ def make_objective(
                     num_boost_round=n_estimators,
                     valid_sets=[val_data],
                     valid_names=["val"],
-                    feval=focal_eval,
+                    feval=eval_fn,
                     callbacks=callbacks,
                 )
             except Exception:
@@ -554,6 +599,7 @@ def run_search(
     max_n_estimators: int = 3000,
     early_stopping_rounds: int = 100,
     max_folds: int = 10,
+    objective_type: str = "focal",
 ):
     """Run the Walk-Forward Optuna search (Phase 1: Brain Optimization).
 
@@ -592,6 +638,7 @@ def run_search(
     print("=" * 70)
     print(f"  Target:          {target_name}")
     print(f"  ML metric:       {ml_metric}")
+    print(f"  Objective:       {objective_type}")
     print(f"  Trials:          {n_trials}")
     print(f"  Workers:         {n_jobs}  (LGB threads/worker: 8 hardcoded)")
     print(f"  Balance:         {balance_mode}")
@@ -706,6 +753,7 @@ def run_search(
         num_leaves_range=num_leaves_range,
         max_n_estimators=max_n_estimators,
         early_stopping_rounds=early_stopping_rounds,
+        objective_type=objective_type,
     )
 
     # Progress callback
@@ -991,6 +1039,12 @@ def main():
         help="Worker ID for process-level parallelism (default: 0 = single process). "
              "When >0, all output is prefixed with [W{id}] for log disambiguation.",
     )
+    parser.add_argument(
+        "--objective", default="focal",
+        choices=list(OBJECTIVE_REGISTRY.keys()),
+        help="LightGBM objective function: 'focal' (default) or 'asymmetric' "
+             "(5× FP penalty for hyper-conservative precision).",
+    )
     args = parser.parse_args()
 
     # Set global worker ID and total trials for logging
@@ -1016,6 +1070,7 @@ def main():
         max_n_estimators=args.max_n_estimators,
         early_stopping_rounds=args.early_stopping_rounds,
         max_folds=args.max_folds,
+        objective_type=args.objective,
     )
 
 

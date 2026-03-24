@@ -153,11 +153,14 @@ def make_objective(
         cfg = copy.deepcopy(base_cfg)
 
         # Search space
-        cfg["tp_atr_mult"] = trial.suggest_float("tp_atr_mult", 1.5, 7.0, step=0.5)
-        cfg["sl_atr_mult"] = trial.suggest_float("sl_atr_mult", 0.5, 3.0, step=0.5)
+        cfg["tp_atr_mult"] = trial.suggest_float("tp_atr_mult", 1.5, 10.0, step=0.5)
+        cfg["sl_atr_mult"] = trial.suggest_float("sl_atr_mult", 0.5, 5.0, step=0.5)
         cfg["trailing_atr_mult"] = trial.suggest_float("trailing_atr_mult", 0.5, 5.0, step=0.5)
         cfg["cooldown_bars"] = trial.suggest_int("cooldown_bars", 0, 30, step=5)
         cfg["max_hold_bars"] = trial.suggest_int("max_hold_bars", 72, 576, step=72)
+        
+        if base_cfg.get("execution_class") == "BreakoutStraddleStrategy":
+            cfg["breakout_window"] = trial.suggest_int("breakout_window", 2, 24, step=2)
 
         # Threshold — update in the models section if ensemble, else top-level
         threshold = trial.suggest_float("entry_threshold", 0.50, 0.80, step=0.05)
@@ -204,6 +207,8 @@ def save_trial_config(
     cfg["trailing_atr_mult"] = trial.params["trailing_atr_mult"]
     cfg["cooldown_bars"] = trial.params["cooldown_bars"]
     cfg["max_hold_bars"] = trial.params["max_hold_bars"]
+    if "breakout_window" in trial.params:
+        cfg["breakout_window"] = trial.params["breakout_window"]
     threshold = trial.params["entry_threshold"]
     cfg["entry_threshold"] = threshold
     if "models" in cfg:
@@ -359,6 +364,8 @@ def run_optimization(
     best_cfg["trailing_atr_mult"] = best_trial.params["trailing_atr_mult"]
     best_cfg["cooldown_bars"] = best_trial.params["cooldown_bars"]
     best_cfg["max_hold_bars"] = best_trial.params["max_hold_bars"]
+    if "breakout_window" in best_trial.params:
+        best_cfg["breakout_window"] = best_trial.params["breakout_window"]
     threshold = best_trial.params["entry_threshold"]
     best_cfg["entry_threshold"] = threshold
     if "models" in best_cfg:

@@ -530,7 +530,7 @@ class BacktestEngine:
 
         self._state = TradeState.IN_POSITION
         self._entry_dt = dt
-        self._entry_price = bar.Close
+        self._entry_price = order.override_entry_price if (order is not None and order.override_entry_price is not None) else bar.Close
         self._atr_at_entry = atr
         self._side = signal_side
         self._lots = lots
@@ -650,7 +650,7 @@ class BacktestEngine:
         order: Optional[Order] = None,
     ) -> None:
         """Open a new position and add it to the open-positions list."""
-        entry_price = bar.Close
+        entry_price = order.override_entry_price if (order is not None and order.override_entry_price is not None) else bar.Close
         entry_order_side = "Buy" if signal_side == 1 else "Sell"
         entry_fill = self._apply_slippage(entry_price, entry_order_side)
 
