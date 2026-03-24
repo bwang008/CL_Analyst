@@ -1,11 +1,61 @@
-# HANDOFF
+# HANDOFF (Agent Bootstrap & Context)
+
+> Quick-read bootstrap file for new agent sessions. Read this FIRST for instant project context.
+
+## Project
+Crude oil (CL) 5-minute bar ML trading system using LightGBM with focal loss, walk-forward validation, and IBKR live execution.
+
+## Current State (2026-03-23)
+- **No proven clean model yet.** All prior "alpha" came from lookahead leakage in set_08.
+- **Active experiment**: Asymmetric Drawdown target ("Easy Money") running on GCP (`optuna-runner-directed`).
+- **Metric policy**: Optuna uses `logloss` + `average_precision` (PR-AUC). Do NOT use `f0.5` in Optuna for targets with <5% positive rate — it goes blind.
+
+## Root Documentation — Reading Priority
+
+| File | Read? | Purpose |
+|------|:-----:|---------|
+| **`HANDOFF.md`** (this file) | ✅ Always | 30-second orientation, technical reference, configs, known bugs |
+| **`AGENT_LOG.md`** | ⚡ Skim | Last 2-3 days of detailed work history. Skim the headers for context |
+| **`AGENT_LOG_ARCHIVE.md`** | ❌ Skip | Historical entries older than ~3 days. Deep debugging only |
+| **`INVESTIGATION_RESULTS.md`** | ❌ Skip | 2026-03-20 skew investigation (bugs are fixed). Cross-reference only |
+| **`READBEN.me`** / `README.md` | ❌ Skip | High-level project overview — agents have better context here |
+
+## Key Operational Files
+
+| File | Purpose |
+|------|---------|
+| `experiment_tracker.json` | Structured registry of all experiments with metrics |
+| `research_backlog.json` | Prioritized queue of experiment ideas to try |
+| `models/registry/` | Archived model bundles (PKL + metrics + predictions) |
+| `configs/strategies/` | Live trading and backtest strategy configs |
+| `.agents/workflows/` | Slash commands — run `/run-tests`, `/commit`, `/next`, etc. |
+
+### Documentation Maintenance Protocol
+To keep the AI context window sharp, all agents must follow these rules before ending a session:
+1. **Log your work**: Add a new `## YYYY-MM-DD — Title` entry at the top of `AGENT_LOG.md` (under the header) summarizing what you did, bugs fixed, and metric results.
+2. **Update HANDOFF**: Update the "Last Completed Task", "Current Known Bugs", and "Immediate Next Steps" sections in this file (`HANDOFF.md`).
+3. **Auto-Prune**: If `AGENT_LOG.md` exceeds ~500 lines (or contains more than 5-7 days of history), automatically move the oldest entries to the top of `AGENT_LOG_ARCHIVE.md`. Leave a pointer at the bottom of `AGENT_LOG.md` referencing the archive. Do not ask the user for permission to prune; just do it to keep the active log clean.
+
+
+## Datasets
+| Dataset | Status | Notes |
+|---------|--------|-------|
+| set_06, 07, 08 | ⛔ Leaked | MACRO resample lookahead + bfill + div-by-zero |
+| set_09 | ⚠️ Partial | Fixed MACRO, still has bfill |
+| **set_10** | ✅ Clean | Causally safe, 1.19M rows, 156 features |
+| **set_11** | ✅ Clean | Latest 5-min: set_10 + new features, 199 columns |
+| **HourSet_02** | ✅ Clean | Latest hourly: 1H bars, 120H targets, ~101K rows |
+| **CL_set_11_asym** | 🔬 Expr. | set_11 + Asymmetric targets (3.46% LONG / 3.23% SHORT) |
+
+---
 
 ## Current Branch
 - `live_trader_test` (merged from `development` 2026-03-21)
 
 ## Last Completed Task
-- **Canary Pipeline & Dataset Experiments (2026-03-22)**: Built lightweight canary pipeline (`gcp_deploy_canary.ps1` + `vm_canary_run.sh` + `gcp_monitor.ps1`) for rapid 20-trial experiment validation. Fixed LightGBM SIGSEGV with search-level process parallelism. Ran canary experiments on set_11 (5-min, clean + new features) and HourSet_02 (1-hour, 120H targets). **Key finding: only set_08 (leaky) produces signals; all clean datasets (set_10, set_11, HourSet_02) produce zero or unprofitable trades.** Fixed ensemble backtest bug in `vm_e2e_pipeline.py` and custom target passthrough bug.
-- **E2E Alpha Factory Pipeline (2026-03-21)**: Full E2E pipeline: Optuna → train → backtest → package → GCS upload. Uses `ensemble4.json` for backtests.
+- **Asymmetric Drawdown Target & Metric Architecture (2026-03-23)**: Engineered "Easy Money" target (`scripts/generate_asymmetric_target.py`) with 3.46% LONG / 3.23% SHORT positive rates. **Replaced `f0.5` with `average_precision` (PR-AUC) as default Optuna metric** — F0.5 is blind on rare targets (<5% positive rate). Deployed `optuna-runner-directed` with `{LONG, SHORT} × {logloss, average_precision}` searches. Optimized Volatility Breakout strategy (PF 1.47, 112 trades).
+- **Canary Pipeline & Dataset Experiments (2026-03-22)**: Built canary pipeline for rapid 20-trial validation. **Key finding: only set_08 (leaky) produces signals; all clean datasets produce zero or unprofitable trades.**
+- **E2E Alpha Factory Pipeline (2026-03-21)**: Full E2E pipeline: Optuna → train → backtest → package → GCS upload.
 
 ## Current Known Bugs / Issues
 - **~~MACRO resample lookahead bias~~** ✅ FIXED (2026-03-21): Replaced `resample("1h")` with bar-level `rolling(hours*12, min_periods=1)` + `ffill()` + `.clip(lower=1e-8)`.
@@ -189,12 +239,21 @@ Creates registry-compatible bundles + production_artifacts.zip → GCS
 
 > **NOT searched**: `scale_pos_weight` (conflicts with focal loss), `dart` boosting (5-10× slower)
 
-### Metrics
-| Metric | Description |
-|---|---|
-| `logloss` | Best-calibrated probabilities |
-| `f0.5` | F-Beta emphasizing precision |
-| `average_precision` | PR-AUC — ranking confident positive signals |
+### Metrics (Two-Tier Architecture)
+
+**Tier 1 — ML Brain (Optuna Search)**:
+| Metric | Description | When to Use |
+|---|---|---|
+| `logloss` | Best-calibrated probabilities | Always |
+| `average_precision` | PR-AUC — threshold-free ranking | Always (especially <5% positive targets) |
+
+**Tier 2 — Execution Trigger (Backtest/Threshold Sweep)**:
+| Metric | Description | When to Use |
+|---|---|---|
+| `f0.5` | F-Beta emphasizing precision | Threshold sweep on frozen model |
+| `Profit Factor` | Win $ / Loss $ | Backtest evaluation |
+
+> **⚠️ CRITICAL (2026-03-23)**: Do NOT use `f0.5` in Optuna for targets with <5% positive rate. F0.5 uses a hard 0.50 threshold — on a 3% target, all probabilities fall below 0.50 and Optuna goes blind (every trial returns 0.00). Use `average_precision` instead.
 
 ### Quota Notes
 | Quota | Current | Needed |
@@ -216,8 +275,14 @@ Creates registry-compatible bundles + production_artifacts.zip → GCS
 > **CRITICAL FINDING (2026-03-22)**: All "alpha" in set_08 comes from lookahead leakage. Every leak-free dataset produces zero or unprofitable signals with the current model architecture (LightGBM + focal loss + current feature set). The model architecture and/or feature engineering need fundamental changes to find real alpha.
 
 ## Immediate Next Steps
-- **Rethink feature engineering** — current features (MACRO, exhaustion, volume flow, etc.) don't contain enough predictive signal without leakage
-- **Explore alternative model architectures** — consider temporal models (LSTM, Transformer), different loss functions, or ensemble methods beyond LightGBM
+1. Read `experiment_tracker.json` for what's been tried
+2. Read `research_backlog.json` for prioritized ideas
+3. Propose the highest-priority "ready" item, or type `/next`
+
+### Current Active Tasks
+- **⏳ ACTIVE: Asymmetric Drawdown Canary** — `optuna-runner-directed` running 20-trial searches on `CL_set_11_asym.parquet` (3.46% LONG / 3.23% SHORT targets). Monitor with `gsutil cat gs://cltrainer-optuna-results/canary/STATUS.json`. Results will show if LightGBM can rank "Easy Money" setups via OOS Logloss + PR-AUC.
+- **Tier 2 threshold sweep** — Once Asymmetric Drawdown models are trained, run F0.5 threshold sweep (0.50–0.95) to find optimal trading threshold. Script needed: `scripts/threshold_sweep.py`.
+- **Rethink feature engineering** — current features don't contain enough predictive signal without leakage
+- **Explore alternative model architectures** — temporal models (LSTM, Transformer), different loss functions
 - **Re-examine target definitions** — the triple-barrier target may be too hard to predict from available features
-- **Feature importance analysis on set_08** — understand exactly which features drive set_08's performance and engineer leak-free analogs
 - Address `trailing_atr_mult = 0.0` bug (should disable trailing stop, currently triggers immediately)
