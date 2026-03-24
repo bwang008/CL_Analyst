@@ -15,11 +15,14 @@
 *.joblib
 *.png
 *.log
+backtest_report*.txt
 reports/
 
 # ----- Keep these in git -----
 # Model registry (configs + trained models, ~5 MB total)
 !models/registry/**
+# ...but still ignore backtest reports inside registry
+models/registry/**/backtest_report*.txt
 # Project config files
 !experiments.json
 !data/DATASETS.json
