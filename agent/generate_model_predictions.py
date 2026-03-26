@@ -94,6 +94,22 @@ def main() -> None:
     learner = LGBMLearner()
     learner.load(args.model_path)
 
+    # ---- Narrow features to model's training set ----
+    if learner.feature_names is not None:
+        model_feats = learner.feature_names
+        available = [f for f in model_feats if f in feature_cols]
+        dropped = set(feature_cols) - set(available)
+        extra = set(model_feats) - set(feature_cols)
+        if extra:
+            raise ValueError(
+                f"Dataset is missing {len(extra)} features the model expects: "
+                f"{sorted(extra)[:10]}..."
+            )
+        if dropped:
+            print(f"  [INFO] Dropping {len(dropped)} dataset features not in model")
+        feature_cols = available
+        print(f"  Using {len(feature_cols)} model features for scoring")
+
     # ---- Determine prediction range ----
     if args.oos_start_date:
         oos_start = pd.Timestamp(args.oos_start_date)
