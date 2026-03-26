@@ -238,3 +238,71 @@ def test_add_all_features_extended(flat_line_data):
     assert "DIST_SKEW_10" in df_ext.columns
     assert "MOM_STOCH_K_10" in df_ext.columns
 
+
+def test_exhaustion_divergence_columns_exist(long_trend_data):
+    """Exhaustion divergence cluster should add EXHDIV_* columns."""
+    factory = AlphaFactory(long_trend_data)
+    # Need momentum first for RSI
+    factory.add_momentum_cluster()
+    df = factory.add_exhaustion_divergence_cluster(window=20)
+
+    for col in [
+        "EXHDIV_SLOPE_DIVERGE_20",
+        "EXHDIV_PEAK_OFFSET_20",
+        "EXHDIV_EFFORT_REWARD_20",
+    ]:
+        assert col in df.columns, f"Missing column: {col}"
+        series = df[col].dropna()
+        assert not series.empty, f"{col} is all NaN"
+        assert not np.isinf(series).any(), f"{col} has inf values"
+
+
+def test_effort_reward_non_negative(long_trend_data):
+    """Effort-reward ratio should always be >= 0 (volume and range are positive)."""
+    factory = AlphaFactory(long_trend_data)
+    factory.add_momentum_cluster()
+    df = factory.add_exhaustion_divergence_cluster(window=20)
+
+    er = df["EXHDIV_EFFORT_REWARD_20"].dropna()
+    assert not er.empty, "EXHDIV_EFFORT_REWARD_20 is all NaN"
+    assert (er >= 0).all(), "EXHDIV_EFFORT_REWARD_20 contains negative values"
+
+
+def test_exhaustion_divergence_no_lookahead(long_trend_data):
+    """Features at row i must not change when future data (row i+1 onward) changes."""
+    test_row = 500  # well past warmup
+
+    # Run 1: original data
+    factory1 = AlphaFactory(long_trend_data.copy())
+    factory1.add_momentum_cluster()
+    df1 = factory1.add_exhaustion_divergence_cluster(window=20)
+
+    # Run 2: scramble all data after test_row
+    modified = long_trend_data.copy()
+    np.random.seed(42)
+    n_future = len(modified) - test_row - 1
+    modified.iloc[test_row + 1:, modified.columns.get_loc("Close")] = (
+        np.random.uniform(50, 200, n_future)
+    )
+    modified.iloc[test_row + 1:, modified.columns.get_loc("High")] = (
+        modified.iloc[test_row + 1:]["Close"] + 1.0
+    )
+    modified.iloc[test_row + 1:, modified.columns.get_loc("Low")] = (
+        modified.iloc[test_row + 1:]["Close"] - 1.0
+    )
+    factory2 = AlphaFactory(modified)
+    factory2.add_momentum_cluster()
+    df2 = factory2.add_exhaustion_divergence_cluster(window=20)
+
+    for col in [
+        "EXHDIV_SLOPE_DIVERGE_20",
+        "EXHDIV_PEAK_OFFSET_20",
+        "EXHDIV_EFFORT_REWARD_20",
+    ]:
+        v1 = df1[col].iloc[test_row]
+        v2 = df2[col].iloc[test_row]
+        if pd.notna(v1) and pd.notna(v2):
+            assert np.isclose(v1, v2, rtol=1e-6), (
+                f"Lookahead detected in {col}: {v1} vs {v2}"
+            )
+

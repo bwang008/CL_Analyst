@@ -14,7 +14,7 @@
 #
 # Arguments:
 #   --dataset=<name>   Dataset filename without path/extension (default: cl-5m_bk_set_10)
-#   --metrics=<list>   Comma-separated metrics to search (default: logloss,f0.5)
+#   --metrics=<list>   Comma-separated metrics to search (default: logloss,average_precision)
 #   --shutdown         Auto-shutdown VM after completion
 #   --agent-id=<id>    Agent identifier for logging
 # =============================================================================
@@ -42,6 +42,7 @@ CANARY_PREFIX="canary"
 STRATEGY="configs/strategies/ensemble4.json"
 LOG="canary_run_$(date +%Y%m%d_%H%M%S).log"
 SHUTDOWN=false
+USE_BUCKETS=false
 AGENT_ID="${AGENT_ID:-canary_bot}"
 
 # Search space constraints (fast canary)
@@ -63,6 +64,7 @@ for arg in "$@"; do
         --target-long=*) TARGET_LONG="${arg#*=}" ;;
         --target-short=*) TARGET_SHORT="${arg#*=}" ;;
         --strategy=*) STRATEGY="configs/strategies/${arg#*=}" ;;
+        --use-buckets) USE_BUCKETS=true ;;
     esac
 done
 
@@ -113,6 +115,7 @@ echo "  Strategy:   $STRATEGY" | tee -a "$LOG"
 echo "  Shutdown:   $SHUTDOWN" | tee -a "$LOG"
 echo "  Log:        $LOG" | tee -a "$LOG"
 echo "  GCS dest:   $BUCKET/$CANARY_PREFIX/" | tee -a "$LOG"
+echo "  Buckets:    $USE_BUCKETS" | tee -a "$LOG"
 echo "" | tee -a "$LOG"
 echo "  SEARCH SPACE CONSTRAINTS:" | tee -a "$LOG"
 echo "    max_depth:       [$MAX_DEPTH_MIN, $MAX_DEPTH_MAX]" | tee -a "$LOG"
@@ -173,6 +176,7 @@ for i in "${!COMBOS[@]}"; do
         --num-threads $THREADS_PER_WORKER \
         --max-folds $MAX_FOLDS \
         --worker-id $WORKER_ID \
+        $([ "$USE_BUCKETS" = true ] && echo "--use-buckets") \
         2>&1 | tee -a "$LOG" &
     SEARCH_PIDS+=($!)
     SEARCH_LABELS+=("$LABEL")
@@ -243,7 +247,7 @@ if [ $COMPLETED -gt 0 ]; then
         --output-dir "${PROJECT_DIR}/canary_output"
         --gcs-bucket "$BUCKET"
         --gcs-prefix "$CANARY_PREFIX"
-        --metrics logloss f0.5
+        --metrics logloss average_precision
         --study-prefix "$CANARY_PREFIX"
         --targets "$TARGET_LONG" "$TARGET_SHORT"
     )

@@ -399,6 +399,7 @@ def make_objective(
     max_n_estimators: int = 3000,
     early_stopping_rounds: int = 100,
     objective_type: str = "focal",
+    use_buckets: bool = False,
 ):
     """Create the Optuna objective closure.
 
@@ -417,6 +418,22 @@ def make_objective(
 
     def objective(trial: optuna.Trial) -> float:
         _log_mem("trial_start", trial=trial.number)
+
+        # ---- Feature Bucket Selection ----
+        if use_buckets:
+            from src.features.feature_buckets import (
+                TOGGLEABLE_BUCKETS, get_active_features,
+            )
+            active_buckets = {"core"}  # always on
+            for bucket in TOGGLEABLE_BUCKETS:
+                if trial.suggest_categorical(f"use_{bucket}", [True, False]):
+                    active_buckets.add(bucket)
+            trial_features = get_active_features(feature_cols, active_buckets)
+            trial.set_user_attr("active_buckets", sorted(active_buckets))
+            trial.set_user_attr("n_active_features", len(trial_features))
+        else:
+            trial_features = feature_cols
+
         # ---- Suggest hyperparameters (E2E Alpha Factory wide ranges) ----
         boosting_type = trial.suggest_categorical("boosting_type", ["gbdt", "goss"])
 
@@ -454,9 +471,9 @@ def make_objective(
         fold_details = []
 
         for fold_idx, (train_start, train_end, test_start, test_end) in enumerate(folds):
-            X_train = X.iloc[train_start:train_end]
+            X_train = X[trial_features].iloc[train_start:train_end]
             y_train = y.iloc[train_start:train_end]
-            X_test = X.iloc[test_start:test_end]
+            X_test = X[trial_features].iloc[test_start:test_end]
             y_test = y.iloc[test_start:test_end]
 
             # Apply class balancing
@@ -600,6 +617,7 @@ def run_search(
     early_stopping_rounds: int = 100,
     max_folds: int = 10,
     objective_type: str = "focal",
+    use_buckets: bool = False,
 ):
     """Run the Walk-Forward Optuna search (Phase 1: Brain Optimization).
 
@@ -633,12 +651,21 @@ def run_search(
     if study_name is None:
         study_name = f"wf_v2_{direction_tag}_{ml_metric}"
 
+    # Enforce minimum trials when buckets are active (2^11 search space)
+    if use_buckets:
+        from src.features.feature_buckets import BUCKET_MIN_TRIALS, TOGGLEABLE_BUCKETS
+        if n_trials < BUCKET_MIN_TRIALS:
+            print(f"  [BUCKET MODE] Raising n_trials from {n_trials} to {BUCKET_MIN_TRIALS} "
+                  f"(2^{len(TOGGLEABLE_BUCKETS)} categorical combos require TPE warm-up)")
+            n_trials = BUCKET_MIN_TRIALS
+
     print("=" * 70)
     print("OPTUNA LIGHTGBM SEARCH v2 — WALK-FORWARD BAKE-OFF")
     print("=" * 70)
     print(f"  Target:          {target_name}")
     print(f"  ML metric:       {ml_metric}")
     print(f"  Objective:       {objective_type}")
+    print(f"  Buckets:         {'ON (feature group toggles)' if use_buckets else 'OFF (all features)'}")
     print(f"  Trials:          {n_trials}")
     print(f"  Workers:         {n_jobs}  (LGB threads/worker: 8 hardcoded)")
     print(f"  Balance:         {balance_mode}")
@@ -754,6 +781,7 @@ def run_search(
         max_n_estimators=max_n_estimators,
         early_stopping_rounds=early_stopping_rounds,
         objective_type=objective_type,
+        use_buckets=use_buckets,
     )
 
     # Progress callback
@@ -1045,6 +1073,12 @@ def main():
         help="LightGBM objective function: 'focal' (default) or 'asymmetric' "
              "(5× FP penalty for hyper-conservative precision).",
     )
+    parser.add_argument(
+        "--use-buckets", action="store_true", default=False,
+        help="Enable Feature Bucket Architecture: Optuna toggles feature groups "
+             "(volatility, momentum, macro, etc.) as categorical hyperparameters. "
+             "Automatically enforces minimum 150 trials for TPE convergence.",
+    )
     args = parser.parse_args()
 
     # Set global worker ID and total trials for logging
@@ -1071,6 +1105,7 @@ def main():
         early_stopping_rounds=args.early_stopping_rounds,
         max_folds=args.max_folds,
         objective_type=args.objective,
+        use_buckets=args.use_buckets,
     )
 
 

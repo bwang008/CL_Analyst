@@ -481,6 +481,9 @@ class LiveTrader:
         # Per-trade overrides (reset each trade via _reset_position_state)
         self._trade_trailing_atr_mult: Optional[float] = None
         self._trade_max_hold_bars: Optional[int] = None
+        # TP/SL order tracking for software-side OCA (no parentId linkage)
+        self._tp_order_id: Optional[int] = None
+        self._sl_order_id: Optional[int] = None
         self._run_id = (
             f"live-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}-"
             f"{uuid.uuid4().hex[:8]}"
@@ -696,6 +699,9 @@ class LiveTrader:
         # Reset per-trade overrides (back to global config defaults)
         self._trade_trailing_atr_mult = None
         self._trade_max_hold_bars = None
+        # Clear TP/SL order tracking
+        self._tp_order_id = None
+        self._sl_order_id = None
 
     def _check_entry_order_ttl(self, bar_time: pd.Timestamp) -> None:
         """Cancel stale entry orders that haven't filled after 1 bar.
@@ -824,8 +830,14 @@ class LiveTrader:
             new_sl,
         )
 
-        # Find and modify the STP child order on IBKR
+        # Find and modify the SL order on IBKR by tracked order ID
         try:
+            if self._sl_order_id is None:
+                log.warning(
+                    "TRAILING STOP: triggered but _sl_order_id is None "
+                    "— SL order may not have been placed"
+                )
+                return
             for t in self.manager.ib.openTrades():
                 c = getattr(t, "contract", None)
                 o = getattr(t, "order", None)
@@ -833,23 +845,22 @@ class LiveTrader:
                     continue
                 if getattr(c, "symbol", None) != "CL":
                     continue
-                parent_id = getattr(o, "parentId", 0) or 0
-                if parent_id == 0:
-                    continue  # skip parent entry orders
-                order_type = getattr(o, "orderType", "")
-                if order_type != "STP":
+                order_id = getattr(o, "orderId", None)
+                if order_id != self._sl_order_id:
                     continue
                 old_sl = getattr(o, "auxPrice", 0.0) or 0.0
                 o.auxPrice = new_sl
                 self.manager.ib.placeOrder(c, o)
                 log.info(
                     "TRAILING STOP: modified SL order %d: %.2f → %.2f",
-                    getattr(o, "orderId", 0), old_sl, new_sl,
+                    order_id, old_sl, new_sl,
                 )
                 self._trailing_activated = True
                 return
             log.warning(
-                "TRAILING STOP: triggered but no STP child order found"
+                "TRAILING STOP: triggered but SL order %d not found in "
+                "open trades (may have already filled or been cancelled)",
+                self._sl_order_id,
             )
         except Exception:
             log.exception("TRAILING STOP: failed to modify SL order")
@@ -973,6 +984,23 @@ class LiveTrader:
             # Update entry price to actual fill (for trailing stop)
             self._entry_price = fill_price
 
+            # Store TP and SL order IDs for software-side OCA and
+            # trailing stop lookup (orders have no parentId linkage)
+            if len(child_trades) >= 2:
+                tp_trade_obj = child_trades[0]
+                sl_trade_obj = child_trades[1]
+                self._tp_order_id = getattr(
+                    getattr(tp_trade_obj, "order", None), "orderId", None
+                )
+                self._sl_order_id = getattr(
+                    getattr(sl_trade_obj, "order", None), "orderId", None
+                )
+                log.info(
+                    "[TRADE] BRACKET CHILDREN: TP orderId=%s  SL orderId=%s  "
+                    "(standalone orders, software OCA active)",
+                    self._tp_order_id, self._sl_order_id,
+                )
+
             # Log tradebook events for the children
             decision_ctx = ctx
             for child_trade in child_trades:
@@ -1036,18 +1064,42 @@ class LiveTrader:
 
             if status_str == "Filled":
                 avg_price = float(getattr(status, "avgFillPrice", 0) or 0)
-                if parent_id and parent_id != 0:
-                    # Child order filled (TP or SL)
-                    if order_type == "LMT":
-                        exit_type = "TP HIT"
-                    elif order_type == "STP":
-                        exit_type = "SL HIT"
-                    else:
-                        exit_type = order_type
+                # Extract order_id BEFORE the TP/SL check (was previously
+                # only assigned in the else branch, causing UnboundLocalError)
+                order_id = getattr(order, "orderId", None)
+                # Detect TP/SL fill by tracked order IDs (no parentId linkage)
+                is_tp_fill = (order_id is not None and order_id == self._tp_order_id)
+                is_sl_fill = (order_id is not None and order_id == self._sl_order_id)
+                if is_tp_fill or is_sl_fill:
+                    # Exit order filled — log and apply software-side OCA
+                    exit_type = "TP HIT" if is_tp_fill else "SL HIT"
                     log.info(
                         "[TRADE] EXIT: %s %.0f %s @ %.2f (%s)",
                         action_str, qty, symbol_str, avg_price, exit_type,
                     )
+                    # Software OCA: cancel the other open exit leg
+                    other_order_id = (
+                        self._sl_order_id if is_tp_fill else self._tp_order_id
+                    )
+                    if other_order_id is not None:
+                        try:
+                            for t in self.manager.ib.openTrades():
+                                o2 = getattr(t, "order", None)
+                                if o2 is None:
+                                    continue
+                                if getattr(o2, "orderId", None) == other_order_id:
+                                    self.manager.ib.cancelOrder(o2)
+                                    log.info(
+                                        "OCA: cancelled opposite exit order %d "
+                                        "after %s",
+                                        other_order_id, exit_type,
+                                    )
+                                    break
+                        except Exception:
+                            log.exception(
+                                "OCA: failed to cancel opposite exit order %d",
+                                other_order_id,
+                            )
                     # Activate exit-type-specific cooldown
                     if exit_type == "SL HIT" and self._sl_cooldown_bars > 0:
                         self._cooldown_remaining = self._sl_cooldown_bars
@@ -1061,6 +1113,7 @@ class LiveTrader:
                             "COOLDOWN activated: %d bars after %s",
                             self._tp_cooldown_bars, exit_type,
                         )
+                    self._reset_position_state()
                 else:
                     # Parent entry order filled — clear TTL tracking
                     log.info(
@@ -1069,8 +1122,7 @@ class LiveTrader:
                     )
                     self._pending_entry_order_id = None
                     self._pending_entry_bar_time = None
-                    # Phase 2: place TP/SL children from actual fill price
-                    order_id = getattr(order, "orderId", None)
+                    # Phase 2: place TP/SL as standalone orders from actual fill price
                     if order_id is not None:
                         self._place_bracket_children_on_fill(
                             order_id=order_id,

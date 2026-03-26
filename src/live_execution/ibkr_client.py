@@ -950,15 +950,27 @@ class IBKRConnectionManager:
         tp_price: float,
         sl_price: float,
     ) -> list[Trade]:
-        """Submit TP and SL child orders linked to a filled parent.
+        """Submit TP and SL orders as independent standalone orders.
 
         Phase 2 of two-phase order placement.  Called from the fill
         callback after the entry order fills so prices are computed
         from the actual fill price.
 
+        IMPORTANT: These orders are submitted WITHOUT parentId.  Using
+        parentId after the entry fills causes IBKR Error 201 ("Parent
+        order is being cancelled") because IBKR removes the parent from
+        its working-order table the moment it fills — any children
+        arriving milliseconds later reference a terminal order ID.
+        Fast fills (e.g. 3-lot marketable limit split into 3 partial
+        fills) reliably trigger this race condition.
+
+        OCA behavior (cancel the other leg on fill) is handled in
+        software by LiveTrader._on_order_status.
+
         Args:
             contract: Same contract as the parent entry order.
-            parent_order_id: orderId of the filled parent entry.
+            parent_order_id: orderId of the filled parent entry
+                (kept for logging/context; no longer set on orders).
             action: Exit action — opposite of entry ('BUY' if entry
                 was SELL, 'SELL' if entry was BUY).
             quantity: Number of contracts (matches entry).
@@ -970,20 +982,18 @@ class IBKRConnectionManager:
         """
         self.ensure_connected()
 
-        # Take-profit child (LMT)
+        # Take-profit order (standalone LMT — no parentId)
         tp_order = LimitOrder(action, quantity, tp_price)
-        tp_order.parentId = parent_order_id
         tp_order.outsideRth = True
         tp_order.tif = "GTC"
-        tp_order.transmit = False  # hold until SL is also submitted
+        tp_order.transmit = True
 
-        # Stop-loss child (STP)
+        # Stop-loss order (standalone STP — no parentId)
         sl_order = StopOrder(action, quantity, sl_price)
-        sl_order.parentId = parent_order_id
         sl_order.outsideRth = True
         sl_order.tif = "GTC"
         sl_order.triggerMethod = 1  # native exchange trigger (double bid/ask)
-        sl_order.transmit = True   # transmit both children together
+        sl_order.transmit = True
 
         tp_trade = self.ib.placeOrder(contract, tp_order)
         sl_trade = self.ib.placeOrder(contract, sl_order)
