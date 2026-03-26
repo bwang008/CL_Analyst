@@ -97,10 +97,8 @@ except:
 # Define all 6 search combos
 COMBOS=(
     "TARGET_TRIPLE_2x1_24H_LONG logloss"
-    "TARGET_TRIPLE_2x1_24H_LONG f0.5"
     "TARGET_TRIPLE_2x1_24H_LONG average_precision"
     "TARGET_TRIPLE_2x1_24H_SHORT logloss"
-    "TARGET_TRIPLE_2x1_24H_SHORT f0.5"
     "TARGET_TRIPLE_2x1_24H_SHORT average_precision"
 )
 

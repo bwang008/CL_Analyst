@@ -8,7 +8,7 @@
 .EXAMPLE
     .\gcp_deploy_run.ps1 -DataPath "C:\CL_Analyst_Data\data\processed\cl-5m_bk_set_09.parquet" -E2E
     .\gcp_deploy_run.ps1 -DataPath "..." -NTrials 200 -NJobs 12 -E2E -Shutdown
-    .\gcp_deploy_run.ps1 -DataPath "..." -MlMetric f0.5 -StrategyConfig ensemble4.json -E2E
+    .\gcp_deploy_run.ps1 -DataPath "..." -MlMetric average_precision -StrategyConfig ensemble4.json -E2E
 #>
 
 param(

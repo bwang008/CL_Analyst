@@ -182,6 +182,7 @@ class AlphaFactory:
         include_momentum: bool = True,
         include_macro: bool = True,
         include_extended: bool = False,
+        include_exhaustion_divergence: bool = False,
         macro_windows: dict[str, int] | None = None,
         log_progress: bool = False,
     ) -> pd.DataFrame:
@@ -194,6 +195,9 @@ class AlphaFactory:
             include_extended: Add extended clusters (set_07+): return
                 distribution, stochastic oscillator, Chaikin Money Flow,
                 and cross-timeframe ratios.
+            include_exhaustion_divergence: Add exhaustion divergence
+                cluster (set_12+): slope divergence, temporal peak
+                offset, and effort-reward ratio.
             macro_windows: Dict of label→hourly-window for macro context.
             log_progress: Print progress timestamps.
         """
@@ -218,6 +222,8 @@ class AlphaFactory:
                 self.add_return_distribution_cluster(window=window)
                 self.add_stochastic_cluster(window=window)
                 self.add_exhaustion_cluster(window=window)
+            if include_exhaustion_divergence:
+                self.add_exhaustion_divergence_cluster(window=window)
             if log_progress:
                 print(f"[AlphaFactory] Window {window} done at {datetime.now().isoformat(timespec='seconds')}")
 
@@ -533,6 +539,90 @@ class AlphaFactory:
         recent_high = self.close.rolling(window).max()
         self.df[f"EXHAUST_DIST_HIGH{suffix}"] = (
             (self.close - recent_high) / atr
+        )
+
+        return self.df
+
+    def add_exhaustion_divergence_cluster(self, window: int = 40) -> pd.DataFrame:
+        """Exhaustion divergence features for mean-reversion detection.
+
+        Three feature types that look for divergence between price action
+        and momentum/volume — a classic exhaustion signal.
+
+        All computations are strictly backward-looking (no lookahead).
+
+        Features per window:
+          EXHDIV_SLOPE_DIVERGE_{window}  – normalized price slope minus
+              normalized RSI slope.  When price keeps rising but RSI
+              flattens, this goes positive → bearish divergence.
+          EXHDIV_PEAK_OFFSET_{window}   – bar distance between
+              rolling_argmax(Close) and rolling_argmax(RSI_14).  Large
+              positive values mean price peaked after RSI (bearish).
+          EXHDIV_EFFORT_REWARD_{window} – relative volume divided by
+              relative candle size.  High values indicate heavy volume
+              with small candles → absorption / exhaustion.
+        """
+        suffix = f"_{window}"
+
+        # --- Ensure RSI_14 exists (requires momentum cluster) ---
+        if "MOM_RSI_14" not in self.df.columns:
+            rsi = self.df.ta.rsi(length=14)
+            self.df["MOM_RSI_14"] = (
+                rsi if isinstance(rsi, pd.Series) else rsi.iloc[:, 0]
+            ) if rsi is not None else np.nan
+
+        rsi = self.df["MOM_RSI_14"]
+
+        # ---- 1) Slope Divergence ----
+        # Linear-regression slopes over `window` bars for Close and RSI.
+        # Normalise by rolling std so the two are on compatible scales.
+        close_arr = self.close.to_numpy(dtype=np.float64)
+        close_slopes, _ = _rolling_slope_r2_numba(close_arr, window)
+        close_slopes = pd.Series(close_slopes, index=self.df.index)
+
+        rsi_arr = rsi.ffill().fillna(50.0).to_numpy(dtype=np.float64)
+        rsi_slopes, _ = _rolling_slope_r2_numba(rsi_arr, window)
+        rsi_slopes = pd.Series(rsi_slopes, index=self.df.index)
+
+        # Normalise by rolling std of the raw series (not the slopes).
+        # If std is 0 (e.g. flat price or constant RSI), the normalised
+        # slope is 0 by convention (no variability = no divergence).
+        close_std = self.close.rolling(window).std().replace(0, np.nan)
+        rsi_std = rsi.rolling(window).std().replace(0, np.nan)
+
+        norm_close_slope = (close_slopes / close_std).fillna(0.0)
+        norm_rsi_slope = (rsi_slopes / rsi_std).fillna(0.0)
+
+        self.df[f"EXHDIV_SLOPE_DIVERGE{suffix}"] = norm_close_slope - norm_rsi_slope
+
+        # ---- 2) Temporal Peak Offset ----
+        # Distance in bars between rolling argmax of Close and RSI.
+        # pandas rolling doesn't have argmax, so we use apply.
+        # For performance, use numpy argmax on the raw window.
+        def _rolling_argmax(series, w):
+            """Return position-from-end of the rolling argmax."""
+            return series.rolling(w).apply(
+                lambda x: np.argmax(x), raw=True
+            )
+
+        price_peak_pos = _rolling_argmax(self.close, window)
+        rsi_peak_pos = _rolling_argmax(rsi.ffill().fillna(50.0), window)
+        self.df[f"EXHDIV_PEAK_OFFSET{suffix}"] = price_peak_pos - rsi_peak_pos
+
+        # ---- 3) Effort-Reward Ratio ----
+        # Relative Volume / Relative Candle Size
+        vol_sma = self.volume.rolling(window).mean().clip(lower=1e-8)
+        relative_volume = self.volume / vol_sma
+
+        candle_range = (self.high - self.low).clip(lower=1e-8)
+        atr_col = "ATR_14"
+        if atr_col not in self.df.columns:
+            self.df[atr_col] = self.df.ta.atr(length=14)
+        atr_sma = self.df[atr_col].rolling(window).mean().clip(lower=1e-8)
+        relative_candle = candle_range / atr_sma
+
+        self.df[f"EXHDIV_EFFORT_REWARD{suffix}"] = (
+            relative_volume / relative_candle.clip(lower=1e-8)
         )
 
         return self.df

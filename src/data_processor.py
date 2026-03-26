@@ -45,6 +45,7 @@ DATASET_VERSIONS = {
     'set_10': 'Causal cleanup (set_09 + removed bfill lookahead, 26K warmup — 100% causally safe)',
     'set_11': 'Macro-augmented (set_10 + FRED macro regime + CFTC COT positioning features)',
     'set_11c': 'Spread-Adjusted Momentum variant (set_11 + Spread-adj RSI)',
+    'set_12': 'Exhaustion Divergence (set_11 cumulative + Slope Div, Peak Offset, Effort-Reward)',
     'HourSet_01': '1-Hour bar macro swing-trading dataset: 5-min resampled to 1H, 72H/120H triple-barrier targets',
     'HourSet_02': '1-Hour macro-augmented (HourSet_01 + FRED macro regime + CFTC COT positioning features)',
 }
@@ -757,6 +758,10 @@ class DataProcessor:
             return self.process_set_08()
         elif self.dataset_version == "set_11":
             return self.process_set_11()
+        elif self.dataset_version in ("set_11c", "set_11b"):
+            return self.process_set_11()
+        elif self.dataset_version == "set_12":
+            return self.process_set_12()
         elif self.dataset_version == "HourSet_01":
             return self.process_hourset_01()
         elif self.dataset_version == "HourSet_02":
@@ -1601,6 +1606,117 @@ class DataProcessor:
         """set_11 variant C for Iteration 4: Spread-Adjusted Momentum."""
         self.dataset_version = "set_11c"
         return self.process_set_11()
+
+    # ------------------------------------------------------------------
+    # set_12: Cumulative dataset with Exhaustion Divergence features
+    # ------------------------------------------------------------------
+    def process_set_12(self) -> pd.DataFrame:
+        """Cumulative dataset: set_11 + Exhaustion Divergence cluster.
+
+        Inherits everything from set_11 (AlphaFactory extended clusters,
+        FRED macro, CFTC COT, Spread-Adjusted Momentum) and adds:
+        - EXHDIV_SLOPE_DIVERGE_*  (price vs RSI slope divergence)
+        - EXHDIV_PEAK_OFFSET_*    (temporal peak offset)
+        - EXHDIV_EFFORT_REWARD_*  (volume effort vs candle reward)
+        """
+        start_time = datetime.now()
+        print("=" * 60)
+        print(f"Starting Data Processing Pipeline - SET_12")
+        print(f"  set_11 cumulative + Exhaustion Divergence features")
+        print(f"Started at: {start_time.isoformat(timespec='seconds')}")
+        print("=" * 60)
+
+        # Step 1: Load data
+        df = self.load_data()
+        total_rows = len(df)
+        print(f"  [15%] Loaded {total_rows} rows at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 2: Add time features (includes day-of-week)
+        df = self.add_time_features(df, include_day_of_week=True)
+        print(f"  [20%] Time features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 3: Add AlphaFactory features — ALL clusters enabled
+        windows = [
+            1 * self.BARS_PER_DAY,   # 288 = 1 day
+            3 * self.BARS_PER_DAY,   # 864 = 3 days
+            7 * self.BARS_PER_DAY,   # 2016 = 7 days
+            14 * self.BARS_PER_DAY,  # 4032 = 14 days
+            35 * self.BARS_PER_DAY,  # 10080 = 35 days
+        ]
+        macro_windows = {
+            "1D": 24, "3D": 72, "1W": 168, "2W": 336,
+            "1M": 840, "3M": 2160,
+        }
+        df = AlphaFactory(df).add_all_features(
+            windows=windows,
+            include_momentum=True,
+            include_macro=True,
+            include_extended=True,
+            include_exhaustion_divergence=True,  # NEW for set_12
+            macro_windows=macro_windows,
+            log_progress=True,
+        )
+        print(f"  [50%] AlphaFactory features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 4: Merge external macro features (FRED + COT)
+        macro_engine = MacroFeatureEngine()
+        df = macro_engine.merge_all(df)
+        n_macro = len(macro_engine.get_feature_names())
+        print(f"  [60%] {n_macro} external macro features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 5: Add RAW columns for evaluation
+        raw_horizon = 288
+        future_high = df['High'].iloc[::-1].rolling(
+            window=raw_horizon, min_periods=1
+        ).max().iloc[::-1].shift(-1)
+        future_low = df['Low'].iloc[::-1].rolling(
+            window=raw_horizon, min_periods=1
+        ).min().iloc[::-1].shift(-1)
+        df['RAW_Close'] = df['Close'].copy()
+        df['RAW_Future_High'] = future_high
+        df['RAW_Future_Low'] = future_low
+        print("  - Added RAW_Close, RAW_Future_High, RAW_Future_Low")
+
+        # Step 6: Create Triple Barrier targets (cumulative — all horizons)
+        df = self.add_triple_barrier_target(
+            df, prefix="TARGET_TRIPLE_2x1_12H",
+            tp_atr_mult=2.0, sl_atr_mult=1.0,
+            max_horizon=144, atr_period=14,
+        )
+        df = self.add_triple_barrier_target(
+            df, prefix="TARGET_TRIPLE_2x1_24H",
+            tp_atr_mult=2.0, sl_atr_mult=1.0,
+            max_horizon=288, atr_period=14,
+        )
+        df = self.add_triple_barrier_target(
+            df, prefix="TARGET_TRIPLE_3x1_24H",
+            tp_atr_mult=3.0, sl_atr_mult=1.0,
+            max_horizon=288, atr_period=14,
+        )
+        df = self.add_return_target(df, horizons=[144, 288])
+        print(f"  [80%] All targets created at {datetime.now().isoformat(timespec='seconds')}")
+
+        # Step 7: Normalize features
+        df = self.normalize_features(df)
+
+        # Step 8: Cleanup
+        df = self.cleanup(df, drop_raw_returns=True, keep_ohlcv=self.keep_ohlcv)
+
+        # Step 9: Save
+        saved_path = self.save(df)
+        print(f"  [100%] Saved output at {datetime.now().isoformat(timespec='seconds')}")
+
+        print("=" * 60)
+        print("Processing Complete!")
+        print(f"Output: {saved_path}")
+        print(f"Shape: {df.shape}")
+        print(f"Columns: {list(df.columns)}")
+        duration = datetime.now() - start_time
+        print(f"Wall time: {str(duration).split('.')[0]}")
+        print("=" * 60)
+
+        self.df = df
+        return df
 
     # ------------------------------------------------------------------
     # set_11: set_10 + macro features (FRED + COT)

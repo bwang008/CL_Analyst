@@ -406,7 +406,7 @@ def run_pipeline(
     start_time = time.perf_counter()
 
     if metrics is None:
-        metrics = ["logloss", "f0.5", "average_precision"]
+        metrics = ["logloss", "average_precision"]
 
     if targets is None:
         targets = [
@@ -802,8 +802,8 @@ def main():
     parser.add_argument("--shutdown", action="store_true", help="Shutdown VM after completion")
     parser.add_argument(
         "--metrics", nargs="+",
-        default=["logloss", "f0.5", "average_precision"],
-        help="Metrics to process (default: logloss f0.5 average_precision)",
+        default=["logloss", "average_precision"],
+        help="Metrics to process (default: logloss average_precision)",
     )
     parser.add_argument(
         "--targets", nargs="+",

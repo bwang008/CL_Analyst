@@ -23,11 +23,12 @@ param(
     [string]$ProvisioningModel = "SPOT",
     [string]$GcsDataPath = "gs://cltrainer-optuna-results/data/cl-5m_bk_set_10.parquet",
     [string]$StrategyConfig = "ensemble4.json",
-    [string]$Metrics = "logloss,f0.5",
+    [string]$Metrics = "logloss,average_precision",
     [string]$TargetLong = "",
     [string]$TargetShort = "",
     [switch]$NoShutdown,
-    [switch]$SkipProvision
+    [switch]$SkipProvision,
+    [switch]$UseBuckets
 )
 
 # Add gcloud to PATH if not already there
@@ -54,6 +55,7 @@ Write-Host "  Pricing:       $ProvisioningModel"
 Write-Host "  Data (GCS):    $GcsDataPath"
 Write-Host "  Strategy:      $StrategyConfig"
 Write-Host "  Auto-Shutdown: $(-not $NoShutdown)"
+Write-Host "  Buckets:       $($UseBuckets.IsPresent)"
 Write-Host "=====================================================" -ForegroundColor Magenta
 
 # --- [1/6] Provision VM (or reuse existing) ---
@@ -148,6 +150,8 @@ $codeFiles = @(
     @{ Local = "src\live_execution\strategies\execution_models.py"; Remote = "src/live_execution/strategies/" },
     @{ Local = "src\live_execution\strategies\configurable_strategy.py"; Remote = "src/live_execution/strategies/" },
     @{ Local = "src\live_execution\strategies\buy70_sized_manatee.py"; Remote = "src/live_execution/strategies/" },
+    @{ Local = "src\features\__init__.py";       Remote = "src/features/" },
+    @{ Local = "src\features\feature_buckets.py"; Remote = "src/features/" },
     @{ Local = "gcp\vm_canary_run.sh";           Remote = "gcp/" },
     @{ Local = "gcp\vm_e2e_pipeline.py";         Remote = "gcp/" }
 )
@@ -188,7 +192,8 @@ $datasetName = [System.IO.Path]::GetFileNameWithoutExtension($DataFileName)
 $targetFlags = ""
 if ($TargetLong) { $targetFlags += " --target-long=$TargetLong" }
 if ($TargetShort) { $targetFlags += " --target-short=$TargetShort" }
-$launchCmd = "tmux kill-session -t canary 2>/dev/null; tmux new-session -d -s canary 'bash $RemoteProject/gcp/vm_canary_run.sh $shutdownFlag --dataset=$datasetName --strategy=$StrategyConfig --metrics=$Metrics$targetFlags'"
+$bucketFlag = if ($UseBuckets) { " --use-buckets" } else { "" }
+$launchCmd = "tmux kill-session -t canary 2>/dev/null; tmux new-session -d -s canary 'bash $RemoteProject/gcp/vm_canary_run.sh $shutdownFlag --dataset=$datasetName --strategy=$StrategyConfig --metrics=$Metrics$targetFlags$bucketFlag'"
 gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd --quiet 2>$null
 
 Write-Host "  Canary pipeline launched!" -ForegroundColor Green
