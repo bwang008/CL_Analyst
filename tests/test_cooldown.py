@@ -112,6 +112,14 @@ def _make_trader_stub(
     trader._trailing_atr_mult = 100.0
     trader._trailing_sl_atr_offset = 0.25
 
+    # TP/SL order tracking (software-side OCA)
+    trader._tp_order_id = None
+    trader._sl_order_id = None
+    trader._active_trade_id = None
+
+    # Engine-level position cap
+    trader._max_position_size = 3
+
     # Consecutive signal threshold state
     trader._consecutive_signal_threshold = 0
     trader._consecutive_buy_count = 0
@@ -268,6 +276,9 @@ class TestCooldownActivation:
         mock_trade.orderStatus = mock_status
         mock_trade.contract = mock_contract
 
+        # Set SL order ID so the fill is recognized as an SL hit
+        trader._sl_order_id = 99
+
         assert trader._cooldown_remaining == 0
         trader._on_order_status(mock_trade)
         assert trader._cooldown_remaining == 10  # sl_cooldown_bars=10
@@ -303,6 +314,9 @@ class TestCooldownActivation:
         mock_trade.order = mock_order
         mock_trade.orderStatus = mock_status
         mock_trade.contract = mock_contract
+
+        # Set TP order ID so the fill is recognized as a TP hit
+        trader._tp_order_id = 100
 
         assert trader._cooldown_remaining == 0
         trader._on_order_status(mock_trade)
@@ -359,6 +373,9 @@ class TestCooldownActivation:
         mock_order.lmtPrice = 0.0
         mock_order.auxPrice = 72.64
         mock_order.account = "DU1899929"
+
+        # Set SL order ID so the fill is recognized
+        trader._sl_order_id = 99
 
         mock_status = MagicMock()
         mock_status.status = "Filled"

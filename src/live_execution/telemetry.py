@@ -151,6 +151,34 @@ _CREATE_SHADOW_LOG_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_shadow_ts ON shadow_log(timestamp);
 """
 
+_CREATE_ACTIVE_POSITIONS = """
+CREATE TABLE IF NOT EXISTS active_positions (
+    trade_id            TEXT    PRIMARY KEY,
+    status              TEXT    NOT NULL DEFAULT 'OPEN',   -- OPEN / CLOSED
+    side                TEXT    NOT NULL,                  -- LONG / SHORT
+    quantity            INTEGER NOT NULL,
+    entry_price         REAL    NOT NULL,
+    entry_order_id      INTEGER,
+    tp_order_id         INTEGER,
+    sl_order_id         INTEGER,
+    tp_price            REAL,
+    sl_price            REAL,
+    atr_at_entry        REAL,
+    entry_time          TEXT    NOT NULL,
+    entry_bar_time      TEXT,
+    close_time          TEXT,
+    close_reason        TEXT,
+    bars_held           INTEGER,
+    trailing_atr_mult   REAL,
+    max_hold_bars       INTEGER,
+    created_at          TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+_CREATE_ACTIVE_POSITIONS_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_active_pos_status ON active_positions(status);
+"""
+
 
 class TelemetryDB:
     """Lightweight SQLite telemetry backend for live execution."""
@@ -174,9 +202,11 @@ class TelemetryDB:
             + _CREATE_RAW_FRONT_MONTH_BARS
             + _CREATE_TRADEBOOK_EVENTS
             + _CREATE_SHADOW_LOG
+            + _CREATE_ACTIVE_POSITIONS
             + _CREATE_INDEXES
             + _CREATE_TRADEBOOK_INDEXES
             + _CREATE_SHADOW_LOG_INDEXES
+            + _CREATE_ACTIVE_POSITIONS_INDEXES
         )
         self._migrate_trade_ledger_columns(conn)
         self._migrate_unique_constraints(conn)
@@ -624,3 +654,116 @@ class TelemetryDB:
         rows = conn.execute(query, params).fetchall()
         conn.row_factory = None
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Active positions (persistent position ledger)
+    # ------------------------------------------------------------------
+
+    def open_position(
+        self,
+        *,
+        trade_id: str,
+        side: str,
+        quantity: int,
+        entry_price: float,
+        entry_order_id: Optional[int] = None,
+        atr_at_entry: Optional[float] = None,
+        entry_time: str,
+        entry_bar_time: Optional[str] = None,
+        trailing_atr_mult: Optional[float] = None,
+        max_hold_bars: Optional[int] = None,
+    ) -> None:
+        """Record a new position opening in the ledger."""
+        conn = self._get_conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO active_positions "
+            "(trade_id, status, side, quantity, entry_price, entry_order_id, "
+            " atr_at_entry, entry_time, entry_bar_time, "
+            " trailing_atr_mult, max_hold_bars) "
+            "VALUES (?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                trade_id, side, quantity, entry_price, entry_order_id,
+                self._sanitize_float(atr_at_entry),
+                entry_time, entry_bar_time,
+                self._sanitize_float(trailing_atr_mult),
+                max_hold_bars,
+            ),
+        )
+        conn.commit()
+
+    def update_position_brackets(
+        self,
+        trade_id: str,
+        *,
+        tp_order_id: Optional[int] = None,
+        sl_order_id: Optional[int] = None,
+        tp_price: Optional[float] = None,
+        sl_price: Optional[float] = None,
+    ) -> None:
+        """Update TP/SL order IDs and prices after bracket children are placed."""
+        conn = self._get_conn()
+        conn.execute(
+            "UPDATE active_positions "
+            "SET tp_order_id = ?, sl_order_id = ?, tp_price = ?, sl_price = ? "
+            "WHERE trade_id = ? AND status = 'OPEN'",
+            (tp_order_id, sl_order_id, tp_price, sl_price, trade_id),
+        )
+        conn.commit()
+
+    def update_position_sl(
+        self,
+        trade_id: str,
+        *,
+        new_sl_price: float,
+        sl_order_id: Optional[int] = None,
+    ) -> None:
+        """Update SL price after trailing stop modification."""
+        conn = self._get_conn()
+        if sl_order_id is not None:
+            conn.execute(
+                "UPDATE active_positions "
+                "SET sl_price = ?, sl_order_id = ? "
+                "WHERE trade_id = ? AND status = 'OPEN'",
+                (new_sl_price, sl_order_id, trade_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE active_positions SET sl_price = ? "
+                "WHERE trade_id = ? AND status = 'OPEN'",
+                (new_sl_price, trade_id),
+            )
+        conn.commit()
+
+    def close_position(
+        self,
+        trade_id: str,
+        *,
+        reason: str,
+        close_time: str,
+        bars_held: Optional[int] = None,
+    ) -> None:
+        """Mark a position as closed in the ledger."""
+        conn = self._get_conn()
+        conn.execute(
+            "UPDATE active_positions "
+            "SET status = 'CLOSED', close_reason = ?, close_time = ?, bars_held = ? "
+            "WHERE trade_id = ? AND status = 'OPEN'",
+            (reason, close_time, bars_held, trade_id),
+        )
+        conn.commit()
+
+    def get_open_position(self) -> Optional[dict]:
+        """Return the currently open position, or None if flat.
+
+        At most one position should be OPEN at any time.
+        If multiple are found, returns the most recently created.
+        """
+        conn = self._get_conn()
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM active_positions "
+            "WHERE status = 'OPEN' "
+            "ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        conn.row_factory = None
+        return dict(row) if row else None

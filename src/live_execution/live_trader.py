@@ -423,15 +423,35 @@ class LiveTrader:
         )
         # Exit mode for time-barrier exits (separate from entry_mode)
         self._exit_mode: str = exit_mode
+        # Engine-level hard position cap (defense-in-depth)
+        # Computed from the highest lot size across all tiers, or from
+        # max_concurrent * quantity.  This prevents position accumulation
+        # regardless of strategy-level guards.
+        max_lots_from_tiers = quantity
+        for tier_list_key in ("long", "short"):
+            tier_list = strategy_config.get(tier_list_key, {})
+            if isinstance(tier_list, dict):
+                for tier in tier_list.get("tiers", []):
+                    tier_lots = int(tier.get("lots", 1))
+                    if tier_lots > max_lots_from_tiers:
+                        max_lots_from_tiers = tier_lots
+        sizing_tiers = strategy_config.get("sizing_tiers", {})
+        for _, lots_val in sizing_tiers.items():
+            if int(lots_val) > max_lots_from_tiers:
+                max_lots_from_tiers = int(lots_val)
+        self._max_position_size: int = int(
+            strategy_config.get("max_position_size", max_lots_from_tiers)
+        )
         log.info("Strategy: %s  direction=%s", strategy.name, strategy.direction)
         log.info(
             "Entry mode: %s  adaptive_priority=%s  max_hold_bars=%d  "
             "tp_cooldown=%d  sl_cooldown=%d  trailing_atr_mult=%.2f  "
-            "trailing_sl_offset=%.2f  exit_mode=%s",
+            "trailing_sl_offset=%.2f  exit_mode=%s  max_position=%d",
             entry_mode, adaptive_priority, self._max_hold_bars,
             self._tp_cooldown_bars, self._sl_cooldown_bars,
             self._trailing_atr_mult,
             self._trailing_sl_atr_offset, self._exit_mode,
+            self._max_position_size,
         )
 
         # Telemetry
@@ -484,6 +504,8 @@ class LiveTrader:
         # TP/SL order tracking for software-side OCA (no parentId linkage)
         self._tp_order_id: Optional[int] = None
         self._sl_order_id: Optional[int] = None
+        # Active trade ID for position ledger tracking (OOB close detection)
+        self._active_trade_id: Optional[str] = None
         self._run_id = (
             f"live-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}-"
             f"{uuid.uuid4().hex[:8]}"
@@ -562,6 +584,9 @@ class LiveTrader:
 
             # Step 7: Warm-start via DataManager
             self._warm_start()
+
+            # Step 7b: Recover any inherited position from the ledger
+            self._recover_inherited_position()
 
             # Step 8: Subscribe to live bars (Brain stream)
             self._subscribe()
@@ -702,6 +727,7 @@ class LiveTrader:
         # Clear TP/SL order tracking
         self._tp_order_id = None
         self._sl_order_id = None
+        self._active_trade_id: Optional[str] = None
 
     def _check_entry_order_ttl(self, bar_time: pd.Timestamp) -> None:
         """Cancel stale entry orders that haven't filled after 1 bar.
@@ -856,6 +882,16 @@ class LiveTrader:
                     order_id, old_sl, new_sl,
                 )
                 self._trailing_activated = True
+                # Persist new SL price to ledger
+                if self._active_trade_id is not None:
+                    try:
+                        self.telemetry.update_position_sl(
+                            self._active_trade_id,
+                            new_sl_price=new_sl,
+                            sl_order_id=order_id,
+                        )
+                    except Exception:
+                        log.debug("Failed to update ledger SL", exc_info=True)
                 return
             log.warning(
                 "TRAILING STOP: triggered but SL order %d not found in "
@@ -875,6 +911,56 @@ class LiveTrader:
         """Enforce 24-hour (288-bar) exit to match backtests."""
         current_position = self.manager.get_cl_position()
         if current_position == 0:
+            # Detect out-of-band close (manual TWS close, external system, etc.)
+            if self._active_trade_id is not None:
+                log.info(
+                    "[TRADE] EXIT: OUT-OF-BAND close detected — position went "
+                    "flat while trade %s was still tracked (held %d bars)",
+                    self._active_trade_id, self._position_bars_held,
+                )
+                try:
+                    self.telemetry.close_position(
+                        self._active_trade_id,
+                        reason="CLOSED_OOB",
+                        close_time=self._utc_iso_now(),
+                        bars_held=self._position_bars_held,
+                    )
+                except Exception:
+                    log.debug(
+                        "Failed to close ledger position (OOB)", exc_info=True
+                    )
+                # Log a tradebook event for auditability
+                event_ts = self._utc_iso_now()
+                event_id = self._build_event_id(
+                    event_type="POSITION_CLOSED_OOB",
+                    event_ts=event_ts,
+                )
+                try:
+                    self.telemetry.log_tradebook_event(
+                        event_id=event_id,
+                        event_type="POSITION_CLOSED_OOB",
+                        event_timestamp_utc=event_ts,
+                        symbol="CL",
+                        status="CLOSED",
+                        **self._base_tradebook_fields(),
+                    )
+                except Exception:
+                    log.debug(
+                        "Failed to log OOB tradebook event", exc_info=True
+                    )
+                # Cancel any orphaned TP/SL orders still live on IBKR
+                try:
+                    cancelled = self.manager.cancel_open_cl_orders()
+                    if cancelled > 0:
+                        log.info(
+                            "OOB CLEANUP: cancelled %d orphaned CL order(s)",
+                            cancelled,
+                        )
+                except Exception:
+                    log.debug(
+                        "OOB CLEANUP: cancel_open_cl_orders failed",
+                        exc_info=True,
+                    )
             self._reset_position_state()
             return False
 
@@ -917,8 +1003,239 @@ class LiveTrader:
             if trade is not None
             else None,
         )
+        # Close position in ledger
+        if self._active_trade_id is not None:
+            try:
+                self.telemetry.close_position(
+                    self._active_trade_id,
+                    reason="TIME_BARRIER",
+                    close_time=self._utc_iso_now(),
+                    bars_held=self._position_bars_held,
+                )
+            except Exception:
+                log.debug("Failed to close ledger position", exc_info=True)
         self._reset_position_state()
         return True
+
+    def _recover_inherited_position(self) -> None:
+        """Recover position state from the persistent ledger on startup.
+
+        Reads the `active_positions` table to restore in-memory state
+        (entry price, TP/SL order IDs, etc.) and verifies that the
+        IBKR portfolio matches.  If TP/SL orders are missing from IBKR
+        (e.g. cancelled during downtime), they are re-placed using the
+        stored prices from the ledger.
+        """
+        # 1. Check ledger for an open position
+        ledger_pos = self.telemetry.get_open_position()
+        ibkr_pos = self.manager.get_cl_position()
+
+        if ledger_pos is None and ibkr_pos == 0:
+            log.info("[RECOVERY] No open position in ledger or IBKR — clean start")
+            return
+
+        if ledger_pos is None and ibkr_pos != 0:
+            # IBKR has a position but the ledger doesn't know about it.
+            # This can happen if the position was opened before the ledger
+            # was implemented, or from a different client_id.
+            log.warning(
+                "[RECOVERY] IBKR has position=%d but no open trade in ledger. "
+                "Position is UNTRACKED — no TP/SL will be placed. "
+                "Consider manually closing or adding a ledger entry.",
+                ibkr_pos,
+            )
+            return
+
+        # Ledger has an open position
+        trade_id = ledger_pos["trade_id"]
+        side = ledger_pos["side"]
+        entry_price = ledger_pos["entry_price"]
+        quantity = ledger_pos["quantity"]
+        tp_order_id = ledger_pos.get("tp_order_id")
+        sl_order_id = ledger_pos.get("sl_order_id")
+        tp_price = ledger_pos.get("tp_price")
+        sl_price = ledger_pos.get("sl_price")
+        atr_at_entry = ledger_pos.get("atr_at_entry")
+        entry_bar_time_str = ledger_pos.get("entry_bar_time")
+        trailing_atr_mult = ledger_pos.get("trailing_atr_mult")
+        max_hold_bars = ledger_pos.get("max_hold_bars")
+
+        # 2. Verify IBKR position exists
+        if ibkr_pos == 0:
+            # Position was closed while we were offline
+            log.info(
+                "[RECOVERY] Ledger trade %s shows OPEN but IBKR is flat "
+                "— marking as CLOSED (filled out-of-band)",
+                trade_id,
+            )
+            self.telemetry.close_position(
+                trade_id,
+                reason="CLOSED_OOB",
+                close_time=self._utc_iso_now(),
+            )
+            return
+
+        # 3. IBKR confirms position exists — restore in-memory state
+        log.info(
+            "[RECOVERY] Restoring position from ledger: "
+            "trade_id=%s  side=%s  entry=%.2f  qty=%d",
+            trade_id, side, entry_price, quantity,
+        )
+        self._active_trade_id = trade_id
+        self._entry_price = entry_price
+        self._atr_at_entry = atr_at_entry
+        self._position_side = 1 if side == "LONG" else -1
+        self._trade_trailing_atr_mult = trailing_atr_mult
+        self._trade_max_hold_bars = (
+            int(max_hold_bars) if max_hold_bars is not None else None
+        )
+
+        # Restore entry bar time and estimate bars held
+        if entry_bar_time_str:
+            try:
+                self._position_entry_bar_time = pd.Timestamp(entry_bar_time_str)
+                # Estimate bars held from entry time to now
+                if self.rolling_df is not None and len(self.rolling_df) > 0:
+                    last_bar = self.rolling_df.index[-1]
+                    delta_minutes = (
+                        last_bar - self._position_entry_bar_time
+                    ).total_seconds() / 60.0
+                    self._position_bars_held = max(
+                        0, int(delta_minutes / 5)
+                    )
+                    log.info(
+                        "[RECOVERY] Estimated %d bars held since entry at %s",
+                        self._position_bars_held,
+                        self._position_entry_bar_time,
+                    )
+            except Exception:
+                log.debug("Failed to parse entry_bar_time", exc_info=True)
+                self._position_entry_bar_time = (
+                    self.rolling_df.index[-1]
+                    if self.rolling_df is not None and len(self.rolling_df) > 0
+                    else None
+                )
+                self._position_bars_held = 0
+        else:
+            # No bar time saved — set conservative defaults
+            self._position_entry_bar_time = (
+                self.rolling_df.index[-1]
+                if self.rolling_df is not None and len(self.rolling_df) > 0
+                else None
+            )
+            self._position_bars_held = 0
+
+        # Init trailing stop tracking from current data
+        if self.rolling_df is not None and len(self.rolling_df) > 0:
+            self._highest_high = float(self.rolling_df["High"].iloc[-1])
+            self._lowest_low = float(self.rolling_df["Low"].iloc[-1])
+
+        # 4. Verify TP/SL orders on IBKR
+        tp_found = False
+        sl_found = False
+        try:
+            for t in self.manager.ib.openTrades():
+                c = getattr(t, "contract", None)
+                o = getattr(t, "order", None)
+                if c is None or o is None:
+                    continue
+                if getattr(c, "symbol", None) != "CL":
+                    continue
+                oid = getattr(o, "orderId", None)
+                if oid is not None and oid == tp_order_id:
+                    tp_found = True
+                elif oid is not None and oid == sl_order_id:
+                    sl_found = True
+        except Exception:
+            log.warning(
+                "[RECOVERY] Failed to scan IBKR open trades",
+                exc_info=True,
+            )
+
+        if tp_found and sl_found:
+            # Both orders exist — just restore the IDs
+            self._tp_order_id = tp_order_id
+            self._sl_order_id = sl_order_id
+            log.info(
+                "[RECOVERY] TP/SL verified on IBKR: "
+                "TP orderId=%s (%.2f)  SL orderId=%s (%.2f)",
+                tp_order_id, tp_price or 0.0,
+                sl_order_id, sl_price or 0.0,
+            )
+            return
+
+        # 5. One or both TP/SL orders missing — re-place them
+        if tp_price is None or sl_price is None:
+            log.warning(
+                "[RECOVERY] TP/SL orders missing and no stored prices "
+                "in ledger — cannot re-place protective orders. "
+                "Position is UNPROTECTED."
+            )
+            return
+
+        if self._front_month_contract is None:
+            log.warning(
+                "[RECOVERY] Cannot re-place TP/SL — "
+                "front-month contract not resolved"
+            )
+            return
+
+        # Cancel any stale orders that partially exist
+        if tp_found and not sl_found:
+            log.info("[RECOVERY] SL order missing — re-placing both TP/SL")
+        elif sl_found and not tp_found:
+            log.info("[RECOVERY] TP order missing — re-placing both TP/SL")
+        else:
+            log.info("[RECOVERY] Both TP/SL orders missing — placing fresh")
+
+        # Cancel any remaining stale CL exit orders before re-placing
+        try:
+            self.manager.cancel_open_cl_orders()
+        except Exception:
+            log.debug("[RECOVERY] cancel_open_cl_orders failed", exc_info=True)
+
+        # Place fresh TP/SL
+        exit_action = "SELL" if self._position_side == 1 else "BUY"
+        try:
+            child_trades = self.manager.place_child_orders(
+                contract=self._front_month_contract,
+                parent_order_id=0,  # no parent — standalone
+                action=exit_action,
+                quantity=quantity,
+                tp_price=tp_price,
+                sl_price=sl_price,
+            )
+            if len(child_trades) >= 2:
+                self._tp_order_id = getattr(
+                    getattr(child_trades[0], "order", None), "orderId", None
+                )
+                self._sl_order_id = getattr(
+                    getattr(child_trades[1], "order", None), "orderId", None
+                )
+                # Update ledger with new order IDs
+                self.telemetry.update_position_brackets(
+                    trade_id,
+                    tp_order_id=self._tp_order_id,
+                    sl_order_id=self._sl_order_id,
+                    tp_price=tp_price,
+                    sl_price=sl_price,
+                )
+                log.info(
+                    "[RECOVERY] TP/SL RE-PLACED: "
+                    "TP orderId=%s (%.2f)  SL orderId=%s (%.2f)",
+                    self._tp_order_id, tp_price,
+                    self._sl_order_id, sl_price,
+                )
+            else:
+                log.warning(
+                    "[RECOVERY] place_child_orders returned "
+                    "%d trades (expected 2)",
+                    len(child_trades),
+                )
+        except Exception:
+            log.exception(
+                "[RECOVERY] Failed to re-place TP/SL orders"
+            )
 
     def _place_bracket_children_on_fill(
         self,
@@ -1000,6 +1317,20 @@ class LiveTrader:
                     "(standalone orders, software OCA active)",
                     self._tp_order_id, self._sl_order_id,
                 )
+                # Persist TP/SL order IDs and prices to ledger
+                if self._active_trade_id is not None:
+                    try:
+                        self.telemetry.update_position_brackets(
+                            self._active_trade_id,
+                            tp_order_id=self._tp_order_id,
+                            sl_order_id=self._sl_order_id,
+                            tp_price=tp_price,
+                            sl_price=sl_price,
+                        )
+                    except Exception:
+                        log.debug(
+                            "Failed to update ledger brackets", exc_info=True
+                        )
 
             # Log tradebook events for the children
             decision_ctx = ctx
@@ -1100,6 +1431,21 @@ class LiveTrader:
                                 "OCA: failed to cancel opposite exit order %d",
                                 other_order_id,
                             )
+                    # Close position in ledger
+                    if self._active_trade_id is not None:
+                        close_reason = "TP_HIT" if is_tp_fill else "SL_HIT"
+                        try:
+                            self.telemetry.close_position(
+                                self._active_trade_id,
+                                reason=close_reason,
+                                close_time=self._utc_iso_now(),
+                                bars_held=self._position_bars_held,
+                            )
+                        except Exception:
+                            log.debug(
+                                "Failed to close ledger position",
+                                exc_info=True,
+                            )
                     # Activate exit-type-specific cooldown
                     if exit_type == "SL HIT" and self._sl_cooldown_bars > 0:
                         self._cooldown_remaining = self._sl_cooldown_bars
@@ -1122,6 +1468,35 @@ class LiveTrader:
                     )
                     self._pending_entry_order_id = None
                     self._pending_entry_bar_time = None
+                    # Open position in the persistent ledger
+                    trade_id = uuid.uuid4().hex
+                    self._active_trade_id = trade_id
+                    side = "LONG" if action_str == "BOT" or action_str == "BUY" else "SHORT"
+                    try:
+                        self.telemetry.open_position(
+                            trade_id=trade_id,
+                            side=side,
+                            quantity=int(qty),
+                            entry_price=avg_price,
+                            entry_order_id=order_id,
+                            atr_at_entry=self._atr_at_entry,
+                            entry_time=self._utc_iso_now(),
+                            entry_bar_time=(
+                                self._position_entry_bar_time.isoformat()
+                                if self._position_entry_bar_time is not None
+                                else None
+                            ),
+                            trailing_atr_mult=self._trade_trailing_atr_mult,
+                            max_hold_bars=self._trade_max_hold_bars,
+                        )
+                        log.info(
+                            "[LEDGER] OPEN: trade_id=%s  side=%s  qty=%d  "
+                            "entry=%.2f  ATR=%.4f",
+                            trade_id, side, int(qty), avg_price,
+                            self._atr_at_entry or 0.0,
+                        )
+                    except Exception:
+                        log.exception("Failed to write OPEN to position ledger")
                     # Phase 2: place TP/SL as standalone orders from actual fill price
                     if order_id is not None:
                         self._place_bracket_children_on_fill(
@@ -1662,6 +2037,19 @@ class LiveTrader:
         # 2. Position guard: check both filled position AND pending orders
         #    to prevent duplicate entries when Adaptive Algo is still working
         current_position = self.manager.get_cl_position()
+
+        # Engine-level hard position cap (defense-in-depth)
+        if abs(current_position) >= self._max_position_size:
+            if abs(current_position) > self._max_position_size:
+                log.warning(
+                    "POSITION CAP BREACH: abs(position)=%d > max=%d — "
+                    "blocking ALL new entries",
+                    abs(current_position), self._max_position_size,
+                )
+            # Already at or above max — don't even run strategy eval
+            # for new entries (still log PNL and run trailing stop)
+            pass  # will be blocked by strategy's position guard
+
         pending_cl_entry_orders = 0
         try:
             for t in self.manager.ib.openTrades():
@@ -1673,8 +2061,15 @@ class LiveTrader:
                 if getattr(c, "symbol", None) != "CL":
                     continue
                 order_status = getattr(s, "status", "") if s else ""
+                oid = getattr(o, "orderId", None)
+                # Skip tracked TP/SL orders (they are standalone with
+                # parentId==0 but are NOT entry orders)
+                if oid is not None and (
+                    oid == self._tp_order_id or oid == self._sl_order_id
+                ):
+                    continue
                 parent_id = getattr(o, "parentId", 0) or 0
-                # Only count parent entry orders (parentId==0), not TP/SL children
+                # Only count parent entry orders (parentId==0)
                 if parent_id == 0 and order_status in (
                     "Submitted", "PreSubmitted", "PendingSubmit",
                 ):
@@ -1705,16 +2100,15 @@ class LiveTrader:
                         continue
                     if getattr(c, "symbol", None) != "CL":
                         continue
-                    parent_id = getattr(o, "parentId", 0) or 0
-                    if parent_id == 0:
-                        continue  # skip parent entry orders
-                    order_type = getattr(o, "orderType", "")
-                    lmt = getattr(o, "lmtPrice", 0.0) or 0.0
-                    aux = getattr(o, "auxPrice", 0.0) or 0.0
-                    if order_type == "LMT" and lmt > 0:
-                        tp_price_live = lmt
-                    elif order_type in ("STP", "TRAIL") and aux > 0:
-                        sl_price_live = aux
+                    oid = getattr(o, "orderId", None)
+                    if oid is not None and oid == self._tp_order_id:
+                        lmt = getattr(o, "lmtPrice", 0.0) or 0.0
+                        if lmt > 0:
+                            tp_price_live = lmt
+                    elif oid is not None and oid == self._sl_order_id:
+                        aux = getattr(o, "auxPrice", 0.0) or 0.0
+                        if aux > 0:
+                            sl_price_live = aux
             except Exception:
                 log.warning("Bracket order scan failed", exc_info=True)
 

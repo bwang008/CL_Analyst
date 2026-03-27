@@ -409,6 +409,76 @@ class DataProcessor:
             print(f"  - Added {col} (mean={df[col].mean():.6f}, std={df[col].std():.6f})")
 
         return df
+
+    def add_vol_expansion_target(
+        self,
+        df: pd.DataFrame,
+        forward_horizon: int = 288,
+        rolling_window: int = 10_080,
+        percentile_threshold: float = 0.80,
+    ) -> pd.DataFrame:
+        """Volatility Expansion target (ported from scripts/generate_vol_target.py).
+
+        For each bar, compute the True Range (max High - min Low) of the next
+        `forward_horizon` bars.  If this forward TR exceeds the trailing
+        `rolling_window` 80th-percentile, label = 1 (top 20% vol events).
+
+        Args:
+            df: DataFrame with High, Low columns and DatetimeIndex.
+            forward_horizon: Bars to look ahead (288 = 24H at 5-min).
+            rolling_window: Trailing window for percentile (10_080 = 35 days).
+            percentile_threshold: Quantile threshold (0.80 = top 20%).
+        """
+        import numpy as np
+
+        print(f"   [Target] Generating Vol Expansion: "
+              f"horizon={forward_horizon}, rolling={rolling_window}, "
+              f"top {(1 - percentile_threshold) * 100:.0f}%")
+
+        n = len(df)
+        high = df["High"].values
+        low = df["Low"].values
+
+        # Forward True Range: max(High[t+1:t+h]) - min(Low[t+1:t+h])
+        forward_max_high = (
+            pd.Series(high[::-1])
+            .rolling(window=forward_horizon, min_periods=1)
+            .max()
+            .values[::-1]
+        )
+        forward_min_low = (
+            pd.Series(low[::-1])
+            .rolling(window=forward_horizon, min_periods=1)
+            .min()
+            .values[::-1]
+        )
+
+        # Shift by 1 to exclude current bar
+        forward_tr = np.full(n, np.nan)
+        forward_tr[:-1] = forward_max_high[1:] - forward_min_low[1:]
+        forward_tr[-forward_horizon:] = np.nan  # insufficient future data
+
+        # Rolling percentile threshold (trailing, causal)
+        forward_tr_series = pd.Series(forward_tr, index=df.index)
+        rolling_threshold = forward_tr_series.rolling(
+            window=rolling_window, min_periods=rolling_window // 2
+        ).quantile(percentile_threshold)
+
+        # Label: 1 if forward TR exceeds rolling threshold
+        labels = np.where(
+            np.isnan(forward_tr) | np.isnan(rolling_threshold.values),
+            np.nan,
+            np.where(forward_tr > rolling_threshold.values, 1.0, 0.0),
+        )
+        df["TARGET_VOL_EXPANSION"] = pd.array(labels, dtype="Int64")
+
+        non_nan = df["TARGET_VOL_EXPANSION"].dropna()
+        if len(non_nan) > 0:
+            pos_rate = (non_nan == 1).sum() / len(non_nan)
+            print(f"  - TARGET_VOL_EXPANSION: {len(non_nan):,} valid, "
+                  f"positive rate {pos_rate:.1%} (target ~20%)")
+
+        return df
     
     def add_direction_target(
         self,
@@ -1694,6 +1764,7 @@ class DataProcessor:
             max_horizon=288, atr_period=14,
         )
         df = self.add_return_target(df, horizons=[144, 288])
+        df = self.add_vol_expansion_target(df)  # TARGET_VOL_EXPANSION
         print(f"  [80%] All targets created at {datetime.now().isoformat(timespec='seconds')}")
 
         # Step 7: Normalize features
