@@ -1,0 +1,13 @@
+==========================================================================================
+                      BACKTEST REPORT: Ensemble (average_precision)                       
+==========================================================================================
+  Strategy:       E2E_set_11c_average_precision_ensemble
+  Models:         E2E_set_11c_long_average_precision (Long) + E2E_set_11c_short_average_precision (Short)
+  Threshold:      Buy >= 0.6, Sell >= 0.6
+  TP / SL:        3.5x / 1.5x ATR
+  Trailing:       1.5x
+  Predictions:    long: /home/bwang/project/canary_output/oos_predictions_long_average_precision.csv, short: /home/bwang/project/canary_output/oos_predictions_short_average_precision.csv
+  Data:           /home/bwang/data/cl-5m_bk_set_11c.parquet
+==========================================================================================
+  No trades simulated.
+==========================================================================================

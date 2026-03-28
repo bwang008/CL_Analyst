@@ -200,19 +200,27 @@ class ConfigurableStrategy(Strategy):
 
         elif self._is_ensemble:
             models_cfg = self.config["models"]
+            long_cfg_entry = models_cfg.get("long", {})
             long_exp_id = (
-                models_cfg.get("long", {}).get("experiment_id")
+                long_cfg_entry.get("experiment_id")
                 or live_cfg.get("experiment_id")
             )
+            long_model_path = long_cfg_entry.get("model_path")
             if long_exp_id:
-                self._long_learner = self._load_model(long_exp_id, "LONG")
+                self._long_learner = self._load_model(
+                    long_exp_id, "LONG", model_path=long_model_path,
+                )
             else:
                 self._long_learner = None
                 log.warning("[%s] No LONG model experiment_id — long signals disabled", self._nickname)
 
-            short_exp_id = models_cfg.get("short", {}).get("experiment_id")
+            short_cfg_entry = models_cfg.get("short", {})
+            short_exp_id = short_cfg_entry.get("experiment_id")
+            short_model_path = short_cfg_entry.get("model_path")
             if short_exp_id:
-                self._short_learner = self._load_model(short_exp_id, "SHORT")
+                self._short_learner = self._load_model(
+                    short_exp_id, "SHORT", model_path=short_model_path,
+                )
             else:
                 self._short_learner = None
                 log.warning("[%s] No SHORT model experiment_id — short signals disabled", self._nickname)
@@ -254,18 +262,38 @@ class ConfigurableStrategy(Strategy):
 
         self.base_quantity = base_quantity
 
-    def _load_model(self, experiment_id: str, label: str) -> LGBMLearner:
-        """Load a LGBMLearner from the model registry."""
-        model_dir = _dp_model_path(f"registry/{experiment_id}")
-        model_path = model_dir / "final_model.pkl"
-        if not model_path.exists():
-            raise FileNotFoundError(
-                f"Model not found: {model_path} "
-                f"(experiment_id={experiment_id})"
-            )
-        log.info("[%s] Loading %s model from %s", self._nickname, label, model_path)
+    def _load_model(self, experiment_id: str, label: str, model_path: str | None = None) -> LGBMLearner:
+        """Load a LGBMLearner from the model registry or a direct path.
+
+        Args:
+            experiment_id: Registry folder name (e.g. "EXP-017_S_Ultimate").
+            label: Human-readable label for logging ("LONG" or "SHORT").
+            model_path: Optional direct path to the model PKL file.
+                If provided, used instead of the registry path.
+        """
+        if model_path:
+            # Direct path mode — resolve relative to project root
+            path = Path(model_path)
+            if not path.is_absolute():
+                path = _PROJECT_ROOT / path
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"Model not found: {path} "
+                    f"(model_path={model_path})"
+                )
+            log.info("[%s] Loading %s model from %s", self._nickname, label, path)
+        else:
+            # Registry mode
+            model_dir = _dp_model_path(f"registry/{experiment_id}")
+            path = model_dir / "final_model.pkl"
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"Model not found: {path} "
+                    f"(experiment_id={experiment_id})"
+                )
+            log.info("[%s] Loading %s model from %s", self._nickname, label, path)
         learner = LGBMLearner.__new__(LGBMLearner)
-        learner.load(str(model_path))
+        learner.load(str(path))
         log.info(
             "[%s] %s model loaded: %d features",
             self._nickname, label, len(learner.feature_names),

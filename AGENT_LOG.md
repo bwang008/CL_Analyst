@@ -2,6 +2,81 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
+## 2026-03-27 — Lean Canary Breakthrough & Production Deployment
+
+### Goal
+Execute threshold sweep on set_11c long_logloss to find profitability boundary. Run "Pure Alpha" lean canary (22 core+momentum features) to test if noise reduction improves generalization. Deploy winning model to production.
+
+### Threshold Sweep (EXP-037b)
+- Scanned 0.45–0.65 probability range on EXP-035 long_logloss OOS predictions
+- **Profitability boundary at 0.56**: 26 trades, 46.2% WR, PF 1.54, +$1,176
+- Below 0.56: thousands of trades but PF < 1.0 (friction eats the edge)
+- Above 0.57: very few trades (9 at 0.57, 5 at 0.58)
+
+### Lean Canary (EXP-037) — 🏆 PRODUCTION WINNER
+- Engineered `set_11c_lean` dataset: 26 features (core + momentum only), 154 MB
+- Ran 150-trial bucket-pruned canary on GCP (4 searches, 46 min total)
+- **short_logloss**: 208 trades, 31.2% WR, PF 1.27, **+$5,816**
+- First statistically significant profitable clean model
+- ML logloss -0.6904 (slightly worse than full 206-feature -0.6845) but dramatically better OOS performance → fewer features = less overfitting
+
+### Production Deployment
+- Model PKL repackaged for LGBMLearner at `models/production/final_model.pkl`
+- Config frozen at `configs/strategies/production_lean_momentum.json`:
+  - SHORT only, threshold 0.60, TP=3.5x ATR, SL=1.5x ATR
+  - `lean_features: true` — fast momentum-only feature pipeline
+  - `execution_symbol: MCL` — Brain=CL continuous, Hands=MCL (Micro CL)
+
+### Code Changes
+- **`ibkr_client.py`** — Added `build_mcl_contract()`, parameterized `get_front_month_contract(symbol=)`
+- **`configurable_strategy.py`** — Added `model_path` for direct PKL loading (bypasses registry)
+- **`live_trader.py`** — Lean feature path (`lean=True`), MCL execution routing, symbol-aware position/order queries
+
+### Files Changed
+- `src/live_execution/ibkr_client.py` — MCL contract support
+- `src/live_execution/strategies/configurable_strategy.py` — model_path loading
+- `src/live_execution/live_trader.py` — lean features, MCL routing
+- `models/production/final_model.pkl` — **[NEW]** production model
+- `configs/strategies/production_lean_momentum.json` — **[NEW]** production config
+
+## 2026-03-26 — Feature Bucket Architecture & Winning Strategy Optimization
+
+### Goal
+Implement automated feature bucket pruning in Optuna to identify toxic feature clusters, standardize the ad-hoc `TARGET_VOL_EXPANSION` target into the pipeline, and run 150-trial bucket canary searches on winning strategies.
+
+### Feature Bucket Architecture
+- **`src/features/feature_buckets.py`** — **[NEW]** Partitions 227 features into 12 logical buckets (core always ON, 11 toggleable)
+- **`agent/optuna_lgbm_search_v2.py`** — Added bucket toggle categorical hyperparameters, `--use-buckets` CLI flag, enforced 150-trial minimum for bucket-enabled runs
+- **`gcp/vm_canary_run.sh`** + **`gcp/gcp_deploy_canary.ps1`** — `--use-buckets` / `-UseBuckets` passthrough
+
+### TARGET_VOL_EXPANSION Standardization
+- Ported logic from ad-hoc `scripts/generate_vol_target.py` into `data_processor.py` as `add_vol_expansion_target()` (L411-483)
+- Wired into `process_set_12` pipeline — now generates automatically
+- Regenerated set_12 locally (19.4% positive rate) and uploaded to GCS (864.5 MB)
+
+### Bucket Canary Results (150 trials × 4 searches each)
+
+| Experiment | Dataset | Target | Trades | WR | PF | PnL |
+|---|---|---|---|---|---|---|
+| **EXP-034** | set_12 | TRIPLE_2x1_24H | 273 | 27% | 0.66 | -$15,127 |
+| **EXP-035** 🏆 | set_11c | TRIPLE_2x1_24H | **50** | **34%** | **0.98** | **-$98** |
+| **EXP-036** | set_12 | VOL_EXPANSION | 455 | 21% | 0.61 | -$32,603 |
+
+### Key Findings — Cross-Run Bucket Consensus (12 searches)
+- **Momentum**: ON in 10/12 — **the alpha signal**
+- **Structure**: OFF in 11/12 — confirmed noise (candle body/wick ratios, OBV slope)
+- **Trend**: OFF in 10/12 — noise
+- **Divergence**: OFF in 4/4 on set_12 (toxic with EXHDIV features), ON in some set_11c models
+- **Vol Expansion**: directionless — predicts *whether* vol expands, not *which direction*. Needs directional filter.
+
+### Files Changed
+- `src/features/feature_buckets.py` — **[NEW]** bucket definitions + filtering
+- `tests/test_feature_buckets.py` — **[NEW]** 13 unit tests
+- `src/data_processor.py` — `add_vol_expansion_target()` method + wired into `process_set_12`
+- `agent/optuna_lgbm_search_v2.py` — bucket toggles, 150-trial floor, `--use-buckets`
+- `gcp/vm_canary_run.sh` — `--use-buckets` passthrough
+- `gcp/gcp_deploy_canary.ps1` — `-UseBuckets` switch, `feature_buckets.py` in upload list
+
 ## 2026-03-23 — Volatility Straddle Optimization, Asymmetric Drawdown Target & Metric Architecture Change
 
 ### Goal

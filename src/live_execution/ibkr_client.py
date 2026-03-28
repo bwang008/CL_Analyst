@@ -52,6 +52,39 @@ def build_cl_contract(
     )
 
 
+def build_mcl_contract(
+    *,
+    continuous: bool = True,
+    contract_month: Optional[str] = None,
+    exchange: str = "NYMEX",
+    currency: str = "USD",
+) -> Contract:
+    """Build a Micro WTI Crude Oil (MCL) futures contract for IBKR.
+
+    MCL is 1/10th the size of CL ($100/point vs $1,000/point).
+    Used for the 'Hands' execution stream when the strategy wants
+    to trade smaller size while reading CL signals ('Brain').
+
+    Args:
+        continuous: If True, use IB's continuous futures contract.
+        contract_month: Specific front-month (YYYYMM), required if continuous=False.
+        exchange: Futures exchange (NYMEX for MCL).
+        currency: Contract currency.
+    """
+    if continuous:
+        return ContFuture(symbol="MCL", exchange=exchange, currency=currency, includeExpired=True)
+
+    if not contract_month:
+        raise ValueError("contract_month is required when continuous=False (format: YYYYMM).")
+
+    return Future(
+        symbol="MCL",
+        lastTradeDateOrContractMonth=contract_month,
+        exchange=exchange,
+        currency=currency,
+    )
+
+
 def _is_pacing_error(error: Exception) -> bool:
     message = str(error).lower()
     return "pacing" in message or "rate limit" in message
@@ -485,14 +518,20 @@ class IBKRConnectionManager:
     # the next month to avoid Error 201 rejections.
     _EXPIRY_BUFFER_DAYS = 3
 
-    def get_front_month_contract(self) -> tuple[Contract, str]:
-        """
-        Resolve the current front-month CL futures contract.
+    def get_front_month_contract(
+        self, symbol: str = "CL",
+    ) -> tuple[Contract, str]:
+        """Resolve the current front-month futures contract.
 
-        Uses reqContractDetails to find the nearest-expiry CL contract
+        Supports both CL (WTI Crude Oil) and MCL (Micro WTI).
+
+        Uses reqContractDetails to find the nearest-expiry contract
         that is still tradable.  Contracts expiring within
         ``_EXPIRY_BUFFER_DAYS`` are skipped to avoid IBKR's
         near-expiration physical delivery restrictions.
+
+        Args:
+            symbol: Futures symbol — "CL" (default) or "MCL".
 
         Returns:
             tuple: (qualified Contract, contract_month string e.g. '202504')
@@ -500,13 +539,13 @@ class IBKRConnectionManager:
         from datetime import datetime, timedelta
 
         self.ensure_connected()
-        # Use a generic CL Future to search for available contracts
-        search = Future(symbol="CL", exchange="NYMEX", currency="USD")
+        # Use a generic Future to search for available contracts
+        search = Future(symbol=symbol, exchange="NYMEX", currency="USD")
         details = self.ib.reqContractDetails(search)
 
         if not details:
             raise RuntimeError(
-                "Could not retrieve CL contract details from IBKR."
+                f"Could not retrieve {symbol} contract details from IBKR."
             )
 
         # Sort by expiry and pick the nearest one that isn't too close
@@ -526,9 +565,9 @@ class IBKRConnectionManager:
         else:
             # Fallback: all contracts are near-expiry (shouldn't happen)
             log.warning(
-                "All CL contracts expire within %d days — "
+                "All %s contracts expire within %d days — "
                 "using nearest available",
-                self._EXPIRY_BUFFER_DAYS,
+                symbol, self._EXPIRY_BUFFER_DAYS,
             )
             front = details[0]
 
@@ -536,9 +575,9 @@ class IBKRConnectionManager:
         month_str = contract.lastTradeDateOrContractMonth[:6]  # YYYYMM
 
         log.info(
-            "Front-month CL contract: %s (conId=%d, month=%s, "
+            "Front-month %s contract: %s (conId=%d, month=%s, "
             "expiry=%s, buffer=%dd)",
-            contract.localSymbol, contract.conId, month_str,
+            symbol, contract.localSymbol, contract.conId, month_str,
             contract.lastTradeDateOrContractMonth,
             self._EXPIRY_BUFFER_DAYS,
         )

@@ -5,10 +5,12 @@
 ## Project
 Crude oil (CL) 5-minute bar ML trading system using LightGBM with focal loss, walk-forward validation, and IBKR live execution.
 
-## Current State (2026-03-23)
-- **No proven clean model yet.** All prior "alpha" came from lookahead leakage in set_08.
-- **Active experiment**: Asymmetric Drawdown target ("Easy Money") running on GCP (`optuna-runner-directed`).
-- **Metric policy**: Optuna uses `logloss` + `average_precision` (PR-AUC). Do NOT use `f0.5` in Optuna for targets with <5% positive rate — it goes blind.
+## Current State (2026-03-27)
+- **Production model**: EXP-037 `LeanMomentumShort` on `set_11c_lean` — 208 trades, 31.2% WR, PF 1.27, **+$5,816**. First statistically significant profitable clean model.
+- **Production config**: `configs/strategies/production_lean_momentum.json` — SHORT only, threshold 0.60, TP=3.5x, SL=1.5x, Brain=CL, Hands=MCL.
+- **Feature Bucket Architecture**: Implemented. Momentum = alpha. Structure/trend = noise. Divergence = toxic on set_12.
+- **Metric policy**: Optuna uses `logloss` + `average_precision` (PR-AUC). Do NOT use `f0.5` in Optuna for targets with <5% positive rate.
+- **Bucket flag**: use `--use-buckets` (CLI) / `-UseBuckets` (PowerShell) for 150-trial bucket-enabled runs.
 
 ## Root Documentation — Reading Priority
 
@@ -27,6 +29,7 @@ Crude oil (CL) 5-minute bar ML trading system using LightGBM with focal loss, wa
 | `experiment_tracker.json` | Structured registry of all experiments with metrics |
 | `research_backlog.json` | Prioritized queue of experiment ideas to try |
 | `models/registry/` | Archived model bundles (PKL + metrics + predictions) |
+| `models/production/` | **Production model PKL** (lean momentum short) |
 | `configs/strategies/` | Live trading and backtest strategy configs |
 | `.agents/workflows/` | Slash commands — run `/run-tests`, `/commit`, `/next`, etc. |
 
@@ -44,6 +47,9 @@ To keep the AI context window sharp, all agents must follow these rules before e
 | set_09 | ⚠️ Partial | Fixed MACRO, still has bfill |
 | **set_10** | ✅ Clean | Causally safe, 1.19M rows, 156 features |
 | **set_11** | ✅ Clean | Latest 5-min: set_10 + new features, 199 columns |
+| **set_11c** | ✅ Clean | Corwin-Schultz spread-adjusted. Near-breakeven (EXP-035). Profitable at 0.56 threshold (EXP-037b) |
+| **set_11c_lean** | ✅ Clean | **🏆 PRODUCTION.** 26 features (core+momentum). EXP-037: 208 trades, PF 1.27, +$5,816 |
+| **set_12** | ✅ Clean | Cumulative: 227 features + TARGET_VOL_EXPANSION. EXHDIV divergence = toxic |
 | **HourSet_02** | ✅ Clean | Latest hourly: 1H bars, 120H targets, ~101K rows |
 | **CL_set_11_asym** | 🔬 Expr. | set_11 + Asymmetric targets (3.46% LONG / 3.23% SHORT) |
 
@@ -53,8 +59,8 @@ To keep the AI context window sharp, all agents must follow these rules before e
 - `live_trader_test` (merged from `development` 2026-03-21)
 
 ## Last Completed Task
-- **Asymmetric Drawdown Target & Metric Architecture (2026-03-23)**: Engineered "Easy Money" target (`scripts/generate_asymmetric_target.py`) with 3.46% LONG / 3.23% SHORT positive rates. **Replaced `f0.5` with `average_precision` (PR-AUC) as default Optuna metric** — F0.5 is blind on rare targets (<5% positive rate). Deployed `optuna-runner-directed` with `{LONG, SHORT} × {logloss, average_precision}` searches. Optimized Volatility Breakout strategy (PF 1.47, 112 trades).
-- **Canary Pipeline & Dataset Experiments (2026-03-22)**: Built canary pipeline for rapid 20-trial validation. **Key finding: only set_08 (leaky) produces signals; all clean datasets produce zero or unprofitable trades.**
+- **Lean Canary Breakthrough & Production Deployment (2026-03-27)**: Threshold sweep found profitability at 0.56 (+$1,176 on 26 trades). Lean canary (26 features) validated "less is more" hypothesis: **EXP-037 short_logloss = 208 trades, PF 1.27, +$5,816**. Deployed production model (`models/production/`), config (`configs/strategies/production_lean_momentum.json`), and code changes for MCL routing + lean feature path.
+- **Feature Bucket Architecture & Winning Strategy Optimization (2026-03-26)**: Implemented feature bucket pruning (12 buckets, 11 toggleable) in Optuna. Ran 3 bucket canary experiments (EXP-034 through EXP-036). Key finding: **momentum = alpha** (ON in 10/12 searches), **structure = noise** (OFF in 11/12).
 - **E2E Alpha Factory Pipeline (2026-03-21)**: Full E2E pipeline: Optuna → train → backtest → package → GCS upload.
 
 ## Current Known Bugs / Issues
@@ -138,6 +144,8 @@ Configs are in `configs/strategies/`. Reference: `configs/strategies/config_read
 | set_09 | 156 | 5-min | MACRO lookahead fix (causally-safe bar-level rolling) |
 | set_10 | 156 | 5-min | Causally safe (bfill removed, 26K warmup) |
 | **set_11** | **199** | **5-min** | **Latest: set_10 + new features (no leakage). 809 MB, 1,192,395 rows** |
+| **set_11c** | **206** | **5-min** | **Corwin-Schultz spread-adjusted. Best clean model (EXP-035)** |
+| **set_12** | **227** | **5-min** | **Cumulative + EXHDIV + TARGET_VOL_EXPANSION. Divergence = toxic.** |
 | HourSet_01 | 176 | 1-hour | First hourly dataset, 101K rows |
 | **HourSet_02** | **199** | **1-hour** | **Latest hourly: new features, 120H targets. 88 MB, ~101K rows** |
 
@@ -275,14 +283,13 @@ Creates registry-compatible bundles + production_artifacts.zip → GCS
 > **CRITICAL FINDING (2026-03-22)**: All "alpha" in set_08 comes from lookahead leakage. Every leak-free dataset produces zero or unprofitable signals with the current model architecture (LightGBM + focal loss + current feature set). The model architecture and/or feature engineering need fundamental changes to find real alpha.
 
 ## Immediate Next Steps
-1. Read `experiment_tracker.json` for what's been tried
-2. Read `research_backlog.json` for prioritized ideas
-3. Propose the highest-priority "ready" item, or type `/next`
+1. **Threshold sweep on EXP-035 (set_11c long_logloss)**: 34% WR / PF 0.98 is 4% above breakeven — sweep threshold 0.50→0.65 to generate more trades
+2. **Momentum Core hypothesis**: Test a lean 19-feature model using only `MOM_*` + `core` features
+3. **Vol Expansion + Direction combo**: Two-stage model (predict expansion, then direction)
+4. Read `experiment_tracker.json` for what's been tried
+5. Read `research_backlog.json` for prioritized ideas
 
 ### Current Active Tasks
-- **⏳ ACTIVE: Asymmetric Drawdown Canary** — `optuna-runner-directed` running 20-trial searches on `CL_set_11_asym.parquet` (3.46% LONG / 3.23% SHORT targets). Monitor with `gsutil cat gs://cltrainer-optuna-results/canary/STATUS.json`. Results will show if LightGBM can rank "Easy Money" setups via OOS Logloss + PR-AUC.
-- **Tier 2 threshold sweep** — Once Asymmetric Drawdown models are trained, run F0.5 threshold sweep (0.50–0.95) to find optimal trading threshold. Script needed: `scripts/threshold_sweep.py`.
-- **Rethink feature engineering** — current features don't contain enough predictive signal without leakage
-- **Explore alternative model architectures** — temporal models (LSTM, Transformer), different loss functions
-- **Re-examine target definitions** — the triple-barrier target may be too hard to predict from available features
+- **✅ COMPLETE: Bucket Architecture** — 3 runs done (EXP-034–036). Best: EXP-035 set_11c (PF 0.98)
+- **Next: Threshold sweep** on set_11c long_logloss model to unlock profitability
 - Address `trailing_atr_mult = 0.0` bug (should disable trailing stop, currently triggers immediately)

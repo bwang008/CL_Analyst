@@ -215,6 +215,8 @@ def _sigmoid(x: float) -> float:
 def build_live_features(
     df: pd.DataFrame,
     feature_names: list[str],
+    *,
+    lean: bool = False,
 ) -> Optional[pd.DataFrame]:
     """
     Generate features from a rolling OHLCV DataFrame for live inference.
@@ -238,9 +240,9 @@ def build_live_features(
         Single-row DataFrame with the model's expected features,
         or None if features cannot be computed (e.g. NaN in required columns).
     """
-    # Auto-detect set_07 pipeline
-    is_set_07 = bool(_SET_07_SENTINEL_FEATURES & set(feature_names))
-    alpha_windows = _ALPHA_WINDOWS_SET_07 if is_set_07 else _ALPHA_WINDOWS
+    # Auto-detect set_07 pipeline (ignored if lean=True)
+    is_set_07 = not lean and bool(_SET_07_SENTINEL_FEATURES & set(feature_names))
+    alpha_windows = _ALPHA_WINDOWS_SET_07 if is_set_07 or lean else _ALPHA_WINDOWS
 
     if len(df) < alpha_windows[-1]:
         log.warning(
@@ -275,7 +277,16 @@ def build_live_features(
         work["Time_DayOfWeek_Cos"] = np.cos(2 * np.pi * day_of_week / 5)
 
     # 2. Run AlphaFactory
-    if is_set_07:
+    if lean:
+        # Lean path: momentum + time features only (no macro, no extended)
+        # This is 6-7x faster than the full pipeline
+        work = AlphaFactory(work).add_all_features(
+            windows=alpha_windows,
+            include_momentum=True,
+            include_macro=False,
+            include_extended=False,
+        )
+    elif is_set_07:
         work = AlphaFactory(work).add_all_features(
             windows=alpha_windows,
             include_momentum=True,
@@ -443,15 +454,26 @@ class LiveTrader:
             strategy_config.get("max_position_size", max_lots_from_tiers)
         )
         log.info("Strategy: %s  direction=%s", strategy.name, strategy.direction)
+
+        # Read execution_symbol from strategy config (Brain=CL, Hands=CL or MCL)
+        self._execution_symbol: str = strategy_config.get(
+            "execution_symbol", "CL"
+        ).upper()
+        # Whether to use the lean (momentum-only) feature path
+        self._lean_features: bool = bool(
+            strategy_config.get("lean_features", False)
+        )
         log.info(
             "Entry mode: %s  adaptive_priority=%s  max_hold_bars=%d  "
             "tp_cooldown=%d  sl_cooldown=%d  trailing_atr_mult=%.2f  "
-            "trailing_sl_offset=%.2f  exit_mode=%s  max_position=%d",
+            "trailing_sl_offset=%.2f  exit_mode=%s  max_position=%d  "
+            "execution_symbol=%s  lean_features=%s",
             entry_mode, adaptive_priority, self._max_hold_bars,
             self._tp_cooldown_bars, self._sl_cooldown_bars,
             self._trailing_atr_mult,
             self._trailing_sl_atr_offset, self._exit_mode,
             self._max_position_size,
+            self._execution_symbol, self._lean_features,
         )
 
         # Telemetry
@@ -557,9 +579,12 @@ class LiveTrader:
             log.info("Qualified CL continuous contract: %s", self._contract)
 
             # Step 4: Resolve front-month contract (Hands stream)
+            #         Use execution_symbol from config (CL or MCL)
             try:
                 self._front_month_contract, self._front_month_str = (
-                    self.manager.get_front_month_contract()
+                    self.manager.get_front_month_contract(
+                        symbol=self._execution_symbol,
+                    )
                 )
                 log.info(
                     "Front-month contract: %s (month=%s)",
@@ -909,7 +934,9 @@ class LiveTrader:
         atr_value: Optional[float],
     ) -> bool:
         """Enforce 24-hour (288-bar) exit to match backtests."""
-        current_position = self.manager.get_cl_position()
+        current_position = self.manager.get_cl_position(
+            symbol=self._execution_symbol,
+        )
         if current_position == 0:
             # Detect out-of-band close (manual TWS close, external system, etc.)
             if self._active_trade_id is not None:
@@ -950,7 +977,9 @@ class LiveTrader:
                     )
                 # Cancel any orphaned TP/SL orders still live on IBKR
                 try:
-                    cancelled = self.manager.cancel_open_cl_orders()
+                    cancelled = self.manager.cancel_open_cl_orders(
+                        symbol=self._execution_symbol,
+                    )
                     if cancelled > 0:
                         log.info(
                             "OOB CLEANUP: cancelled %d orphaned CL order(s)",
@@ -980,8 +1009,11 @@ class LiveTrader:
         if self._position_bars_held <= effective_max_hold:
             return False
 
-        cancelled = self.manager.cancel_open_cl_orders()
+        cancelled = self.manager.cancel_open_cl_orders(
+            symbol=self._execution_symbol,
+        )
         trade = self.manager.close_cl_position(
+            symbol=self._execution_symbol,
             exit_mode=self._exit_mode,
             current_price=current_price,
         )
@@ -1028,7 +1060,9 @@ class LiveTrader:
         """
         # 1. Check ledger for an open position
         ledger_pos = self.telemetry.get_open_position()
-        ibkr_pos = self.manager.get_cl_position()
+        ibkr_pos = self.manager.get_cl_position(
+            symbol=self._execution_symbol,
+        )
 
         if ledger_pos is None and ibkr_pos == 0:
             log.info("[RECOVERY] No open position in ledger or IBKR — clean start")
@@ -2014,7 +2048,9 @@ class LiveTrader:
             in_cooldown = True
 
         # 1. Generate features (always — needed for INFERENCE display)
-        features = build_live_features(self.rolling_df, self.feature_names)
+        features = build_live_features(
+            self.rolling_df, self.feature_names, lean=self._lean_features,
+        )
         if features is None:
             log.info("Feature generation skipped (insufficient data or NaN)")
             return
@@ -2036,7 +2072,9 @@ class LiveTrader:
 
         # 2. Position guard: check both filled position AND pending orders
         #    to prevent duplicate entries when Adaptive Algo is still working
-        current_position = self.manager.get_cl_position()
+        current_position = self.manager.get_cl_position(
+            symbol=self._execution_symbol,
+        )
 
         # Engine-level hard position cap (defense-in-depth)
         if abs(current_position) >= self._max_position_size:

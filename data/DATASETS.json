@@ -195,11 +195,14 @@
     },
     "set_12": {
       "name": "Exhaustion Divergence Dataset (Cumulative)",
-      "summary": "Cumulative dataset: all set_11 features + Spread-Adjusted Momentum + new Exhaustion Divergence cluster (Slope Divergence, Temporal Peak Offset, Effort-Reward Ratio). ~215 features. LightGBM will auto-select the most informative features from the full collection.",
+      "summary": "Cumulative dataset: all set_11 features + Spread-Adjusted Momentum + Exhaustion Divergence cluster + TARGET_VOL_EXPANSION. 227 features. Bucket pruning (EXP-034) confirmed EXHDIV divergence features are toxic noise. Vol expansion target labels top-20% 24H forward True Range events.",
       "bar_frequency": "5min",
+      "features": 227,
+      "rows": 1192395,
       "windows": [288, 864, 2016, 4032, 10080],
       "macro_windows": {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160},
-      "change_from_set_11": "Added EXHDIV_SLOPE_DIVERGE_*, EXHDIV_PEAK_OFFSET_*, EXHDIV_EFFORT_REWARD_* at each window",
+      "change_from_set_11": "Added EXHDIV_SLOPE_DIVERGE_*, EXHDIV_PEAK_OFFSET_*, EXHDIV_EFFORT_REWARD_* at each window + TARGET_VOL_EXPANSION",
+      "gcs_path": "gs://cltrainer-optuna-results/data/cl-5m_bk_set_12.parquet",
       "new_features": [
         "EXHDIV_SLOPE_DIVERGE_*",
         "EXHDIV_PEAK_OFFSET_*",
@@ -211,8 +214,13 @@
         "TARGET_TRIPLE_2x1_24H_LONG",
         "TARGET_TRIPLE_2x1_24H_SHORT",
         "TARGET_TRIPLE_3x1_24H_LONG",
-        "TARGET_TRIPLE_3x1_24H_SHORT"
-      ]
+        "TARGET_TRIPLE_3x1_24H_SHORT",
+        "TARGET_VOL_EXPANSION"
+      ],
+      "canary_results": {
+        "EXP-034_TripleBarrier": "273 trades, PF 0.66, -$15,127. Divergence OFF in all 4 searches.",
+        "EXP-036_VolExpansion": "455 trades, PF 0.61, -$32,603. Directionless — needs direction filter."
+      }
     }
   }
 }
