@@ -31,6 +31,7 @@
         "0.60": 1
     },
     "execution_symbol": "MCL",
+    "bar_size": "1h",
     "live_config": {
         "client_id": 25,
         "entry_mode": "marketable_limit",

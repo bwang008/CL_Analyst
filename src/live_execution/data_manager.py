@@ -114,12 +114,16 @@ class DataManager:
         master_ledger_path: str = _DEFAULT_MASTER_LEDGER_PATH,
         ibkr_manager: Optional["IBKRConnectionManager"] = None,
         front_month_id: Optional[str] = None,
+        bar_size: str = "5 mins",
+        bars_per_day: int = 288,
     ) -> None:
         self.seed_path = Path(seed_path)
         self.cache_path = Path(cache_path)
         self.master_ledger_path = Path(master_ledger_path)
         self.ibkr_manager = ibkr_manager
         self.front_month_id = front_month_id  # e.g. "CLJ6"
+        self.bar_size = bar_size
+        self.bars_per_day = bars_per_day
 
         self._df: Optional[pd.DataFrame] = None
         self._bars_since_flush: int = 0
@@ -149,15 +153,26 @@ class DataManager:
                 self._df.index.max(),
             )
         else:
-            log.info("No cache found — seeding from %s", self.seed_path)
-            self._df = self._seed_from_csv()
-            self.save_cache()
-            log.info(
-                "Cache seeded: %d bars, range %s → %s",
-                len(self._df),
-                self._df.index.min(),
-                self._df.index.max(),
-            )
+            if self.seed_path.exists():
+                log.info("No cache found — seeding from %s", self.seed_path)
+                self._df = self._seed_from_csv()
+                self.save_cache()
+                log.info(
+                    "Cache seeded: %d bars, range %s → %s",
+                    len(self._df),
+                    self._df.index.min(),
+                    self._df.index.max(),
+                )
+            else:
+                log.warning(
+                    "No cache and no seed file found at %s. "
+                    "Bootstrapping completely from IBKR over the last %d days...",
+                    self.seed_path, _SEED_LOOKBACK_DAYS
+                )
+                start_ts = pd.Timestamp.now() - pd.Timedelta(days=_SEED_LOOKBACK_DAYS)
+                self._df = pd.DataFrame([{"DateTime": start_ts, "Open": 0.0, "High": 0.0, "Low": 0.0, "Close": 0.0, "Volume": 0}]).set_index("DateTime", drop=False)
+                self._df.index.name = "DateTime"
+                # _backfill will populate the real bars from start_ts, then we drop the dummy below
 
         # Step 2: Detect rollover and apply Panama Canal back-adjustment
         if self.ibkr_manager is not None and self.front_month_id is not None:
@@ -179,6 +194,10 @@ class DataManager:
         # Step 3: Backfill any gap from IBKR
         if self.ibkr_manager is not None:
             self._backfill()
+            # If we used a dummy bootstrap row, drop it now that backfill is done
+            if len(self._df) > 1 and self._df.iloc[0]["Volume"] == 0 and self._df.iloc[0]["Close"] == 0.0:
+                self._df = self._df.iloc[1:]
+                self.save_cache()
         else:
             log.warning(
                 "No IBKR manager provided — skipping backfill. "
@@ -609,7 +628,7 @@ class DataManager:
         bars = self.ibkr_manager._request_historical_data(
             contract=contract,
             duration_str="3 D",
-            bar_size="5 mins",
+            bar_size=self.bar_size,
             what_to_show="TRADES",
             use_rth=False,
             end_datetime="",

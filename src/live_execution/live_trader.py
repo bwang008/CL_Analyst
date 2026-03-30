@@ -32,6 +32,7 @@ import re
 import signal
 import socket
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -217,6 +218,7 @@ def build_live_features(
     feature_names: list[str],
     *,
     lean: bool = False,
+    bar_size: str = "5m",
 ) -> Optional[pd.DataFrame]:
     """
     Generate features from a rolling OHLCV DataFrame for live inference.
@@ -235,14 +237,22 @@ def build_live_features(
         df: Rolling OHLCV DataFrame with DateTime index and columns
             [Open, High, Low, Close, Volume].
         feature_names: The exact list of feature column names the model expects.
+        lean: Whether to generate only momentum + time features (faster).
+        bar_size: The timeframe of the input df ("5m" or "1h").
 
     Returns:
         Single-row DataFrame with the model's expected features,
         or None if features cannot be computed (e.g. NaN in required columns).
     """
-    # Auto-detect set_07 pipeline (ignored if lean=True)
-    is_set_07 = not lean and bool(_SET_07_SENTINEL_FEATURES & set(feature_names))
-    alpha_windows = _ALPHA_WINDOWS_SET_07 if is_set_07 or lean else _ALPHA_WINDOWS
+    if bar_size == "1h":
+        is_set_07 = True
+        alpha_windows = [24, 72, 168, 336, 840]
+        macro_windows = {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160}
+    else:
+        # Auto-detect set_07 pipeline (ignored if lean=True)
+        is_set_07 = not lean and bool(_SET_07_SENTINEL_FEATURES & set(feature_names))
+        alpha_windows = _ALPHA_WINDOWS_SET_07 if is_set_07 or lean else _ALPHA_WINDOWS
+        macro_windows = _MACRO_WINDOWS_SET_07
 
     if len(df) < alpha_windows[-1]:
         log.warning(
@@ -293,7 +303,7 @@ def build_live_features(
             include_momentum=True,
             include_macro=True,
             include_extended=True,
-            macro_windows=_MACRO_WINDOWS_SET_07,
+            macro_windows=macro_windows,
         )
     else:
         work = factory.add_all_features(
@@ -484,6 +494,9 @@ class LiveTrader:
             self._execution_symbol, self._lean_features,
         )
 
+        # Extract designated primary stream from config (e.g. "1h" or "5m")
+        self._bar_size: str = strategy_config.get("bar_size", "5m").lower()
+
         # Telemetry
         self.telemetry = TelemetryDB(db_path)
         log.info("Telemetry DB: %s", db_path)
@@ -496,22 +509,47 @@ class LiveTrader:
             readonly=dry_run,  # readonly in dry-run mode
         )
 
-        # DataManager for warm-start
-        self.data_manager = DataManager(
+        # DataManagers for warm-start (Two-Brain Hub)
+        self.data_manager_5m = DataManager(
             seed_path=seed_path,
             cache_path=cache_path,
             ibkr_manager=self.manager,
+            bar_size="5 mins",
+            bars_per_day=288,
         )
 
+        self.data_manager_1h = None
+        if self._bar_size == "1h":
+            # 1h models use a dedicated 1h data manager to avoid pacing limits
+            cache_path_1h = str(Path(cache_path).parent / "warm_start_cache_1h.parquet")
+            seed_path_1h = str(Path(seed_path).parent / "cl-1h_bk.csv")
+            self.data_manager_1h = DataManager(
+                seed_path=seed_path_1h,
+                cache_path=cache_path_1h,
+                ibkr_manager=self.manager,
+                bar_size="1 hour",
+                bars_per_day=24,
+            )
+
+        # Thread-Safe Virtual Ledger State
+        self._ledger_lock = threading.Lock()
+        self._virtual_ledger = {
+            "5m": 0,
+            "1h": 0,
+        }
+
         # State
-        self.rolling_df: Optional[pd.DataFrame] = None
-        self._live_bars = None
+        self.rolling_df_5m: Optional[pd.DataFrame] = None
+        self.rolling_df_1h: Optional[pd.DataFrame] = None
+        self._live_bars_5m = None
+        self._live_bars_1h = None
         self._front_month_bars = None  # Two-Stream: raw front-month
         self._contract = None
         self._front_month_contract = None
         self._front_month_str: Optional[str] = None
         self._running = False
-        self._last_bar_time: Optional[pd.Timestamp] = None
+        self._last_bar_time_5m: Optional[pd.Timestamp] = None
+        self._last_bar_time_1h: Optional[pd.Timestamp] = None
         self._subscriptions_lost = False  # Track connectivity drops
         self._resubscribe_pending = False  # Prevent duplicate resubscription scheduling
         self._callbacks_registered = False
@@ -609,11 +647,15 @@ class LiveTrader:
             # Step 5: Print CL-only account summary
             self._print_account_summary()
 
-            # Step 6: Pass front-month ID to DataManager for rollover detection
+            # Step 6: Pass front-month ID to DataManagers for rollover detection
             if self._front_month_contract is not None:
-                self.data_manager.front_month_id = (
+                self.data_manager_5m.front_month_id = (
                     self._front_month_contract.localSymbol
                 )
+                if self.data_manager_1h is not None:
+                    self.data_manager_1h.front_month_id = (
+                        self._front_month_contract.localSymbol
+                    )
 
             # Step 7: Warm-start via DataManager
             self._warm_start()
@@ -670,9 +712,14 @@ class LiveTrader:
 
     def _shutdown(self) -> None:
         log.info("Shutting down...")
-        if self._live_bars is not None:
+        if self._live_bars_5m is not None:
             try:
-                self.manager.cancel_subscription(self._live_bars)
+                self.manager.cancel_subscription(self._live_bars_5m)
+            except Exception:
+                pass
+        if self._live_bars_1h is not None:
+            try:
+                self.manager.cancel_subscription(self._live_bars_1h)
             except Exception:
                 pass
         if self._front_month_bars is not None:
@@ -680,9 +727,11 @@ class LiveTrader:
                 self.manager.cancel_subscription(self._front_month_bars)
             except Exception:
                 pass
-        # Save warm-start cache on shutdown
+        # Save warm-start caches on shutdown
         try:
-            self.data_manager.save_cache()
+            self.data_manager_5m.save_cache()
+            if self.data_manager_1h is not None:
+                self.data_manager_1h.save_cache()
         except Exception:
             log.warning("Failed to save warm-start cache on shutdown.")
         self.manager.disconnect()
@@ -1784,40 +1833,65 @@ class LiveTrader:
 
     def _warm_start(self) -> None:
         """Initialize rolling window via DataManager (seed + backfill)."""
-        log.info("Warm-start: initializing via DataManager...")
-        self.rolling_df = self.data_manager.initialize()
+        log.info("Warm-start: initializing 5m DataManager...")
+        self.rolling_df_5m = self.data_manager_5m.initialize()
 
-        if len(self.rolling_df) == 0:
+        if len(self.rolling_df_5m) == 0:
             raise RuntimeError(
-                "Warm-start failed: no data available from seed or IBKR."
+                "Warm-start failed: no data available for 5m stream."
             )
 
         # Ensure DateTime index
-        if "DateTime" in self.rolling_df.columns and not isinstance(
-            self.rolling_df.index, pd.DatetimeIndex
+        if "DateTime" in self.rolling_df_5m.columns and not isinstance(
+            self.rolling_df_5m.index, pd.DatetimeIndex
         ):
-            self.rolling_df = self.rolling_df.set_index("DateTime", drop=False)
+            self.rolling_df_5m = self.rolling_df_5m.set_index("DateTime", drop=False)
 
-        self._last_bar_time = self.rolling_df.index[-1]
+        self._last_bar_time_5m = self.rolling_df_5m.index[-1]
         log.info(
-            "Rolling window initialized: %d bars, latest=%s",
-            len(self.rolling_df), self._last_bar_time,
+            "5m rolling window initialized: %d bars, latest=%s",
+            len(self.rolling_df_5m), self._last_bar_time_5m,
         )
+
+        if self._bar_size == "1h" and self.data_manager_1h is not None:
+            log.info("Warm-start: initializing 1h DataManager...")
+            self.rolling_df_1h = self.data_manager_1h.initialize()
+            if len(self.rolling_df_1h) == 0:
+                raise RuntimeError("Warm-start failed: no data available for 1h stream.")
+            if "DateTime" in self.rolling_df_1h.columns and not isinstance(
+                self.rolling_df_1h.index, pd.DatetimeIndex
+            ):
+                self.rolling_df_1h = self.rolling_df_1h.set_index("DateTime", drop=False)
+            self._last_bar_time_1h = self.rolling_df_1h.index[-1]
+            log.info(
+                "1h rolling window initialized: %d bars, latest=%s",
+                len(self.rolling_df_1h), self._last_bar_time_1h,
+            )
 
     # ------------------------------------------------------------------
     # Live bar subscription
     # ------------------------------------------------------------------
 
     def _subscribe(self) -> None:
-        """Subscribe to live 5-min bars (Brain stream: continuous contract)."""
-        log.info("Subscribing to live 5-min bars (Brain stream)...")
-        self._live_bars = self.manager.subscribe_live_bars(
+        """Subscribe to live bars (Brain streams)."""
+        log.info("Subscribing to live 5-min bars (Stream A)...")
+        self._live_bars_5m = self.manager.subscribe_live_bars(
             self._contract,
             bar_size="5 mins",
             duration_str="60 S",
         )
-        self._live_bars.updateEvent += self._on_bar_update
-        log.info("Subscribed to continuous contract live bars")
+        self._live_bars_5m.updateEvent += self._on_bar_update_5m
+        log.info("Subscribed to 5-min continuous contract live bars")
+
+        if self._bar_size == "1h":
+            log.info("Subscribing to live 1-hour bars (Stream B)...")
+            self._live_bars_1h = self.manager.subscribe_live_bars(
+                self._contract,
+                bar_size="1 hour",
+                duration_str="2 D",
+            )
+            self._live_bars_1h.updateEvent += self._on_bar_update_1h
+            log.info("Subscribed to 1-hour continuous contract live bars")
 
     def _subscribe_front_month(self) -> None:
         """Subscribe to live 5-min bars (Hands stream: front-month contract)."""
@@ -1873,9 +1947,14 @@ class LiveTrader:
         """
         try:
             # 1. Cancel stale subscriptions (sync, safe — no network request)
-            if self._live_bars is not None:
+            if self._live_bars_5m is not None:
                 try:
-                    self.manager.cancel_subscription(self._live_bars)
+                    self.manager.cancel_subscription(self._live_bars_5m)
+                except Exception:
+                    pass
+            if self._live_bars_1h is not None:
+                try:
+                    self.manager.cancel_subscription(self._live_bars_1h)
                 except Exception:
                     pass
             if self._front_month_bars is not None:
@@ -1885,14 +1964,24 @@ class LiveTrader:
                     pass
 
             # 2. Re-subscribe using async API
-            log.info("Subscribing to live 5-min bars (Brain stream)...")
-            self._live_bars = await self.manager.subscribe_live_bars_async(
+            log.info("Subscribing to live 5-min bars (Stream A)...")
+            self._live_bars_5m = await self.manager.subscribe_live_bars_async(
                 self._contract,
                 bar_size="5 mins",
                 duration_str="60 S",
             )
-            self._live_bars.updateEvent += self._on_bar_update
-            log.info("Subscribed to continuous contract live bars")
+            self._live_bars_5m.updateEvent += self._on_bar_update_5m
+            log.info("Subscribed to 5-min continuous contract live bars")
+
+            if self._bar_size == "1h":
+                log.info("Subscribing to live 1-hour bars (Stream B)...")
+                self._live_bars_1h = await self.manager.subscribe_live_bars_async(
+                    self._contract,
+                    bar_size="1 hour",
+                    duration_str="2 D",
+                )
+                self._live_bars_1h.updateEvent += self._on_bar_update_1h
+                log.info("Subscribed to 1-hour continuous contract live bars")
 
             if self._front_month_contract is not None:
                 log.info(
@@ -1975,14 +2064,12 @@ class LiveTrader:
             new_bar.close, float(new_bar.volume),
         )
 
-    def _on_bar_update(self, bars, has_new_bar) -> None:
-        """Callback fired by ib_insync when continuous bars are updated."""
+    def _on_bar_update_5m(self, bars, has_new_bar) -> None:
+        """Callback fired by ib_insync when continuous 5m bars are updated."""
         if not has_new_bar or not bars:
             return
 
-        # Convert the latest bar to a row
         new_bar = bars[-1]
-        # Normalize tz-aware timestamps (IBKR sends US/Eastern) to tz-naive UTC
         raw_ts = pd.Timestamp(new_bar.date)
         if raw_ts.tzinfo is not None:
             raw_ts = raw_ts.tz_convert("UTC").tz_localize(None)
@@ -1996,68 +2083,98 @@ class LiveTrader:
                 "Volume": float(new_bar.volume),
             }]
         )
-        new_row = new_row.set_index(
-            pd.DatetimeIndex(new_row["DateTime"]), drop=False
-        )
+        new_row = new_row.set_index(pd.DatetimeIndex(new_row["DateTime"]), drop=False)
         new_row.index.name = "DateTime"
-
         bar_time = new_row.index[0]
 
-        # Deduplicate: skip if we've already seen this bar
-        if self._last_bar_time is not None and bar_time <= self._last_bar_time:
+        if self._last_bar_time_5m is not None and bar_time <= self._last_bar_time_5m:
+            return
+        self._last_bar_time_5m = bar_time
+
+        log.info(
+            "NEW 5M BAR: %s  O=%.2f H=%.2f L=%.2f C=%.2f V=%.0f",
+            bar_time, new_row["Open"].iloc[0], new_row["High"].iloc[0],
+            new_row["Low"].iloc[0], new_row["Close"].iloc[0], new_row["Volume"].iloc[0],
+        )
+
+        self.rolling_df_5m = pd.concat([self.rolling_df_5m, new_row])
+        if len(self.rolling_df_5m) > _MAX_ROLLING_BARS:
+            self.rolling_df_5m = self.rolling_df_5m.iloc[-_MAX_ROLLING_BARS:]
+
+        self.data_manager_5m.append_bar(new_row)
+
+        self.telemetry.log_bar(
+            timestamp=bar_time, open_=new_row["Open"].iloc[0],
+            high=new_row["High"].iloc[0], low=new_row["Low"].iloc[0],
+            close=new_row["Close"].iloc[0], volume=new_row["Volume"].iloc[0],
+        )
+
+        if self._bar_size == "5m":
+            with self._ledger_lock:
+                self._on_new_bar(bar_time, self.rolling_df_5m, "5m")
+
+    def _on_bar_update_1h(self, bars, has_new_bar) -> None:
+        """Callback fired by ib_insync when continuous 1h bars are updated."""
+        if not has_new_bar or not bars:
             return
 
-        self._last_bar_time = bar_time
+        new_bar = bars[-1]
+        raw_ts = pd.Timestamp(new_bar.date)
+        if raw_ts.tzinfo is not None:
+            raw_ts = raw_ts.tz_convert("UTC").tz_localize(None)
+        new_row = pd.DataFrame(
+            [{
+                "DateTime": raw_ts,
+                "Open": new_bar.open,
+                "High": new_bar.high,
+                "Low": new_bar.low,
+                "Close": new_bar.close,
+                "Volume": float(new_bar.volume),
+            }]
+        )
+        new_row = new_row.set_index(pd.DatetimeIndex(new_row["DateTime"]), drop=False)
+        new_row.index.name = "DateTime"
+        bar_time = new_row.index[0]
+
+        if self._last_bar_time_1h is not None and bar_time <= self._last_bar_time_1h:
+            return
+        self._last_bar_time_1h = bar_time
+
         log.info(
-            "NEW BAR: %s  O=%.2f H=%.2f L=%.2f C=%.2f V=%.0f",
-            bar_time,
-            new_row["Open"].iloc[0],
-            new_row["High"].iloc[0],
-            new_row["Low"].iloc[0],
-            new_row["Close"].iloc[0],
-            new_row["Volume"].iloc[0],
+            "NEW 1H BAR: %s  O=%.2f H=%.2f L=%.2f C=%.2f V=%.0f",
+            bar_time, new_row["Open"].iloc[0], new_row["High"].iloc[0],
+            new_row["Low"].iloc[0], new_row["Close"].iloc[0], new_row["Volume"].iloc[0],
         )
 
-        # Append to rolling window
-        self.rolling_df = pd.concat([self.rolling_df, new_row])
-        if len(self.rolling_df) > _MAX_ROLLING_BARS:
-            self.rolling_df = self.rolling_df.iloc[-_MAX_ROLLING_BARS:]
+        self.rolling_df_1h = pd.concat([self.rolling_df_1h, new_row])
+        if len(self.rolling_df_1h) > _MAX_ROLLING_BARS:
+            self.rolling_df_1h = self.rolling_df_1h.iloc[-_MAX_ROLLING_BARS:]
 
-        # Append to warm-start cache (DataManager)
-        self.data_manager.append_bar(new_row)
+        self.data_manager_1h.append_bar(new_row)
 
-        # Log bar to telemetry (smoothed continuous data)
-        self.telemetry.log_bar(
-            timestamp=bar_time,
-            open_=new_row["Open"].iloc[0],
-            high=new_row["High"].iloc[0],
-            low=new_row["Low"].iloc[0],
-            close=new_row["Close"].iloc[0],
-            volume=new_row["Volume"].iloc[0],
-        )
-
-        # Run inference pipeline
-        self._on_new_bar(bar_time)
+        if self._bar_size == "1h":
+            with self._ledger_lock:
+                self._on_new_bar(bar_time, self.rolling_df_1h, "1h")
 
     # ------------------------------------------------------------------
     # Inference + Execution
     # ------------------------------------------------------------------
 
-    def _on_new_bar(self, bar_time: pd.Timestamp) -> None:
-        """Run feature generation, strategy evaluation, and potentially execute a trade."""
+    def _on_new_bar(self, bar_time: pd.Timestamp, rolling_df: pd.DataFrame, stream: str) -> None:
+        """Run feature generation, strategy evaluation, update ledger, and net execution."""
         # 0a. Entry order TTL: cancel stale entry orders after 1 bar
         self._check_entry_order_ttl(bar_time)
 
-        # 0b. Track cooldown state (don't return early — we still want INFERENCE
-        #     and BRACKET to always be visible in logs)
+        # 0b. Track cooldown state
         in_cooldown = False
         if self._cooldown_remaining > 0:
             self._cooldown_remaining -= 1
             in_cooldown = True
 
         # 1. Generate features (always — needed for INFERENCE display)
+        # Use stream for bar_size to inform feature engineering scale
         features = build_live_features(
-            self.rolling_df, self.feature_names, lean=self._lean_features,
+            rolling_df, self.feature_names, lean=self._lean_features, bar_size=stream
         )
         if features is None:
             log.info("Feature generation skipped (insufficient data or NaN)")
@@ -2204,6 +2321,19 @@ class LiveTrader:
             current_price=current_price,
             atr_value=atr_value,
             current_position=effective_position,
+        )
+
+        # Update Thread-Safe Virtual Ledger (Dual Stream Netting)
+        if signal.action == "ENTER":
+            self._virtual_ledger[stream] = signal.direction * signal.lots
+        elif signal.action == "EXIT":
+            self._virtual_ledger[stream] = 0
+            
+        net_target_position = sum(self._virtual_ledger.values())
+        log.info(
+            "VIRTUAL LEDGER [%s]: 5m=%d, 1h=%d -> NET TARGET: %d (Actual: %d)",
+            stream, self._virtual_ledger["5m"], self._virtual_ledger["1h"],
+            net_target_position, current_position,
         )
 
         # Shadow-replay logging: capture exact state for parity validation
