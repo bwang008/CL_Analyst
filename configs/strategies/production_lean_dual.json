@@ -5,11 +5,13 @@
     "models": {
         "long": {
             "experiment_id": "production_long",
+            "predictions_path": "reports/canary/registry/canary_output/registry/E2E_set_11c_lean_long_logloss/oos_predictions.csv",
             "model_path": "models/production/final_model_long.pkl",
             "threshold": 0.56
         },
         "short": {
             "experiment_id": "production_short",
+            "predictions_path": "reports/canary/registry/canary_output/registry/E2E_set_11c_lean_short_logloss/oos_predictions.csv",
             "model_path": "models/production/final_model.pkl",
             "threshold": 0.60
         }

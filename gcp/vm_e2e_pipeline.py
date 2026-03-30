@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import joblib
 import pickle
 import shutil
 import subprocess
@@ -172,10 +173,15 @@ def train_final_model(
     best_iter = getattr(model, "best_iteration", n_estimators)
     print(f"  Trained: {best_iter} iterations (budget: {n_estimators})")
 
-    # Save as pickle (compatible with existing registry format)
+    # Save in LGBMLearner-compatible dict format (joblib)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    with open(output_path, "wb") as f:
-        pickle.dump(model, f)
+    payload = {
+        "model": model,
+        "feature_names": model.feature_name(),
+        "n_features_in_": model.num_feature(),
+        "params": params,
+    }
+    joblib.dump(payload, output_path)
     print(f"  Saved: {output_path} ({os.path.getsize(output_path) / 1024:.0f} KB)")
 
     return model

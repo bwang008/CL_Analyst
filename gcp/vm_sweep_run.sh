@@ -1,16 +1,15 @@
 #!/bin/bash
 # =============================================================================
-# E2E Alpha Factory — Canary (Light) Run
+# E2E Alpha Factory — Sweep (Production) Run
 #
-# A stripped-down version of vm_production_run.sh for fast-feedback (~30 min).
-#   - 4 searches (2 metrics × 2 directions) instead of 6
-#   - 20 trials per search (not 200)
-#   - Constrained search space (shallow trees, max 500 estimators)
-#   - Output to gs://cltrainer-optuna-results/canary/ (isolated from production)
-#   - Still runs full E2E pipeline (train + backtest + package) at end
+# A parameterized version of vm_canary_run.sh meant for deep, exhaustive optimization.
+#   - 4 searches (2 metrics × 2 directions)
+#   - Default 300 trials per search
+#   - Expanded search space (deep trees, max 1500 estimators)
+#   - Outputs to gs://cltrainer-optuna-results/<job-name>/ and vaults upon completion.
 #
-# Usage (called by gcp_deploy_canary.ps1 or manually):
-#   bash gcp/vm_canary_run.sh [--shutdown] [--dataset=<name>] [--metrics=<list>]
+# Usage (called by gcp_deploy_sweep.ps1 or manually):
+#   bash gcp/vm_sweep_run.sh [--shutdown] [--dataset=<name>] [--metrics=<list>] [--job-name=<name>] [--n-trials=<N>]
 #
 # Arguments:
 #   --dataset=<name>   Dataset filename without path/extension (default: cl-5m_bk_set_10)
@@ -27,31 +26,31 @@ source /opt/optuna-env/bin/activate
 PROJECT_DIR="/home/$(whoami)/project"
 cd "$PROJECT_DIR"
 
-# Configuration — CANARY OVERRIDES
+# Configuration — SWEEP OVERRIDES
 DATASET_NAME="cl-5m_bk_set_10"
 METRICS="logloss,average_precision"
 TARGET_LONG="TARGET_TRIPLE_2x1_24H_LONG"
 TARGET_SHORT="TARGET_TRIPLE_2x1_24H_SHORT"
 CUTOFF="2022-01-01"
-N_TRIALS=20
+N_TRIALS=300
 N_WORKERS=4
 THREADS_PER_WORKER=12
 DB_DIR="models/optuna_studies"
 BUCKET="gs://cltrainer-optuna-results"
-CANARY_PREFIX="canary"
+JOB_NAME="sweep"
 STRATEGY="configs/strategies/ensemble4.json"
-LOG="canary_run_$(date +%Y%m%d_%H%M%S).log"
+LOG="sweep_run_$(date +%Y%m%d_%H%M%S).log"
 SHUTDOWN=false
 USE_BUCKETS=false
-AGENT_ID="${AGENT_ID:-canary_bot}"
+AGENT_ID="${AGENT_ID:-sweep_bot}"
 
-# Search space constraints (fast canary)
+# Search space constraints (production sweep)
 MAX_DEPTH_MIN=3
-MAX_DEPTH_MAX=5
+MAX_DEPTH_MAX=10
 NUM_LEAVES_MIN=15
-NUM_LEAVES_MAX=31
-MAX_N_ESTIMATORS=500
-EARLY_STOPPING=20
+NUM_LEAVES_MAX=100
+MAX_N_ESTIMATORS=2000
+EARLY_STOPPING=25
 MAX_FOLDS=5
 
 # Parse args
@@ -64,6 +63,8 @@ for arg in "$@"; do
         --target-long=*) TARGET_LONG="${arg#*=}" ;;
         --target-short=*) TARGET_SHORT="${arg#*=}" ;;
         --strategy=*) STRATEGY="configs/strategies/${arg#*=}" ;;
+        --job-name=*) JOB_NAME="${arg#*=}" ;;
+        --n-trials=*) N_TRIALS="${arg#*=}" ;;
         --use-buckets) USE_BUCKETS=true ;;
     esac
 done
@@ -81,7 +82,7 @@ if [ "$REQUIRED_CPUS" -ne "$SYSTEM_CPUS" ]; then
     echo "  Required:      $REQUIRED_CPUS (N_WORKERS=$N_WORKERS × THREADS_PER_WORKER=$THREADS_PER_WORKER)" | tee -a "$LOG"
     echo "  Fix: adjust N_WORKERS and THREADS_PER_WORKER in this script to match the machine." | tee -a "$LOG"
     echo "" | tee -a "$LOG"
-    gsutil cp "$LOG" "$BUCKET/$CANARY_PREFIX/logs/" 2>/dev/null || true
+    gsutil cp "$LOG" "$BUCKET/$JOB_NAME/logs/" 2>/dev/null || true
     exit 1
 fi
 # No TRIALS_PER_WORKER needed — each search runs the full N_TRIALS sequentially
@@ -100,7 +101,7 @@ FAILED=0
 START_TIME=$(date +%s)
 
 echo "============================================================" | tee "$LOG"
-echo " E2E ALPHA FACTORY — CANARY (LIGHT) RUN" | tee -a "$LOG"
+echo " E2E ALPHA FACTORY — SWEEP (PRODUCTION) RUN" | tee -a "$LOG"
 echo "============================================================" | tee -a "$LOG"
 echo "  Timestamp:  $(date -Iseconds)" | tee -a "$LOG"
 echo "  Agent:      $AGENT_ID" | tee -a "$LOG"
@@ -114,7 +115,7 @@ echo "  Searches:   $TOTAL (${#METRIC_LIST[@]} metrics × 2 directions)" | tee -
 echo "  Strategy:   $STRATEGY" | tee -a "$LOG"
 echo "  Shutdown:   $SHUTDOWN" | tee -a "$LOG"
 echo "  Log:        $LOG" | tee -a "$LOG"
-echo "  GCS dest:   $BUCKET/$CANARY_PREFIX/" | tee -a "$LOG"
+echo "  GCS dest:   $BUCKET/$JOB_NAME/" | tee -a "$LOG"
 echo "  Buckets:    $USE_BUCKETS" | tee -a "$LOG"
 echo "" | tee -a "$LOG"
 echo "  SEARCH SPACE CONSTRAINTS:" | tee -a "$LOG"
@@ -139,7 +140,7 @@ for i in "${!COMBOS[@]}"; do
     combo="${COMBOS[$i]}"
     read -r TARGET METRIC <<< "$combo"
     if [[ "$TARGET" == *"LONG" ]]; then DIR="long"; else DIR="short"; fi
-    STUDY="${CANARY_PREFIX}_${DIR}_${METRIC}"
+    STUDY="${JOB_NAME}_${DIR}_${METRIC}"
     if [ -f "${DB_DIR}/${STUDY}.journal" ]; then
         echo "  Removing stale journal: ${DB_DIR}/${STUDY}.journal" | tee -a "$LOG"
         rm -f "${DB_DIR}/${STUDY}.journal"
@@ -156,7 +157,7 @@ for i in "${!COMBOS[@]}"; do
     combo="${COMBOS[$i]}"
     read -r TARGET METRIC <<< "$combo"
     if [[ "$TARGET" == *"LONG" ]]; then DIR="long"; else DIR="short"; fi
-    STUDY="${CANARY_PREFIX}_${DIR}_${METRIC}"
+    STUDY="${JOB_NAME}_${DIR}_${METRIC}"
     WORKER_ID=$((i + 1))
     LABEL="${DIR^^} ${METRIC}"
 
@@ -197,7 +198,7 @@ for idx in "${!SEARCH_PIDS[@]}"; do
     combo="${COMBOS[$idx]}"
     read -r TARGET METRIC <<< "$combo"
     if [[ "$TARGET" == *"LONG" ]]; then DIR="long"; else DIR="short"; fi
-    STUDY="${CANARY_PREFIX}_${DIR}_${METRIC}"
+    STUDY="${JOB_NAME}_${DIR}_${METRIC}"
 
     if [ $EXIT_CODE -eq 0 ]; then
         COMPLETED=$((COMPLETED + 1))
@@ -208,12 +209,12 @@ for idx in "${!SEARCH_PIDS[@]}"; do
     fi
 
     # Upload results for this search
-    gsutil -m cp ${DB_DIR}/${STUDY}.journal "$BUCKET/$CANARY_PREFIX/studies/" 2>/dev/null || true
-    gsutil -m cp reports/optuna_*_${DIR}_${METRIC}.* "$BUCKET/$CANARY_PREFIX/reports/" 2>/dev/null || true
+    gsutil -m cp ${DB_DIR}/${STUDY}.journal "$BUCKET/$JOB_NAME/studies/" 2>/dev/null || true
+    gsutil -m cp reports/optuna_*_${DIR}_${METRIC}.* "$BUCKET/$JOB_NAME/reports/" 2>/dev/null || true
 
     # Upload STATUS.json
     echo "{\"completed\": $COMPLETED, \"failed\": $FAILED, \"total\": $TOTAL, \"current\": \"${DIR}_${METRIC}\", \"agent\": \"$AGENT_ID\", \"last_update\": \"$(date -Iseconds)\"}" | \
-        gsutil cp - "$BUCKET/$CANARY_PREFIX/STATUS.json" 2>/dev/null || true
+        gsutil cp - "$BUCKET/$JOB_NAME/STATUS.json" 2>/dev/null || true
 done
 
 # Upload log after all searches
@@ -246,9 +247,9 @@ if [ $COMPLETED -gt 0 ]; then
         --db-dir "$DB_DIR"
         --output-dir "${PROJECT_DIR}/canary_output"
         --gcs-bucket "$BUCKET"
-        --gcs-prefix "$CANARY_PREFIX"
+        --gcs-prefix "$JOB_NAME"
         --metrics logloss average_precision
-        --study-prefix "$CANARY_PREFIX"
+        --study-prefix "$JOB_NAME"
         --targets "$TARGET_LONG" "$TARGET_SHORT"
     )
 
@@ -262,12 +263,12 @@ if [ $COMPLETED -gt 0 ]; then
         # VAULT: Copy artifacts to timestamped GCS prefix (never overwritten)
         # =====================================================================
         VAULT_TS=$(date +%Y%m%d_%H%M%S)
-        VAULT_PREFIX="${CANARY_PREFIX}_vault/${VAULT_TS}"
+        VAULT_PREFIX="${JOB_NAME}_vault/${VAULT_TS}"
         echo "" | tee -a "$LOG"
         echo "  📦 Vaulting artifacts to gs://${BUCKET#gs://}/${VAULT_PREFIX}/" | tee -a "$LOG"
-        gsutil -m cp -r "$BUCKET/$CANARY_PREFIX/production/*" "$BUCKET/$VAULT_PREFIX/production/" 2>/dev/null || true
-        gsutil -m cp -r "$BUCKET/$CANARY_PREFIX/studies/*" "$BUCKET/$VAULT_PREFIX/studies/" 2>/dev/null || true
-        gsutil -m cp -r "$BUCKET/$CANARY_PREFIX/reports/*" "$BUCKET/$VAULT_PREFIX/reports/" 2>/dev/null || true
+        gsutil -m cp -r "$BUCKET/$JOB_NAME/production/*" "$BUCKET/$VAULT_PREFIX/production/" 2>/dev/null || true
+        gsutil -m cp -r "$BUCKET/$JOB_NAME/studies/*" "$BUCKET/$VAULT_PREFIX/studies/" 2>/dev/null || true
+        gsutil -m cp -r "$BUCKET/$JOB_NAME/reports/*" "$BUCKET/$VAULT_PREFIX/reports/" 2>/dev/null || true
         gsutil cp "$LOG" "$BUCKET/$VAULT_PREFIX/logs/" 2>/dev/null || true
         echo "  ✓ Vaulted to $BUCKET/$VAULT_PREFIX/" | tee -a "$LOG"
     else
@@ -286,17 +287,17 @@ echo "============================================================" | tee -a "$L
 echo " CANARY RUN COMPLETE" | tee -a "$LOG"
 echo "  Total wall time: $((TOTAL_ELAPSED / 3600))h $((TOTAL_ELAPSED % 3600 / 60))m" | tee -a "$LOG"
 echo "  Searches:        ${COMPLETED}/${TOTAL} passed" | tee -a "$LOG"
-echo "  GCS results:     $BUCKET/$CANARY_PREFIX/" | tee -a "$LOG"
+echo "  GCS results:     $BUCKET/$JOB_NAME/" | tee -a "$LOG"
 echo "============================================================" | tee -a "$LOG"
 echo "" | tee -a "$LOG"
 echo "Download results:" | tee -a "$LOG"
-echo "  gsutil -m cp -r ${BUCKET}/${CANARY_PREFIX}/* ." | tee -a "$LOG"
+echo "  gsutil -m cp -r ${BUCKET}/${JOB_NAME}/* ." | tee -a "$LOG"
 echo "" | tee -a "$LOG"
 
 # Shutdown VM if requested
 if [ "$SHUTDOWN" = true ]; then
-    echo "Shutting down canary VM in 30 seconds..." | tee -a "$LOG"
-    gsutil cp "$LOG" "$BUCKET/$CANARY_PREFIX/logs/" 2>/dev/null || true
+    echo "Shutting down VM in 30 seconds..." | tee -a "$LOG"
+    gsutil cp "$LOG" "$BUCKET/$JOB_NAME/logs/" 2>/dev/null || true
     sleep 30
     sudo shutdown -h now
 fi

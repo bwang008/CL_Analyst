@@ -270,24 +270,25 @@ def build_live_features(
     work["Time_Sin"] = np.sin(2 * np.pi * minutes / 1440)
     work["Time_Cos"] = np.cos(2 * np.pi * minutes / 1440)
 
-    # 1b. Day-of-week encoding (set_07 only)
-    if is_set_07:
+    # 1b. Day-of-week encoding
+    if is_set_07 or "Time_DayOfWeek_Sin" in feature_names:
         day_of_week = work.index.dayofweek
         work["Time_DayOfWeek_Sin"] = np.sin(2 * np.pi * day_of_week / 5)
         work["Time_DayOfWeek_Cos"] = np.cos(2 * np.pi * day_of_week / 5)
 
     # 2. Run AlphaFactory
+    factory = AlphaFactory(work)
     if lean:
         # Lean path: momentum + time features only (no macro, no extended)
         # This is 6-7x faster than the full pipeline
-        work = AlphaFactory(work).add_all_features(
+        work = factory.add_all_features(
             windows=alpha_windows,
             include_momentum=True,
             include_macro=False,
             include_extended=False,
         )
     elif is_set_07:
-        work = AlphaFactory(work).add_all_features(
+        work = factory.add_all_features(
             windows=alpha_windows,
             include_momentum=True,
             include_macro=True,
@@ -295,11 +296,18 @@ def build_live_features(
             macro_windows=_MACRO_WINDOWS_SET_07,
         )
     else:
-        work = AlphaFactory(work).add_all_features(
+        work = factory.add_all_features(
             windows=alpha_windows,
             include_momentum=True,
             include_macro=True,
         )
+
+    # 2b. Add STOCH specifically if lean but the strategy requests it
+    # (STOCH is usually part of include_extended=True, but lean turns extended off)
+    if lean and any(f.startswith("MOM_STOCH_") for f in feature_names):
+        for window in alpha_windows:
+            factory.add_stochastic_cluster(window=window)
+        work = factory.df
 
     # 3. Add ATR_14 (in training, this was created by add_triple_barrier_target
     #    in data_processor.py, but we skip target generation for live inference)
@@ -2553,9 +2561,19 @@ class LiveTrader:
         log.info("Entering event loop (poll every %.1fs) ...", _POLL_INTERVAL)
         log.info("Press Ctrl+C to stop.")
 
+        # Heartbeat: log status every ~5 minutes (60 cycles × 5s) when
+        # no new bars arrive, so the user knows the trader is alive.
+        _HEARTBEAT_CYCLES = 60  # 60 × 5s = 300s = 5 minutes
+        poll_count = 0
+
         while self._running:
             try:
                 self.manager.ib.sleep(_POLL_INTERVAL)
+                poll_count += 1
+
+                # Periodic heartbeat (only when idle — no bars arriving)
+                if poll_count % _HEARTBEAT_CYCLES == 0:
+                    self._log_heartbeat()
             except KeyboardInterrupt:
                 self._running = False
             except (ConnectionError, OSError) as exc:
@@ -2574,6 +2592,69 @@ class LiveTrader:
                 time.sleep(_POLL_INTERVAL)
 
         log.info("Event loop exited.")
+
+    def _log_heartbeat(self) -> None:
+        """Log a periodic heartbeat so the user knows the trader is alive."""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        # Time since last bar
+        if self._last_bar_time is not None:
+            delta = now - self._last_bar_time
+            hours = delta.total_seconds() / 3600
+            last_bar_str = f"{hours:.1f}h ago ({self._last_bar_time})"
+        else:
+            last_bar_str = "no bars received yet"
+
+        # Market hours check (CL: Sun 18:00 ET → Fri 17:00 ET)
+        market_status = self._get_market_status(now)
+
+        # Position
+        try:
+            pos = self.manager.get_cl_position(symbol=self._execution_symbol)
+            pos_str = f"{pos} contracts" if pos != 0 else "FLAT"
+        except Exception:
+            pos_str = "unknown"
+
+        log.info(
+            "HEARTBEAT: alive | last_bar=%s | market=%s | position=%s | connected=%s",
+            last_bar_str,
+            market_status,
+            pos_str,
+            self.manager.ib.isConnected(),
+        )
+
+    @staticmethod
+    def _get_market_status(utc_now: datetime) -> str:
+        """Return human-readable CL market status based on UTC time.
+
+        CL futures trade Sunday 18:00 ET → Friday 17:00 ET with a
+        daily maintenance halt 17:00-18:00 ET (Mon-Thu).
+
+        Args:
+            utc_now: Current time in UTC (tz-naive).
+
+        Returns:
+            String like "OPEN", "CLOSED (weekend)", or "CLOSED (daily halt)".
+        """
+        import pytz
+        et = pytz.timezone("America/New_York")
+        et_now = utc_now.replace(tzinfo=pytz.utc).astimezone(et)
+        weekday = et_now.weekday()  # 0=Mon … 6=Sun
+        hour = et_now.hour
+
+        # Saturday: always closed
+        if weekday == 5:
+            return "CLOSED (weekend — opens Sun 6pm ET)"
+        # Sunday before 18:00 ET: closed
+        if weekday == 6 and hour < 18:
+            return "CLOSED (weekend — opens Sun 6pm ET)"
+        # Friday after 17:00 ET: closed
+        if weekday == 4 and hour >= 17:
+            return "CLOSED (weekend — opens Sun 6pm ET)"
+        # Mon-Thu 17:00-18:00 ET: daily maintenance halt
+        if 0 <= weekday <= 3 and hour == 17:
+            return "CLOSED (daily halt 5-6pm ET)"
+        return "OPEN"
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,67 @@
+{
+    "nickname": "HourEnsemble001",
+    "description": "Hourly HourSet_02 dual-direction ensemble. Long: 2.5x1 120H logloss (195 trades, PF 1.02, +$1.5k). Short: 2.5x1 120H logloss (26 trades, PF 1.59, +$6.5k). Trained on cl-1h_bk_HourSet_02.parquet with 150-trial bucket-pruned Optuna.",
+    "execution_class": "ConservativeEnsembleStrategy",
+    "models": {
+        "long": {
+            "experiment_id": "HourSet_02_2p5x1_120H_long_logloss",
+            "predictions_path": "models/registry/HourSet_02_2p5x1_120H_long_logloss/oos_predictions.csv",
+            "model_path": "models/registry/HourSet_02_2p5x1_120H_long_logloss/final_model.pkl",
+            "threshold": 0.60
+        },
+        "short": {
+            "experiment_id": "HourSet_02_2p5x1_120H_short_logloss",
+            "predictions_path": "models/registry/HourSet_02_2p5x1_120H_short_logloss/oos_predictions.csv",
+            "model_path": "models/registry/HourSet_02_2p5x1_120H_short_logloss/final_model.pkl",
+            "threshold": 0.60
+        }
+    },
+    "tp_atr_mult": 2.5,
+    "sl_atr_mult": 1.5,
+    "trailing_atr_mult": 1.5,
+    "tp_cooldown_bars": 0,
+    "sl_cooldown_bars": 5,
+    "max_hold_bars": 288,
+    "allow_concurrent": false,
+    "max_concurrent": 1,
+    "consecutive_signal_threshold": 2,
+    "sizing_tiers": {
+        "0.80": 3,
+        "0.70": 2,
+        "0.60": 1
+    },
+    "execution_symbol": "MCL",
+    "live_config": {
+        "client_id": 25,
+        "entry_mode": "marketable_limit",
+        "exit_mode": "marketable_limit"
+    },
+    "provenance": {
+        "long_model": {
+            "source_canary": "canary_exp4",
+            "dataset": "cl-1h_bk_HourSet_02.parquet",
+            "target": "TARGET_TRIPLE_2p5x1_120H_LONG",
+            "ml_metric": "logloss",
+            "ml_score": -0.6829,
+            "threshold": 0.60,
+            "oos_trades": 195,
+            "oos_pf": 1.02,
+            "oos_wr": 0.487,
+            "oos_pnl": 1478.52,
+            "max_drawdown": -9671.49
+        },
+        "short_model": {
+            "source_canary": "canary_exp4",
+            "dataset": "cl-1h_bk_HourSet_02.parquet",
+            "target": "TARGET_TRIPLE_2p5x1_120H_SHORT",
+            "ml_metric": "logloss",
+            "ml_score": -0.6836,
+            "threshold": 0.60,
+            "oos_trades": 26,
+            "oos_pf": 1.59,
+            "oos_wr": 0.615,
+            "oos_pnl": 6524.18,
+            "max_drawdown": -6657.14
+        }
+    }
+}

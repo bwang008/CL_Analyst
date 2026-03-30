@@ -92,6 +92,10 @@ def _make_trader_stub(
     trader._exit_mode = "marketable_limit"
     trader.adaptive_priority = "Normal"
 
+    # Execution config (added in Phase 1/Phase 2 refactor)
+    trader._execution_symbol = "CL"
+    trader._lean_features = False
+
     # Execution callback state
     trader._callbacks_registered = False
     trader._last_decision_context_by_order_id = {}
@@ -428,6 +432,7 @@ class TestTimeBarrierExitMode:
         assert result is True
         # Verify it called close_cl_position with exit_mode, NOT close_cl_position_market
         trader.manager.close_cl_position.assert_called_once_with(
+            symbol="CL",
             exit_mode="marketable_limit",
             current_price=72.50,
         )
@@ -453,6 +458,7 @@ class TestTimeBarrierExitMode:
         )
 
         trader.manager.close_cl_position.assert_called_once_with(
+            symbol="CL",
             exit_mode="market",
             current_price=72.50,
         )

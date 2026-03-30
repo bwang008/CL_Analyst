@@ -2,6 +2,46 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
+## 2026-03-29 — Live Trader Subsystem Fixes & Feature Generation 
+
+### Goal
+Resolve critical runtime issues in the live trading engine during after-hours execution and fix missing feature extraction for "lean" production models. 
+
+### Fix 1: Missing Production Models on git Worktrees
+- **Problem**: The `development` worktree crashed on startup because `models/production/*.pkl` files were missing. `*.pkl` was globally gitignored.
+- **Fix**: Added `!models/production/**` to `.gitignore` so production model binaries are officially tracked by git and synchronize across clones/worktrees.
+
+### Fix 2: After-Hours Observability (Heartbeat Logging)
+- **Problem**: The engine appeared frozen during weekend and after-hours periods (no bar updates logged), causing ambiguity about connectivity status.
+- **Fix**: Implemented a 5-minute heartbeat in `LiveTrader._event_loop`. The engine now logs: `last_bar` age, `market` status (OPEN vs CLOSED with weekend/halt reasons), `position`, and `connected` state.
+
+### Fix 3: Lean Feature Generation Missing Extended Columns
+- **Problem**: The production model (`production_lean_dual.json`) uses `"lean_features": true` but expects extended features (`MOM_STOCH_K_*` and `Time_DayOfWeek_*`). The lean pipeline in `build_live_features` bypassed these.
+- **Fix**: Updated `build_live_features` in `live_trader.py` to explicitly generate DayOfWeek and Stochastic features if requested by `feature_names`, even when `lean=True`. This keeps the pipeline fast while providing the necessary inputs.
+
+### Files Changed
+- `.gitignore` — Un-ignored `models/production/**`
+- `src/live_execution/live_trader.py` — Heartbeat logging & explicit lean feature generation
+
+
+## 2026-03-29 — HourSet_02 Short Model Selection (120H Horizon)
+
+### Goal
+Identify the optimal SHORT model on the `cl-1h_bk_HourSet_02.parquet` dataset to pair with the existing validated LONG model (`TARGET_TRIPLE_2p5x1_72H_LONG`). The priority is maximizing trade count while maintaining positive PnL and statistical significance.
+
+### Canary Experiments (150 trials, bucket-pruned)
+Four custom targets were evaluated via the GCP canary pipeline:
+1. `TARGET_TRIPLE_1p5x1_72H_SHORT`: 1 trade (0% WR)
+2. `TARGET_TRIPLE_1p5x1_120H_SHORT`: 1 trade (100% WR, +$2.1k)
+3. `TARGET_TRIPLE_2p0x1_120H_SHORT` (avg_precision): 12 trades (50% WR, PF 3.20, +$8.5k)
+4. `TARGET_TRIPLE_2p5x1_120H_SHORT` (logloss): **26 trades (61.5% WR, PF 1.58, +$6.5k)**
+
+### Decision
+The **2.5x1 120H Short (logloss)** target (Canary 4) was selected as the best candidate. With 26 trades and a 61.5% win rate over the OOS period, it provides the highest statistical confidence while remaining strongly profitable (+$6,524). This appropriately balances the 170-trade count of the 72H Long model.
+
+### Files Created
+- `reports/short_models_report.md` — Complete metrics summary table comparing all 4 short models.
+
 ## 2026-03-27 — Lean Canary Breakthrough & Production Deployment
 
 ### Goal

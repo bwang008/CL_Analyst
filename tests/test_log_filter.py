@@ -73,20 +73,24 @@ class TestPassedMessages:
     """CL and generic connection messages should NOT be filtered."""
 
     def test_cl_position(self, log_filter):
+        """CL position messages are suppressed (verbose IBKR callback dump)."""
         record = _make_record(
             "position: Position(account='DU1899929', "
             "contract=Future(symbol='CL', exchange='NYMEX'), "
             "position=1.0, avgCost=65.50)"
         )
-        assert log_filter.filter(record) is True
+        # Verbose callback dumps are now suppressed for ALL symbols
+        # (redundant with our [TRADE] lines)
+        assert log_filter.filter(record) is False
 
     def test_cl_portfolio_update(self, log_filter):
+        """CL portfolio updates are suppressed (verbose IBKR callback dump)."""
         record = _make_record(
             "updatePortfolio: PortfolioItem("
             "contract=ContFuture(symbol='CL', exchange='NYMEX'), "
             "position=1.0, unrealizedPNL=500.0)"
         )
-        assert log_filter.filter(record) is True
+        assert log_filter.filter(record) is False
 
     def test_connection_warning(self, log_filter):
         record = _make_record(
@@ -105,17 +109,18 @@ class TestPassedMessages:
         assert log_filter.filter(record) is True
 
     def test_exec_details_cl(self, log_filter):
-        """CL execution details should pass through."""
+        """CL exec details are suppressed (verbose IBKR callback dump)."""
         record = _make_record(
             "execDetails Execution(execId='abc', exchange='NYMEX', "
             "side='BOT', shares=1.0, price=65.50)"
         )
-        assert log_filter.filter(record) is True
+        # Verbose callback dumps are now suppressed for ALL symbols
+        assert log_filter.filter(record) is False
 
     def test_commission_report_plain(self, log_filter):
-        """Commission report without Stock() should pass."""
+        """Commission reports are suppressed (verbose IBKR callback dump)."""
         record = _make_record(
             "commissionReport: CommissionReport(execId='abc', "
             "commission=2.25, realizedPNL=100.0)"
         )
-        assert log_filter.filter(record) is True
+        assert log_filter.filter(record) is False

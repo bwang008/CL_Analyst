@@ -1735,14 +1735,15 @@ def main() -> None:
             print(f"Auto-resolving predictions from config: {short_preds_path}")
             preds = load_predictions(short_preds_path)
         else:
-            print("WARNING: No predictions_path in config and no --predictions flag. Using default.")
-            args.predictions = resolve_cli_path("reports/vault_predictions.csv")
-            preds = load_predictions(args.predictions)
+            raise ValueError(
+                "No 'predictions_path' found in config for either 'long' or 'short' models, "
+                "and no --predictions flag provided. Explicit prediction paths are required."
+            )
     elif args.predictions is None:
-        # No config and no predictions — use legacy default
-        args.predictions = resolve_cli_path("reports/vault_predictions.csv")
-        print(f"Loading predictions from {args.predictions}...")
-        preds = load_predictions(args.predictions)
+        raise ValueError(
+            "No --predictions flag provided and no config file specified. "
+            "Explicit prediction paths are required."
+        )
     else:
         print(f"Loading predictions from {args.predictions}...")
         preds = load_predictions(args.predictions)

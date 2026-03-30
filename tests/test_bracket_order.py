@@ -211,9 +211,8 @@ class TestMarketableLimitOrder:
         assert parent.lmtPrice == 65.02
 
     def test_marketable_limit_sell(self, manager):
-        """SELL: limit = best_bid - 2 ticks ($0.02)."""
+        """SELL: limit = limit_price - 2 ticks ($0.02)."""
         mgr, parent, _, _ = manager
-        mgr.get_bid_ask = MagicMock(return_value=(64.98, 65.00))
 
         mgr.place_bracket_order(
             contract=MagicMock(),
@@ -225,42 +224,42 @@ class TestMarketableLimitOrder:
             entry_mode="marketable_limit",
         )
         assert parent.orderType == "LMT"
-        # 64.98 (best bid) - 0.02 (2 ticks) = 64.96
-        assert parent.lmtPrice == 64.96
+        # 65.00 (limit_price) - 0.02 (2 ticks) = 64.98
+        assert parent.lmtPrice == 64.98
 
-    def test_marketable_limit_fallback_no_ask(self, manager):
-        """If ask quote unavailable for BUY, fall back to MKT."""
+    def test_marketable_limit_uses_limit_price_buy(self, manager):
+        """BUY marketable_limit uses limit_price (no live NBBO fetch)."""
         mgr, parent, _, _ = manager
-        mgr.get_bid_ask = MagicMock(return_value=(64.98, None))
 
         mgr.place_bracket_order(
             contract=MagicMock(),
             action="BUY",
             quantity=1,
-            limit_price=65.00,
-            tp_price=65.50,
-            sl_price=64.50,
+            limit_price=64.50,
+            tp_price=65.00,
+            sl_price=64.00,
             entry_mode="marketable_limit",
         )
-        assert parent.orderType == "MKT"
-        assert parent.lmtPrice == 0
+        assert parent.orderType == "LMT"
+        # 64.50 (limit_price) + 0.02 (2 ticks) = 64.52
+        assert parent.lmtPrice == 64.52
 
-    def test_marketable_limit_fallback_no_bid(self, manager):
-        """If bid quote unavailable for SELL, fall back to MKT."""
+    def test_marketable_limit_uses_limit_price_sell(self, manager):
+        """SELL marketable_limit uses limit_price (no live NBBO fetch)."""
         mgr, parent, _, _ = manager
-        mgr.get_bid_ask = MagicMock(return_value=(None, 65.00))
 
         mgr.place_bracket_order(
             contract=MagicMock(),
             action="SELL",
             quantity=1,
-            limit_price=65.00,
-            tp_price=64.50,
-            sl_price=65.50,
+            limit_price=72.00,
+            tp_price=71.50,
+            sl_price=72.50,
             entry_mode="marketable_limit",
         )
-        assert parent.orderType == "MKT"
-        assert parent.lmtPrice == 0
+        assert parent.orderType == "LMT"
+        # 72.00 (limit_price) - 0.02 (2 ticks) = 71.98
+        assert parent.lmtPrice == 71.98
 
 
 class TestEntryModeBackwardCompat:
