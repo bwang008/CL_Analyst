@@ -37,7 +37,7 @@ N_WORKERS=4
 THREADS_PER_WORKER=12
 DB_DIR="models/optuna_studies"
 BUCKET="gs://cltrainer-optuna-results"
-JOB_NAME="sweep"
+JOB_NAME=""  # Auto-derived from DATASET_NAME below if not set via --job-name
 STRATEGY="configs/strategies/ensemble4.json"
 LOG="sweep_run_$(date +%Y%m%d_%H%M%S).log"
 SHUTDOWN=false
@@ -68,6 +68,14 @@ for arg in "$@"; do
         --use-buckets) USE_BUCKETS=true ;;
     esac
 done
+
+# Auto-derive JOB_NAME from DATASET_NAME if not explicitly set
+if [ -z "$JOB_NAME" ]; then
+    # Strip common prefixes to get a clean name, e.g. cl-5m_bk_set_11c -> sweep_set_11c
+    CLEAN_NAME=$(echo "$DATASET_NAME" | sed 's/^cl-[0-9]*[mh]_bk_//')
+    JOB_NAME="sweep_${CLEAN_NAME}"
+    echo "Auto-derived JOB_NAME: $JOB_NAME"
+fi
 
 # Resolve DATA path from DATASET_NAME
 DATA="/home/$(whoami)/data/${DATASET_NAME}.parquet"
@@ -218,7 +226,7 @@ for idx in "${!SEARCH_PIDS[@]}"; do
 done
 
 # Upload log after all searches
-gsutil cp "$LOG" "$BUCKET/$CANARY_PREFIX/logs/" 2>/dev/null || true
+gsutil cp "$LOG" "$BUCKET/$JOB_NAME/logs/" 2>/dev/null || true
 
 SEARCH_ELAPSED=$(( $(date +%s) - START_TIME ))
 echo "" | tee -a "$LOG"
@@ -279,7 +287,7 @@ else
 fi
 
 # Upload final log
-gsutil cp "$LOG" "$BUCKET/$CANARY_PREFIX/logs/" 2>/dev/null || true
+gsutil cp "$LOG" "$BUCKET/$JOB_NAME/logs/" 2>/dev/null || true
 
 TOTAL_ELAPSED=$(( $(date +%s) - START_TIME ))
 echo "" | tee -a "$LOG"

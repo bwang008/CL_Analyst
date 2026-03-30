@@ -504,9 +504,25 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
         if np.isnan(prob_sell):
             prob_sell = 0.0
 
-        # If already in a position, ignore new signals (conservative)
+        # Match tiers
+        buy_tier = self._match_tier(prob_buy, self.long_tiers)
+        sell_tier = self._match_tier(prob_sell, self.short_tiers)
+
+        buy_ok = buy_tier is not None
+        sell_ok = sell_tier is not None
+
+        # Virtual Ledger Netting: if already in a position, check for exact opposing signals
         if state.position != 0:
+            if state.side == 1 and sell_ok:
+                # Long Ledger is +1, Short Ledger just activated -1 -> Net = 0
+                return [Order(action="EXIT", side=0, lots=1, reason="NET_TO_ZERO"),
+                        self._tier_to_order(sell_tier, "SELL", -1, prob_sell)]
+            elif state.side == -1 and buy_ok:
+                # Short Ledger is -1, Long Ledger just activated +1 -> Net = 0
+                return [Order(action="EXIT", side=0, lots=1, reason="NET_TO_ZERO"),
+                        self._tier_to_order(buy_tier, "BUY", 1, prob_buy)]
             return HOLD
+            
         if state.open_positions >= self.max_concurrent:
             return HOLD
 

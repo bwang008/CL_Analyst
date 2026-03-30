@@ -14,6 +14,8 @@ Every model result report **must** include these columns in this order:
 | Column | Description | Example |
 |---|---|---|
 | **Model Name** | Experiment ID or descriptive name | `EXP-037 LeanMomentum Short` |
+| **Dataset**    | The specific parquet dataset file used | `cl-5m_bk_set_11c` |
+| **Features**   | Number of features preserved by Optuna | `214` |
 | **ML Metric** | Optimization metric used by Optuna | `logloss`, `average_precision` |
 | **Best ML Score** | Best value achieved for that metric | `-0.6904` |
 | **Trades** | Total OOS trade count | `208` |
@@ -28,9 +30,9 @@ Every model result report **must** include these columns in this order:
 ## Example Table
 
 ```markdown
-| Model Name | ML Metric | Best ML Score | Trades | WR | PF | PnL | Max DD | OOS Period | Contract | Direction |
-|---|---|---:|---:|---:|---:|---:|---:|---|---|---|
-| EXP-037 LeanMomentum | logloss | -0.6904 | 208 | 31.2% | 1.27 | +$5,816 | -$6,445 | 2022-01 to 2026-02 | CL | Short |
+| Model Name | Dataset | Features | ML Metric | Best ML Score | Trades | WR | PF | PnL | Max DD | OOS Period | Contract | Direction |
+|---|---|---:|---|---:|---:|---:|---:|---:|---:|---|---|---|
+| EXP-037 LeanMomentum | cl-5m_bk_set_11c | 214 | logloss | -0.6904 | 208 | 31.2% | 1.27 | +$5,816 | -$6,445 | 2022-01 to 2026-02 | CL | Short |
 ```
 
 ## Notes

@@ -986,7 +986,7 @@ class IBKRConnectionManager:
         parent_order_id: int,
         action: str,
         quantity: int,
-        tp_price: float,
+        tp_price: float | list[tuple[int, float]],
         sl_price: float,
     ) -> list[Trade]:
         """Submit TP and SL orders as independent standalone orders.
@@ -1021,11 +1021,24 @@ class IBKRConnectionManager:
         """
         self.ensure_connected()
 
-        # Take-profit order (standalone LMT — no parentId)
-        tp_order = LimitOrder(action, quantity, tp_price)
-        tp_order.outsideRth = True
-        tp_order.tif = "GTC"
-        tp_order.transmit = True
+        trades = []
+
+        # Take-profit order(s) (standalone LMT — no parentId)
+        if isinstance(tp_price, list):
+            for tq, target_price in tp_price:
+                if tq <= 0:
+                    continue
+                tp_order = LimitOrder(action, tq, target_price)
+                tp_order.outsideRth = True
+                tp_order.tif = "GTC"
+                tp_order.transmit = True
+                trades.append(self.ib.placeOrder(contract, tp_order))
+        else:
+            tp_order = LimitOrder(action, quantity, tp_price)
+            tp_order.outsideRth = True
+            tp_order.tif = "GTC"
+            tp_order.transmit = True
+            trades.append(self.ib.placeOrder(contract, tp_order))
 
         # Stop-loss order (standalone STP — no parentId)
         sl_order = StopOrder(action, quantity, sl_price)
@@ -1034,10 +1047,9 @@ class IBKRConnectionManager:
         sl_order.triggerMethod = 1  # native exchange trigger (double bid/ask)
         sl_order.transmit = True
 
-        tp_trade = self.ib.placeOrder(contract, tp_order)
-        sl_trade = self.ib.placeOrder(contract, sl_order)
+        trades.append(self.ib.placeOrder(contract, sl_order))
 
-        return [tp_trade, sl_trade]
+        return trades
 
 
 def ib_bars_to_dataframe(

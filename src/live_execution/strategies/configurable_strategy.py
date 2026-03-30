@@ -156,9 +156,20 @@ class ConfigurableStrategy(Strategy):
             self._long_threshold = self.entry_threshold
             self._short_threshold = self.entry_threshold
 
-        # ATR multipliers (global defaults; overridden per-trade by tiers)
-        self.tp_atr_mult: float = float(self.config.get("tp_atr_mult", 2.0))
+        # Exit Strategy logic
+        self.exit_mode: str = self.config.get("exit_mode", "SINGLE").upper()
+        
+        if self.exit_mode == "SINGLE":
+            self.tp_atr_mult: float = float(self.config.get("tp_atr_mult", 2.0))
+        else:
+            self.tp_atr_mult: float = 2.0  # Fallback for evaluate placeholder logic
+
+        # Stop-Loss remains a single global/tiered float
         self.sl_atr_mult: float = float(self.config.get("sl_atr_mult", 1.0))
+
+        # Configurable fractional exits for TIERED mode
+        self._long_tiered_exits = self.config.get("long", {}).get("tiered_exits")
+        self._short_tiered_exits = self.config.get("short", {}).get("tiered_exits")
 
         # Sizing tiers: {"0.80": 3, "0.70": 2, ...} → [(0.80, 3), (0.70, 2), ...]
         raw_tiers = self.config.get("sizing_tiers", {})
@@ -171,23 +182,32 @@ class ConfigurableStrategy(Strategy):
         live_cfg = self.config.get("live_config", {})
 
         if self._is_tiered:
-            # Tiered: experiment_id is under long/short, not under models
-            long_cfg = self.config.get("long", {})
-            short_cfg = self.config.get("short", {})
+            # Check models block first, fallback to root long/short for backward compat
+            models_cfg = self.config.get("models", {})
+            long_model_cfg = models_cfg.get("long") or self.config.get("long", {})
+            short_model_cfg = models_cfg.get("short") or self.config.get("short", {})
+            
             long_exp_id = (
-                long_cfg.get("experiment_id")
+                long_model_cfg.get("experiment_id")
                 or live_cfg.get("experiment_id")
             )
-            short_exp_id = short_cfg.get("experiment_id")
+            short_exp_id = short_model_cfg.get("experiment_id")
+
+            long_model_path = long_model_cfg.get("model_path")
+            short_model_path = short_model_cfg.get("model_path")
 
             if long_exp_id:
-                self._long_learner = self._load_model(long_exp_id, "LONG")
+                self._long_learner = self._load_model(
+                    long_exp_id, "LONG", model_path=long_model_path
+                )
             else:
                 self._long_learner = None
                 log.warning("[%s] No LONG model experiment_id — long signals disabled", self._nickname)
 
             if short_exp_id:
-                self._short_learner = self._load_model(short_exp_id, "SHORT")
+                self._short_learner = self._load_model(
+                    short_exp_id, "SHORT", model_path=short_model_path
+                )
             else:
                 self._short_learner = None
                 log.warning("[%s] No SHORT model experiment_id — short signals disabled", self._nickname)
@@ -429,6 +449,24 @@ class ConfigurableStrategy(Strategy):
             sl_mult = self.sl_atr_mult
             lots = self._prob_to_lots(probability)
 
+        tiered_tp_offsets = None
+        if self.exit_mode == "TIERED":
+            exits_cfg = self._long_tiered_exits if active_action == "BUY" else self._short_tiered_exits
+            if exits_cfg:
+                tiered_tp_offsets = []
+                avg_mult = 0.0
+                total_pct = 0.0
+                for ex in exits_cfg:
+                    pct = float(ex["qty_pct"])
+                    mult = float(ex["tp_atr_mult"])
+                    offset_amount = round(mult * atr_value, 4)
+                    tiered_tp_offsets.append((pct, offset_amount))
+                    avg_mult += pct * mult
+                    total_pct += pct
+                if total_pct > 0:
+                    # Provide an averaged multi-tranche float as cosmetic fallback
+                    tp_mult = avg_mult / total_pct
+
         # Compute bracket prices (direction-aware)
         if active_action == "SELL":
             tp_price = round(current_price - tp_mult * atr_value, 2)
@@ -447,6 +485,7 @@ class ConfigurableStrategy(Strategy):
             signal_label=active_label,
             buy_prob=buy_prob,
             sell_prob=sell_prob,
+            tiered_tp_offsets=tiered_tp_offsets,
             **tier_overrides,
         )
 

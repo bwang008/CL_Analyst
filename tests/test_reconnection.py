@@ -9,6 +9,7 @@ from __future__ import annotations
 import time
 from unittest.mock import MagicMock, patch, PropertyMock, call
 
+import pandas as pd
 import pytest
 
 from src.live_execution import live_trader as lt_module
@@ -39,12 +40,15 @@ def _make_trader_stub():
     trader._running = True
     trader._subscriptions_lost = False
     trader._resubscribe_pending = False
-    trader._live_bars = None
+    trader._live_bars_5m = None
+    trader._live_bars_1h = None
     trader._front_month_bars = None
     trader._contract = MagicMock()
     trader._front_month_contract = MagicMock()
     trader._front_month_str = "202604"
-    trader._last_bar_time = None
+    trader._last_bar_time_5m = None
+    trader._last_bar_time_1h = None
+    trader._bar_size = "5m"
     trader._callbacks_registered = False
     trader._needs_restart = False
     trader._restart_count = 0
@@ -55,6 +59,8 @@ def _make_trader_stub():
 
     # Mock _on_ib_error (tested separately)
     trader._on_ib_error = MagicMock()
+
+    trader._virtual_ledger = {"5m": 0, "1h": 0}
 
     return trader
 
@@ -181,15 +187,15 @@ class TestReconnect:
     def test_reconnect_cancels_stale_subscriptions(self):
         """_resubscribe_and_backfill cancels stale bars before resubscribing."""
         trader = _make_trader_stub()
-        old_live_bars = MagicMock()
+        old_live_bars_5m = MagicMock()
         old_front_bars = MagicMock()
-        trader._live_bars = old_live_bars
+        trader._live_bars_5m = old_live_bars_5m
         trader._front_month_bars = old_front_bars
 
         trader._reconnect()
 
         # Stale subscriptions should be cancelled
-        trader.manager.cancel_subscription.assert_any_call(old_live_bars)
+        trader.manager.cancel_subscription.assert_any_call(old_live_bars_5m)
         trader.manager.cancel_subscription.assert_any_call(old_front_bars)
         # New subscriptions should be created
         trader._subscribe.assert_called_once()
@@ -260,6 +266,8 @@ class TestResubscribeAndBackfill:
     def test_resubscribes_both_streams(self):
         """Resubscribes to both Brain and Hands streams."""
         trader = _make_trader_stub()
+        # tz-naive timestamp (e.g., from warm-start cache)
+        trader._last_bar_time_5m = pd.Timestamp("2026-03-02 18:00:00")
         trader._subscriptions_lost = True
         trader._resubscribe_pending = True
 
@@ -283,14 +291,19 @@ class TestResubscribeAndBackfill:
     def test_cancels_stale_subscriptions(self):
         """Cancels old subscriptions before creating new ones."""
         trader = _make_trader_stub()
-        old_live = MagicMock()
+        old_live_5m = MagicMock()
         old_front = MagicMock()
-        trader._live_bars = old_live
+        trader._live_bars_5m = old_live_5m
         trader._front_month_bars = old_front
+        # tz-aware timestamp (e.g., from IBKR bar callback)
+        trader._last_bar_time_5m = pd.Timestamp(
+            "2026-03-02 18:00:00", tz="UTC"
+        )
+        trader._subscriptions_lost = True
 
         trader._resubscribe_and_backfill()
 
-        trader.manager.cancel_subscription.assert_any_call(old_live)
+        trader.manager.cancel_subscription.assert_any_call(old_live_5m)
         trader.manager.cancel_subscription.assert_any_call(old_front)
         # After cancel, the old references should be None before resubscribe
         # (the method sets them to None)

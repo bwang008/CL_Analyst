@@ -21,6 +21,8 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +31,10 @@ import pandas as pd
 from src.data_paths import get_data_path
 
 log = logging.getLogger(__name__)
+
+# Maximum file age before auto-refresh (seconds)
+_FRED_MAX_AGE_SECONDS = 24 * 3600      # 1 day
+_COT_MAX_AGE_SECONDS = 7 * 24 * 3600   # 7 days
 
 # Change windows (in trading days)
 CHANGE_WINDOWS = [1, 3, 7, 14, 35]
@@ -64,6 +70,95 @@ class MacroFeatureEngine:
         self._cot_df: pd.DataFrame | None = None
 
     # ------------------------------------------------------------------
+    # Auto-refresh
+    # ------------------------------------------------------------------
+
+    def refresh_if_stale(self) -> None:
+        """Re-download FRED and/or COT data if the CSV files are stale.
+
+        Staleness thresholds:
+            FRED: >24 hours  (daily indicators)
+            COT:  >7 days    (weekly CFTC report)
+
+        Safe to call on every startup — only downloads when actually stale.
+        Requires ``FRED_API_KEY`` in the environment or ``.env`` for FRED.
+        COT downloads from CFTC directly (no API key needed).
+        """
+        now = datetime.now().timestamp()
+
+        # --- FRED refresh ---
+        fred_stale = True
+        if self.fred_path.exists():
+            age = now - self.fred_path.stat().st_mtime
+            fred_stale = age > _FRED_MAX_AGE_SECONDS
+            if fred_stale:
+                log.info(
+                    "FRED data is stale (%.1f hours old), refreshing...",
+                    age / 3600,
+                )
+            else:
+                log.info(
+                    "FRED data is fresh (%.1f hours old), skipping refresh",
+                    age / 3600,
+                )
+        else:
+            log.info("FRED data file not found, downloading...")
+
+        if fred_stale:
+            api_key = os.environ.get("FRED_API_KEY", "")
+            if not api_key:
+                log.warning(
+                    "FRED_API_KEY not set — cannot refresh FRED data. "
+                    "Add FRED_API_KEY to .env or set as environment variable. "
+                    "Using existing (possibly stale) data if available."
+                )
+            else:
+                try:
+                    from scripts.download_macro_data import (
+                        download_fred_data,
+                        save_fred_data,
+                    )
+                    fred_data = download_fred_data(api_key)
+                    save_fred_data(fred_data)
+                    # Clear cached data so next merge_all() reloads
+                    self._fred_df = None
+                    log.info("FRED data refreshed successfully")
+                except Exception as exc:
+                    log.warning("Failed to refresh FRED data: %s", exc)
+
+        # --- COT refresh ---
+        cot_stale = True
+        if self.cot_path.exists():
+            age = now - self.cot_path.stat().st_mtime
+            cot_stale = age > _COT_MAX_AGE_SECONDS
+            if cot_stale:
+                log.info(
+                    "COT data is stale (%.1f days old), refreshing...",
+                    age / 86400,
+                )
+            else:
+                log.info(
+                    "COT data is fresh (%.1f days old), skipping refresh",
+                    age / 86400,
+                )
+        else:
+            log.info("COT data file not found, downloading...")
+
+        if cot_stale:
+            try:
+                from scripts.download_macro_data import (
+                    download_cot_data,
+                    save_cot_data,
+                )
+                cot_data = download_cot_data()
+                save_cot_data(cot_data)
+                # Clear cached data so next merge_all() reloads
+                self._cot_df = None
+                log.info("COT data refreshed successfully")
+            except Exception as exc:
+                log.warning("Failed to refresh COT data: %s", exc)
+
+    # ------------------------------------------------------------------
     # Loading
     # ------------------------------------------------------------------
 
@@ -79,7 +174,7 @@ class MacroFeatureEngine:
             )
 
         df = pd.read_csv(self.fred_path, parse_dates=["Date"])
-        log.info("Loaded FRED data: %d rows, columns=%s", len(df), list(df.columns))
+        log.debug("Loaded FRED data: %d rows, columns=%s", len(df), list(df.columns))
         self._fred_df = df
         return df
 
@@ -95,7 +190,7 @@ class MacroFeatureEngine:
             )
 
         df = pd.read_csv(self.cot_path, parse_dates=["Date"])
-        log.info("Loaded COT data: %d rows, columns=%s", len(df), list(df.columns))
+        log.debug("Loaded COT data: %d rows, columns=%s", len(df), list(df.columns))
         self._cot_df = df
         return df
 
@@ -118,7 +213,7 @@ class MacroFeatureEngine:
         # A bar at 10:00 AM should NOT see today's close — only yesterday's.
         # This shift ensures no intra-day lookahead from daily signals.
         df.index = df.index + pd.Timedelta(days=1)
-        log.info("FRED dates shifted +1 day for end-of-day publication lag")
+        log.debug("FRED dates shifted +1 day for end-of-day publication lag")
 
         features = pd.DataFrame(index=df.index)
 
@@ -156,7 +251,7 @@ class MacroFeatureEngine:
         if "FED_FUNDS" in df.columns:
             features["MACRO_FED_FUNDS"] = df["FED_FUNDS"]
 
-        log.info("Built %d FRED features", len(features.columns))
+        log.debug("Built %d FRED features", len(features.columns))
         return features
 
     # ------------------------------------------------------------------
@@ -179,7 +274,7 @@ class MacroFeatureEngine:
         # Shift dates forward by 3 business days to match publication date.
         # This prevents lookahead: Tuesday's data becomes available Friday.
         df.index = df.index + pd.offsets.BDay(3)
-        log.info("COT dates shifted +3 business days for publication lag")
+        log.debug("COT dates shifted +3 business days for publication lag")
 
         features = pd.DataFrame(index=df.index)
 
@@ -222,7 +317,7 @@ class MacroFeatureEngine:
                 raw=False,
             )
 
-        log.info("Built %d COT features", len(features.columns))
+        log.debug("Built %d COT features", len(features.columns))
         return features
 
     # ------------------------------------------------------------------
@@ -277,7 +372,7 @@ class MacroFeatureEngine:
                 fred_aligned.index = df.index
                 for col in fred_aligned.columns:
                     df[col] = fred_aligned[col].values
-                log.info("Merged %d FRED features", len(fred_aligned.columns))
+                log.debug("Merged %d FRED features", len(fred_aligned.columns))
             except FileNotFoundError as exc:
                 log.warning("Skipping FRED features: %s", exc)
             except Exception as exc:
@@ -293,7 +388,7 @@ class MacroFeatureEngine:
                 cot_aligned.index = df.index
                 for col in cot_aligned.columns:
                     df[col] = cot_aligned[col].values
-                log.info("Merged %d COT features", len(cot_aligned.columns))
+                log.debug("Merged %d COT features", len(cot_aligned.columns))
             except FileNotFoundError as exc:
                 log.warning("Skipping COT features: %s", exc)
             except Exception as exc:
@@ -301,7 +396,7 @@ class MacroFeatureEngine:
                 raise
 
         n_added = len(df.columns) - n_before
-        log.info("Total macro features added: %d", n_added)
+        log.debug("Total macro features added: %d", n_added)
         return df
 
     def get_feature_names(self) -> list[str]:

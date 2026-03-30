@@ -52,6 +52,9 @@ class TradeSignal:
     sl_atr_mult: Optional[float] = None
     trailing_atr_mult: Optional[float] = None
     max_hold_bars: Optional[int] = None
+    # Fractional Take-Profit offsets list of (qty_pct, tp_offset amount).
+    # None implies SINGLE exit_mode, delegating behavior back to tp_price float.
+    tiered_tp_offsets: Optional[list[tuple[float, float]]] = None
 
 
 # ---------------------------------------------------------------------------

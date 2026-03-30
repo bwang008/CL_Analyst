@@ -203,7 +203,10 @@ $targetFlags = ""
 if ($TargetLong) { $targetFlags += " --target-long=$TargetLong" }
 if ($TargetShort) { $targetFlags += " --target-short=$TargetShort" }
 $bucketFlag = if ($UseBuckets) { " --use-buckets" } else { "" }
-$launchCmd = "tmux kill-session -t sweep 2>/dev/null; tmux new-session -d -s sweep 'bash $RemoteProject/gcp/vm_sweep_run.sh $shutdownFlag --dataset=$datasetName --strategy=$StrategyConfig --metrics=$Metrics$targetFlags$bucketFlag'"
+# Derive a unique job name from the dataset to prevent GCS collisions between parallel VMs
+$cleanName = $datasetName -replace '^cl-[0-9]+[mh]_bk_', ''
+$jobName = "sweep_$cleanName"
+$launchCmd = "tmux kill-session -t sweep 2>/dev/null; tmux new-session -d -s sweep 'bash $RemoteProject/gcp/vm_sweep_run.sh $shutdownFlag --dataset=$datasetName --strategy=$StrategyConfig --metrics=$Metrics --job-name=$jobName$targetFlags$bucketFlag'"
 try { gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd --quiet 2>$null } catch { }
 
 Write-Host "  Canary pipeline launched!" -ForegroundColor Green
@@ -229,7 +232,7 @@ Write-Host "=====================================================" -ForegroundCo
 Write-Host ""
 Write-Host "  VM:           $VmName"
 Write-Host "  Expected:     ~hours"
-$gcsOut = "gs://cltrainer-optuna-results/sweep/"
+$gcsOut = "gs://cltrainer-optuna-results/$jobName/"
 Write-Host "  GCS output:   $gcsOut"
 Write-Host ""
 Write-Host "Useful commands:" -ForegroundColor Cyan

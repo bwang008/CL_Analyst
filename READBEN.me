@@ -15,6 +15,11 @@ The repo now uses a "Three-File System" for documentation:
 
 ## Backtesting Guide (Quick Reference)
 
+### Run this for the latest model for hourly. Make sure you point it to the right feature set. 
+python agent/backtest_engine.py --config configs/strategies/hourly_ensemble_002.json --data data/cl-1h_bk_HourSet_02.parquet
+### Run this for the latest model for 5 min
+
+
 ### 1) Generate prediction files
 Use the saved model artifacts to produce probability CSVs:
 

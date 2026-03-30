@@ -53,8 +53,10 @@ log = logging.getLogger("MacroDownloader")
 # Configuration
 # ---------------------------------------------------------------------------
 
+from src.data_paths import get_data_path
+
 # Where to save everything
-OUTPUT_DIR = PROJECT_ROOT / "data" / "raw" / "macro"
+OUTPUT_DIR = get_data_path("raw/macro")
 
 # FRED series to download
 FRED_SERIES = {

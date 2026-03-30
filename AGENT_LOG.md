@@ -19,9 +19,22 @@ Resolve critical runtime issues in the live trading engine during after-hours ex
 - **Problem**: The production model (`production_lean_dual.json`) uses `"lean_features": true` but expects extended features (`MOM_STOCH_K_*` and `Time_DayOfWeek_*`). The lean pipeline in `build_live_features` bypassed these.
 - **Fix**: Updated `build_live_features` in `live_trader.py` to explicitly generate DayOfWeek and Stochastic features if requested by `feature_names`, even when `lean=True`. This keeps the pipeline fast while providing the necessary inputs.
 
+### Fix 4: External Macro/COT Features Missing in Live Pipeline
+- **Problem**: The 1h model (`HourEnsemble001`) was trained on `HourSet_02` which includes 62 external features (FRED: VIX, OVX, DXY, yield curve, fed funds; CFTC: COT positioning). `build_live_features` never called `MacroFeatureEngine.merge_all()`, so these features were absent at inference time.
+- **Fix**: Wired `MacroFeatureEngine.merge_all()` into `build_live_features` — triggered only when external macro/COT features are detected in `feature_names`. Also added the missing `6M: 4320` entry to the 1h macro_windows dict.
+
+### Fix 5: Auto-Refresh Macro Data at Startup
+- **Problem**: FRED and COT CSV files could go stale if not updated, causing the live trader to use outdated macro context.
+- **Fix**: Added `MacroFeatureEngine.refresh_if_stale()` which checks file modification times (FRED: >24h, COT: >7 days) and re-downloads via the existing `scripts/download_macro_data.py` functions. Called automatically at `LiveTrader.start()` — only for models that need external macro features. COT downloads from CFTC (no API key). FRED requires `FRED_API_KEY` in `.env`.
+
+### Fix 6: Lingering Dual-Stream AttributeErrors
+- **Problem**: Earlier dual-stream refactoring renamed `self.rolling_df` to `self.rolling_df_5m` and `self._live_bars` to `self._live_bars_5m`, but missed several references in `_on_new_bar()`, `_manage_working_orders()`, and `_cancel_subscriptions()`. This caused crashes in the live environment (`AttributeError: 'LiveTrader' object has no attribute 'rolling_df'`) and 14 failures in the test suite.
+- **Fix**: Replaced all remaining legacy attributes with their stream-specific counterparts (`_5m` or `_1h`) or the localized `rolling_df` parameter. Updated test stubs to include `_bar_size` and `_virtual_ledger` mocks. All tests pass.
+
 ### Files Changed
 - `.gitignore` — Un-ignored `models/production/**`
-- `src/live_execution/live_trader.py` — Heartbeat logging & explicit lean feature generation
+- `src/live_execution/live_trader.py` — Heartbeat logging, lean feature generation, macro merge, auto-refresh at startup
+- `src/features/macro_features.py` — Added `refresh_if_stale()` method with staleness thresholds
 
 
 ## 2026-03-29 — HourSet_02 Short Model Selection (120H Horizon)

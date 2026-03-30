@@ -317,10 +317,17 @@ class LGBMLearner:
             FileNotFoundError: If filepath does not exist.
         """
         data = joblib.load(filepath)
-        self.model = data["model"]
-        self.feature_names = data["feature_names"]
-        self.n_features_in_ = data["n_features_in_"]
-        self.params = data["params"]
+        if isinstance(data, dict) and "model" in data:
+            self.model = data["model"]
+            self.feature_names = data.get("feature_names")
+            self.n_features_in_ = data.get("n_features_in_")
+            self.params = data.get("params", {})
+        else:
+            # Handle native raw LightGBM Booster objects exported by Optuna/Canary pipelines
+            self.model = data
+            self.feature_names = data.feature_name() if hasattr(data, "feature_name") else None
+            self.n_features_in_ = len(self.feature_names) if self.feature_names else getattr(data, "num_feature", lambda: None)()
+            self.params = {}
 
     def author(self) -> str:
         """Return the author's identifier."""

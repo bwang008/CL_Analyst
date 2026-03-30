@@ -25,6 +25,7 @@ description: Run a model improvement experiment for CL_Analyst
    ```
 
 5. Run any experiment-specific scripts (training, hyperparameter tuning, evaluation) as needed.
+   - **Gotcha**: When backtesting Dual Ensembles with `TieredEnsembleStrategy` using `agent/backtest_engine.py`, ensure the root levels of the config JSON also define `"tp_atr_mult": "Tiered"`, `"sl_atr_mult": "Tiered"`, and a float `"trailing_atr_mult": 100.0`. If omitted, the backtester fallback strings will throw a `TypeError` during the final string formatting of the report footer.
 
 6. Compare results against the baseline and summarize findings with metrics.
 

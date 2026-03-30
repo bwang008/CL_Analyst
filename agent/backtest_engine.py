@@ -92,6 +92,7 @@ class ExitReason(Enum):
     SL = "SL"
     TRAILING_BE = "TRAILING_BE"  # Trailing stop hit at breakeven
     TIME_BARRIER = "TIME_BARRIER"  # 288 bars elapsed
+    STRATEGY_FLIP = "STRATEGY_FLIP"  # Strategy requested an early exit/netting
 
 
 @dataclass
@@ -380,6 +381,7 @@ class BacktestEngine:
         # Consecutive signal counters
         self._consecutive_buy_count: int = 0
         self._consecutive_sell_count: int = 0
+        self._consecutive_exit_count: int = 0
 
         # Reset mutable engine state
         self._engine_state.position = 0
@@ -1070,6 +1072,33 @@ class BacktestEngine:
 
             elif self._state == TradeState.IN_POSITION:
                 self._on_in_position(ts, row.Open, row.High, row.Low)
+
+                # Strategy-driven Virtual Ledger netting: Check if strategy wants to force an early exit or flip
+                if self._state == TradeState.IN_POSITION:
+                    self._update_engine_state()
+                    pb = prob_buy_lookup.get(ts, 0.0)
+                    ps = prob_sell_lookup.get(ts, 0.0)
+                    orders = strategy.on_bar(
+                        ts, row.Open, row.High, row.Low, row.Close,
+                        atr, pb, ps, self._engine_state,
+                    )
+                    for order in orders:
+                        if order.action in ("EXIT", "BUY", "SELL"):
+                            if self.consecutive_signal_threshold > 0:
+                                if order.action == "EXIT" or (order.action in ("BUY", "SELL") and order.side != self._side):
+                                    self._consecutive_exit_count += 1
+                                    self._consecutive_buy_count = 0
+                                    self._consecutive_sell_count = 0
+                                    if self._consecutive_exit_count < self.consecutive_signal_threshold:
+                                        break
+                                    self._consecutive_exit_count = 0
+                                    
+                            if order.action == "EXIT" or (order.action in ("BUY", "SELL") and order.side != self._side):
+                                self._close_trade(ts, row.Close, ExitReason.STRATEGY_FLIP)
+                            break
+                    else:
+                        if self.consecutive_signal_threshold > 0:
+                            self._consecutive_exit_count = 0
 
             elif self._state == TradeState.COOLDOWN:
                 self._on_cooldown()

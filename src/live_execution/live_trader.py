@@ -48,6 +48,7 @@ load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
 # Project imports
 from src.features.alpha_factory import AlphaFactory
+from src.features.macro_features import MacroFeatureEngine
 from src.live_execution.strategy import Strategy, TradeSignal
 from src.live_execution.strategies.buy70_sized_manatee import Buy70SizedManatee
 from src.live_execution.strategies.configurable_strategy import ConfigurableStrategy
@@ -247,7 +248,7 @@ def build_live_features(
     if bar_size == "1h":
         is_set_07 = True
         alpha_windows = [24, 72, 168, 336, 840]
-        macro_windows = {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160}
+        macro_windows = {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320}
     else:
         # Auto-detect set_07 pipeline (ignored if lean=True)
         is_set_07 = not lean and bool(_SET_07_SENTINEL_FEATURES & set(feature_names))
@@ -318,6 +319,20 @@ def build_live_features(
         for window in alpha_windows:
             factory.add_stochastic_cluster(window=window)
         work = factory.df
+
+    # 2c. Merge external macro data (FRED + COT) if model expects it
+    _has_external_macro = any(
+        f.startswith(("MACRO_VIX", "MACRO_OVX", "MACRO_DXY",
+                      "MACRO_YIELD_CURVE", "MACRO_FED_FUNDS", "COT_"))
+        for f in feature_names
+    )
+    if _has_external_macro:
+        try:
+            work = MacroFeatureEngine().merge_all(work)
+        except FileNotFoundError as exc:
+            log.warning("Macro data not available: %s", exc)
+        except Exception as exc:
+            log.error("Error merging macro features: %s", exc)
 
     # 3. Add ATR_14 (in training, this was created by add_triple_barrier_target
     #    in data_processor.py, but we skip target generation for live inference)
@@ -443,6 +458,7 @@ class LiveTrader:
         )
         self._consecutive_buy_count: int = 0
         self._consecutive_sell_count: int = 0
+        self._consecutive_exit_count: int = 0
         # Trailing stop config (parity with backtest engine)
         self._trailing_atr_mult: float = float(
             strategy_config.get("trailing_atr_mult", 100.0)
@@ -657,7 +673,20 @@ class LiveTrader:
                         self._front_month_contract.localSymbol
                     )
 
-            # Step 7: Warm-start via DataManager
+            # Step 7: Refresh external macro data if stale and model needs it
+            _needs_macro = any(
+                f.startswith(("MACRO_VIX", "MACRO_OVX", "MACRO_DXY",
+                              "MACRO_YIELD_CURVE", "MACRO_FED_FUNDS", "COT_"))
+                for f in self.feature_names
+            )
+            if _needs_macro:
+                log.info("Model uses external macro features — checking freshness...")
+                try:
+                    MacroFeatureEngine().refresh_if_stale()
+                except Exception as exc:
+                    log.warning("Macro data refresh failed: %s (will use existing data)", exc)
+
+            # Step 8: Warm-start via DataManager
             self._warm_start()
 
             # Step 7b: Recover any inherited position from the ledger
@@ -696,7 +725,8 @@ class LiveTrader:
                 self._needs_restart = False
                 self._subscriptions_lost = False
                 self._resubscribe_pending = False
-                self._live_bars = None
+                self._live_bars_5m = None
+                self._live_bars_1h = None
                 self._front_month_bars = None
                 self.start()  # recursive restart
             else:
@@ -892,7 +922,7 @@ class LiveTrader:
             return
 
         # Update bar extremes from the latest bar
-        last_bar = self.rolling_df.iloc[-1]
+        last_bar = self.rolling_df_5m.iloc[-1]
         bar_high = float(last_bar["High"])
         bar_low = float(last_bar["Low"])
         self._highest_high = max(self._highest_high, bar_high)
@@ -1186,8 +1216,8 @@ class LiveTrader:
             try:
                 self._position_entry_bar_time = pd.Timestamp(entry_bar_time_str)
                 # Estimate bars held from entry time to now
-                if self.rolling_df is not None and len(self.rolling_df) > 0:
-                    last_bar = self.rolling_df.index[-1]
+                if self.rolling_df_5m is not None and len(self.rolling_df_5m) > 0:
+                    last_bar = self.rolling_df_5m.index[-1]
                     delta_minutes = (
                         last_bar - self._position_entry_bar_time
                     ).total_seconds() / 60.0
@@ -1202,24 +1232,24 @@ class LiveTrader:
             except Exception:
                 log.debug("Failed to parse entry_bar_time", exc_info=True)
                 self._position_entry_bar_time = (
-                    self.rolling_df.index[-1]
-                    if self.rolling_df is not None and len(self.rolling_df) > 0
+                    self.rolling_df_5m.index[-1]
+                    if self.rolling_df_5m is not None and len(self.rolling_df_5m) > 0
                     else None
                 )
                 self._position_bars_held = 0
         else:
             # No bar time saved — set conservative defaults
             self._position_entry_bar_time = (
-                self.rolling_df.index[-1]
-                if self.rolling_df is not None and len(self.rolling_df) > 0
+                self.rolling_df_5m.index[-1]
+                if self.rolling_df_5m is not None and len(self.rolling_df_5m) > 0
                 else None
             )
             self._position_bars_held = 0
 
         # Init trailing stop tracking from current data
-        if self.rolling_df is not None and len(self.rolling_df) > 0:
-            self._highest_high = float(self.rolling_df["High"].iloc[-1])
-            self._lowest_low = float(self.rolling_df["Low"].iloc[-1])
+        if self.rolling_df_5m is not None and len(self.rolling_df_5m) > 0:
+            self._highest_high = float(self.rolling_df_5m["High"].iloc[-1])
+            self._lowest_low = float(self.rolling_df_5m["Low"].iloc[-1])
 
         # 4. Verify TP/SL orders on IBKR
         tp_found = False
@@ -1297,24 +1327,30 @@ class LiveTrader:
                 sl_price=sl_price,
             )
             if len(child_trades) >= 2:
-                self._tp_order_id = getattr(
-                    getattr(child_trades[0], "order", None), "orderId", None
-                )
+                tp_trade_objs = child_trades[:-1]
+                sl_trade_obj = child_trades[-1]
+
+                self._tp_order_ids = []
+                for t in tp_trade_objs:
+                    oid = getattr(getattr(t, "order", None), "orderId", None)
+                    if oid is not None:
+                        self._tp_order_ids.append(oid)
+                        
                 self._sl_order_id = getattr(
-                    getattr(child_trades[1], "order", None), "orderId", None
+                    getattr(sl_trade_obj, "order", None), "orderId", None
                 )
-                # Update ledger with new order IDs
+                # Update ledger with new order IDs (use first TP as reference proxy)
                 self.telemetry.update_position_brackets(
                     trade_id,
-                    tp_order_id=self._tp_order_id,
+                    tp_order_id=self._tp_order_ids[0] if self._tp_order_ids else None,
                     sl_order_id=self._sl_order_id,
                     tp_price=tp_price,
                     sl_price=sl_price,
                 )
                 log.info(
                     "[RECOVERY] TP/SL RE-PLACED: "
-                    "TP orderId=%s (%.2f)  SL orderId=%s (%.2f)",
-                    self._tp_order_id, tp_price,
+                    "TP orderIds=%s (avg %.2f)  SL orderId=%s (%.2f)",
+                    self._tp_order_ids, tp_price,
                     self._sl_order_id, sl_price,
                 )
             else:
@@ -1357,7 +1393,9 @@ class LiveTrader:
         entry_action = ctx.get("entry_action")
         lots = int(ctx.get("lots", qty))
 
-        if tp_offset is None or sl_offset is None or entry_action is None:
+        tiered_tp_offsets = ctx.get("tiered_tp_offsets")
+
+        if (tp_offset is None and not tiered_tp_offsets) or sl_offset is None or entry_action is None:
             log.warning(
                 "BRACKET CHILDREN: missing tp_offset/sl_offset/entry_action "
                 "in context for orderId=%d — cannot place children",
@@ -1368,16 +1406,36 @@ class LiveTrader:
         # Compute bracket prices from fill price
         exit_action = "SELL" if entry_action == "BUY" else "BUY"
         if entry_action == "BUY":
-            tp_price = round(fill_price + tp_offset, 2)
             sl_price = round(fill_price - sl_offset, 2)
+            if tiered_tp_offsets:
+                tp_price = []
+                rem_lots = lots
+                for i, (pct, off) in enumerate(tiered_tp_offsets):
+                    t_lots = rem_lots if i == len(tiered_tp_offsets) - 1 else max(1, int(round(lots * pct)))
+                    t_lots = min(t_lots, rem_lots)
+                    if t_lots > 0:
+                        tp_price.append((t_lots, round(fill_price + off, 2)))
+                    rem_lots -= t_lots
+            else:
+                tp_price = round(fill_price + tp_offset, 2)
         else:  # SELL (short)
-            tp_price = round(fill_price - tp_offset, 2)
             sl_price = round(fill_price + sl_offset, 2)
+            if tiered_tp_offsets:
+                tp_price = []
+                rem_lots = lots
+                for i, (pct, off) in enumerate(tiered_tp_offsets):
+                    t_lots = rem_lots if i == len(tiered_tp_offsets) - 1 else max(1, int(round(lots * pct)))
+                    t_lots = min(t_lots, rem_lots)
+                    if t_lots > 0:
+                        tp_price.append((t_lots, round(fill_price - off, 2)))
+                    rem_lots -= t_lots
+            else:
+                tp_price = round(fill_price - tp_offset, 2)
 
         log.info(
-            "[TRADE] BRACKET CHILDREN: fill=%.2f  TP=%.2f  SL=%.2f  "
-            "(tp_offset=%.4f, sl_offset=%.4f)",
-            fill_price, tp_price, sl_price, tp_offset, sl_offset,
+            "[TRADE] BRACKET CHILDREN: fill=%.2f  TPs=%s  SL=%.2f  "
+            "(array=%s, sl_offset=%.4f)",
+            fill_price, tp_price, sl_price, bool(tiered_tp_offsets), sl_offset,
         )
 
         try:
@@ -1393,29 +1451,33 @@ class LiveTrader:
             self._entry_price = fill_price
 
             # Store TP and SL order IDs for software-side OCA and
-            # trailing stop lookup (orders have no parentId linkage)
             if len(child_trades) >= 2:
-                tp_trade_obj = child_trades[0]
-                sl_trade_obj = child_trades[1]
-                self._tp_order_id = getattr(
-                    getattr(tp_trade_obj, "order", None), "orderId", None
-                )
+                tp_trade_objs = child_trades[:-1]
+                sl_trade_obj = child_trades[-1]
+                
+                self._tp_order_ids = []
+                for tp_trade_obj in tp_trade_objs:
+                    oid = getattr(getattr(tp_trade_obj, "order", None), "orderId", None)
+                    if oid is not None:
+                        self._tp_order_ids.append(oid)
+                        
                 self._sl_order_id = getattr(
                     getattr(sl_trade_obj, "order", None), "orderId", None
                 )
                 log.info(
-                    "[TRADE] BRACKET CHILDREN: TP orderId=%s  SL orderId=%s  "
+                    "[TRADE] BRACKET CHILDREN: TP orderIds=%s  SL orderId=%s  "
                     "(standalone orders, software OCA active)",
-                    self._tp_order_id, self._sl_order_id,
+                    self._tp_order_ids, self._sl_order_id,
                 )
                 # Persist TP/SL order IDs and prices to ledger
                 if self._active_trade_id is not None:
                     try:
                         self.telemetry.update_position_brackets(
                             self._active_trade_id,
-                            tp_order_id=self._tp_order_id,
+                            tp_order_id=self._tp_order_ids[0] if self._tp_order_ids else None,
                             sl_order_id=self._sl_order_id,
-                            tp_price=tp_price,
+                            # Dummy array aggregation if multiple 
+                            tp_price=tp_price if not isinstance(tp_price, list) else tp_price[0][1],
                             sl_price=sl_price,
                         )
                     except Exception:
@@ -1490,7 +1552,7 @@ class LiveTrader:
                 # only assigned in the else branch, causing UnboundLocalError)
                 order_id = getattr(order, "orderId", None)
                 # Detect TP/SL fill by tracked order IDs (no parentId linkage)
-                is_tp_fill = (order_id is not None and order_id == self._tp_order_id)
+                is_tp_fill = (order_id is not None and order_id in self._tp_order_ids)
                 is_sl_fill = (order_id is not None and order_id == self._sl_order_id)
                 if is_tp_fill or is_sl_fill:
                     # Exit order filled — log and apply software-side OCA
@@ -1499,58 +1561,88 @@ class LiveTrader:
                         "[TRADE] EXIT: %s %.0f %s @ %.2f (%s)",
                         action_str, qty, symbol_str, avg_price, exit_type,
                     )
-                    # Software OCA: cancel the other open exit leg
-                    other_order_id = (
-                        self._sl_order_id if is_tp_fill else self._tp_order_id
-                    )
-                    if other_order_id is not None:
-                        try:
-                            for t in self.manager.ib.openTrades():
-                                o2 = getattr(t, "order", None)
-                                if o2 is None:
-                                    continue
-                                if getattr(o2, "orderId", None) == other_order_id:
-                                    self.manager.ib.cancelOrder(o2)
-                                    log.info(
-                                        "OCA: cancelled opposite exit order %d "
-                                        "after %s",
-                                        other_order_id, exit_type,
-                                    )
-                                    break
-                        except Exception:
-                            log.exception(
-                                "OCA: failed to cancel opposite exit order %d",
-                                other_order_id,
+                    
+                    if is_sl_fill:
+                        # Global SL hit — cancel all pending TPs
+                        for tp_id in self._tp_order_ids:
+                            try:
+                                for t in self.manager.ib.openTrades():
+                                    o2 = getattr(t, "order", None)
+                                    if o2 is not None and getattr(o2, "orderId", None) == tp_id:
+                                        self.manager.ib.cancelOrder(o2)
+                                        log.info("OCA: cancelled pending TP tranche %d after SL HIT", tp_id)
+                                        break
+                            except Exception:
+                                log.exception("OCA: failed to cancel pending TP tranche %d", tp_id)
+                        is_final_exit = True
+                    else:
+                        # TP fill (partial or full)
+                        self._tp_order_ids.remove(order_id)
+                        if not self._tp_order_ids:
+                            # Last TP filled — cancel the SL
+                            if self._sl_order_id is not None:
+                                try:
+                                    for t in self.manager.ib.openTrades():
+                                        o2 = getattr(t, "order", None)
+                                        if o2 is not None and getattr(o2, "orderId", None) == self._sl_order_id:
+                                            self.manager.ib.cancelOrder(o2)
+                                            log.info("OCA: cancelled opposite SL %d after final TP HIT", self._sl_order_id)
+                                            break
+                                except Exception:
+                                    log.exception("OCA: failed to cancel opposite SL %d", self._sl_order_id)
+                            is_final_exit = True
+                        else:
+                            # Fractional TP filled — dynamically downgrade SL order size!
+                            if self._sl_order_id is not None:
+                                try:
+                                    for t in self.manager.ib.openTrades():
+                                        o2 = getattr(t, "order", None)
+                                        if o2 is not None and getattr(o2, "orderId", None) == self._sl_order_id:
+                                            # We just sold `qty` contracts
+                                            current_qty = float(getattr(o2, "totalQuantity", 0) or 0)
+                                            new_qty = current_qty - qty
+                                            if new_qty > 0:
+                                                o2.totalQuantity = float(new_qty)
+                                                self.manager.ib.placeOrder(t.contract, o2)
+                                                log.info("OCA: reduced SL %d quantity from %.0f to %.0f after partial TP", self._sl_order_id, current_qty, new_qty)
+                                            else:
+                                                self.manager.ib.cancelOrder(o2)
+                                                log.info("OCA: cancelled SL %d (quantity exhausted)", self._sl_order_id)
+                                            break
+                                except Exception:
+                                    log.exception("OCA: failed to modify SL %d quantity", self._sl_order_id)
+                            is_final_exit = False
+                            
+                    if is_final_exit:
+                        # Close position in ledger
+                        if self._active_trade_id is not None:
+                            close_reason = "TP_HIT" if is_tp_fill else "SL_HIT"
+                            try:
+                                self.telemetry.close_position(
+                                    self._active_trade_id,
+                                    reason=close_reason,
+                                    close_time=self._utc_iso_now(),
+                                    bars_held=self._position_bars_held,
+                                )
+                            except Exception:
+                                log.debug(
+                                    "Failed to close ledger position",
+                                    exc_info=True,
+                                )
+                        # Activate exit-type-specific cooldown
+                        if exit_type == "SL HIT" and self._sl_cooldown_bars > 0:
+                            self._cooldown_remaining = self._sl_cooldown_bars
+                            log.info(
+                                "COOLDOWN activated: %d bars after %s",
+                                self._sl_cooldown_bars, exit_type,
                             )
-                    # Close position in ledger
-                    if self._active_trade_id is not None:
-                        close_reason = "TP_HIT" if is_tp_fill else "SL_HIT"
-                        try:
-                            self.telemetry.close_position(
-                                self._active_trade_id,
-                                reason=close_reason,
-                                close_time=self._utc_iso_now(),
-                                bars_held=self._position_bars_held,
+                        elif exit_type == "TP HIT" and self._tp_cooldown_bars > 0:
+                            self._cooldown_remaining = self._tp_cooldown_bars
+                            log.info(
+                                "COOLDOWN activated: %d bars after %s",
+                                self._tp_cooldown_bars, exit_type,
                             )
-                        except Exception:
-                            log.debug(
-                                "Failed to close ledger position",
-                                exc_info=True,
-                            )
-                    # Activate exit-type-specific cooldown
-                    if exit_type == "SL HIT" and self._sl_cooldown_bars > 0:
-                        self._cooldown_remaining = self._sl_cooldown_bars
-                        log.info(
-                            "COOLDOWN activated: %d bars after %s",
-                            self._sl_cooldown_bars, exit_type,
-                        )
-                    elif exit_type == "TP HIT" and self._tp_cooldown_bars > 0:
-                        self._cooldown_remaining = self._tp_cooldown_bars
-                        log.info(
-                            "COOLDOWN activated: %d bars after %s",
-                            self._tp_cooldown_bars, exit_type,
-                        )
-                    self._reset_position_state()
+                        self._reset_position_state()
                 else:
                     # Parent entry order filled — clear TTL tracking
                     log.info(
@@ -2013,12 +2105,19 @@ class LiveTrader:
         loop, not inside ib.sleep).
         """
         # 1. Cancel stale subscriptions
-        if self._live_bars is not None:
+        if self._live_bars_5m is not None:
             try:
-                self.manager.cancel_subscription(self._live_bars)
+                self.manager.cancel_subscription(self._live_bars_5m)
             except Exception:
                 pass
-            self._live_bars = None
+            self._live_bars_5m = None
+
+        if self._live_bars_1h is not None:
+            try:
+                self.manager.cancel_subscription(self._live_bars_1h)
+            except Exception:
+                pass
+            self._live_bars_1h = None
         if self._front_month_bars is not None:
             try:
                 self.manager.cancel_subscription(self._front_month_bars)
@@ -2180,7 +2279,7 @@ class LiveTrader:
             log.info("Feature generation skipped (insufficient data or NaN)")
             return
 
-        current_price = float(self.rolling_df["Close"].iloc[-1])
+        current_price = float(rolling_df["Close"].iloc[-1])
 
         # Get ATR from the features
         atr_value = None
@@ -2338,7 +2437,7 @@ class LiveTrader:
 
         # Shadow-replay logging: capture exact state for parity validation
         try:
-            last_row = self.rolling_df.iloc[-1]
+            last_row = rolling_df.iloc[-1]
             # Prefer per-signal buy/sell probs (ensemble); fall back to direction
             if signal.buy_prob is not None or signal.sell_prob is not None:
                 _prob_buy = signal.buy_prob
@@ -2413,6 +2512,7 @@ class LiveTrader:
             if self._consecutive_signal_threshold > 0:
                 self._consecutive_buy_count = 0
                 self._consecutive_sell_count = 0
+                self._consecutive_exit_count = 0
             action_taken = signal.skip_reason or "HOLD"
             if signal.skip_reason == "POSITION_OPEN":
                 log.info(
@@ -2437,9 +2537,10 @@ class LiveTrader:
 
         # 4b. Consecutive signal filter (parity with backtest engine)
         if self._consecutive_signal_threshold > 0:
-            if signal.action == "BUY":
+            if signal.action in ("BUY", "ENTER"):
                 self._consecutive_buy_count += 1
                 self._consecutive_sell_count = 0
+                self._consecutive_exit_count = 0
                 if self._consecutive_buy_count < self._consecutive_signal_threshold:
                     log.info(
                         "CONSECUTIVE FILTER: BUY signal %d/%d — waiting for more",
@@ -2462,9 +2563,10 @@ class LiveTrader:
                     self._consecutive_signal_threshold,
                 )
                 self._consecutive_buy_count = 0
-            elif signal.action == "SELL":
+            elif signal.action in ("SELL", "SHORT"):
                 self._consecutive_sell_count += 1
                 self._consecutive_buy_count = 0
+                self._consecutive_exit_count = 0
                 if self._consecutive_sell_count < self._consecutive_signal_threshold:
                     log.info(
                         "CONSECUTIVE FILTER: SELL signal %d/%d — waiting for more",
@@ -2486,6 +2588,31 @@ class LiveTrader:
                     self._consecutive_signal_threshold,
                 )
                 self._consecutive_sell_count = 0
+            elif signal.action == "EXIT":
+                self._consecutive_exit_count += 1
+                self._consecutive_buy_count = 0
+                self._consecutive_sell_count = 0
+                if self._consecutive_exit_count < self._consecutive_signal_threshold:
+                    log.info(
+                        "CONSECUTIVE FILTER: EXIT netting signal %d/%d — waiting for more",
+                        self._consecutive_exit_count,
+                        self._consecutive_signal_threshold,
+                    )
+                    self.telemetry.log_signal(
+                        timestamp=bar_time,
+                        signal=signal.signal_label,
+                        confidence_pct=signal.confidence_pct,
+                        action_taken="CONSECUTIVE_WAIT",
+                        current_price=current_price,
+                        atr_value=atr_value,
+                    )
+                    return
+                log.info(
+                    "CONSECUTIVE FILTER: EXIT threshold met (%d/%d) — executing",
+                    self._consecutive_exit_count,
+                    self._consecutive_signal_threshold,
+                )
+                self._consecutive_exit_count = 0
 
         # 5. Active signal (BUY or SELL) — bracket already logged above
 
@@ -2553,8 +2680,8 @@ class LiveTrader:
             self._atr_at_entry = atr_value
             self._position_side = 1 if signal.action == "BUY" else -1
             self._trailing_activated = False
-            self._highest_high = float(self.rolling_df["High"].iloc[-1])
-            self._lowest_low = float(self.rolling_df["Low"].iloc[-1])
+            self._highest_high = float(rolling_df["High"].iloc[-1])
+            self._lowest_low = float(rolling_df["Low"].iloc[-1])
             # Store per-trade overrides from tier matching (None = use global)
             self._trade_trailing_atr_mult = signal.trailing_atr_mult
             self._trade_max_hold_bars = signal.max_hold_bars
@@ -2728,10 +2855,10 @@ class LiveTrader:
         now = datetime.now(timezone.utc).replace(tzinfo=None)
 
         # Time since last bar
-        if self._last_bar_time is not None:
-            delta = now - self._last_bar_time
+        if getattr(self, "_last_bar_time_5m", None) is not None:
+            delta = now - self._last_bar_time_5m
             hours = delta.total_seconds() / 3600
-            last_bar_str = f"{hours:.1f}h ago ({self._last_bar_time})"
+            last_bar_str = f"{hours:.1f}h ago ({self._last_bar_time_5m})"
         else:
             last_bar_str = "no bars received yet"
 

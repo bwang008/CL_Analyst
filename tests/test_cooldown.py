@@ -54,12 +54,14 @@ def _make_trader_stub(
     # State
     trader._running = True
     trader._subscriptions_lost = False
-    trader._live_bars = None
+    trader._live_bars_5m = None
+    trader._live_bars_1h = None
     trader._front_month_bars = None
     trader._contract = MagicMock()
     trader._front_month_contract = MagicMock()
     trader._front_month_str = "202604"
-    trader._last_bar_time = None
+    trader._last_bar_time_5m = None
+    trader._last_bar_time_1h = None
     trader._max_hold_bars = 288
 
     # Cooldown state
@@ -76,17 +78,19 @@ def _make_trader_stub(
 
     # Feature/model mocks
     trader.feature_names = ["ATR_14", "MACD"]
-    trader.rolling_df = pd.DataFrame(
+    trader.rolling_df_5m = pd.DataFrame(
         {"DateTime": pd.date_range("2026-01-01", periods=200, freq="5min"),
          "Open": 70.0, "High": 71.0, "Low": 69.0, "Close": 70.5,
          "Volume": 100.0}
     )
-    trader.rolling_df = trader.rolling_df.set_index(
-        pd.DatetimeIndex(trader.rolling_df["DateTime"]), drop=False
+    trader.rolling_df_5m = trader.rolling_df_5m.set_index(
+        pd.DatetimeIndex(trader.rolling_df_5m["DateTime"]), drop=False
     )
+    trader.rolling_df_1h = None
 
     # Dry-run mode (don't place real orders)
     trader.dry_run = True
+    trader._bar_size = "5m"
     trader.entry_mode = "market"
     trader.exit_mode = "marketable_limit"
     trader._exit_mode = "marketable_limit"
@@ -129,6 +133,8 @@ def _make_trader_stub(
     trader._consecutive_buy_count = 0
     trader._consecutive_sell_count = 0
 
+    trader._virtual_ledger = {"5m": 0, "1h": 0}
+
     return trader
 
 
@@ -162,7 +168,7 @@ class TestCooldownEnforcement:
         )
 
         bar_time = pd.Timestamp("2026-03-02 18:00:00")
-        trader._on_new_bar(bar_time)
+        trader._on_new_bar(bar_time, trader.rolling_df_5m, "5m")
 
         # Features and strategy SHOULD be called during cooldown
         mock_features.assert_called_once()
@@ -196,19 +202,19 @@ class TestCooldownEnforcement:
         bar_time = pd.Timestamp("2026-03-02 18:00:00")
 
         # Bar 1: cooldown=3 → evaluate but skip execution
-        trader._on_new_bar(bar_time)
+        trader._on_new_bar(bar_time, trader.rolling_df_5m, "5m")
         assert trader._cooldown_remaining == 2
 
         # Bar 2: cooldown=2 → evaluate but skip execution
-        trader._on_new_bar(bar_time)
+        trader._on_new_bar(bar_time, trader.rolling_df_5m, "5m")
         assert trader._cooldown_remaining == 1
 
         # Bar 3: cooldown=1 → evaluate but skip execution
-        trader._on_new_bar(bar_time)
+        trader._on_new_bar(bar_time, trader.rolling_df_5m, "5m")
         assert trader._cooldown_remaining == 0
 
         # Bar 4: cooldown=0 → normal evaluation
-        trader._on_new_bar(bar_time)
+        trader._on_new_bar(bar_time, trader.rolling_df_5m, "5m")
         assert mock_features.call_count == 4
         assert trader.strategy.evaluate.call_count == 4
 
@@ -233,7 +239,7 @@ class TestCooldownEnforcement:
         )
 
         bar_time = pd.Timestamp("2026-03-02 18:00:00")
-        trader._on_new_bar(bar_time)
+        trader._on_new_bar(bar_time, trader.rolling_df_5m, "5m")
 
         # Should call features right away
         mock_features.assert_called_once()
