@@ -33,7 +33,7 @@ Crude oil (CL) 5-minute bar ML trading system using LightGBM with focal loss, wa
 | `models/registry/` | Archived model bundles (PKL + metrics + predictions) |
 | `models/production/` | **Production model PKL** (lean momentum short) |
 | `configs/strategies/` | Live trading and backtest strategy configs |
-| `.agents/workflows/` | Slash commands — run `/run-tests`, `/commit`, `/next`, etc. |
+| `.agents/workflows/` | Slash commands — run `/sweep-ensembles`, `/run-tests`, `/commit`, `/next`, etc. |
 
 ### Documentation Maintenance Protocol
 To keep the AI context window sharp, all agents must follow these rules before ending a session:
@@ -61,7 +61,7 @@ To keep the AI context window sharp, all agents must follow these rules before e
 - `live_trader_test` (merged from `development` 2026-03-21)
 
 ## Last Completed Task
-- **HourSet_02 Canary Experiments (2026-03-29)**: Ran 4 Canary experiments targeting 1.5x, 2.0x, and 2.5x ATR shorts on 120H horizons. Identified `TARGET_TRIPLE_2p5x1_120H_SHORT` (Canary 4, logloss) as the optimal short companion model.
+- **HourSet_02 Canary Experiments (2026-03-29)**: Ran 4 Canary experiments targeting 1.5x, 2.0x, and 2.5x ATR shorts on 120H horizons. Identified `TARGET_TRIPLE_2p5x1_120H_SHORT` (Canary 4, logloss) as the optimal short companion model. Created `/sweep-ensembles` workflow to automate Cartesian combinations.
 - **Lean Canary Breakthrough & Production Deployment (2026-03-27)**: Threshold sweep found profitability at 0.56 (+$1,176 on 26 trades). Lean canary (26 features) validated "less is more" hypothesis: **EXP-037 short_logloss = 208 trades, PF 1.27, +$5,816**. Deployed production model (`models/production/`), config (`configs/strategies/production_lean_momentum.json`), and code changes for MCL routing + lean feature path.
 - **Feature Bucket Architecture & Winning Strategy Optimization (2026-03-26)**: Implemented feature bucket pruning (12 buckets, 11 toggleable) in Optuna. Ran 3 bucket canary experiments (EXP-034 through EXP-036). Key finding: **momentum = alpha** (ON in 10/12 searches), **structure = noise** (OFF in 11/12).
 

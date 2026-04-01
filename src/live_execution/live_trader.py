@@ -209,15 +209,6 @@ def _sigmoid(x: float) -> float:
     """Apply sigmoid to convert logit to probability."""
     return 1.0 / (1.0 + np.exp(-x))
 
-def focal_obj(preds, train_set):
-    """Dummy function to allow unpickling of models trained with custom focal loss.
-    
-    When models are trained via scripts where `focal_obj` is defined in __main__
-    (e.g., retrain_hourset03.py), joblib.load() expects to find this attribute 
-    in the execution context of the unpickler, which is __main__ (live_trader.py).
-    """
-    pass
-
 
 # ---------------------------------------------------------------------------
 # Feature Pipeline (replicates process_set_05/set_06 for live data)

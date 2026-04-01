@@ -276,7 +276,18 @@ class LGBMLearner:
                     f"got {n_features}."
                 )
 
-        pred = self.model.predict(X)
+        if isinstance(self.model, lgb.Booster):
+            pred = self.model.predict(X)
+        elif hasattr(self.model, "predict_proba"):
+            # Sklearn API fallback for legacy .pkl files
+            pred = self.model.predict_proba(X)
+            # If binary class, align with booster output (1D array of positive probability)
+            if pred.ndim == 2 and pred.shape[1] == 2:
+                pred = pred[:, 1]
+        else:
+            # Fallback if predict_proba is not available
+            pred = self.model.predict(X)
+
         obj = self.params.get("objective", "multiclass")
 
         if obj == "multiclass":
@@ -316,6 +327,25 @@ class LGBMLearner:
         Raises:
             FileNotFoundError: If filepath does not exist.
         """
+        import os
+        
+        # Smart fallback for Model Sanitization protocol
+        if filepath.endswith(".pkl"):
+            pure_path = filepath.replace(".pkl", "_pure.txt")
+            if os.path.exists(pure_path):
+                import logging
+                logging.getLogger("LGBMLearner").info(
+                    "Found %s. Bypassing Joblib for sanitized model.", os.path.basename(pure_path)
+                )
+                filepath = pure_path
+
+        if filepath.endswith(".txt"):
+            self.model = lgb.Booster(model_file=filepath)
+            self.feature_names = self.model.feature_name()
+            self.n_features_in_ = self.model.num_feature()
+            self.params = {}
+            return
+
         data = joblib.load(filepath)
         if isinstance(data, dict) and "model" in data:
             self.model = data["model"]
