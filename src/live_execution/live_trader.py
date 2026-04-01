@@ -209,6 +209,15 @@ def _sigmoid(x: float) -> float:
     """Apply sigmoid to convert logit to probability."""
     return 1.0 / (1.0 + np.exp(-x))
 
+def focal_obj(preds, train_set):
+    """Dummy function to allow unpickling of models trained with custom focal loss.
+    
+    When models are trained via scripts where `focal_obj` is defined in __main__
+    (e.g., retrain_hourset03.py), joblib.load() expects to find this attribute 
+    in the execution context of the unpickler, which is __main__ (live_trader.py).
+    """
+    pass
+
 
 # ---------------------------------------------------------------------------
 # Feature Pipeline (replicates process_set_05/set_06 for live data)
@@ -263,14 +272,17 @@ def build_live_features(
         return None
 
     # Warn if cache depth is below recommended minimum for long-window
-    # features (MACRO_3M needs 2160h × 12 = 25,920 bars + warmup).
-    _MIN_RECOMMENDED_BARS = 26_000
-    if len(df) < _MIN_RECOMMENDED_BARS:
+    # features (MACRO_3M needs 2160h × 12 = 25,920 5m-bars + warmup).
+    # Scale by bar_size: 26,000 for 5m, ~2,167 for 1h.
+    _MIN_RECOMMENDED_BARS_5M = 26_000
+    _bar_divisor = 12 if bar_size == "1h" else 1
+    _min_recommended = _MIN_RECOMMENDED_BARS_5M // _bar_divisor
+    if len(df) < _min_recommended:
         log.warning(
             "Cache depth %d below recommended %d — "
             "long-window features (MACRO_3M, VOL_ROC_10080) may be "
             "unreliable due to insufficient warmup history",
-            len(df), _MIN_RECOMMENDED_BARS,
+            len(df), _min_recommended,
         )
 
     # Work on a copy to avoid mutating the rolling window

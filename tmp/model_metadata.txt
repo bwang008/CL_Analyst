@@ -1,0 +1,109 @@
+=== LONG (average_precision) ===
+path: reports/canary/registry/canary_output/registry/E2E_HourSet_02_long_average_precision/final_model.pkl
+type: <class 'lightgbm.basic.Booster'>
+num_trees: 500
+num_feature: 199
+feature_names sample: ['Time_Sin', 'Time_Cos', 'Time_DayOfWeek_Sin', 'Time_DayOfWeek_Cos', 'log_ret']
+booster params: {
+  "use_time": false,
+  "use_volatility": false,
+  "use_momentum": true,
+  "use_trend": true,
+  "use_microstructure": false,
+  "use_structure": false,
+  "use_distribution": true,
+  "use_exhaustion": false,
+  "use_divergence": true,
+  "use_macro_tech": true,
+  "use_macro_external": true,
+  "boosting_type": "gbdt",
+  "num_leaves": 21,
+  "min_child_samples": 265,
+  "learning_rate": 0.009955276692030826,
+  "feature_fraction": 0.526107441454962,
+  "reg_alpha": 0.24927639658941683,
+  "reg_lambda": 3.1566927993570597,
+  "max_depth": 3,
+  "min_gain_to_split": 1.7600716820772384,
+  "path_smooth": 2.6316283326309917,
+  "bagging_fraction": 0.386118818529592,
+  "bagging_freq": 1,
+  "verbose": -1,
+  "num_threads": 8,
+  "metric": "None",
+  "objective": "none",
+  "num_iterations": 500
+}
+
+=== LONG experiment_config.json ===
+  experiment_id: E2E_HourSet_02_long_average_precision
+  strategy: e2e_alpha_factory_long_average_precision
+  hypothesis: E2E Alpha Factory: long model optimized for average_precision on set_09
+  data_path: /home/bwang/data/cl-1h_bk_HourSet_02.parquet
+  target_name: TARGET_TRIPLE_2p5x1_72H_LONG
+  method: walk_forward
+  balance_mode: downsample
+  train_cutoff_date: 2022-01-01
+  model_params: {
+    "use_time": false,
+    "use_volatility": false,
+    "use_momentum": true,
+    "use_trend": true,
+    "use_microstructure": false,
+    "use_structure": false,
+    "use_distribution": true,
+    "use_exhaustion": false,
+    "use_divergence": true,
+    "use_macro_tech": true,
+    "use_macro_external": true,
+    "boosting_type": "gbdt",
+    "num_leaves": 21,
+    "min_child_samples": 265,
+    "learning_rate": 0.009955276692030826,
+    "feature_fraction": 0.526107441454962,
+    "reg_alpha": 0.24927639658941683,
+    "reg_lambda": 3.1566927993570597,
+    "max_depth": 3,
+    "min_gain_to_split": 1.7600716820772384,
+    "path_smooth": 2.6316283326309917,
+    "bagging_fraction": 0.386118818529592,
+    "bagging_freq": 1,
+    "n_estimators": 500
+}
+  optuna_provenance: {'source': 'Optuna study: canary_long_average_precision', 'note': 'E2E Alpha Factory production run on set_09 (MACRO lookahead fix)'}
+
+=== SHORT (logloss) ===
+path: models/registry/HourSet_02_2p5x1_120H_short_logloss/final_model.pkl
+type: <class 'dict'>
+keys: ['model', 'feature_names', 'n_features_in_', 'params']
+params: {
+  "objective": "binary",
+  "verbose": -1
+}
+model type: <class 'lightgbm.basic.Booster'>
+model num_trees: 500
+model num_feature: 199
+model feature_names sample: ['Time_Sin', 'Time_Cos', 'Time_DayOfWeek_Sin', 'Time_DayOfWeek_Cos', 'log_ret']
+feature_names count: 199
+n_features_in_: 199
+
+=== SHORT config.json ===
+  experiment_id: E2E_HourSet_02_short_logloss
+  strategy: e2e_alpha_factory_short_logloss
+  timestamp: 2026-03-29T18:35:44
+  target_name: TARGET_TRIPLE_2p5x1_120H_SHORT
+  type: Short
+  dataset_path: /home/bwang/data/cl-1h_bk_HourSet_02.parquet
+  model_params: {"use_time": false, "use_volatility": false, "use_momentum": false, "use_trend": true, "use_microstructure": false, "use_structure": false, "use_distribution": false, "use_exhaustion": true, "use_divergence": false, "use_macro_tech": true, "use_macro_external": false, "boosting_type": "gbdt", "num_leaves": 27, "min_child_samples": 26, "learning_rate": 0.01984465430649546, "feature_fraction": 0.41990251470987794, "reg_alpha": 0.017790700565472058, "reg_lambda": 0.01680235345790802, "max_depth": 4, "min_gain_to_split": 0.6301821388193342, "path_smooth": 8.447928139251882, "bagging_fraction": 0.5584128761973873, "bagging_freq": 6, "n_estimators": 500}
+
+=== SHORT experiment_config.json ===
+  experiment_id: E2E_HourSet_02_short_logloss
+  strategy: e2e_alpha_factory_short_logloss
+  hypothesis: E2E Alpha Factory: short model optimized for logloss on set_09
+  data_path: /home/bwang/data/cl-1h_bk_HourSet_02.parquet
+  target_name: TARGET_TRIPLE_2p5x1_120H_SHORT
+  method: walk_forward
+  balance_mode: downsample
+  train_cutoff_date: 2022-01-01
+  model_params: {"use_time": false, "use_volatility": false, "use_momentum": false, "use_trend": true, "use_microstructure": false, "use_structure": false, "use_distribution": false, "use_exhaustion": true, "use_divergence": false, "use_macro_tech": true, "use_macro_external": false, "boosting_type": "gbdt", "num_leaves": 27, "min_child_samples": 26, "learning_rate": 0.01984465430649546, "feature_fraction": 0.41990251470987794, "reg_alpha": 0.017790700565472058, "reg_lambda": 0.01680235345790802, "max_depth": 4, "min_gain_to_split": 0.6301821388193342, "path_smooth": 8.447928139251882, "bagging_fraction": 0.5584128761973873, "bagging_freq": 6, "n_estimators": 500}
+  optuna_provenance: {"source": "Optuna study: canary_short_logloss", "note": "E2E Alpha Factory production run on set_09 (MACRO lookahead fix)"}

@@ -1,0 +1,28 @@
+﻿Loaded strategy config 'hourly_ensemble_003': TP=2.0x  SL=1.0x  threshold=0.45  [single-position]
+Auto-resolving predictions from config (dual-model):
+  Long:  reports/canary/registry/canary_output/registry/E2E_HourSet_02_long_average_precision/oos_predictions.csv
+  Short: models/registry/HourSet_02_2p5x1_120H_short_logloss/oos_predictions.csv
+python : Traceback (most recent call last):
+At line:1 char:1
++ python agent/backtest_engine.py --config 
+configs/strategies/hourly_en ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Trac 
+   eback (most recent call last)::String) [], Re  
+  moteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "C:\Users\bwang\Documents\GitHub\CL_Analyst
+_Development\agent\backtest_engine.py", line 
+1839, in <module>
+    main()
+  File "C:\Users\bwang\Documents\GitHub\CL_Analyst
+_Development\agent\backtest_engine.py", line 
+1749, in main
+    raise ValueError(
+ValueError: Short model predictions (models/regist
+ry/HourSet_02_2p5x1_120H_short_logloss/oos_predict
+ions.csv) have no column containing 'sell' 
+(found: ['prob_buy']). Cannot silently use 
+another column as prob_sell.
