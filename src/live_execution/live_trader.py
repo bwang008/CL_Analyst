@@ -158,8 +158,6 @@ class CLOnlyLogFilter(logging.Filter):
         r"|orderStatus:"
         r"|execDetails[ :]"
         r"|commissionReport:"
-        r"|updatePortfolio:"
-        r"|position:"
         r")",
     )
 
@@ -201,8 +199,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("LiveTrader")
 
-# Suppress non-CL noise from ib_insync internal logging
-logging.getLogger("ib_insync").addFilter(CLOnlyLogFilter())
+# Suppress non-CL noise from ib_insync internal logging (callbacks originate in wrapper)
+logging.getLogger("ib_insync.wrapper").addFilter(CLOnlyLogFilter())
 
 
 def _sigmoid(x: float) -> float:
@@ -2868,19 +2866,31 @@ class LiveTrader:
         # Market hours check (CL: Sun 18:00 ET → Fri 17:00 ET)
         market_status = self._get_market_status(now)
 
-        # Position
+        # Position and PNL lookup
         try:
-            pos = self.manager.get_cl_position(symbol=self._execution_symbol)
-            pos_str = f"{pos} contracts" if pos != 0 else "FLAT"
+            # Pnl accumulation for the execution symbol
+            unr_pnl, real_pnl = 0.0, 0.0
+            pos = 0.0
+            if getattr(self.manager, "ib", None) and self.manager.ib.isConnected():
+                for item in self.manager.ib.portfolio():
+                    if getattr(item.contract, "symbol", "") == self._execution_symbol:
+                        pos += getattr(item, "position", 0.0)
+                        unr_pnl += getattr(item, "unrealizedPNL", 0.0) or 0.0
+                        real_pnl += getattr(item, "realizedPNL", 0.0) or 0.0
+            
+            pos_str = f"{pos:g} contracts" if pos != 0 else "FLAT"
+            pnl_str = f" | unr_pnl=${unr_pnl:,.2f} | real_pnl=${real_pnl:,.2f}"
         except Exception:
             pos_str = "unknown"
+            pnl_str = ""
 
         log.info(
-            "HEARTBEAT: alive | last_bar=%s | market=%s | position=%s | connected=%s",
+            "HEARTBEAT: alive | last_bar=%s | market=%s | position=%s%s | connected=%s",
             last_bar_str,
             market_status,
             pos_str,
-            self.manager.ib.isConnected(),
+            pnl_str,
+            self.manager.ib.isConnected() if getattr(self.manager, "ib", None) else False,
         )
 
     @staticmethod
