@@ -28,17 +28,17 @@ PROJECT_DIR="/home/$(whoami)/project"
 cd "$PROJECT_DIR"
 
 # Configuration — CANARY OVERRIDES
-DATASET_NAME="cl-5m_bk_set_10"
+DATASET_NAME="cl-5m_bk_set_11c"
 METRICS="logloss,average_precision"
 TARGET_LONG="TARGET_TRIPLE_2x1_24H_LONG"
 TARGET_SHORT="TARGET_TRIPLE_2x1_24H_SHORT"
 CUTOFF="2022-01-01"
-N_TRIALS=20
+N_TRIALS=300
 N_WORKERS=4
 THREADS_PER_WORKER=12
 DB_DIR="models/optuna_studies"
 BUCKET="gs://cltrainer-optuna-results"
-CANARY_PREFIX="canary"
+CANARY_PREFIX="scout_5m_v1"
 STRATEGY="configs/strategies/ensemble4.json"
 LOG="canary_run_$(date +%Y%m%d_%H%M%S).log"
 SHUTDOWN=false

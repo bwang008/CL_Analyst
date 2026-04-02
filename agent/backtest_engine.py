@@ -50,10 +50,13 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+from pandas.tseries.offsets import DateOffset
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
+from src.LGBMLearner import LGBMLearner
+from src.util import get_X_y
 from src.live_execution.strategies.execution_models import (
     BaseExecutionStrategy,
     EngineState,
@@ -92,7 +95,6 @@ class ExitReason(Enum):
     SL = "SL"
     TRAILING_BE = "TRAILING_BE"  # Trailing stop hit at breakeven
     TIME_BARRIER = "TIME_BARRIER"  # 288 bars elapsed
-    STRATEGY_FLIP = "STRATEGY_FLIP"  # Strategy requested an early exit/netting
 
 
 @dataclass
@@ -381,7 +383,6 @@ class BacktestEngine:
         # Consecutive signal counters
         self._consecutive_buy_count: int = 0
         self._consecutive_sell_count: int = 0
-        self._consecutive_exit_count: int = 0
 
         # Reset mutable engine state
         self._engine_state.position = 0
@@ -1073,33 +1074,6 @@ class BacktestEngine:
             elif self._state == TradeState.IN_POSITION:
                 self._on_in_position(ts, row.Open, row.High, row.Low)
 
-                # Strategy-driven Virtual Ledger netting: Check if strategy wants to force an early exit or flip
-                if self._state == TradeState.IN_POSITION:
-                    self._update_engine_state()
-                    pb = prob_buy_lookup.get(ts, 0.0)
-                    ps = prob_sell_lookup.get(ts, 0.0)
-                    orders = strategy.on_bar(
-                        ts, row.Open, row.High, row.Low, row.Close,
-                        atr, pb, ps, self._engine_state,
-                    )
-                    for order in orders:
-                        if order.action in ("EXIT", "BUY", "SELL"):
-                            if self.consecutive_signal_threshold > 0:
-                                if order.action == "EXIT" or (order.action in ("BUY", "SELL") and order.side != self._side):
-                                    self._consecutive_exit_count += 1
-                                    self._consecutive_buy_count = 0
-                                    self._consecutive_sell_count = 0
-                                    if self._consecutive_exit_count < self.consecutive_signal_threshold:
-                                        break
-                                    self._consecutive_exit_count = 0
-                                    
-                            if order.action == "EXIT" or (order.action in ("BUY", "SELL") and order.side != self._side):
-                                self._close_trade(ts, row.Close, ExitReason.STRATEGY_FLIP)
-                            break
-                    else:
-                        if self.consecutive_signal_threshold > 0:
-                            self._consecutive_exit_count = 0
-
             elif self._state == TradeState.COOLDOWN:
                 self._on_cooldown()
 
@@ -1621,6 +1595,16 @@ def main() -> None:
         description="BacktestEngine — Config-Driven Strategy Backtester"
     )
     parser.add_argument(
+        "--retrain-every",
+        default=None,
+        help="Pandas offset string (e.g. 3M, 6M) for Walk-Forward periodic retraining.",
+    )
+    parser.add_argument(
+        "--oos-start",
+        default=None,
+        help="Start date for Out-Of-Sample Walk-Forward timeline (e.g., 2024-01-01). Required if --retrain-every is set.",
+    )
+    parser.add_argument(
         "--predictions",
         default=None,
         help="Path to predictions CSV. If omitted and --config is given, "
@@ -1657,7 +1641,7 @@ def main() -> None:
         "--commission-per-side", type=float, default=2.50, help="Commission per side ($)"
     )
     parser.add_argument(
-        "--slippage-per-side", type=float, default=0.01, help="Slippage per side"
+        "--slippage-per-side", type=float, default=0.03, help="Slippage per side"
     )
     parser.add_argument(
         "--contract-multiplier", type=float, default=1000.0, help="CL multiplier"
@@ -1721,65 +1705,165 @@ def main() -> None:
             contract_multiplier=args.contract_multiplier,
         )
 
-    # Auto-resolve predictions from config if not explicitly provided
-    if args.predictions is None and strategy_cfg is not None:
-        models_cfg = strategy_cfg.get("models", {})
-        long_preds_path = models_cfg.get("long", {}).get("predictions_path")
-        short_preds_path = models_cfg.get("short", {}).get("predictions_path")
-
-        if long_preds_path and short_preds_path:
-            # Dual-model: auto-merge long + short predictions
-            long_preds_path = resolve_cli_path(long_preds_path)
-            short_preds_path = resolve_cli_path(short_preds_path)
-            print(f"Auto-resolving predictions from config (dual-model):")
-            print(f"  Long:  {long_preds_path}")
-            print(f"  Short: {short_preds_path}")
-            long_df = load_predictions(long_preds_path)
-            short_df = load_predictions(short_preds_path)
-            # Find probability columns (case-insensitive, strict validation)
-            long_col = _resolve_prob_column(long_df, "buy")
-            short_col = _resolve_prob_column(short_df, "sell")
-            if long_col is None:
-                raise ValueError(
-                    f"Long model predictions ({long_preds_path}) have no column "
-                    f"containing 'buy' (found: {list(long_df.columns)}). "
-                    f"Cannot silently use another column as prob_buy."
-                )
-            if short_col is None:
-                raise ValueError(
-                    f"Short model predictions ({short_preds_path}) have no column "
-                    f"containing 'sell' (found: {list(short_df.columns)}). "
-                    f"Cannot silently use another column as prob_sell."
-                )
-            long_probs = long_df[[long_col]].rename(columns={long_col: "prob_Buy"})
-            short_probs = short_df[[short_col]].rename(columns={short_col: "prob_Sell"})
-            preds = long_probs.join(short_probs, how="outer").fillna(0.0)
-            print(f"  Merged: {len(preds):,} rows ({preds['prob_Buy'].gt(0).sum():,} buy signals, {preds['prob_Sell'].gt(0).sum():,} sell signals)")
-        elif long_preds_path:
-            long_preds_path = resolve_cli_path(long_preds_path)
-            print(f"Auto-resolving predictions from config: {long_preds_path}")
-            preds = load_predictions(long_preds_path)
-        elif short_preds_path:
-            short_preds_path = resolve_cli_path(short_preds_path)
-            print(f"Auto-resolving predictions from config: {short_preds_path}")
-            preds = load_predictions(short_preds_path)
-        else:
-            raise ValueError(
-                "No 'predictions_path' found in config for either 'long' or 'short' models, "
-                "and no --predictions flag provided. Explicit prediction paths are required."
-            )
-    elif args.predictions is None:
-        raise ValueError(
-            "No --predictions flag provided and no config file specified. "
-            "Explicit prediction paths are required."
-        )
-    else:
-        print(f"Loading predictions from {args.predictions}...")
-        preds = load_predictions(args.predictions)
-
-    # Run A: Historical data
+    # Load historical data
     print(f"Loading historical OHLCV from {args.data}...")
     ohlcv_a = load_ohlcv(args.data)
+
+    if args.retrain_every is not None:
+        if not args.oos_start:
+            raise ValueError("--oos-start must be provided if --retrain-every is used (e.g., --oos-start 2024-01-01).")
+        
+        print(f"\n--- INIT WALK-FORWARD PERIODIC RETRAINING: {args.retrain_every} ---")
+        oos_start = pd.Timestamp(args.oos_start)
+        
+        if not args.data.endswith(".parquet"):
+            raise ValueError("Walk-Forward Retraining requires the full .parquet feature dataset.")
+            
+        models_cfg = strategy_cfg.get("models", {}) if strategy_cfg else {}
+        
+        best_params = {}
+        for side in ["long", "short"]:
+            cfg_side = models_cfg.get(side, {})
+            exp_id = cfg_side.get("experiment_id")
+            if exp_id:
+                bp_path = os.path.join(PROJECT_ROOT, "models", "registry", exp_id, "best_params.json")
+                try:
+                    with open(bp_path, "r") as f:
+                        best_params[side] = json.load(f)
+                    print(f"Loaded {side} params: {bp_path}")
+                except FileNotFoundError:
+                    print(f"WARNING: No best_params.json found for {side} at {bp_path}")
+                    best_params[side] = {}
+            else:
+                best_params[side] = {}
+                
+        chunks = list(pd.date_range(start=oos_start, end=ohlcv_a.index.max(), freq=args.retrain_every))
+        if len(chunks) == 0 or chunks[-1] < ohlcv_a.index.max():
+            chunks.append(ohlcv_a.index.max())
+            
+        oos_preds = []
+        for i in range(len(chunks) - 1):
+            chunk_start = chunks[i]
+            chunk_end = chunks[i+1]
+            print(f"\n[WF] Chunk {i+1}: {chunk_start.strftime('%Y-%m-%d')} to {chunk_end.strftime('%Y-%m-%d')}")
+            
+            lb_years_long = models_cfg.get("long", {}).get("lookback_window_years")
+            lb_years_short = models_cfg.get("short", {}).get("lookback_window_years")
+            
+            is_start_long = chunk_start - DateOffset(years=lb_years_long) if lb_years_long else ohlcv_a.index.min()
+            is_start_short = chunk_start - DateOffset(years=lb_years_short) if lb_years_short else ohlcv_a.index.min()
+            
+            is_df_long = ohlcv_a[(ohlcv_a.index >= is_start_long) & (ohlcv_a.index < chunk_start)]
+            is_df_short = ohlcv_a[(ohlcv_a.index >= is_start_short) & (ohlcv_a.index < chunk_start)]
+            
+            oos_df = ohlcv_a[(ohlcv_a.index >= chunk_start) & (ohlcv_a.index < chunk_end)]
+            if oos_df.empty:
+                continue
+                
+            chunk_preds = pd.DataFrame(index=oos_df.index)
+            
+            if "long" in models_cfg:
+                target_name = models_cfg["long"].get("target", "TARGET_DIR_8PCT_MULTI")
+                X_train_l, y_train_l = get_X_y(is_df_long, target_name=target_name)
+                valid_mask = ~y_train_l.isna()
+                X_train_l, y_train_l = X_train_l[valid_mask], y_train_l[valid_mask]
+                
+                print(f"  Training Long model: {len(X_train_l):,} rows (IS start: {is_start_long.strftime('%Y-%m-%d')})")
+                model_long = LGBMLearner(**best_params["long"])
+                model_long.add_evidence(X_train_l, y_train_l)
+                
+                X_test_l, _ = get_X_y(oos_df, target_name=target_name)
+                preds_l = model_long.model.predict(X_test_l)
+                if preds_l.ndim == 2 and preds_l.shape[1] >= 2:
+                    prob_buy = preds_l[:, 1]
+                else:
+                    prob_buy = preds_l
+                chunk_preds["prob_Buy"] = prob_buy
+            
+            if "short" in models_cfg:
+                target_name = models_cfg["short"].get("target", "TARGET_DIR_8PCT_MULTI")
+                X_train_s, y_train_s = get_X_y(is_df_short, target_name=target_name)
+                valid_mask = ~y_train_s.isna()
+                X_train_s, y_train_s = X_train_s[valid_mask], y_train_s[valid_mask]
+                
+                print(f"  Training Short model: {len(X_train_s):,} rows (IS start: {is_start_short.strftime('%Y-%m-%d')})")
+                model_short = LGBMLearner(**best_params["short"])
+                model_short.add_evidence(X_train_s, y_train_s)
+                
+                X_test_s, _ = get_X_y(oos_df, target_name=target_name)
+                preds_s = model_short.model.predict(X_test_s)
+                if preds_s.ndim == 2 and preds_s.shape[1] >= 3:
+                    prob_sell = preds_s[:, 2]
+                elif preds_s.ndim == 2 and preds_s.shape[1] == 2:
+                    prob_sell = preds_s[:, 1]
+                else:
+                    prob_sell = preds_s
+                chunk_preds["prob_Sell"] = prob_sell
+
+            oos_preds.append(chunk_preds)
+            
+        if len(oos_preds) > 0:
+            preds = pd.concat(oos_preds).fillna(0.0)
+            print(f"\n[WF] Stitching Complete. Generated {len(preds):,} OOS predictions.")
+        else:
+            print("\n[WF] WARNING: Generated 0 chunks. Fallback to empty predictions.")
+            preds = pd.DataFrame()
+
+    else:
+        # Auto-resolve predictions from config if not explicitly provided
+        if args.predictions is None and strategy_cfg is not None:
+            models_cfg = strategy_cfg.get("models", {})
+            long_preds_path = models_cfg.get("long", {}).get("predictions_path")
+            short_preds_path = models_cfg.get("short", {}).get("predictions_path")
+    
+            if long_preds_path and short_preds_path:
+                # Dual-model: auto-merge long + short predictions
+                long_preds_path = resolve_cli_path(long_preds_path)
+                short_preds_path = resolve_cli_path(short_preds_path)
+                print(f"Auto-resolving predictions from config (dual-model):")
+                print(f"  Long:  {long_preds_path}")
+                print(f"  Short: {short_preds_path}")
+                long_df = load_predictions(long_preds_path)
+                short_df = load_predictions(short_preds_path)
+                # Find probability columns (case-insensitive, strict validation)
+                long_col = _resolve_prob_column(long_df, "buy")
+                short_col = _resolve_prob_column(short_df, "sell")
+                if long_col is None:
+                    raise ValueError(
+                        f"Long model predictions ({long_preds_path}) have no column "
+                        f"containing 'buy' (found: {list(long_df.columns)}). "
+                        f"Cannot silently use another column as prob_buy."
+                    )
+                if short_col is None:
+                    raise ValueError(
+                        f"Short model predictions ({short_preds_path}) have no column "
+                        f"containing 'sell' (found: {list(short_df.columns)}). "
+                        f"Cannot silently use another column as prob_sell."
+                    )
+                long_probs = long_df[[long_col]].rename(columns={long_col: "prob_Buy"})
+                short_probs = short_df[[short_col]].rename(columns={short_col: "prob_Sell"})
+                preds = long_probs.join(short_probs, how="outer").fillna(0.0)
+                print(f"  Merged: {len(preds):,} rows ({preds['prob_Buy'].gt(0).sum():,} buy signals, {preds['prob_Sell'].gt(0).sum():,} sell signals)")
+            elif long_preds_path:
+                long_preds_path = resolve_cli_path(long_preds_path)
+                print(f"Auto-resolving predictions from config: {long_preds_path}")
+                preds = load_predictions(long_preds_path)
+            elif short_preds_path:
+                short_preds_path = resolve_cli_path(short_preds_path)
+                print(f"Auto-resolving predictions from config: {short_preds_path}")
+                preds = load_predictions(short_preds_path)
+            else:
+                print("WARNING: No predictions_path in config and no --predictions flag. Using default.")
+                args.predictions = resolve_cli_path("reports/vault_predictions.csv")
+                preds = load_predictions(args.predictions)
+        elif args.predictions is None:
+            # No config and no predictions — use legacy default
+            args.predictions = resolve_cli_path("reports/vault_predictions.csv")
+            print(f"Loading predictions from {args.predictions}...")
+            preds = load_predictions(args.predictions)
+        else:
+            print(f"Loading predictions from {args.predictions}...")
+            preds = load_predictions(args.predictions)
 
     print("Running backtest on historical data...")
     result_a = bt.run(preds, ohlcv_a, label="Historical")
