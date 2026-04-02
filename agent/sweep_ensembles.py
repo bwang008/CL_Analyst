@@ -1,8 +1,19 @@
+"""
+Automated Ensemble Sweep (Cartesian Pairing)
+
+This script executes a Cartesian sweep of Long and Short models, pairing them
+together to find the ultimate strategy combinations without triggering 
+expensive retraining logic.
+
+Tags: cartesian sweep, ensemble sweep, pairing, combinatorics
+"""
+
 import json
 import subprocess
 import os
 import re
 import argparse
+import pandas as pd
 
 def get_models_from_dir(directory, prefix=""):
     models = []
@@ -53,6 +64,9 @@ def run_backtest(long_path, short_path, base_config, data_path, temp_config):
     winrate = re.search(r"Win Rate:\s+([\d\.]+%)", out)
     winrate = winrate.group(1) if winrate else "0%"
     
+    pf = re.search(r"Profit Factor:\s+([\d\.]+)", out)
+    pf = pf.group(1) if pf else "0.0"
+    
     max_dd = re.search(r"Max Drawdown:\s+\$\s+([\-\d\.,]+)", out)
     max_dd = max_dd.group(1) if max_dd else "0"
     
@@ -65,30 +79,21 @@ def run_backtest(long_path, short_path, base_config, data_path, temp_config):
                     val = match.group(1).replace(",", "")
                     tail_pnl += float(val)
 
-    return {"trades": trades, "pnl": pnl, "winrate": winrate, "max_dd": max_dd, "tail_pnl": f"{tail_pnl:,.2f}"}
+    return {"trades": trades, "pnl": pnl, "winrate": winrate, "pf": pf, "max_dd": max_dd, "tail_pnl": f"{tail_pnl:,.2f}"}
 
 
 def main():
     parser = argparse.ArgumentParser(description="Sweep Model Ensembles")
     parser.add_argument("--base-config", required=True, help="Base JSON strategy")
     parser.add_argument("--data", required=True, help="Parquet Dataset")
-    parser.add_argument("--output-md", default="reports/ensemble_sweep_results.md", help="Output Markdown report")
+    parser.add_argument("--long-dir", required=True, help="Directory containing Long models")
+    parser.add_argument("--short-dir", required=True, help="Directory containing Short models")
+    parser.add_argument("--output-csv", default="reports/ensemble_sweep_results.csv", help="Output CSV report")
     args = parser.parse_args()
 
     # Discover models
-    long_models = []
-    short_models = []
-    
-    dirs = [
-        "reports/canary/registry/canary_output/registry",
-        "models/registry"
-    ]
-    
-    for d in dirs:
-        long_models.extend(get_models_from_dir(d, prefix="E2E_HourSet_02_long"))
-        long_models.extend(get_models_from_dir(d, prefix="HourSet_02_2p5x1_120H_long"))
-        short_models.extend(get_models_from_dir(d, prefix="E2E_HourSet_02_short"))
-        short_models.extend(get_models_from_dir(d, prefix="HourSet_02_2p5x1_120H_short"))
+    long_models = get_models_from_dir(args.long_dir)
+    short_models = get_models_from_dir(args.short_dir)
         
     print(f"Discovered {len(long_models)} Long and {len(short_models)} Short candidates.")
     if not long_models or not short_models:
@@ -98,8 +103,8 @@ def main():
     temp_cfg = "configs/strategies/temp_sweep_config.json"
     results = []
 
-    print(f"{'Long Model':<40} | {'Short Model':<40} | {'Trds':<4} | {'WR%':<5} | {'Net PnL':<10} | {'Max DD':<10} | {'Tail PnL':<10}")
-    print("-" * 140)
+    print(f"{'Long Model':<40} | {'Short Model':<40} | {'Trds':<4} | {'WR%':<5} | {'PF':<5} | {'Net PnL':<10} | {'Max DD':<10} | {'Tail PnL':<10}")
+    print("-" * 145)
 
     for lm in long_models:
         for sm in short_models:
@@ -107,23 +112,33 @@ def main():
             sname = sm.split("/")[-1].replace("E2E_HourSet_02_short_", "short_").replace("HourSet_02_2p5x1_120H_short_", "short_120H_")
             
             metrics = run_backtest(lm, sm, args.base_config, args.data, temp_cfg)
-            print(f"{lname[:40]:<40} | {sname[:40]:<40} | {metrics['trades']:<4} | {metrics['winrate']:<5} | {metrics['pnl']:<10} | {metrics['max_dd']:<10} | {metrics['tail_pnl']:<10}")
+            print(f"{lname[:40]:<40} | {sname[:40]:<40} | {metrics['trades']:<4} | {metrics['winrate']:<5} | {metrics['pf']:<5} | {metrics['pnl']:<10} | {metrics['max_dd']:<10} | {metrics['tail_pnl']:<10}")
             
-            # Format row
-            row = f"| `{lname}` | `{sname}` | {metrics['trades']} | {metrics['winrate']} | ${metrics['pnl']} | ${metrics['max_dd']} | ${metrics['tail_pnl']} |\n"
-            results.append(row)
+            # Append dict for Pandas
+            pnl_val = float(metrics['pnl'].replace(",", "")) if metrics['pnl'] else 0.0
+            pf_val = float(metrics['pf']) if metrics['pf'] else 0.0
+            
+            results.append({
+                "Long Model": lname,
+                "Short Model": sname,
+                "Trades": int(metrics['trades']),
+                "Win Rate": metrics['winrate'],
+                "Profit Factor": pf_val,
+                "Net PnL": pnl_val,
+                "Max DD": metrics['max_dd'],
+                "Tail PnL": metrics['tail_pnl']
+            })
 
     if os.path.exists(temp_cfg):
         os.remove(temp_cfg)
         
-    os.makedirs(os.path.dirname(args.output_md), exist_ok=True)
-    with open(args.output_md, "w", encoding="utf-8") as f:
-        f.write("# Ensemble Sweep Results\n\n")
-        f.write("| Long Model | Short Model | Trades | WR% | Net PnL | Max DD | 25/26 Tail PnL |\n")
-        f.write("|---|---|---|---|---|---|---|\n")
-        f.writelines(results)
+    if results:
+        df = pd.DataFrame(results)
+        df = df.sort_values(by="Profit Factor", ascending=False)
         
-    print(f"\nSaved Markdown Report to {args.output_md}")
+        os.makedirs(os.path.dirname(args.output_csv), exist_ok=True)
+        df.to_csv(args.output_csv, index=False)
+        print(f"\nSaved Sorted CSV Report to {args.output_csv}")
 
 if __name__ == "__main__":
     main()
