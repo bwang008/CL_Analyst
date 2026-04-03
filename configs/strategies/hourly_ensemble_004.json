@@ -20,14 +20,14 @@
     "models": {
         "long": {
             "experiment_id": "E2E_HourSet_03_long_average_precision",
-            "model_path": "reports/canary/registry/canary_output/registry/E2E_HourSet_03_long_average_precision/final_model.pkl",
-            "predictions_path": "reports/canary/registry/canary_output/registry/E2E_HourSet_03_long_average_precision/oos_predictions.csv",
+            "model_path": "models/registry/E2E_HourSet_03_long_average_precision/final_model.pkl",
+            "predictions_path": "models/registry/E2E_HourSet_03_long_average_precision/oos_predictions.csv",
             "threshold": 0.55
         },
         "short": {
             "experiment_id": "E2E_HourSet_03_short_logloss",
-            "model_path": "reports/canary/registry/canary_output/registry/E2E_HourSet_03_short_logloss/final_model.pkl",
-            "predictions_path": "reports/canary/registry/canary_output/registry/E2E_HourSet_03_short_logloss/oos_predictions.csv",
+            "model_path": "models/registry/E2E_HourSet_03_short_logloss/final_model.pkl",
+            "predictions_path": "models/registry/E2E_HourSet_03_short_logloss/oos_predictions.csv",
             "threshold": 0.55
         }
     },

@@ -1,0 +1,39 @@
+{
+  "experiment_id": "E2E_HourSet_03_long_average_precision",
+  "strategy": "e2e_alpha_factory_long",
+  "data_path": "C:\\CL_Analyst_Data\\data\\processed\\cl-1h_bk_HourSet_03.parquet",
+  "target_name": "TARGET_TRIPLE_2p5x1_72H_LONG",
+  "method": "frozen_retrain",
+  "balance_mode": "downsample",
+  "train_cutoff_date": "2022-01-01",
+  "model_params": {
+    "use_time": false,
+    "use_volatility": false,
+    "use_momentum": true,
+    "use_trend": true,
+    "use_microstructure": false,
+    "use_structure": false,
+    "use_distribution": true,
+    "use_exhaustion": false,
+    "use_divergence": true,
+    "use_macro_tech": true,
+    "use_macro_external": true,
+    "boosting_type": "gbdt",
+    "num_leaves": 21,
+    "min_child_samples": 265,
+    "learning_rate": 0.009955276692030826,
+    "feature_fraction": 0.526107441454962,
+    "reg_alpha": 0.24927639658941683,
+    "reg_lambda": 3.1566927993570597,
+    "max_depth": 3,
+    "min_gain_to_split": 1.7600716820772384,
+    "path_smooth": 2.6316283326309917,
+    "bagging_fraction": 0.386118818529592,
+    "bagging_freq": 1,
+    "n_estimators": 500
+  },
+  "provenance": {
+    "source": "Frozen hyperparams from HourSet_02 Optuna champion",
+    "base_experiment": "E2E_HourSet_02_long_average_precision"
+  }
+}
