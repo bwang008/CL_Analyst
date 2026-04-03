@@ -47,7 +47,7 @@ def focal_eval(preds, val_set):
 # Config
 # ---------------------------------------------------------------------------
 
-DATA_PATH = "data/cl-1h_bk_HourSet_03.parquet"
+DATA_PATH = r"C:\CL_Analyst_Data\data\processed\cl-1h_bk_HourSet_03.parquet"
 TRAIN_CUTOFF = pd.Timestamp("2022-01-01")
 OUTPUT_BASE = "reports/canary/registry/canary_output/registry"
 

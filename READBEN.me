@@ -1,4 +1,4 @@
-﻿# Optuna checkpoint_dir
+# Optuna checkpoint_dir
 python agent/check_optuna_db.py models/optuna_studies/wf_v2_long_logloss_set08.db
 python agent/check_optuna_db.py models/optuna_studies/wf_v2_long_logloss_set08.db
 python agent/check_optuna_db.py models/optuna_studies/long_logloss_100t.db
@@ -244,8 +244,21 @@ conda run -n trader python agent/backtest_engine.py --predictions reports/oos_en
 
 # Live ensemble latest:
 python -m src.live_execution.live_trader --config configs/strategies/ensemble2.json --dry-run
-# Ensemble4
+# Ensemble4 5min
 python -m src.live_execution.live_trader --config configs/strategies/ensemble4.json
+#Ensemble hourly
+python -m src.live_execution.live_trader --config configs/strategies/hourly_ensemble_004.json
+
+
+#Backtest Hourly
+python agent/backtest_engine.py --config configs/strategies/hourly_ensemble_004.json --data "C:\CL_Analyst_Data\data\processed\cl-1h_bk_HourSet_03.parquet" --slippage-per-side 0.01
+
+
+#Backtest
+python agent/backtest_engine.py --config configs/strategies/ensemble4_set11.json --data "C:\CL_Analyst_Data\data\processed\cl-1h_bk_HourSet_03.parquet" --slippage-per-side 0.01
+
+
+
 
 ```powershell
 # Dry run (no real orders -- logs signals only)

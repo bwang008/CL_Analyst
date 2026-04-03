@@ -24,23 +24,34 @@ def get_models_from_dir(directory, prefix=""):
                     models.append(os.path.join(directory, item).replace("\\", "/"))
     return models
 
-def run_backtest(long_path, short_path, base_config, data_path, temp_config):
-    # Load base config
+def run_backtest(long_path, short_path, base_config, data_path, temp_config, long_threshold=None, short_threshold=None):
+    # Load base config fresh for each pair
     with open(base_config, "r") as f:
         cfg = json.load(f)
-        
+
     # Ensure models block exists
     if "models" not in cfg:
         cfg["models"] = {"long": {}, "short": {}}
-        
-    cfg["models"]["long"]["experiment_id"] = long_path.split("/")[-1]
-    cfg["models"]["long"]["model_path"] = long_path
+
+    # --- Resolve thresholds ---
+    # Priority: CLI override > base config value > safe default of 0.55
+    base_long_thr  = cfg["models"].get("long",  {}).get("threshold", 0.55)
+    base_short_thr = cfg["models"].get("short", {}).get("threshold", 0.55)
+    final_long_thr  = long_threshold  if long_threshold  is not None else base_long_thr
+    final_short_thr = short_threshold if short_threshold is not None else base_short_thr
+
+    # --- Patch Long model ---
+    cfg["models"]["long"]["experiment_id"]   = long_path.split("/")[-1]
+    cfg["models"]["long"]["model_path"]       = long_path
     cfg["models"]["long"]["predictions_path"] = f"{long_path}/oos_predictions.csv"
-    
-    cfg["models"]["short"]["experiment_id"] = short_path.split("/")[-1]
-    cfg["models"]["short"]["model_path"] = short_path
+    cfg["models"]["long"]["threshold"]        = final_long_thr   # enforce threshold!
+
+    # --- Patch Short model ---
+    cfg["models"]["short"]["experiment_id"]   = short_path.split("/")[-1]
+    cfg["models"]["short"]["model_path"]       = short_path
     cfg["models"]["short"]["predictions_path"] = f"{short_path}/oos_predictions.csv"
-    
+    cfg["models"]["short"]["threshold"]        = final_short_thr  # enforce threshold!
+
     # Save temp config
     with open(temp_config, "w") as f:
         json.dump(cfg, f, indent=4)
@@ -89,16 +100,27 @@ def main():
     parser.add_argument("--long-dir", required=True, help="Directory containing Long models")
     parser.add_argument("--short-dir", required=True, help="Directory containing Short models")
     parser.add_argument("--output-csv", default="reports/ensemble_sweep_results.csv", help="Output CSV report")
+    parser.add_argument("--long-threshold",  type=float, default=None, help="Override Buy probability threshold (e.g. 0.55)")
+    parser.add_argument("--short-threshold", type=float, default=None, help="Override Sell probability threshold (e.g. 0.55)")
     args = parser.parse_args()
 
     # Discover models
     long_models = get_models_from_dir(args.long_dir)
     short_models = get_models_from_dir(args.short_dir)
-        
+
     print(f"Discovered {len(long_models)} Long and {len(short_models)} Short candidates.")
     if not long_models or not short_models:
         print("Missing models to sweep. Exiting.")
         return
+
+    # Resolve thresholds for display
+    with open(args.base_config) as f:
+        _base = json.load(f)
+    _base_long_thr  = _base.get("models", {}).get("long",  {}).get("threshold", 0.55)
+    _base_short_thr = _base.get("models", {}).get("short", {}).get("threshold", 0.55)
+    eff_long_thr  = args.long_threshold  if args.long_threshold  is not None else _base_long_thr
+    eff_short_thr = args.short_threshold if args.short_threshold is not None else _base_short_thr
+    print(f"Thresholds enforced: Buy >= {eff_long_thr}, Sell >= {eff_short_thr}")
 
     temp_cfg = "configs/strategies/temp_sweep_config.json"
     results = []
@@ -111,7 +133,11 @@ def main():
             lname = lm.split("/")[-1].replace("E2E_HourSet_02_long_", "long_").replace("HourSet_02_2p5x1_120H_long_", "long_120H_")
             sname = sm.split("/")[-1].replace("E2E_HourSet_02_short_", "short_").replace("HourSet_02_2p5x1_120H_short_", "short_120H_")
             
-            metrics = run_backtest(lm, sm, args.base_config, args.data, temp_cfg)
+            metrics = run_backtest(
+                lm, sm, args.base_config, args.data, temp_cfg,
+                long_threshold=args.long_threshold,
+                short_threshold=args.short_threshold,
+            )
             print(f"{lname[:40]:<40} | {sname[:40]:<40} | {metrics['trades']:<4} | {metrics['winrate']:<5} | {metrics['pf']:<5} | {metrics['pnl']:<10} | {metrics['max_dd']:<10} | {metrics['tail_pnl']:<10}")
             
             # Append dict for Pandas

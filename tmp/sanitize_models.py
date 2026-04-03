@@ -1,20 +1,15 @@
 """
-Model Sanitization Script
-Converts legacy pickled LightGBM models into native .txt representations.
-This strips all Python namespace dependencies and Immunizes the production
-engine from Custom Objective Pickling Errors.
+Sanitize HourSet_03 model PKLs by exporting the booster as a pure
+LightGBM text file (final_model_pure.txt). LGBMLearner.load() will
+automatically prefer these over the .pkl when present.
 """
-
-import os
-import sys
+import os, sys
 import numpy as np
 import joblib
+import lightgbm as lgb
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, PROJECT_ROOT)
-os.chdir(PROJECT_ROOT)
-
-# 1. Define dummy focal_obj so Joblib can unpack the infected .pkl files
+# Must define focal_obj here so joblib can deserialize the PKL
+# (it was defined in __main__ when the retrain script ran)
 FOCAL_GAMMA = 2.0
 
 def _sigmoid(x):
@@ -22,39 +17,31 @@ def _sigmoid(x):
     return 1.0 / (1.0 + np.exp(-x))
 
 def focal_obj(preds, train_set):
-    """Dummy scope target for unpickling"""
-    pass
+    labels = train_set.get_label().astype(int)
+    p = _sigmoid(preds)
+    p_t = np.where(labels == 1, p, 1 - p)
+    grad = (p - labels) * ((1 - p_t) ** FOCAL_GAMMA)
+    hess = (p * (1 - p)) * ((1 - p_t) ** FOCAL_GAMMA)
+    return grad, hess
 
-def sanitize_model(pkl_path):
-    if not os.path.exists(pkl_path):
-        print(f"File not found: {pkl_path}")
-        return
-        
-    print(f"Loading {pkl_path}...")
-    try:
-        data = joblib.load(pkl_path)
-    except Exception as e:
-        print(f"Failed to load {pkl_path}: {e}")
-        return
-        
-    if isinstance(data, dict) and 'model' in data:
-        model = data['model']
-    else:
-        model = data
+MODEL_DIRS = [
+    r"reports/canary/registry/canary_output/registry/E2E_HourSet_03_long_average_precision",
+    r"reports/canary/registry/canary_output/registry/E2E_HourSet_03_short_logloss",
+]
 
-    pure_txt_path = pkl_path.replace(".pkl", "_pure.txt")
-    print(f"Saving native booster to {pure_txt_path}...")
-    model.save_model(pure_txt_path)
-    print("Sanitization complete for this model.\n")
+for d in MODEL_DIRS:
+    pkl_path = os.path.join(d, "final_model.pkl")
+    txt_path = os.path.join(d, "final_model_pure.txt")
 
-if __name__ == "__main__":
-    base_dir = "reports/canary/registry/canary_output/registry"
-    
-    models = [
-        "E2E_HourSet_03_long_average_precision",
-        "E2E_HourSet_03_short_logloss"
-    ]
-    
-    for model_dir in models:
-        pkl_path = os.path.join(base_dir, model_dir, "final_model.pkl")
-        sanitize_model(pkl_path)
+    print(f"\nProcessing: {os.path.basename(d)}")
+    print(f"  PKL: {pkl_path}")
+
+    data = joblib.load(pkl_path)
+    booster = data["model"] if isinstance(data, dict) else data
+
+    booster.save_model(txt_path)
+    txt_size = os.path.getsize(txt_path)
+    print(f"  Saved: {txt_path} ({txt_size/1024:.0f} KB)")
+    print(f"  Trees: {booster.num_trees()} | Features: {booster.num_feature()}")
+
+print("\nDone. Live trader will now load _pure.txt versions automatically.")

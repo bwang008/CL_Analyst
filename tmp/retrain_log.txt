@@ -1,7 +1,7 @@
 ======================================================================
 HourSet_03 Local Retrain (Frozen Hyperparameters)
 ======================================================================
-Data: data/cl-1h_bk_HourSet_03.parquet
+Data: C:\CL_Analyst_Data\data\processed\cl-1h_bk_HourSet_03.parquet
 Train cutoff: 2022-01-01
 Total rows: 101,857
 Train (pre-cutoff): 76,891 rows -> 2021-12-31
