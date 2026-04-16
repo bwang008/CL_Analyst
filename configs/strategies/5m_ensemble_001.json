@@ -1,0 +1,64 @@
+{
+    "nickname": "5m_ensemble_001",
+    "description": "5-Minute Walk-Forward Ensemble. Cloud sweep champion hyperparams (300 trials, HourSet_02 proxy). Long=average_precision (trial 174, score=0.3181), Short=logloss (trial 297, score=-0.6706). First WF deployment on 5m bar_size.",
+    "execution_class": "TieredEnsembleStrategy",
+    "exit_mode": "TIERED",
+    "trailing_atr_mult": 100.0,
+    "tp_cooldown_bars": 0,
+    "sl_cooldown_bars": 4,
+    "max_hold_bars": 576,
+    "allow_concurrent": false,
+    "max_concurrent": 1,
+    "max_position_size": 1,
+    "execution_symbol": "MCL",
+    "bar_size": "5m",
+    "live_config": {
+        "client_id": 26,
+        "entry_mode": "marketable_limit",
+        "exit_mode": "marketable_limit"
+    },
+    "models": {
+        "long": {
+            "experiment_id": "scout_5m_v1_long_average_precision",
+            "target": "TARGET_TRIPLE_2x1_24H_LONG",
+            "lookback_window_years": 3,
+            "threshold": 0.55
+        },
+        "short": {
+            "experiment_id": "scout_5m_v1_short_logloss",
+            "target": "TARGET_TRIPLE_2x1_24H_SHORT",
+            "lookback_window_years": 3,
+            "threshold": 0.55
+        }
+    },
+    "long": {
+        "tiered_exits": [
+            {
+                "qty_pct": 1.0,
+                "tp_atr_mult": 2.5
+            }
+        ],
+        "sl_atr_mult": 1.5,
+        "tiers": [
+            {
+                "min_prob": 0.55,
+                "lots": 1
+            }
+        ]
+    },
+    "short": {
+        "tiered_exits": [
+            {
+                "qty_pct": 1.0,
+                "tp_atr_mult": 3.0
+            }
+        ],
+        "sl_atr_mult": 3.0,
+        "tiers": [
+            {
+                "min_prob": 0.55,
+                "lots": 1
+            }
+        ]
+    }
+}

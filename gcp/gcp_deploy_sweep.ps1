@@ -26,6 +26,7 @@ param(
     [string]$Metrics = "logloss,average_precision",
     [string]$TargetLong = "",
     [string]$TargetShort = "",
+    [string]$JobName = "",
     [switch]$NoShutdown,
     [switch]$SkipProvision,
     [switch]$UseBuckets
@@ -204,8 +205,12 @@ if ($TargetLong) { $targetFlags += " --target-long=$TargetLong" }
 if ($TargetShort) { $targetFlags += " --target-short=$TargetShort" }
 $bucketFlag = if ($UseBuckets) { " --use-buckets" } else { "" }
 # Derive a unique job name from the dataset to prevent GCS collisions between parallel VMs
-$cleanName = $datasetName -replace '^cl-[0-9]+[mh]_bk_', ''
-$jobName = "sweep_$cleanName"
+if ($JobName) {
+    $jobName = $JobName
+} else {
+    $cleanName = $datasetName -replace '^cl-[0-9]+[mh]_bk_', ''
+    $jobName = "sweep_$cleanName"
+}
 $launchCmd = "tmux kill-session -t sweep 2>/dev/null; tmux new-session -d -s sweep 'bash $RemoteProject/gcp/vm_sweep_run.sh $shutdownFlag --dataset=$datasetName --strategy=$StrategyConfig --metrics=$Metrics --job-name=$jobName$targetFlags$bucketFlag'"
 try { gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd --quiet 2>$null } catch { }
 

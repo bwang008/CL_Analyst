@@ -190,7 +190,7 @@ function Get-VmLogTail {
     param([int]$Lines = 3)
     try {
         $output = gcloud compute ssh $VmName --zone=$Zone `
-            --command="tail -n $Lines /home/*/project/canary_run_*.log 2>/dev/null || tail -n $Lines /home/*/project/production_run_*.log 2>/dev/null" `
+            --command="tail -n $Lines /home/*/project/sweep_run_*.log 2>/dev/null || tail -n $Lines /home/*/project/canary_run_*.log 2>/dev/null || tail -n $Lines /home/*/project/production_run_*.log 2>/dev/null" `
             --quiet 2>$null
         if ($output -and $LASTEXITCODE -eq 0) {
             return $output

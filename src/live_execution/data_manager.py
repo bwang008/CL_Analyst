@@ -442,7 +442,7 @@ class DataManager:
             bars = self.ibkr_manager._request_historical_data(
                 contract=contract,
                 duration_str=duration_str,
-                bar_size="5 mins",
+                bar_size=self.bar_size,
                 what_to_show="TRADES",
                 use_rth=False,
                 end_datetime="",
@@ -917,7 +917,7 @@ class DataManager:
             bars = self.ibkr_manager._request_historical_data(
                 contract=contract,
                 duration_str=duration_str,
-                bar_size="5 mins",
+                bar_size=self.bar_size,
                 what_to_show="TRADES",
                 use_rth=False,
                 end_datetime="",
