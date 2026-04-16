@@ -92,6 +92,11 @@ def _make_strategy_stub(
     strategy._feature_names = ["ATR_14", "MACD", "ADX"]
     strategy.base_quantity = base_quantity
 
+    # Exit mode and tiered exit configs (required by evaluate)
+    strategy.exit_mode = strategy.config.get("exit_mode", "SINGLE").upper()
+    strategy._long_tiered_exits = None
+    strategy._short_tiered_exits = None
+
     # Ensemble support attributes (single-model stub)
     strategy._is_ensemble = False
     strategy._is_tiered = False
@@ -154,7 +159,8 @@ class TestSafeDefaults:
         s.entry_threshold = 100.0
         s._long_threshold = 100.0
         s._short_threshold = 100.0
-        s.learner.model.predict.return_value = np.array([0.99])
+        # logit 4.6 → sigmoid ≈ 0.99, still below safe threshold of 100.0
+        s.learner.model.predict.return_value = np.array([4.6])
         signal = s.evaluate(
             features=_make_features(),
             current_price=65.0,
@@ -171,7 +177,8 @@ class TestLongDirection:
     def test_buy_above_threshold_flat(self, tmp_path):
         """Probability >= 0.70 and flat → BUY."""
         s = _make_strategy_stub(str(tmp_path))
-        s.learner.model.predict.return_value = np.array([0.75])
+        # logit 1.0986 → sigmoid ≈ 0.75 (above 0.70 threshold)
+        s.learner.model.predict.return_value = np.array([1.0986])
 
         signal = s.evaluate(
             features=_make_features(),
@@ -188,7 +195,8 @@ class TestLongDirection:
 
     def test_hold_below_threshold(self, tmp_path):
         s = _make_strategy_stub(str(tmp_path))
-        s.learner.model.predict.return_value = np.array([0.50])
+        # logit 0.0 → sigmoid = 0.50 (below 0.70 threshold)
+        s.learner.model.predict.return_value = np.array([0.0])
 
         signal = s.evaluate(
             features=_make_features(),
@@ -214,7 +222,8 @@ class TestShortDirection:
                 "sl_atr_mult": 0.75,
             },
         )
-        s.learner.model.predict.return_value = np.array([0.65])
+        # logit 0.6190 → sigmoid ≈ 0.65 (above 0.60 threshold)
+        s.learner.model.predict.return_value = np.array([0.6190])
 
         signal = s.evaluate(
             features=_make_features(),
@@ -235,7 +244,8 @@ class TestPositionGuard:
 
     def test_hold_when_position_open_no_concurrent(self, tmp_path):
         s = _make_strategy_stub(str(tmp_path), {"allow_concurrent": False})
-        s.learner.model.predict.return_value = np.array([0.80])
+        # logit 1.3863 → sigmoid ≈ 0.80 (above 0.70 threshold)
+        s.learner.model.predict.return_value = np.array([1.3863])
 
         signal = s.evaluate(
             features=_make_features(),
@@ -249,7 +259,8 @@ class TestPositionGuard:
 
     def test_signal_fires_when_concurrent_allowed(self, tmp_path):
         s = _make_strategy_stub(str(tmp_path), {"allow_concurrent": True})
-        s.learner.model.predict.return_value = np.array([0.80])
+        # logit 1.3863 → sigmoid ≈ 0.80 (above 0.70 threshold)
+        s.learner.model.predict.return_value = np.array([1.3863])
 
         signal = s.evaluate(
             features=_make_features(),
@@ -265,7 +276,8 @@ class TestATRValidation:
 
     def test_hold_when_atr_none(self, tmp_path):
         s = _make_strategy_stub(str(tmp_path))
-        s.learner.model.predict.return_value = np.array([0.80])
+        # logit 1.3863 → sigmoid ≈ 0.80 (above 0.70 threshold)
+        s.learner.model.predict.return_value = np.array([1.3863])
 
         signal = s.evaluate(
             features=_make_features(),
@@ -278,7 +290,8 @@ class TestATRValidation:
 
     def test_hold_when_atr_zero(self, tmp_path):
         s = _make_strategy_stub(str(tmp_path))
-        s.learner.model.predict.return_value = np.array([0.80])
+        # logit 1.3863 → sigmoid ≈ 0.80 (above 0.70 threshold)
+        s.learner.model.predict.return_value = np.array([1.3863])
 
         signal = s.evaluate(
             features=_make_features(),
@@ -295,19 +308,22 @@ class TestSizingTiers:
 
     def test_highest_tier(self, tmp_path):
         s = _make_strategy_stub(str(tmp_path), {"entry_threshold": 0.50})
-        s.learner.model.predict.return_value = np.array([0.90])
+        # logit 2.1972 → sigmoid ≈ 0.90 (above 0.80 tier → 3 lots)
+        s.learner.model.predict.return_value = np.array([2.1972])
         sig = s.evaluate(_make_features(), 65.0, 0.50, 0)
         assert sig.lots == 3  # 90% >= 80% tier
 
     def test_middle_tier(self, tmp_path):
         s = _make_strategy_stub(str(tmp_path), {"entry_threshold": 0.50})
-        s.learner.model.predict.return_value = np.array([0.75])
+        # logit 1.0986 → sigmoid ≈ 0.75 (above 0.70 tier → 2 lots)
+        s.learner.model.predict.return_value = np.array([1.0986])
         sig = s.evaluate(_make_features(), 65.0, 0.50, 0)
         assert sig.lots == 2  # 75% >= 70% tier
 
     def test_lowest_tier(self, tmp_path):
         s = _make_strategy_stub(str(tmp_path), {"entry_threshold": 0.50})
-        s.learner.model.predict.return_value = np.array([0.55])
+        # logit 0.2007 → sigmoid ≈ 0.55 (above 0.50 tier → 1 lot)
+        s.learner.model.predict.return_value = np.array([0.2007])
         sig = s.evaluate(_make_features(), 65.0, 0.50, 0)
         assert sig.lots == 1  # 55% >= 50% tier
 
@@ -316,7 +332,8 @@ class TestSizingTiers:
             str(tmp_path),
             {"entry_threshold": 0.10, "sizing_tiers": {"0.80": 3}},
         )
-        s.learner.model.predict.return_value = np.array([0.50])
+        # logit 0.0 → sigmoid = 0.50 (above 0.10 threshold, below 0.80 tier)
+        s.learner.model.predict.return_value = np.array([0.0])
         sig = s.evaluate(_make_features(), 65.0, 0.50, 0)
         assert sig.lots == 1  # Falls through to base_quantity
 

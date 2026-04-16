@@ -335,12 +335,16 @@ class ConfigurableStrategy(Strategy):
         return self._feature_names
 
     def _run_inference(self, learner: LGBMLearner, features: pd.DataFrame) -> float:
-        """Run model inference and return a probability."""
+        """Run model inference and return a probability.
+
+        Models trained with custom focal loss (saved as _pure.txt) always
+        return raw logits from booster.predict(), even when values fall in
+        [0, 1].  Unconditional sigmoid is required to convert to probability.
+        Verified by tmp/test_prob_calibration.py (0.000000 error vs OOS).
+        """
         raw_pred = learner.model.predict(features)
         raw_val = float(np.asarray(raw_pred).ravel()[0])
-        if raw_val < 0 or raw_val > 1:
-            return _sigmoid(raw_val)
-        return raw_val
+        return _sigmoid(raw_val)
 
     def evaluate(
         self,
