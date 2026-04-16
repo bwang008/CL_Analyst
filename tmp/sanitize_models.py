@@ -40,6 +40,15 @@ for d in MODEL_DIRS:
     booster = data["model"] if isinstance(data, dict) else data
 
     booster.save_model(txt_path)
+    
+    # Enforce LF line endings over CRLF. LightGBM C++ text parser relies on exact 
+    # byte offsets to skip sections. CRLF causes format errors like 'met ge=0.00995528'
+    with open(txt_path, "rb") as f:
+        content = f.read()
+    if b"\r\n" in content:
+        with open(txt_path, "wb") as f:
+            f.write(content.replace(b"\r\n", b"\n"))
+
     txt_size = os.path.getsize(txt_path)
     print(f"  Saved: {txt_path} ({txt_size/1024:.0f} KB)")
     print(f"  Trees: {booster.num_trees()} | Features: {booster.num_feature()}")

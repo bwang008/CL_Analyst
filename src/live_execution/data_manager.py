@@ -433,10 +433,14 @@ class DataManager:
         contract = self.ibkr_manager.qualify_contract(contract)
 
         total_stitched = 0
+        import re
+        current_end = pd.Timestamp.now(tz="UTC")
+        
         for i, duration_str in enumerate(chunks):
+            end_dt_str = current_end.strftime("%Y%m%d %H:%M:%S")
             log.info(
-                "Backfill chunk %d/%d: requesting %s ...",
-                i + 1, len(chunks), duration_str,
+                "Backfill chunk %d/%d: requesting %s ending %s ...",
+                i + 1, len(chunks), duration_str, end_dt_str
             )
 
             bars = self.ibkr_manager._request_historical_data(
@@ -445,11 +449,16 @@ class DataManager:
                 bar_size=self.bar_size,
                 what_to_show="TRADES",
                 use_rth=False,
-                end_datetime="",
+                end_datetime=end_dt_str,
                 max_retries=5,
                 backoff_seconds=2.0,
                 throttle_seconds=0.5,
             )
+            
+            # Step backward for the next chunk
+            days_match = re.search(r"(\d+)\s*D", duration_str)
+            if days_match:
+                current_end -= pd.Timedelta(days=int(days_match.group(1)))
 
             if not bars:
                 log.warning("Backfill chunk %d: no bars returned.", i + 1)
@@ -908,11 +917,15 @@ class DataManager:
         contract = build_cl_contract(continuous=True)
         contract = self.ibkr_manager.qualify_contract(contract)
 
+        import re
+        current_end = pd.Timestamp.now(tz="UTC")
+        
         all_dfs = []
         for i, duration_str in enumerate(chunks):
+            end_dt_str = current_end.strftime("%Y%m%d %H:%M:%S")
             log.info(
-                "Ledger fetch chunk %d/%d: %s",
-                i + 1, len(chunks), duration_str,
+                "Ledger fetch chunk %d/%d: %s ending %s",
+                i + 1, len(chunks), duration_str, end_dt_str
             )
             bars = self.ibkr_manager._request_historical_data(
                 contract=contract,
@@ -920,11 +933,16 @@ class DataManager:
                 bar_size=self.bar_size,
                 what_to_show="TRADES",
                 use_rth=False,
-                end_datetime="",
+                end_datetime=end_dt_str,
                 max_retries=5,
                 backoff_seconds=2.0,
                 throttle_seconds=0.5,
             )
+            
+            # Step backward for the next chunk
+            days_match = re.search(r"(\d+)\s*D", duration_str)
+            if days_match:
+                current_end -= pd.Timedelta(days=int(days_match.group(1)))
             if bars:
                 all_dfs.append(ib_bars_to_dataframe(bars))
 
