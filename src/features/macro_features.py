@@ -358,6 +358,10 @@ class MacroFeatureEngine:
 
         # Extract date from the bar-level index for joining
         bar_dates = df.index.normalize()  # Strip time → midnight
+        
+        # Macro datasets are tz-naive. Ensure bar_dates are tz-naive for reindexing matching.
+        if bar_dates.tzinfo is not None:
+            bar_dates = bar_dates.tz_localize(None)
 
         n_before = len(df.columns)
 

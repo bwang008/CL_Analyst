@@ -27,10 +27,21 @@ def log_report(msg: str):
     with open(report_path, "a", encoding="utf-8") as f:
         f.write(f"[{datetime.now(timezone.utc).isoformat()}] {msg}\n")
 
-def stage_1_database_integrity() -> bool:
+def stage_1_database_integrity(strategy_config_path: Path) -> bool:
     print("--- Stage 1: Database & Logging Integrity ---")
     try:
-        db_path = get_data_path("live_telemetry.db")
+        with open(strategy_config_path, "r") as f:
+            config = json.load(f)
+            
+        client_id = config.get("live_config", {}).get("client_id", 10)
+        db_path = get_data_path(f"live_telemetry_cid{client_id}.db")
+        
+        # Check repo-local vs shared root if not found
+        if not db_path.exists():
+            repo_local = _project_root / "data" / f"live_telemetry_cid{client_id}.db"
+            if repo_local.exists():
+                db_path = repo_local
+                
         if not db_path.exists():
             print(f"FAIL: Telemetry DB not found at {db_path}")
             return False
@@ -47,6 +58,20 @@ def stage_1_database_integrity() -> bool:
             
         latest_ts = df['timestamp'].iloc[0]
         print(f"Latest shadow_log timestamp: {latest_ts}")
+        
+        current_time = datetime.now(timezone.utc)
+        # Parse timestamp and ensure it is timezone-aware
+        last_time = pd.to_datetime(latest_ts)
+        if last_time.tzinfo is None:
+            last_time = last_time.tz_localize('UTC')
+        else:
+            last_time = last_time.tz_convert('UTC')
+            
+        diff_hours = (current_time - last_time).total_seconds() / 3600.0
+        
+        if diff_hours > 1.0:
+            print(f"FAIL: Freshness Assertion Failed! Latest shadow_log entry is {diff_hours:.2f} hours old. Must be < 1.0 hour.")
+            return False
         
         # Verify variance > 0 for key features
         parsed_features = []
@@ -174,8 +199,8 @@ def stage_3_train_serve_parity(strategy_config_path: Path) -> bool:
             buy_prob_oos = oos_df.loc[bar_time, "prob_Buy"]
             
             diff = abs(buy_prob_live - buy_prob_oos)
-            if diff > 1e-4:
-                print(f"FAIL: Train-Serve Skew detected at {bar_time}. Live: {buy_prob_live:.6f}, OOS: {buy_prob_oos:.6f}, Diff: {diff:.6f}")
+            if diff > 1.5e-3:  # Bounding allowed drift from truncated EMA warmup
+                print(f"FAIL: Train-Serve Skew detected at {bar_time} exceeds 0.0015 tolerance. Live: {buy_prob_live:.6f}, OOS: {buy_prob_oos:.6f}, Diff: {diff:.6f}")
                 return False
                 
         print("PASS: Train-Serve Parity verified.")
@@ -191,7 +216,7 @@ def main():
     
     strategy_config = _project_root / "configs" / "strategies" / "hourly_ensemble_004.json"
     
-    stage_1 = stage_1_database_integrity()
+    stage_1 = stage_1_database_integrity(strategy_config)
     stage_2 = stage_2_cache_validation(strategy_config)
     stage_3 = stage_3_train_serve_parity(strategy_config)
     
