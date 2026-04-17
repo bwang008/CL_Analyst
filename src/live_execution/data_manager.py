@@ -437,10 +437,17 @@ class DataManager:
         current_end = pd.Timestamp.now(tz="UTC")
         
         for i, duration_str in enumerate(chunks):
-            end_dt_str = current_end.strftime("%Y%m%d %H:%M:%S")
+            # IBKR Error 10339: Continuous futures do not allow specific end date/time.
+            # The most recent chunk must be requested with an empty string.
+            if i == 0:
+                end_dt_str = ""
+            else:
+                end_dt_str = current_end.strftime("%Y%m%d %H:%M:%S")
+                log.warning("IBKR may reject specific end datetimes for continuous futures (chunk %d).", i + 1)
+
             log.info(
                 "Backfill chunk %d/%d: requesting %s ending %s ...",
-                i + 1, len(chunks), duration_str, end_dt_str
+                i + 1, len(chunks), duration_str, end_dt_str if end_dt_str else "NOW"
             )
 
             bars = self.ibkr_manager._request_historical_data(
@@ -922,10 +929,15 @@ class DataManager:
         
         all_dfs = []
         for i, duration_str in enumerate(chunks):
-            end_dt_str = current_end.strftime("%Y%m%d %H:%M:%S")
+            if i == 0:
+                end_dt_str = ""
+            else:
+                end_dt_str = current_end.strftime("%Y%m%d %H:%M:%S")
+                log.warning("IBKR may reject specific end datetimes for continuous futures (chunk %d).", i + 1)
+                
             log.info(
                 "Ledger fetch chunk %d/%d: %s ending %s",
-                i + 1, len(chunks), duration_str, end_dt_str
+                i + 1, len(chunks), duration_str, end_dt_str if end_dt_str else "NOW"
             )
             bars = self.ibkr_manager._request_historical_data(
                 contract=contract,
