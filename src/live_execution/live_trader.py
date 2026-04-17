@@ -330,10 +330,9 @@ def build_live_features(
     if _has_external_macro:
         try:
             work = MacroFeatureEngine().merge_all(work)
-        except FileNotFoundError as exc:
-            log.warning("Macro data not available: %s", exc)
         except Exception as exc:
-            log.error("Error merging macro features: %s", exc)
+            log.error("CRITICAL: Error merging macro features: %s", exc, exc_info=True)
+            raise RuntimeError(f"CRITICAL: Macro Feature Engine failed. Cannot generate live features. Reason: {exc}") from exc
 
     # 3. Add ATR_14 (in training, this was created by add_triple_barrier_target
     #    in data_processor.py, but we skip target generation for live inference)
@@ -2458,8 +2457,9 @@ class LiveTrader:
                 prob_sell=_prob_sell,
                 strategy_name=self.strategy.name,
             )
-        except Exception:
-            log.debug("Shadow state logging failed", exc_info=True)
+        except Exception as e:
+            log.error("Shadow state logging failed: %s", e, exc_info=True)
+            raise RuntimeError(f"CRITICAL: Failed to write shadow state to telemetry DB: {e}") from e
 
         # Build direction-aware probability display
         direction = getattr(self.strategy, 'direction', 'LONG').upper()

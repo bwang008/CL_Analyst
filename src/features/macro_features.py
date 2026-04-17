@@ -373,10 +373,8 @@ class MacroFeatureEngine:
                 for col in fred_aligned.columns:
                     df[col] = fred_aligned[col].values
                 log.debug("Merged %d FRED features", len(fred_aligned.columns))
-            except FileNotFoundError as exc:
-                log.warning("Skipping FRED features: %s", exc)
             except Exception as exc:
-                log.error("Error merging FRED features: %s", exc)
+                log.error("CRITICAL Error merging FRED features: %s", exc)
                 raise
 
         if include_cot:
@@ -389,10 +387,8 @@ class MacroFeatureEngine:
                 for col in cot_aligned.columns:
                     df[col] = cot_aligned[col].values
                 log.debug("Merged %d COT features", len(cot_aligned.columns))
-            except FileNotFoundError as exc:
-                log.warning("Skipping COT features: %s", exc)
             except Exception as exc:
-                log.error("Error merging COT features: %s", exc)
+                log.error("CRITICAL Error merging COT features: %s", exc)
                 raise
 
         n_added = len(df.columns) - n_before

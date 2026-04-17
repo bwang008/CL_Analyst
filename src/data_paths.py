@@ -32,27 +32,29 @@ _CL_DATA_ROOT = os.environ.get("CL_DATA_ROOT", "")
 def get_data_root() -> Path:
     """Return the primary data root directory.
 
-    Prefers ``CL_DATA_ROOT/data`` when CL_DATA_ROOT is set **and** the
-    directory exists, otherwise falls back to ``PROJECT_ROOT/data``.
+    Enforces that CL_DATA_ROOT must be set to prevent split-brain
+    worktrees creating isolated databases.
     """
-    if _CL_DATA_ROOT:
-        candidate = Path(_CL_DATA_ROOT) / "data"
-        if candidate.is_dir():
-            return candidate
-    return PROJECT_ROOT / "data"
+    if not _CL_DATA_ROOT:
+        raise RuntimeError(
+            "CRITICAL: CL_DATA_ROOT is missing from .env or environment variables. "
+            "Shared database fallback to project root is disabled to prevent "
+            "split-brain data paths between worktrees. Please define CL_DATA_ROOT."
+        )
+    candidate = Path(_CL_DATA_ROOT) / "data"
+    if candidate.is_dir():
+        return candidate
+    return candidate
 
 
 def get_models_root() -> Path:
-    """Return the primary models root directory.
-
-    Prefers ``CL_DATA_ROOT/models`` when CL_DATA_ROOT is set **and** the
-    directory exists, otherwise falls back to ``PROJECT_ROOT/models``.
-    """
-    if _CL_DATA_ROOT:
-        candidate = Path(_CL_DATA_ROOT) / "models"
-        if candidate.is_dir():
-            return candidate
-    return PROJECT_ROOT / "models"
+    """Return the primary models root directory."""
+    if not _CL_DATA_ROOT:
+        raise RuntimeError("CRITICAL: CL_DATA_ROOT is missing. Shared model fallback is disabled.")
+    candidate = Path(_CL_DATA_ROOT) / "models"
+    if candidate.is_dir():
+        return candidate
+    return candidate
 
 
 # ---------------------------------------------------------------------------
@@ -60,41 +62,29 @@ def get_models_root() -> Path:
 # ---------------------------------------------------------------------------
 
 def get_data_path(relative: str) -> Path:
-    """Resolve a path under the data root.
-
-    Tries ``CL_DATA_ROOT/data/{relative}`` first.  If that file/dir does
-    not exist, falls back to ``PROJECT_ROOT/data/{relative}``.  Returns
-    whichever path exists; if neither exists the CL_DATA_ROOT path is
-    returned so that the caller gets a meaningful error.
-    """
-    if _CL_DATA_ROOT:
-        primary = Path(_CL_DATA_ROOT) / "data" / relative
-        if primary.exists():
-            return primary
+    """Resolve a path under the data root."""
+    if not _CL_DATA_ROOT:
+        raise RuntimeError(f"CRITICAL: CL_DATA_ROOT is missing. Cannot resolve shared data path for {relative}.")
+    primary = Path(_CL_DATA_ROOT) / "data" / relative
+    if primary.exists():
+        return primary
     local = PROJECT_ROOT / "data" / relative
     if local.exists():
         return local
-    # Neither exists – prefer the shared root when configured
-    if _CL_DATA_ROOT:
-        return Path(_CL_DATA_ROOT) / "data" / relative
-    return local
+    return primary
 
 
 def get_model_path(relative: str) -> Path:
-    """Resolve a path under the models root.
-
-    Same fallback logic as :func:`get_data_path` but under ``models/``.
-    """
-    if _CL_DATA_ROOT:
-        primary = Path(_CL_DATA_ROOT) / "models" / relative
-        if primary.exists():
-            return primary
+    """Resolve a path under the models root."""
+    if not _CL_DATA_ROOT:
+        raise RuntimeError(f"CRITICAL: CL_DATA_ROOT is missing. Cannot resolve shared model path for {relative}.")
+    primary = Path(_CL_DATA_ROOT) / "models" / relative
+    if primary.exists():
+        return primary
     local = PROJECT_ROOT / "models" / relative
     if local.exists():
         return local
-    if _CL_DATA_ROOT:
-        return Path(_CL_DATA_ROOT) / "models" / relative
-    return local
+    return primary
 
 
 def get_reports_root() -> Path:

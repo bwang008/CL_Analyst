@@ -480,16 +480,27 @@ class TelemetryDB:
 
     @staticmethod
     def _sanitize_float(val: object) -> object:
-        """Convert NaN / inf to None for safe SQLite insertion."""
+        """Convert NaN/inf to None and robustly cast objects for safe SQLite JSON insertion."""
         if val is None:
             return None
+        # Handle numpy float types that crash json.dumps
+        if isinstance(val, (np.float32, np.float64, np.floating, np.integer)):
+            val = float(val)
+        # Handle timestamps/dates that crash json.dumps
+        if isinstance(val, (pd.Timestamp, datetime)):
+            return val.isoformat()
+
         try:
             f = float(val)
             if math.isnan(f) or math.isinf(f):
                 return None
             return f
         except (TypeError, ValueError):
-            return val
+            # If it cannot be parsed as a float and isn't natively supported, 
+            # cast to string to prevent json.dumps() from throwing a fatal TypeError.
+            if isinstance(val, (str, bool, int, list, dict)):
+                return val
+            return str(val)
 
     def log_shadow_state(
         self,
