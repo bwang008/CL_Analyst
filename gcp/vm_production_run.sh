@@ -224,7 +224,7 @@ for i in "${!COMBOS[@]}"; do
     fi
 
     # Upload intermediate results to GCS after each search
-    gsutil -m cp ${DB_PATH} "$BUCKET/studies/" 2>/dev/null || true
+    gsutil -m cp ${DB_DIR}/${STUDY}.journal "$BUCKET/studies/" 2>/dev/null || true
     gsutil -m cp reports/optuna_*_${DIR}_${METRIC}.* "$BUCKET/reports/" 2>/dev/null || true
     gsutil cp "$LOG" "$BUCKET/logs/" 2>/dev/null || true
     echo "  Uploaded ${STUDY}.db to GCS" | tee -a "$LOG"

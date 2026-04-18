@@ -11,7 +11,7 @@ from gcp.vm_e2e_pipeline import train_final_model, generate_oos_predictions, run
 import src.util as util
 
 DATA_PATH = r"C:\CL_Analyst_Data\data\processed\cl-4h_bk_set_01.parquet"
-OUTPUT_DIR = "reports/scout_4h_v2/canary_output"
+OUTPUT_DIR = "reports/production_4h_v2/canary_output"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 df = pd.read_parquet(DATA_PATH)
@@ -37,7 +37,7 @@ for target_name, direction, metric, json_name in targets:
     df_train_sub = df_train.dropna(subset=[target_col])
     df_vault_sub = df_vault.dropna(subset=[target_col])
     
-    with open(f"reports/scout_4h_v2/reports/{json_name}") as f:
+    with open(f"reports/production_4h_v2/reports/{json_name}") as f:
         data = json.load(f)
         params = data.get("model_params_for_experiment_runner", data["best_hyperparameters"])
         
