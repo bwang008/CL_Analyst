@@ -50,8 +50,8 @@ def main():
         
     print(f"Total bars in March 2026: {len(target_dates)}")
     
-    # 30 sequential bars
-    sample_size = min(30, len(target_dates))
+    # 150 sequential bars
+    sample_size = min(150, len(target_dates))
     sampled_dates = target_dates[:sample_size]
     
     print(f"Running sequential inference on {len(sampled_dates)} continuous sampled bars...")
@@ -119,7 +119,7 @@ def main():
         return
 
     print("\n" + "="*50)
-    print("SKEWED FEATURES SUMMARY (over 30 continuous bars)")
+    print(f"SKEWED FEATURES SUMMARY (over {len(sampled_dates)} continuous bars)")
     print("="*50)
     if not skewed_features_summary:
         print("No skewed features found!")

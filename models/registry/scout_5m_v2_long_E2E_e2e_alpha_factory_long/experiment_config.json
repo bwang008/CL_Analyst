@@ -1,0 +1,36 @@
+{
+  "experiment_id": "scout_5m_v2_long_E2E",
+  "strategy": "e2e_alpha_factory_long",
+  "data_path": "C:\\CL_Analyst_Data\\data\\processed\\cl-5m_bk_set_11c.parquet",
+  "target_name": "TARGET_TRIPLE_2x1_24H_LONG",
+  "method": "frozen_retrain",
+  "balance_mode": "downsample",
+  "train_cutoff_date": "2022-01-01",
+  "model_params": {
+    "use_time": false,
+    "use_volatility": false,
+    "use_momentum": true,
+    "use_trend": true,
+    "use_microstructure": false,
+    "use_structure": false,
+    "use_distribution": true,
+    "use_exhaustion": false,
+    "use_divergence": true,
+    "use_macro_tech": true,
+    "use_macro_external": true,
+    "boosting_type": "goss",
+    "num_leaves": 83,
+    "min_child_samples": 99,
+    "learning_rate": 0.011991465782240114,
+    "feature_fraction": 0.9757284183544513,
+    "reg_alpha": 4.1030821772629995,
+    "reg_lambda": 8.449837142318314,
+    "max_depth": 4,
+    "min_gain_to_split": 1.7567607332129413,
+    "path_smooth": 2.489555338961216,
+    "n_estimators": 900
+  },
+  "provenance": {
+    "source": "scout_5m_v2 swept params (trial 177 / 0.3795)"
+  }
+}
