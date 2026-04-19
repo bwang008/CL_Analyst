@@ -1,0 +1,14 @@
+ # Core runtime dependencies for live trading and feature generation.
+ # Install with: python -m pip install -r requirements.txt
+ numpy
+ pandas
+ pandas-ta
+ scikit-learn
+ lightgbm
+ joblib
+ ib_insync
+ python-dotenv
+ pyarrow
+ requests
+ fredapi
+ numba

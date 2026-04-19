@@ -7,6 +7,14 @@ Trigger this workflow by asking the agent to run the `/smoketest` workflow.
 
 ## Steps
 
+### 0. Tier-0 Clone Checks (no telemetry required)
+Run lightweight checks to validate `.env`, `CL_DATA_ROOT`, seed/macro data,
+and the strategy config before running the full smoke test.
+
+```bash
+python scripts/tier0_checks.py --config configs/strategies/hourly_ensemble_004.json
+```
+
 ### 1. Execute the Pipeline Tests
 Run the automated pipeline test natively in the activated environment.
 

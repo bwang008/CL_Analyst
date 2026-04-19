@@ -4,11 +4,17 @@ Machine learning pipeline for predicting significant price movements in Crude Oi
 
 ## Setup
 
-Activate your environment:
+Create a Python environment and install dependencies:
 
 ```bash
-conda activate trader
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
+
+Create a `.env` file from `.env.example` and set `CL_DATA_ROOT` to a directory
+that contains `data/` and `models/`. `CL_DATA_ROOT` is required — the code
+raises if it is missing.
 
 ## Quick start
 
