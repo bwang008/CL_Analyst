@@ -3038,16 +3038,21 @@ def _merge_legacy_cid_caches(shared_cache_path: str) -> None:
 
 def main() -> None:
     available = ", ".join(sorted(_STRATEGY_REGISTRY.keys()))
+    default_host = os.environ.get("IBKR_HOST", "127.0.0.1")
+    default_port = int(os.environ.get("IBKR_PORT", "4002"))
     parser = argparse.ArgumentParser(
         description="CL Analyst — Live Execution Engine"
     )
     parser.add_argument(
-        "--host", default="127.0.0.1",
-        help="IBKR TWS/Gateway host (default: 127.0.0.1)",
+        "--host", default=default_host,
+        help="IBKR TWS/Gateway host (default: IBKR_HOST or 127.0.0.1)",
     )
     parser.add_argument(
-        "--port", type=int, default=4002,
-        help="IBKR primary port (default: 4002 for IB Gateway; falls back to 7497 TWS)",
+        "--port", type=int, default=default_port,
+        help=(
+            "IBKR primary port (default: IBKR_PORT or 4002 for IB Gateway; "
+            "falls back to 7497 TWS)"
+        ),
     )
     parser.add_argument(
         "--client-id", type=int, default=1,
