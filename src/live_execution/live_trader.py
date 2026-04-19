@@ -59,6 +59,7 @@ from src.live_execution.ibkr_client import (
     ib_bars_to_dataframe,
 )
 from src.live_execution.telemetry import TelemetryDB
+from src.live_execution.utils.telegram_alert import TelegramAlerter
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -599,6 +600,9 @@ class LiveTrader:
         self._process_id = os.getpid()
         self._environment = "paper" if self.port in (4002, 7497) else "live"
 
+        # Telegram alerts (fire-and-forget — failures never affect trading)
+        self._telegram = TelegramAlerter()
+
     # (_prob_to_lots moved to Strategy subclasses)
 
     # ------------------------------------------------------------------
@@ -701,10 +705,27 @@ class LiveTrader:
 
             # Step 10: Enter event loop
             self._running = True
+
+            # ── Telegram: startup confirmation ────────────────────────
+            self._telegram.send(
+                f"🚀 *LiveTrader Online*\n"
+                f"Strategy: `{self.strategy.name}`\n"
+                f"Environment: `{self._environment}`\n"
+                f"Host: `{self._hostname}`\n"
+                f"Dry-run: `{self.dry_run}`",
+            )
+
             self._event_loop()
 
-        except Exception:
+        except Exception as _fatal_exc:
             log.exception("Fatal error in LiveTrader")
+            # ── Telegram: fatal exception alert ───────────────────────
+            self._telegram.send(
+                f"🚨 *FATAL ERROR — LiveTrader Down*\n"
+                f"Strategy: `{self.strategy.name}`\n"
+                f"Error: `{type(_fatal_exc).__name__}: {str(_fatal_exc)[:200]}`\n"
+                f"Host: `{self._hostname}`",
+            )
             raise
         finally:
             self._shutdown()
@@ -1557,11 +1578,17 @@ class LiveTrader:
                 if is_tp_fill or is_sl_fill:
                     # Exit order filled — log and apply software-side OCA
                     exit_type = "TP HIT" if is_tp_fill else "SL HIT"
+                    exit_icon = "🟢" if is_tp_fill else "🔴"
                     log.info(
                         "[TRADE] EXIT: %s %.0f %s @ %.2f (%s)",
                         action_str, qty, symbol_str, avg_price, exit_type,
                     )
-                    
+                    # ── Telegram: trade exit alert ────────────────────
+                    self._telegram.send(
+                        f"{exit_icon} *Trade Exit — {exit_type}*\n"
+                        f"{action_str} {qty:.0f} `{symbol_str}` @ `{avg_price:.2f}`",
+                    )
+
                     if is_sl_fill:
                         # Global SL hit — cancel all pending TPs
                         for tp_id in self._tp_order_ids:
@@ -2697,6 +2724,14 @@ class LiveTrader:
                 order_type_str,
                 signal.tp_price, signal.sl_price, signal.probability,
                 order_id, tp_offset, sl_offset,
+            )
+            # ── Telegram: trade entry alert ────────────────────────
+            self._telegram.send(
+                f"📊 *Trade Entry*\n"
+                f"{signal.action} {signal.lots} `{local_sym}`\n"
+                f"Price: `{current_price:.2f}`\n"
+                f"TP: `{signal.tp_price:.2f}` / SL: `{signal.sl_price:.2f}`\n"
+                f"Prob: `{signal.probability:.4f}`",
             )
             self.telemetry.log_signal(
                 timestamp=bar_time,
