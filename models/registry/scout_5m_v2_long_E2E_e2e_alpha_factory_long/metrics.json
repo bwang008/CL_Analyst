@@ -1,0 +1,95 @@
+{
+  "experiment_id": "scout_5m_v2_long_E2E",
+  "strategy": "e2e_alpha_factory_long",
+  "classification_metrics": {
+    "vault_accuracy": 0.6022342379994602,
+    "signal_precision_buy": 0.43792470329919936,
+    "signal_recall_buy": 0.591350577650547,
+    "signal_f1_buy": 0.5032026534718069,
+    "n_samples": 114849
+  },
+  "vault_metrics_file": {
+    "accuracy": 0.6022342379994602,
+    "precision": {
+      "Hold": 0.7422038762939792,
+      "Buy": 0.43792470329919936,
+      "Sell": 0.0
+    },
+    "recall": {
+      "Hold": 0.6078573786728293,
+      "Buy": 0.591350577650547,
+      "Sell": 0.0
+    },
+    "f1": {
+      "Hold": 0.6683461228519779,
+      "Buy": 0.5032026534718069,
+      "Sell": 0.0
+    },
+    "confusion_matrix": [
+      [
+        46030,
+        29695,
+        0
+      ],
+      [
+        15988,
+        23136,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ]
+    ],
+    "n_samples": 114849,
+    "move_analysis": {
+      "Hold": {
+        "count": 62018,
+        "mean_up": 0.012362596578896046,
+        "mean_down": 0.01958283595740795,
+        "median_up": 0.009151452220976353,
+        "median_down": 0.015465662814676762,
+        "std_up": 0.012134142220020294,
+        "std_down": 0.015726076439023018,
+        "hit_threshold_up_pct": 0.190896191428295,
+        "hit_threshold_down_pct": 0.3778419168628463,
+        "correct_count": 46030,
+        "correct_mean_up": 0.011494969017803669,
+        "correct_mean_down": 0.020632153376936913
+      },
+      "Buy": {
+        "count": 52831,
+        "mean_up": 0.017984539270401,
+        "mean_down": 0.012417158111929893,
+        "median_up": 0.014965617097914219,
+        "median_down": 0.008511384017765522,
+        "std_up": 0.015648165717720985,
+        "std_down": 0.012623129412531853,
+        "hit_threshold_up_pct": 0.33607162461433626,
+        "hit_threshold_down_pct": 0.19626734303723192,
+        "correct_count": 23136,
+        "correct_mean_up": 0.01972915045917034,
+        "correct_mean_down": 0.01039853598922491
+      },
+      "Sell": {
+        "count": 0,
+        "mean_up": null,
+        "mean_down": null,
+        "correct_count": 0,
+        "correct_mean_up": null,
+        "correct_mean_down": null
+      }
+    }
+  },
+  "backtest_summary_from_backtest_csv": null,
+  "backtest_summary_from_report_log": {
+    "win_rate": null,
+    "profit_factor": null,
+    "avg_pnl_per_trade_pct": null,
+    "max_drawdown_pct": null,
+    "total_trades": null,
+    "tp_hits": null,
+    "sl_hits": null
+  }
+}

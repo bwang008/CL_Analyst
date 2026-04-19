@@ -24,15 +24,15 @@ PROJECT_DIR="/home/$(whoami)/project"
 cd "$PROJECT_DIR"
 
 # Configuration
-DATASET_NAME="cl-5m_bk_set_10.parquet"
+DATASET_NAME="cl-4h_bk_set_01.parquet"
 DATA="/home/$(whoami)/data/${DATASET_NAME}"
 GCS_DATA="gs://cltrainer-optuna-results/data/${DATASET_NAME}"
 CUTOFF="2022-01-01"
-N_TRIALS=100
+N_TRIALS=2000
 N_WORKERS=4
 THREADS_PER_WORKER=12
 DB_DIR="models/optuna_studies"
-BUCKET="gs://cltrainer-optuna-results"
+BUCKET="gs://cltrainer-optuna-results/production_4h_v2"
 STRATEGY="configs/strategies/ensemble4.json"
 LOG="optuna_production_$(date +%Y%m%d_%H%M%S).log"
 SHUTDOWN=false
@@ -96,10 +96,10 @@ except:
 
 # Define all 6 search combos
 COMBOS=(
-    "TARGET_TRIPLE_2x1_24H_LONG logloss"
-    "TARGET_TRIPLE_2x1_24H_LONG average_precision"
-    "TARGET_TRIPLE_2x1_24H_SHORT logloss"
-    "TARGET_TRIPLE_2x1_24H_SHORT average_precision"
+    "TARGET_TRIPLE_2x1_30B_LONG logloss"
+    "TARGET_TRIPLE_2x1_30B_LONG average_precision"
+    "TARGET_TRIPLE_2x1_30B_SHORT logloss"
+    "TARGET_TRIPLE_2x1_30B_SHORT average_precision"
 )
 
 TOTAL=${#COMBOS[@]}
@@ -193,9 +193,9 @@ for i in "${!COMBOS[@]}"; do
             --study-name "$STUDY" \
             --db-dir "$DB_DIR" \
             --train-cutoff-date "$CUTOFF" \
-            --max-n-estimators 2000 \
             --num-threads $THREADS_PER_WORKER \
             --worker-id $WORKER_ID \
+            --use-buckets \
             2>&1 | tee -a "$LOG" &
         WORKER_PIDS+=($!)
         echo "  Started worker W${WORKER_ID} (PID $!, $WORKER_TRIALS trials)" | tee -a "$LOG"
@@ -224,7 +224,7 @@ for i in "${!COMBOS[@]}"; do
     fi
 
     # Upload intermediate results to GCS after each search
-    gsutil -m cp ${DB_PATH} "$BUCKET/studies/" 2>/dev/null || true
+    gsutil -m cp ${DB_DIR}/${STUDY}.journal "$BUCKET/studies/" 2>/dev/null || true
     gsutil -m cp reports/optuna_*_${DIR}_${METRIC}.* "$BUCKET/reports/" 2>/dev/null || true
     gsutil cp "$LOG" "$BUCKET/logs/" 2>/dev/null || true
     echo "  Uploaded ${STUDY}.db to GCS" | tee -a "$LOG"
