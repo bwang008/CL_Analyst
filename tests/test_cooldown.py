@@ -121,7 +121,7 @@ def _make_trader_stub(
     trader._trailing_sl_atr_offset = 0.25
 
     # TP/SL order tracking (software-side OCA)
-    trader._tp_order_id = None
+    trader._tp_order_ids = []
     trader._sl_order_id = None
     trader._active_trade_id = None
 
@@ -326,7 +326,7 @@ class TestCooldownActivation:
         mock_trade.contract = mock_contract
 
         # Set TP order ID so the fill is recognized as a TP hit
-        trader._tp_order_id = 100
+        trader._tp_order_ids = [100]
 
         assert trader._cooldown_remaining == 0
         trader._on_order_status(mock_trade)

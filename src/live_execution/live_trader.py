@@ -198,6 +198,8 @@ class CLOnlyLogFilter(logging.Filter):
         r"|orderStatus:"
         r"|execDetails[ :]"
         r"|commissionReport:"
+        r"|updatePortfolio:"
+        r"|position:"
         r")",
     )
 
@@ -640,7 +642,7 @@ class LiveTrader:
         self._trade_trailing_atr_mult: Optional[float] = None
         self._trade_max_hold_bars: Optional[int] = None
         # TP/SL order tracking for software-side OCA (no parentId linkage)
-        self._tp_order_id: Optional[int] = None
+        self._tp_order_ids: list[int] = []
         self._sl_order_id: Optional[int] = None
         # Active trade ID for position ledger tracking (OOB close detection)
         self._active_trade_id: Optional[str] = None
@@ -1011,7 +1013,7 @@ class LiveTrader:
         self._trade_trailing_atr_mult = None
         self._trade_max_hold_bars = None
         # Clear TP/SL order tracking
-        self._tp_order_id = None
+        self._tp_order_ids = []
         self._sl_order_id = None
         self._active_trade_id: Optional[str] = None
 
@@ -1449,7 +1451,7 @@ class LiveTrader:
 
         if tp_found and sl_found:
             # Both orders exist — just restore the IDs
-            self._tp_order_id = tp_order_id
+            self._tp_order_ids = [tp_order_id]
             self._sl_order_id = sl_order_id
             log.info(
                 "[RECOVERY] TP/SL verified on IBKR: "
@@ -2537,7 +2539,7 @@ class LiveTrader:
                 # Skip tracked TP/SL orders (they are standalone with
                 # parentId==0 but are NOT entry orders)
                 if oid is not None and (
-                    oid == self._tp_order_id or oid == self._sl_order_id
+                    oid in self._tp_order_ids or oid == self._sl_order_id
                 ):
                     continue
                 parent_id = getattr(o, "parentId", 0) or 0
@@ -2573,7 +2575,7 @@ class LiveTrader:
                     if getattr(c, "symbol", None) != "CL":
                         continue
                     oid = getattr(o, "orderId", None)
-                    if oid is not None and oid == self._tp_order_id:
+                    if oid is not None and oid in self._tp_order_ids:
                         lmt = getattr(o, "lmtPrice", 0.0) or 0.0
                         if lmt > 0:
                             tp_price_live = lmt
