@@ -5,7 +5,8 @@ description: Run the full test suite with auto-approved commands
 // turbo-all
 
 1. Run all tests (excluding slow tests):
-   ```bash
+   ```powershell
+   $env:PYTHONUTF8 = "1"
    conda run -n trader python -m pytest tests/ -v --tb=short -m "not slow"
    ```
 

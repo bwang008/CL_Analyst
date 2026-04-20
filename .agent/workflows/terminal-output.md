@@ -62,3 +62,26 @@ python script.py  # script writes to tmp/output.txt internally
 # ✅ This works fine for quick checks
 python -c "import pandas as pd; df = pd.read_parquet('file.parquet'); print(len(df))"
 ```
+
+### 6. `conda run` + emoji = UnicodeEncodeError (CRITICAL — will crash the whole process)
+`conda run` acts as a stdout proxy. It captures all subprocess output and re-prints it using the **parent shell's encoding (cp1252)**. Any Unicode character outside cp1252 (emoji, ∙, ±, etc.) causes a hard crash at `conda\cli\main_run.py` — the `try/except UnicodeEncodeError` in Python code **does NOT protect against this** because the error happens in the conda proxy after Python has already exited.
+
+**Two-layer fix — apply both:**
+
+1. **Workflow layer** — set env var before every `conda run`:
+```powershell
+# ✅ Set before all conda run commands in workflow files
+$env:PYTHONUTF8 = "1"
+conda run -n trader python tests/smoke_test_pipeline.py
+```
+
+2. **Script layer** — force UTF-8 stdout at the top of any script that prints Unicode:
+```python
+import sys
+# Force UTF-8 — must come before any print() call
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+```
+
+> **Rule**: Every workflow step using `conda run` MUST have `$env:PYTHONUTF8 = "1"` on the line before it. Every script that uses emoji or non-ASCII characters MUST have the `reconfigure` guard at the top.
+

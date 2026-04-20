@@ -72,6 +72,8 @@ def _make_trader_stub(
     # Position tracking
     trader._position_entry_bar_time = None
     trader._position_bars_held = 0
+    trader._telegram = MagicMock()
+    trader._log_capture = MagicMock()
 
     # Telemetry mock
     trader.telemetry = MagicMock()

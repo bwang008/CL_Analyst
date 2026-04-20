@@ -20,6 +20,7 @@ Run the automated pipeline test natively in the activated environment.
 
 // turbo
 ```powershell
+$env:PYTHONUTF8 = "1"
 conda run -n trader python tests/smoke_test_pipeline.py
 conda run -n trader python tmp/playback_simulator.py
 ```

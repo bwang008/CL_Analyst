@@ -662,6 +662,8 @@ class LiveTrader:
         self._last_inference_bar_time: Optional[pd.Timestamp] = None
         self._heartbeat_stop_event = threading.Event()
         self._heartbeat_thread: Optional[threading.Thread] = None
+        # Event set on SIGINT/SIGTERM — used to interrupt interruptible sleeps
+        self._stop_event = threading.Event()
 
         # Attach log capture handler to root logger
         self._log_capture = _TelegramLogCapture(maxlen=8)
@@ -910,8 +912,21 @@ class LiveTrader:
                 )
 
     def _signal_handler(self, signum, frame) -> None:
-        log.info("Received signal %d — shutting down gracefully...", signum)
+        log.info("Received signal %d — stopping (hard kill in 5s if needed)", signum)
         self._running = False
+        self._stop_event.set()  # wake any interruptible sleeps immediately
+
+        # Hard-kill watchdog: if shutdown hasn't finished in 5 seconds, force-exit.
+        # This prevents the process from hanging during reconnect waits or
+        # slow IB disconnect calls.
+        def _force_kill():
+            import time as _time
+            _time.sleep(5)
+            log.warning("Shutdown timed out — forcing exit (os._exit).")
+            _os._exit(1)
+
+        _kill_thread = threading.Thread(target=_force_kill, name="ShutdownWatchdog", daemon=True)
+        _kill_thread.start()
 
     def _shutdown(self) -> None:
         log.info("Shutting down...")
@@ -3024,7 +3039,11 @@ class LiveTrader:
                 "Reconnect attempt %d/%d (waiting %.0fs)...",
                 attempt, _RECONNECT_MAX_ATTEMPTS, delay,
             )
-            time.sleep(delay)
+            # Use _stop_event.wait() instead of time.sleep() so Ctrl+C
+            # (which sets _stop_event) interrupts the wait immediately
+            # instead of blocking for the full backoff delay.
+            if self._stop_event.wait(timeout=delay):
+                return False  # shutdown requested during wait
             try:
                 # Ensure clean disconnect state
                 try:

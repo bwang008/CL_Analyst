@@ -39,6 +39,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+# ---------------------------------------------------------------------------
+# Force UTF-8 stdout — prevents UnicodeEncodeError when conda run re-prints
+# emoji output on Windows (cp1252 cannot encode ✅ ❌ etc).
+# PYTHONUTF8=1 env var is the preferred external fix; this is the in-process guard.
+# ---------------------------------------------------------------------------
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 # Add project root to sys.path
 _project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_project_root))
