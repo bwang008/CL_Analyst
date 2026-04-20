@@ -1743,9 +1743,16 @@ class LiveTrader:
                         action_str, qty, symbol_str, avg_price,
                     )
                     # ── Telegram: trade completely filled alert ────────────────────
+                    dctx = self._last_decision_context_by_order_id.get(order_id, {})
+                    prob_buy = dctx.get("buy_prob_str", "N/A")
+                    prob_sell = dctx.get("sell_prob_str", "N/A")
+                    bar_str = dctx.get("bar_str", "N/A")
+
                     self._telegram.send(
                         f"✅ *Trade Filled*\n"
-                        f"{action_str} {qty:.0f} `{symbol_str}` @ `{avg_price:.2f}`"
+                        f"{action_str} {qty:.0f} `{symbol_str}` @ `{avg_price:.2f}`\n"
+                        f"Prob (B/S): `{prob_buy}` / `{prob_sell}`\n"
+                        f"Bar: {bar_str}"
                     )
                     self._pending_entry_order_id = None
                     self._pending_entry_bar_time = None
@@ -2817,12 +2824,19 @@ class LiveTrader:
                 order_id, tp_offset, sl_offset,
             )
             # ── Telegram: trade entry alert ────────────────────────
+            try:
+                lr = rolling_df.iloc[-1]
+                bar_str = f"O:`{float(lr['Open']):.2f}` H:`{float(lr['High']):.2f}` L:`{float(lr['Low']):.2f}` C:`{float(lr['Close']):.2f}` V:`{float(lr['Volume']):.0f}`"
+            except Exception:
+                bar_str = "N/A"
+
             self._telegram.send(
                 f"📊 *Trade Entry*\n"
                 f"{signal.action} {signal.lots} `{local_sym}`\n"
                 f"Price: `{current_price:.2f}`\n"
                 f"TP: `{signal.tp_price:.2f}` / SL: `{signal.sl_price:.2f}`\n"
-                f"Prob: `{signal.probability:.4f}`",
+                f"Prob (B/S): `{buy_prob_str}` / `{sell_prob_str}`\n"
+                f"{bar_str}"
             )
             self.telemetry.log_signal(
                 timestamp=bar_time,
@@ -2849,6 +2863,9 @@ class LiveTrader:
                 "sl_offset": sl_offset,
                 "entry_action": signal.action,
                 "lots": signal.lots,
+                "buy_prob_str": buy_prob_str,
+                "sell_prob_str": sell_prob_str,
+                "bar_str": bar_str,
             }
             self._last_decision_context_by_order_id[order_id] = decision_ctx
             # Log tradebook event for parent entry
