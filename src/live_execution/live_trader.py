@@ -22,6 +22,13 @@ Author: CL Analyst
 
 from __future__ import annotations
 
+# Suppress Intel Fortran runtime Ctrl+C interception on Windows.
+# The Fortran runtime (libifcoremd.dll, loaded by NumPy/MKL) intercepts
+# console events before Python's signal handler, causing
+# "forrtl: error (200): program aborting due to control-C event".
+import os as _os
+_os.environ.setdefault("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "1")
+
 import argparse
 import hashlib
 import json
@@ -244,7 +251,17 @@ def build_live_features(
         Single-row DataFrame with the model's expected features,
         or None if features cannot be computed (e.g. NaN in required columns).
     """
-    if bar_size == "1h":
+    if bar_size == "4h":
+        # 4h bars: windows are in 4h-bar units (6=1d, 18=3d, 42=7d, 84=14d, 210=35d)
+        is_set_07 = True
+        alpha_windows = [6, 18, 42, 84, 210]
+        macro_windows = {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320}
+    elif bar_size == "2h":
+        # 2h bars: windows are in 2h-bar units (12=1d, 36=3d, 84=7d, 168=14d, 420=35d)
+        is_set_07 = True
+        alpha_windows = [12, 36, 84, 168, 420]
+        macro_windows = {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320}
+    elif bar_size == "1h":
         is_set_07 = True
         alpha_windows = [24, 72, 168, 336, 840]
         macro_windows = {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320}
@@ -536,7 +553,7 @@ class LiveTrader:
         )
 
         self.data_manager_1h = None
-        if self._bar_size == "1h":
+        if self._bar_size in ("1h", "2h", "4h"):
             # 1h models use a dedicated 1h data manager to avoid pacing limits
             cache_path_1h = str(Path(cache_path).parent / "warm_start_cache_1h.parquet")
             seed_path_1h = str(Path(seed_path).parent / "cl-1h_bk.csv")
@@ -2002,7 +2019,7 @@ class LiveTrader:
         self._live_bars_5m.updateEvent += self._on_bar_update_5m
         log.info("Subscribed to 5-min continuous contract live bars")
 
-        if self._bar_size == "1h":
+        if self._bar_size in ("1h", "2h", "4h"):
             log.info("Subscribing to live 1-hour bars (Stream B)...")
             self._live_bars_1h = self.manager.subscribe_live_bars(
                 self._contract,
@@ -2281,6 +2298,24 @@ class LiveTrader:
         if self._bar_size == "1h":
             with self._ledger_lock:
                 self._on_new_bar(bar_time, self.rolling_df_1h, "1h")
+        elif self._bar_size in ("2h", "4h"):
+            # Resample 1h → 2h/4h on-the-fly and dispatch on boundary
+            resample_hours = 2 if self._bar_size == "2h" else 4
+            if bar_time.hour % resample_hours == (resample_hours - 1):
+                df_resampled = self.rolling_df_1h.resample(
+                    f"{resample_hours}h"
+                ).agg({
+                    "Open": "first", "High": "max",
+                    "Low": "min", "Close": "last",
+                    "Volume": "sum",
+                }).dropna(subset=["Close"])
+                if len(df_resampled) > 0:
+                    log.info(
+                        "RESAMPLED %s BAR: %s  (%d bars from 1H stream)",
+                        self._bar_size.upper(), bar_time, len(df_resampled),
+                    )
+                    with self._ledger_lock:
+                        self._on_new_bar(bar_time, df_resampled, self._bar_size)
 
     # ------------------------------------------------------------------
     # Inference + Execution
