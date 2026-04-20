@@ -2,7 +2,48 @@
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
-## 2026-03-29 — Live Trader Subsystem Fixes & Feature Generation 
+## 2026-04-20 — Telegram Diagnostics, DataManager Seed Fix & Hard-Fail Pipeline
+
+### Goal
+Implement push-only Telegram notifications for the live trader, fix a silent data pipeline failure that was providing wrong historical data to the 1H/4H models, and enforce hard-fail design rules going forward.
+
+### Telegram Notification System
+- **`src/live_execution/utils/telegram_alert.py`**: Verified as fully implemented (fire-and-forget, 3s timeout, try/except). Added PST/PDT timezone to all messages via `zoneinfo` with `pytz` fallback.
+- **Startup alert**: Appends full system health check payload to login message.
+- **Trade Entry**: Fires when bracket order is submitted — includes action, price, TP/SL, buy/sell probabilities, and triggering bar OHLCV.
+- **Trade Filled**: Fires on execution fill — includes fill price, probabilities, and bar data pulled from `_last_decision_context_by_order_id`.
+- **Background Heartbeat**: A daemon thread (`_TelegramHeartbeat`) fires every 3600s on wall-clock time, **independent of inference**. Includes: uptime, broker status, position/PnL, last successful inference bar timestamp (or `❌ None`), inference latency, CPU/RAM/disk, and recent WARNING/ERROR log messages (captured by `_TelegramLogCapture` ring buffer, drained each pulse).
+- **Fatal Error**: Sends stack trace summary to Telegram before process termination.
+
+### DataManager Seed Path Misconfiguration (Root Cause Fix)
+**Bug**: The 1H `DataManager` was configured with `seed_path_1h = ".../raw/cl-1h_bk.csv"` — a file that **never existed**. When the cache was missing, it silently fell back to an IBKR bootstrap, producing a 144KB cache (~142 bars) instead of the 3,600-bar HourSet_02 parquet (91.8MB). This caused:
+- **4H model**: Hard failure (`142 < 210 bars`)
+- **1H model**: Silent degradation — inference ran but on thin, potentially mis-priced data
+
+**Fixes**:
+- `live_trader.py`: `seed_path_1h` now explicitly points to `get_data_root() / "processed" / "cl-1h_bk_HourSet_02.parquet"`
+- `data_manager.py`: `_seed_from_csv()` now supports `.parquet` seeds in addition to semicolon-delimited CSV
+- `data_manager.py`: Removed the silent IBKR bootstrap fallback — **missing seed now raises `FileNotFoundError` immediately with a clear message and Telegram alert**
+- Deleted the stale 144KB `warm_start_cache_1h.parquet` so it rebuilds from the full parquet on next boot
+
+### Hard-Fail Policy Enforced (DataManager)
+Per new design rule: the DataManager no longer silently falls back to IBKR when a seed file is missing. It raises, logs `log.error()`, and sends a Telegram alert. There is one pipeline, one data source, and no silent redundancy.
+
+### Lessons Learned (Added to HANDOFF.md)
+1. **Fail loudly on missing seeds** — hard exception + Telegram alert, never silent bootstrap
+2. **Validate minimum bars at startup** — check before inference, not during feature generation
+3. **Lock seed paths to explicit verified files** via `get_data_root()` — never derive from naming conventions
+4. **One pipeline only** — no backup paths that can silently corrupt the data environment
+5. **Path audit on every new timeframe** — run `audit_paths.py` before deploying new bar sizes
+
+### Files Changed
+- `src/live_execution/live_trader.py` — Heartbeat thread, log capture handler, inference bar tracker, 1H seed path fix
+- `src/live_execution/data_manager.py` — Parquet seed support, hard-fail on missing seed (removed IBKR bootstrap fallback)
+- `src/live_execution/utils/telegram_alert.py` — PST/PDT timezone, global timestamp prefix
+- `README.md` — Telegram Notifications section added under Live Execution
+- `HANDOFF.md` — Live Execution Data Pipeline Design Rules section + bug entry
+
+
 
 ### Goal
 Resolve critical runtime issues in the live trading engine during after-hours execution and fix missing feature extraction for "lean" production models. 

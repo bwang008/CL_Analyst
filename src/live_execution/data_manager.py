@@ -164,15 +164,22 @@ class DataManager:
                     self._df.index.max(),
                 )
             else:
-                log.warning(
-                    "No cache and no seed file found at %s. "
-                    "Bootstrapping completely from IBKR over the last %d days...",
-                    self.seed_path, _SEED_LOOKBACK_DAYS
+                # ── HARD FAIL — Design Rule: No Silent Bootstrap ────────────────
+                # There is ONE pipeline for live data: seed file → cache → live append.
+                # Silently substituting IBKR as a seed creates fake environments that
+                # corrupt data quality and mask bugs. If the seed is missing, we stop.
+                log.error(
+                    "CRITICAL: Seed file missing at '%s'. "
+                    "The live trader cannot run without its historical seed. "
+                    "Restore the file or update the seed_path configuration.",
+                    self.seed_path,
                 )
-                start_ts = pd.Timestamp.now() - pd.Timedelta(days=_SEED_LOOKBACK_DAYS)
-                self._df = pd.DataFrame([{"DateTime": start_ts, "Open": 0.0, "High": 0.0, "Low": 0.0, "Close": 0.0, "Volume": 0}]).set_index("DateTime", drop=False)
-                self._df.index.name = "DateTime"
-                # _backfill will populate the real bars from start_ts, then we drop the dummy below
+                raise FileNotFoundError(
+                    f"Seed file not found: {self.seed_path}\n"
+                    f"The warm-start seed must exist before the live trader starts.\n"
+                    f"Check CL_DATA_ROOT ({os.environ.get('CL_DATA_ROOT', '(not set)')}) "
+                    f"and verify the file is present at the expected path."
+                )
 
         # Step 2: Detect rollover and apply Panama Canal back-adjustment
         if self.ibkr_manager is not None and self.front_month_id is not None:
@@ -191,13 +198,9 @@ class DataManager:
                         roll_delta if roll_delta is not None else 0.0,
                     )
 
-        # Step 3: Backfill any gap from IBKR
+        # Step 3: Backfill any gap from IBKR (recent bars only, not cold-start seeding)
         if self.ibkr_manager is not None:
             self._backfill()
-            # If we used a dummy bootstrap row, drop it now that backfill is done
-            if len(self._df) > 1 and self._df.iloc[0]["Volume"] == 0 and self._df.iloc[0]["Close"] == 0.0:
-                self._df = self._df.iloc[1:]
-                self.save_cache()
         else:
             log.warning(
                 "No IBKR manager provided — skipping backfill. "

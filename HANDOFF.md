@@ -69,6 +69,7 @@ To keep the AI context window sharp, all agents must follow these rules before e
 - **~~MACRO resample lookahead bias~~** ✅ FIXED (2026-03-21): Replaced `resample("1h")` with bar-level `rolling(hours*12, min_periods=1)` + `ffill()` + `.clip(lower=1e-8)`.
 - **~~NaN fill mismatch~~** ✅ MITIGATED (2026-03-21): Added cold-start zero-fill warning in `live_trader.py`. Training pipeline now uses ffill-only (no bfill).
 - **~~bfill() lookahead in cleanup()~~** ✅ FIXED (2026-03-21): Removed `.bfill()`, increased warmup from 10,500 to 26,000 bars.
+- **~~1H/4H DataManager cold-bootstrap corruption~~** ✅ FIXED (2026-04-20): `seed_path_1h` pointed at `cl-1h_bk.csv` (never existed). DataManager silently fell back to IBKR bootstrap, producing a thin 142-bar cache instead of the full 3,600-bar HourSet_02 parquet. Fixed: seed now points at `cl-1h_bk_HourSet_02.parquet`; DataManager now supports parquet seeds; hard-fail added if seed is missing (no more silent bootstrap).
 - **`trailing_atr_mult = 0.0` bug**: Setting this to 0 does not disable the trailing stop as expected — it triggers immediately. Workaround: set to a large value (e.g. 99.0) to effectively disable.
 - **Evaluator naming**: `reports/vault_metrics.json` uses class names `{1: "Buy", 2: "Sell"}` even for binary short targets. For `TARGET_TRIPLE_2x1_24H_SHORT`, the "Buy" slot corresponds to the positive short label.
 - **Binary probabilities**: With focal loss custom objective, LightGBM `predict()` may emit logits (not 0-1). The live trader applies sigmoid transform; use `agent/threshold_sweep_binary.py` (sigmoid-aware) for binary sweeps.
@@ -151,7 +152,54 @@ Configs are in `configs/strategies/`. Reference: `configs/strategies/config_read
 | HourSet_01 | 176 | 1-hour | First hourly dataset, 101K rows |
 | **HourSet_02** | **199** | **1-hour** | **Latest hourly: new features, 120H targets. 88 MB, ~101K rows** |
 
+## 🚨 Live Execution Data Pipeline — Non-Negotiable Design Rules
+
+> These rules exist because silent fallbacks in the live trading pipeline create **fake environments** that corrupt data quality and make bugs invisible. Violating any of these rules is a critical defect.
+
+### Rule 1: No Silent Fallbacks — Fail Loudly or Not at All
+The `DataManager` and any live data pipeline MUST fail with a hard exception if a required data source is missing. There is no backup, no dummy data, no IBKR bootstrap as a cold-start substitute. If the seed is missing → process raises. If the cache is too thin → process raises.
+
+```python
+# WRONG — silent degradation that corrupts the system:
+if not seed.exists():
+    log.warning("Seed missing, bootstrapping from IBKR...")
+    self._df = dummy_row
+
+# CORRECT — hard fail:
+if not seed.exists():
+    raise FileNotFoundError(f"Seed file missing: {seed}. Fix the path or restore the file.")
+```
+
+### Rule 2: Validate Minimum Bars at Startup — Before Inference Runs
+After warm-start, verify `len(rolling_df) >= min_required_bars` for the active model. Raise immediately. Do not let feature generation be the first thing that discovers insufficient data.
+
+| Bar Size | Min 1H Bars Required |
+|---|---|
+| `1h` | 840 |
+| `2h` | 840 (resamples to 420 2H-bars) |
+| `4h` | 840 (resamples to 210 4H-bars) |
+
+### Rule 3: Lock Seed Paths to Explicit Verified Files
+Never derive seed paths from naming conventions or assume files exist because nearby files exist. Use `get_data_root()` and specify the **exact filename**. Verify the path resolves before deploying.
+
+```python
+# WRONG — assumed pattern, never verified:
+seed_path_1h = str(Path(seed_path).parent / "cl-1h_bk.csv")
+
+# CORRECT — explicit, verified path:
+seed_path_1h = str(get_data_root() / "processed" / "cl-1h_bk_HourSet_02.parquet")
+```
+
+### Rule 4: One Pipeline — No Redundancy That Masks Failures
+Live data flows: `seed file → cache → live append`. IBKR backfill is for bridging **recent gaps only** (hours), never as a cold-start data source. There is no Plan B.
+
+### Rule 5: Path Audit Before Deploying New Timeframes
+Whenever a new bar size is added, verify all paths resolve and have minimum bars before the first live run. A path audit script (`audit_paths.py`) should be created and run as part of this check.
+
+---
+
 ## Data File Requirements
+
 - **Shared raw data**: The CL seed CSV (`cl-5m_bk.csv`, ~72 MB) is **not stored in git** (too large). `CL_DATA_ROOT` is **required**; `src/data_paths.py` raises if it is missing. Place `data/raw/cl-5m_bk.csv` under the `CL_DATA_ROOT` tree (or mirror `data/` into the repo and set `CL_DATA_ROOT` to that parent).
 - **GCS dataset staging**: Processed datasets are uploaded to `gs://cltrainer-optuna-results/data/`. VMs auto-download from GCS on startup (~30s within GCP). Latest datasets: `cl-5m_bk_set_11.parquet` (809 MB), `cl-1h_bk_HourSet_02.parquet` (88 MB).
 - **Model registry**: `models/registry/` **tracked by git** and appears in worktrees/clones.
