@@ -257,7 +257,7 @@ class DataManager:
         """
         Persist the current DataFrame to the Parquet cache file.
 
-        Uses atomic write (temp file + rename) to prevent corruption
+        Uses atomic write (temp file + os.replace) to prevent corruption
         from mid-write crashes.
         """
         if self._df is None or len(self._df) == 0:
@@ -280,14 +280,25 @@ class DataManager:
                 save_df = save_df.reset_index(drop=True)
 
             save_df.to_parquet(tmp_path, index=False, engine="pyarrow")
-            # Atomic rename (on Windows, need to remove target first)
-            if self.cache_path.exists():
-                self.cache_path.unlink()
-            Path(tmp_path).rename(self.cache_path)
+            # Single-step atomic replace (avoids unlink+rename; unlink on /mnt/c/ under WSL
+            # often fails with PermissionError when the cache was touched from Windows).
+            os.replace(tmp_path, self.cache_path)
             log.info(
                 "Cache saved: %d bars → %s", len(self._df), self.cache_path
             )
             _mirror_to_root(self.cache_path, _PROJECT_ROOT)
+        except PermissionError:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+            log.error(
+                "Cannot write cache at %s (permission denied). "
+                "If you use WSL, set CL_DATA_ROOT to a Linux path (e.g. ~/CL_Analyst_Data) "
+                "instead of /mnt/c/... — DrvFs often blocks replace/delete on Windows-owned files.",
+                self.cache_path,
+            )
+            raise
         except Exception:
             # Clean up temp file on error
             try:
@@ -763,7 +774,15 @@ class DataManager:
         )
 
         if self.cache_path.exists():
-            self.cache_path.unlink()
+            try:
+                self.cache_path.unlink()
+            except PermissionError:
+                log.error(
+                    "Cannot delete cache at %s (permission denied). "
+                    "If you use WSL, set CL_DATA_ROOT to a Linux path instead of /mnt/c/...",
+                    self.cache_path,
+                )
+                raise
             log.info("Deleted stale cache: %s", self.cache_path)
 
         self._df = self._seed_from_csv()
@@ -983,14 +1002,23 @@ class DataManager:
 
         try:
             save_df.to_parquet(tmp_path, index=False, engine="pyarrow")
-            if self.master_ledger_path.exists():
-                self.master_ledger_path.unlink()
-            Path(tmp_path).rename(self.master_ledger_path)
+            os.replace(tmp_path, self.master_ledger_path)
             log.info(
                 "Master ledger saved: %d bars → %s",
                 len(ledger), self.master_ledger_path,
             )
             _mirror_to_root(self.master_ledger_path, _PROJECT_ROOT)
+        except PermissionError:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+            log.error(
+                "Cannot write master ledger at %s (permission denied). "
+                "If you use WSL, set CL_DATA_ROOT to a Linux path instead of /mnt/c/...",
+                self.master_ledger_path,
+            )
+            raise
         except Exception:
             try:
                 Path(tmp_path).unlink(missing_ok=True)

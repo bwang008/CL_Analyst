@@ -9,7 +9,8 @@
  ib_insync
  python-dotenv
  pyarrow
+ psutil
  requests
  fredapi
  numba
-pytz
+ pytz
