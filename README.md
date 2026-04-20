@@ -274,6 +274,19 @@ rows = db.read_tradebook(limit=1000)  # list[dict], oldest-first
 db.close()
 ```
 
+### Telegram Notifications
+LiveTrader natively integrates a "push-only" mechanism inside `src/live_execution/utils/telegram_alert.py`. 
+Any interaction with the Telegram API is designed strictly as fire-and-forget; its functions are wrapped seamlessly in `try/except` clauses so connection issues with Telegram never bubble up and crash the main execution loop.
+
+Setup:
+To enable notifications, talk to @BotFather on Telegram to generate a `TELEGRAM_BOT_TOKEN`, grab your `TELEGRAM_CHAT_ID`, and provide them inside your `.env` configuration file.
+
+The trader will broadcast messages to your chat for:
+- **Startup:** When the execution engine initiates the event loop, identifying the active strategy and environment.
+- **Heartbeat:** At the top of every hour (appended system resource and MLOps metrics).
+- **Trade Execution:** When a new trade entry or exit (Take Profit, Stop Loss) occurs, with execution price details.
+- **Fatal Error:** Broadcasting stack traces immediately upon severe unhandled exceptions before graceful exit.
+
 ## Project Structure
 
 ```

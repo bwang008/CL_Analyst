@@ -42,6 +42,8 @@ import sys
 import threading
 import time
 import uuid
+import psutil
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -619,12 +621,57 @@ class LiveTrader:
 
         # Telegram alerts (fire-and-forget — failures never affect trading)
         self._telegram = TelegramAlerter()
+        self._bot_start_time = datetime.now(timezone.utc)
+        self._last_inference_time_sec: float = 0.0
 
     # (_prob_to_lots moved to Strategy subclasses)
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+
+    def _build_heartbeat_payload(self) -> str:
+        """Format the heartbeat payload for Telegram."""
+        uptime = datetime.now(timezone.utc) - self._bot_start_time
+        uptime_str = str(uptime).split('.')[0]
+        broker_status = "🟢 Connected" if self.manager.ib.isConnected() else "🔴 Disconnected"
+        
+        current_position = 0
+        try:
+            current_position = self.manager.get_cl_position(symbol=self._execution_symbol)
+        except Exception:
+            pass
+
+        unrealized_pnl = 0.0
+        realized_pnl = 0.0
+        try:
+            for item in self.manager.ib.portfolio():
+                if item.contract.symbol == "CL":
+                    unrealized_pnl = float(item.unrealizedPNL)
+                    realized_pnl = float(item.realizedPNL)
+                    break
+        except Exception:
+            pass
+
+        try:
+            cpu_pct = psutil.cpu_percent(interval=None)
+            ram = psutil.virtual_memory()
+            ram_pct = ram.percent
+            disk = shutil.disk_usage("/")
+            disk_pct = (disk.used / disk.total) * 100
+        except Exception:
+            cpu_pct = ram_pct = disk_pct = 0.0
+
+        return (
+            f"⏱️ Uptime: `{uptime_str}` | Broker: {broker_status}\n\n"
+            f"📈 *Position & PnL*\n"
+            f"Position: `{current_position}`\n"
+            f"Unrealized PnL: `${unrealized_pnl:,.2f}`\n"
+            f"Realized PnL: `${realized_pnl:,.2f}`\n\n"
+            f"🧠 *MLOps & System*\n"
+            f"Inference Latency: `{self._last_inference_time_sec:.4f}s`\n"
+            f"CPU: `{cpu_pct:.1f}%` | RAM: `{ram_pct:.1f}%` | Disk: `{disk_pct:.1f}%`"
+        )
 
     def start(self) -> None:
         """Connect to IBKR, warm-start via DataManager, and enter the event loop.
@@ -724,13 +771,15 @@ class LiveTrader:
             self._running = True
 
             # ── Telegram: startup confirmation ────────────────────────
-            self._telegram.send(
+            startup_msg = (
                 f"🚀 *LiveTrader Online*\n"
                 f"Strategy: `{self.strategy.name}`\n"
                 f"Environment: `{self._environment}`\n"
                 f"Host: `{self._hostname}`\n"
-                f"Dry-run: `{self.dry_run}`",
+                f"Dry-run: `{self.dry_run}`\n\n"
             )
+            startup_msg += self._build_heartbeat_payload()
+            self._telegram.send(startup_msg)
 
             self._event_loop()
 
@@ -1693,6 +1742,11 @@ class LiveTrader:
                         "[TRADE] FILLED: %s %.0f %s @ %.2f",
                         action_str, qty, symbol_str, avg_price,
                     )
+                    # ── Telegram: trade completely filled alert ────────────────────
+                    self._telegram.send(
+                        f"✅ *Trade Filled*\n"
+                        f"{action_str} {qty:.0f} `{symbol_str}` @ `{avg_price:.2f}`"
+                    )
                     self._pending_entry_order_id = None
                     self._pending_entry_bar_time = None
                     # Open position in the persistent ledger
@@ -2477,12 +2531,14 @@ class LiveTrader:
             self._check_trailing_stop()
 
         # 3. Delegate decision to strategy (always — needed for INFERENCE display)
+        t0 = time.perf_counter()
         signal: TradeSignal = self.strategy.evaluate(
             features=features,
             current_price=current_price,
             atr_value=atr_value,
             current_position=effective_position,
         )
+        self._last_inference_time_sec = time.perf_counter() - t0
 
         # Update Thread-Safe Virtual Ledger (Dual Stream Netting)
         if signal.action == "ENTER":
@@ -2839,6 +2895,10 @@ class LiveTrader:
                 decision_id=decision_id,
                 decision_timestamp_utc=decision_timestamp_utc,
             )
+
+        # ── 1-Hour Heartbeat ───────────────────────────────────────────
+        if stream == self._bar_size and bar_time.minute == 0:
+            self._telegram.send(f"💓 *1-Hour Heartbeat*\n\n" + self._build_heartbeat_payload())
 
     # ------------------------------------------------------------------
     # Reconnection
