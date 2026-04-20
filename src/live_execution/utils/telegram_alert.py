@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -89,6 +90,9 @@ class TelegramAlerter:
         """
         if not self.enabled:
             return False
+
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        message = f"_{now_str}_\n\n{message}"
 
         if requests is None:
             log.warning("requests library not installed — cannot send Telegram alert")
