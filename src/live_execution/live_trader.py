@@ -42,6 +42,8 @@ import sys
 import threading
 import time
 import uuid
+import collections
+import logging as _logging
 import psutil
 import shutil
 from datetime import datetime, timezone
@@ -69,6 +71,34 @@ from src.live_execution.ibkr_client import (
 )
 from src.live_execution.telemetry import TelemetryDB
 from src.live_execution.utils.telegram_alert import TelegramAlerter
+
+
+# ---------------------------------------------------------------------------
+# Background log capture for heartbeat diagnostics
+# ---------------------------------------------------------------------------
+
+class _TelegramLogCapture(_logging.Handler):
+    """Thread-safe ring buffer that retains the last N WARNING/ERROR log records."""
+
+    def __init__(self, maxlen: int = 8) -> None:
+        super().__init__(level=_logging.WARNING)
+        self._records: collections.deque = collections.deque(maxlen=maxlen)
+        self._lock = threading.Lock()
+
+    def emit(self, record: _logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            with self._lock:
+                self._records.append((record.levelname, msg))
+        except Exception:
+            pass
+
+    def drain(self) -> list:
+        """Return and clear all buffered records."""
+        with self._lock:
+            items = list(self._records)
+            self._records.clear()
+        return items
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -556,9 +586,13 @@ class LiveTrader:
 
         self.data_manager_1h = None
         if self._bar_size in ("1h", "2h", "4h"):
-            # 1h models use a dedicated 1h data manager to avoid pacing limits
-            cache_path_1h = str(Path(cache_path).parent / "warm_start_cache_1h.parquet")
-            seed_path_1h = str(Path(seed_path).parent / "cl-1h_bk.csv")
+            # 1h models use a dedicated 1h data manager to avoid pacing limits.
+            # Seed from the full historical 1H parquet (cl-1h_bk_HourSet_02.parquet)
+            # which lives alongside the processed datasets in CL_DATA_ROOT/data/processed/.
+            from src.data_paths import get_data_root as _get_data_root
+            _data_root = _get_data_root()
+            cache_path_1h = str(_data_root / "processed" / "warm_start_cache_1h.parquet")
+            seed_path_1h = str(_data_root / "processed" / "cl-1h_bk_HourSet_02.parquet")
             self.data_manager_1h = DataManager(
                 seed_path=seed_path_1h,
                 cache_path=cache_path_1h,
@@ -623,6 +657,16 @@ class LiveTrader:
         self._telegram = TelegramAlerter()
         self._bot_start_time = datetime.now(timezone.utc)
         self._last_inference_time_sec: float = 0.0
+        self._last_inference_bar_time: Optional[pd.Timestamp] = None
+        self._heartbeat_stop_event = threading.Event()
+        self._heartbeat_thread: Optional[threading.Thread] = None
+
+        # Attach log capture handler to root logger
+        self._log_capture = _TelegramLogCapture(maxlen=8)
+        self._log_capture.setFormatter(
+            _logging.Formatter("%(levelname)s [%(name)s] %(message)s")
+        )
+        _logging.getLogger().addHandler(self._log_capture)
 
     # (_prob_to_lots moved to Strategy subclasses)
 
@@ -630,12 +674,12 @@ class LiveTrader:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def _build_heartbeat_payload(self) -> str:
+    def _build_heartbeat_payload(self, recent_errors: list | None = None) -> str:
         """Format the heartbeat payload for Telegram."""
         uptime = datetime.now(timezone.utc) - self._bot_start_time
         uptime_str = str(uptime).split('.')[0]
         broker_status = "🟢 Connected" if self.manager.ib.isConnected() else "🔴 Disconnected"
-        
+
         current_position = 0
         try:
             current_position = self.manager.get_cl_position(symbol=self._execution_symbol)
@@ -662,16 +706,53 @@ class LiveTrader:
         except Exception:
             cpu_pct = ram_pct = disk_pct = 0.0
 
-        return (
+        if self._last_inference_bar_time is not None:
+            infer_str = f"`{self._last_inference_bar_time}`"
+        else:
+            infer_str = "❌ None (inference not yet computed)"
+
+        payload = (
             f"⏱️ Uptime: `{uptime_str}` | Broker: {broker_status}\n\n"
             f"📈 *Position & PnL*\n"
             f"Position: `{current_position}`\n"
             f"Unrealized PnL: `${unrealized_pnl:,.2f}`\n"
             f"Realized PnL: `${realized_pnl:,.2f}`\n\n"
             f"🧠 *MLOps & System*\n"
+            f"Last Inference Bar: {infer_str}\n"
             f"Inference Latency: `{self._last_inference_time_sec:.4f}s`\n"
             f"CPU: `{cpu_pct:.1f}%` | RAM: `{ram_pct:.1f}%` | Disk: `{disk_pct:.1f}%`"
         )
+
+        if recent_errors:
+            lines = []
+            for level, msg in recent_errors[-5:]:
+                icon = "🚨" if level == "ERROR" else "⚠️"
+                lines.append(f"{icon} `{msg[:180]}`")
+            payload += "\n\n📝 *Recent Warnings/Errors*\n" + "\n".join(lines)
+
+        return payload
+
+    def _start_heartbeat_thread(self) -> None:
+        """Start the background 1-hour heartbeat thread."""
+        self._heartbeat_stop_event.clear()
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name="TelegramHeartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+        log.info("Heartbeat thread started (interval=3600s).")
+
+    def _heartbeat_loop(self) -> None:
+        """Daemon thread: send a Telegram health-check pulse every 60 minutes."""
+        _INTERVAL = 3600  # seconds
+        while not self._heartbeat_stop_event.wait(timeout=_INTERVAL):
+            try:
+                recent_errors = self._log_capture.drain()
+                payload = self._build_heartbeat_payload(recent_errors=recent_errors)
+                self._telegram.send(f"💓 *1-Hour Heartbeat*\n\n" + payload)
+            except Exception:
+                pass  # Never let heartbeat crash the thread
 
     def start(self) -> None:
         """Connect to IBKR, warm-start via DataManager, and enter the event loop.
@@ -781,6 +862,9 @@ class LiveTrader:
             startup_msg += self._build_heartbeat_payload()
             self._telegram.send(startup_msg)
 
+            # Start clock-driven heartbeat (independent of inference)
+            self._start_heartbeat_thread()
+
             self._event_loop()
 
         except Exception as _fatal_exc:
@@ -851,8 +935,11 @@ class LiveTrader:
                 self.data_manager_1h.save_cache()
         except Exception:
             log.warning("Failed to save warm-start cache on shutdown.")
+        # Stop heartbeat thread
+        self._heartbeat_stop_event.set()
         self.manager.disconnect()
         self.telemetry.close()
+        _logging.getLogger().removeHandler(self._log_capture)
         log.info("Shutdown complete.")
 
     def _register_execution_callbacks(self) -> None:
@@ -2050,7 +2137,7 @@ class LiveTrader:
             len(self.rolling_df_5m), self._last_bar_time_5m,
         )
 
-        if self._bar_size == "1h" and self.data_manager_1h is not None:
+        if self._bar_size in ("1h", "2h", "4h") and self.data_manager_1h is not None:
             log.info("Warm-start: initializing 1h DataManager...")
             self.rolling_df_1h = self.data_manager_1h.initialize()
             if len(self.rolling_df_1h) == 0:
@@ -2546,6 +2633,7 @@ class LiveTrader:
             current_position=effective_position,
         )
         self._last_inference_time_sec = time.perf_counter() - t0
+        self._last_inference_bar_time = bar_time  # track last successful inference
 
         # Update Thread-Safe Virtual Ledger (Dual Stream Netting)
         if signal.action == "ENTER":

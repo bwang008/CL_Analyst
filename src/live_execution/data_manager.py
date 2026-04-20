@@ -325,11 +325,13 @@ class DataManager:
 
     def _seed_from_csv(self) -> pd.DataFrame:
         """
-        Load the last `_SEED_LOOKBACK_DAYS` of data from the seed CSV.
+        Load the last `_SEED_LOOKBACK_DAYS` of data from the seed file.
 
-        The seed file is semicolon-delimited with no header:
-            Date;Time;Open;High;Low;Close;Volume
-            20/11/2008;00:00;181.588;...
+        Supports two formats:
+          - Parquet (.parquet): read directly, expects DateTime column + OHLCV.
+          - CSV (.csv): semicolon-delimited with no header:
+              Date;Time;Open;High;Low;Close;Volume
+              20/11/2008;00:00;181.588;...
 
         Returns:
             pd.DataFrame with DateTime index and OHLCV columns.
@@ -347,22 +349,33 @@ class DataManager:
 
         log.info("Reading seed file: %s", self.seed_path)
 
-        df = pd.read_csv(
-            self.seed_path,
-            sep=";",
-            header=None,
-            names=["Date", "Time", "Open", "High", "Low", "Close", "Volume"],
-        )
-
-        # Parse DateTime
-        df["DateTime"] = pd.to_datetime(
-            df["Date"] + " " + df["Time"],
-            format="%d/%m/%Y %H:%M",
-        )
-        df = df[["DateTime", "Open", "High", "Low", "Close", "Volume"]]
-        df = df.set_index("DateTime", drop=False)
-        df.index.name = "DateTime"
-        df = df.sort_index()
+        # ── Parquet seed (e.g. cl-1h_bk_HourSet_02.parquet) ──────────────
+        if self.seed_path.suffix.lower() == ".parquet":
+            df = pd.read_parquet(self.seed_path, engine="pyarrow")
+            if "DateTime" not in df.columns:
+                # Try resetting index if DateTime is the index
+                df = df.reset_index()
+            df["DateTime"] = pd.to_datetime(df["DateTime"])
+            df = df[["DateTime", "Open", "High", "Low", "Close", "Volume"]]
+            df = df.set_index("DateTime", drop=False)
+            df.index.name = "DateTime"
+            df = df.sort_index()
+        else:
+            # ── Legacy semicolon-delimited CSV ────────────────────────────────
+            df = pd.read_csv(
+                self.seed_path,
+                sep=";",
+                header=None,
+                names=["Date", "Time", "Open", "High", "Low", "Close", "Volume"],
+            )
+            df["DateTime"] = pd.to_datetime(
+                df["Date"] + " " + df["Time"],
+                format="%d/%m/%Y %H:%M",
+            )
+            df = df[["DateTime", "Open", "High", "Low", "Close", "Volume"]]
+            df = df.set_index("DateTime", drop=False)
+            df.index.name = "DateTime"
+            df = df.sort_index()
 
         # Take the last N days
         cutoff = df.index.max() - timedelta(days=_SEED_LOOKBACK_DAYS)
