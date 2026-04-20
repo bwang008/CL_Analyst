@@ -91,7 +91,17 @@ class TelegramAlerter:
         if not self.enabled:
             return False
 
-        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo("America/Los_Angeles")
+        except ImportError:
+            try:
+                import pytz
+                tz = pytz.timezone("America/Los_Angeles")
+            except ImportError:
+                tz = timezone.utc
+                
+        now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
         message = f"_{now_str}_\n\n{message}"
 
         if requests is None:
