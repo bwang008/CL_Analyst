@@ -20,8 +20,12 @@ Run the automated pipeline test natively in the activated environment.
 
 // turbo
 ```powershell
+# Prevent conda from hanging on its interactive error-report prompt.
+# 'report_errors false' is a one-time conda config (already set on this machine).
+# PYTHONUTF8=1 prevents the UnicodeEncodeError that triggers the prompt.
 $env:PYTHONUTF8 = "1"
 conda run -n trader python tests/smoke_test_pipeline.py
+$env:PYTHONUTF8 = "1"
 conda run -n trader python tmp/playback_simulator.py
 ```
 
