@@ -2171,6 +2171,19 @@ class LiveTrader:
                 "1h rolling window initialized: %d bars, latest=%s",
                 len(self.rolling_df_1h), self._last_bar_time_1h,
             )
+            
+            # Post-load validation: ensure 1H cache meets minimum requirements
+            _min_required = {"1h": 840, "2h": 840, "4h": 840}
+            _required = _min_required.get(self._bar_size, 0)
+            if len(self.rolling_df_1h) < _required:
+                err_msg = (
+                    f"1H cache has only {len(self.rolling_df_1h)} bars — "
+                    f"need {_required} for {self._bar_size} inference. "
+                    f"Delete warm_start_cache_1h.parquet to trigger reseed."
+                )
+                log.error("CACHE VALIDATION FAILED: %s", err_msg)
+                self._telegram.send(f"⚠️ *CACHE VALIDATION FAILED*\n`{err_msg}`")
+                raise RuntimeError(err_msg)
 
     # ------------------------------------------------------------------
     # Live bar subscription
