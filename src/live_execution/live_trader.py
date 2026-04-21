@@ -88,8 +88,11 @@ class _TelegramLogCapture(_logging.Handler):
     def emit(self, record: _logging.LogRecord) -> None:
         try:
             msg = self.format(record)
+            ts_utc = datetime.fromtimestamp(record.created, timezone.utc).strftime(
+                "%Y-%m-%d %H:%M:%S UTC"
+            )
             with self._lock:
-                self._records.append((record.levelname, msg))
+                self._records.append((record.levelname, msg, ts_utc))
         except Exception:
             pass
 
@@ -729,9 +732,9 @@ class LiveTrader:
 
         if recent_errors:
             lines = []
-            for level, msg in recent_errors[-5:]:
+            for level, msg, ts_utc in recent_errors[-5:]:
                 icon = "🚨" if level == "ERROR" else "⚠️"
-                lines.append(f"{icon} `{msg[:180]}`")
+                lines.append(f"{icon} `{ts_utc}` `{msg[:150]}`")
             payload += "\n\n📝 *Recent Warnings/Errors*\n" + "\n".join(lines)
 
         return payload
