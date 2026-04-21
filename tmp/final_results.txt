@@ -1,0 +1,267 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.10.18, pytest-9.0.2, pluggy-1.6.0
+rootdir: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development
+configfile: pytest.ini
+collected 445 items
+
+tests\data\test_verifier.py .................................            [  7%]
+tests\features\test_indicators.py ...................                    [ 11%]
+tests\models\test_lgbm_learner.py .................                      [ 15%]
+tests\test_account_summary.py ...........                                [ 17%]
+tests\test_alpha_factory.py ...............                              [ 21%]
+tests\test_backtest_engine.py .......................................... [ 30%]
+................                                                         [ 34%]
+tests\test_bad_data.py .......                                           [ 35%]
+tests\test_bracket_order.py ......................                       [ 40%]
+tests\test_configurable_strategy.py ....................                 [ 45%]
+tests\test_cooldown.py ............                                      [ 48%]
+tests\test_data_manager.py ..............                                [ 51%]
+tests\test_data_processor.py ......................                      [ 56%]
+tests\test_data_root.py ..........                                       [ 58%]
+tests\test_evaluator.py ....                                             [ 59%]
+tests\test_feature_buckets.py .............                              [ 62%]
+tests\test_ibkr_ports.py ........                                        [ 64%]
+tests\test_live_features.py ................                             [ 67%]
+tests\test_log_filter.py ...........                                     [ 70%]
+tests\test_lookahead_bias.py .....                                       [ 71%]
+tests\test_pipeline_parity.py ....                                       [ 72%]
+tests\test_reconnection.py ..............                                [ 75%]
+tests\test_rollover.py ......................                            [ 80%]
+tests\test_schema_contracts.py ..........                                [ 82%]
+tests\test_shadow_log.py ..................                              [ 86%]
+tests\test_strategy.py ..............                                    [ 89%]
+tests\test_telemetry.py ...............                                  [ 93%]
+tests\test_time_utils.py ...............                                 [ 96%]
+tests\test_tradebook_logging.py ..                                       [ 96%]
+tests\test_triple_barrier.py ........                                    [ 98%]
+tests\test_visualizer.py ...                                             [ 99%]
+tests\test_walk_forward.py ...                                           [100%]
+
+============================== warnings summary ===============================
+..\..\..\anaconda3\envs\trader\lib\site-packages\pandas_ta\__init__.py:7
+  C:\Users\bwang\anaconda3\envs\trader\lib\site-packages\pandas_ta\__init__.py:7: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html
+    from pkg_resources import get_distribution, DistributionNotFound
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:536: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"EXHAUST_CUM_ATR{suffix}"] = price_move / atr
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:540: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"EXHAUST_DIST_HIGH{suffix}"] = (
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:260: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"VOL_PARK{suffix}"] = np.sqrt(
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:265: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"VOL_ROC{suffix}"] = self.df[f"VOL_PARK{suffix}"].pct_change(window)
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:266: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"VOL_VOLVOL{suffix}"] = (
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:276: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"VOL_RS{suffix}"] = np.sqrt(rs_term.rolling(window).mean())
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:285: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"VOL_YZ{suffix}"] = np.sqrt(
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:295: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"LIQ_AMIHUD{suffix}"] = (
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:301: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"LIQ_CORWIN{suffix}"] = _corwin_schultz_numba(
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:313: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"STRUC_EFFICIENCY_{window}"] = direction / volatility
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:351: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"TREND_DONCHIAN_POS{suffix}"] = (self.close - roll_min) / range_span
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:355: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"TREND_LR_SLOPE{suffix}"] = slopes
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:356: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"TREND_LR_R2{suffix}"] = r2s
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:370: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"VOLFLOW_OBV_SLOPE{suffix}"] = (
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:376: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"VOLFLOW_DIVERGENCE{suffix}"] = (
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:382: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"VOLFLOW_VWAP_DIST{suffix}"] = (self.close - vwap) / vwap
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:389: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"VOLFLOW_CMF{suffix}"] = (
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:484: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"DIST_SKEW{suffix}"] = log_ret.rolling(window).skew()
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:487: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"DIST_KURT{suffix}"] = log_ret.rolling(window).kurt()
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:492: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"DIST_ZSCORE{suffix}"] = (
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:508: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"MOM_STOCH_K{suffix}"] = stoch_k
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:511: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"MOM_STOCH_D{suffix}"] = stoch_k.rolling(3).mean()
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:526: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"EXHAUST_CUM_RET{suffix}"] = cum_ret
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:634: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df["CROSS_VOL_RATIO_1D_35D"] = (
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:639: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df["CROSS_VOL_RATIO_3D_14D"] = (
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:646: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df["CROSS_TREND_DIFF_1D_35D"] = (
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:651: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df["CROSS_TREND_DIFF_3D_14D"] = (
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:658: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df["CROSS_VWAP_DIFF_1D_35D"] = (
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:435: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df["MOM_RSI_14"] = rsi if isinstance(rsi, pd.Series) else rsi.iloc[:, 0]
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:446: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df["MOM_BB_Width"] = bb_width if bb_width is not None else np.nan
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:447: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df["MOM_BB_PctB"] = bb_pctb if bb_pctb is not None else np.nan
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:455: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df["MOM_ADX_14"] = adx.iloc[:, 0]
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:456: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df["MOM_DMP_14"] = adx.iloc[:, 1]
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:457: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df["MOM_DMN_14"] = adx.iloc[:, 2]
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:462: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df["MOM_MACD"] = macd.iloc[:, 0]
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:463: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df["MOM_MACD_Signal"] = macd.iloc[:, 1]
+
+tests/test_alpha_factory.py::test_cross_timeframe_ratios
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:464: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df["MOM_MACD_Hist"] = macd.iloc[:, 2]
+
+tests/test_backtest_engine.py::TestFromConfig::test_from_config_defaults
+tests/test_backtest_engine.py::TestFromConfig::test_from_config_overrides
+tests/test_backtest_engine.py::TestSingleModelStrategy::test_default_execution_class_is_single
+tests/test_backtest_engine.py::TestFromConfigCooldowns::test_from_config_reads_separate_cooldowns
+tests/test_backtest_engine.py::TestFromConfigCooldowns::test_from_config_fallback_to_cooldown_bars
+tests/test_backtest_engine.py::TestConsecutiveSignalThreshold::test_from_config_reads_threshold
+tests/test_backtest_engine.py::TestConsecutiveSignalThreshold::test_from_config_defaults_to_zero
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\live_execution\strategies\execution_models.py:667: UserWarning: [SingleModelStrategy] No threshold found in config! Checked models.long.threshold and entry_threshold. Defaulting to 1.0 (NO TRADES). Set a threshold explicitly.
+    return cls(config)
+
+tests/test_bad_data.py: 13 warnings
+  C:\Users\bwang\anaconda3\envs\trader\lib\site-packages\pandas\core\arraylike.py:402: RuntimeWarning: invalid value encountered in log
+    result = getattr(ufunc, method)(*inputs, **kwargs)
+
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:426: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"MACRO_WIDTH_{label}"] = range_span / self.close
+
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+tests/test_live_features.py::TestBuildLiveFeaturesSet07::test_returns_dataframe
+  C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\tests\data\..\..\src\features\alpha_factory.py:427: PerformanceWarning: DataFrame is highly fragmented.  This is usually the result of calling `frame.insert` many times, which has poor performance.  Consider joining all columns at once using pd.concat(axis=1) instead. To get a de-fragmented frame, use `newframe = frame.copy()`
+    self.df[f"MACRO_POS_{label}"] = (self.close - roll_min) / range_span
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+================ 445 passed, 110 warnings in 182.70s (0:03:02) ================
+

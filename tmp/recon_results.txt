@@ -1,0 +1,30 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.10.18, pytest-9.0.2, pluggy-1.6.0 -- C:\Users\bwang\anaconda3\envs\trader\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development
+configfile: pytest.ini
+collecting ... collected 14 items
+
+tests/test_reconnection.py::TestReconnect::test_reconnect_success_first_attempt PASSED [  7%]
+tests/test_reconnection.py::TestReconnect::test_reconnect_retries_on_failure PASSED [ 14%]
+tests/test_reconnection.py::TestReconnect::test_reconnect_gives_up_after_max_attempts PASSED [ 21%]
+tests/test_reconnection.py::TestReconnect::test_reconnect_calls_resubscribe_and_backfill PASSED [ 28%]
+tests/test_reconnection.py::TestReconnect::test_reconnect_re_registers_error_handler PASSED [ 35%]
+tests/test_reconnection.py::TestReconnect::test_reconnect_respects_running_flag PASSED [ 42%]
+tests/test_reconnection.py::TestReconnect::test_reconnect_disconnects_before_connecting PASSED [ 50%]
+tests/test_reconnection.py::TestReconnect::test_reconnect_cancels_stale_subscriptions PASSED [ 57%]
+tests/test_reconnection.py::TestEventLoopReconnection::test_event_loop_calls_reconnect_on_connection_error PASSED [ 64%]
+tests/test_reconnection.py::TestEventLoopReconnection::test_event_loop_shuts_down_on_failed_reconnect PASSED [ 71%]
+tests/test_reconnection.py::TestEventLoopReconnection::test_event_loop_sets_needs_restart_on_failed_reconnect PASSED [ 78%]
+tests/test_reconnection.py::TestResubscribeAndBackfill::test_resubscribes_both_streams PASSED [ 85%]
+tests/test_reconnection.py::TestResubscribeAndBackfill::test_skips_front_month_when_no_contract PASSED [ 92%]
+tests/test_reconnection.py::TestResubscribeAndBackfill::test_cancels_stale_subscriptions PASSED [100%]
+
+============================== warnings summary ===============================
+..\..\..\anaconda3\envs\trader\lib\site-packages\pandas_ta\__init__.py:7
+  C:\Users\bwang\anaconda3\envs\trader\lib\site-packages\pandas_ta\__init__.py:7: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html
+    from pkg_resources import get_distribution, DistributionNotFound
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================== 14 passed, 1 warning in 1.90s ========================
+

@@ -62,6 +62,14 @@ def _make_trader_stub():
 
     trader._virtual_ledger = {"5m": 0, "1h": 0}
 
+    # _reconnect uses _stop_event.wait(timeout=...) for interruptible backoff.
+    # Use a real threading.Event (not set) so wait() returns False (no shutdown).
+    import threading
+    trader._stop_event = threading.Event()
+
+    # _reconnect calls _register_execution_callbacks after a successful connect
+    trader._register_execution_callbacks = MagicMock()
+
     return trader
 
 
