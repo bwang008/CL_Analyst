@@ -2166,6 +2166,36 @@ class LiveTrader:
                 self.rolling_df_1h.index, pd.DatetimeIndex
             ):
                 self.rolling_df_1h = self.rolling_df_1h.set_index("DateTime", drop=False)
+            # Guard against cache contamination (e.g., 5m rows accidentally
+            # written into warm_start_cache_1h.parquet by legacy runs).
+            # A valid 1h cache should have ~1 hour median spacing.
+            if len(self.rolling_df_1h) >= 3:
+                _dt_deltas = self.rolling_df_1h.index.to_series().diff().dropna()
+                _dt_deltas = _dt_deltas[_dt_deltas > pd.Timedelta(0)]
+                if len(_dt_deltas) > 0:
+                    _median_delta = _dt_deltas.median()
+                    _min_hourly = pd.Timedelta(minutes=45)
+                    _max_hourly = pd.Timedelta(hours=2, minutes=30)
+                    if _median_delta < _min_hourly or _median_delta > _max_hourly:
+                        log.warning(
+                            "1h cache cadence invalid (median delta=%s). "
+                            "Deleting %s and rebuilding from 1h seed.",
+                            _median_delta,
+                            self.data_manager_1h.cache_path,
+                        )
+                        try:
+                            if self.data_manager_1h.cache_path.exists():
+                                self.data_manager_1h.cache_path.unlink()
+                        except Exception as exc:
+                            raise RuntimeError(
+                                f"Failed to delete invalid 1h cache at "
+                                f"{self.data_manager_1h.cache_path}: {exc}"
+                            ) from exc
+                        self.rolling_df_1h = self.data_manager_1h.initialize()
+                        if "DateTime" in self.rolling_df_1h.columns and not isinstance(
+                            self.rolling_df_1h.index, pd.DatetimeIndex
+                        ):
+                            self.rolling_df_1h = self.rolling_df_1h.set_index("DateTime", drop=False)
             self._last_bar_time_1h = self.rolling_df_1h.index[-1]
             log.info(
                 "1h rolling window initialized: %d bars, latest=%s",

@@ -443,15 +443,15 @@ class DataManager:
             log.info("Gap < 10 minutes — no backfill needed.")
             return
 
-        # Convert gap to IBKR duration chunks
+        # Continuous futures reject specific endDateTime values (IBKR 10339).
+        # Use a single NOW-anchored request covering the whole gap.
         gap_td = timedelta(seconds=gap.total_seconds())
-        chunks = split_duration_into_chunks(
-            gap_td, max_chunk_days=_MAX_IB_REQUEST_DAYS
-        )
+        gap_days = max(1, int((gap_td.total_seconds() + 86_399) // 86_400))
+        chunks = [f"{gap_days} D"]
 
         log.info(
-            "Backfill: %d chunk(s) needed: %s",
-            len(chunks), chunks,
+            "Backfill: continuous contract using single chunk: %s ending NOW",
+            chunks[0],
         )
 
         from src.live_execution.ibkr_client import build_cl_contract
@@ -460,17 +460,9 @@ class DataManager:
         contract = self.ibkr_manager.qualify_contract(contract)
 
         total_stitched = 0
-        import re
-        current_end = pd.Timestamp.now(tz="UTC")
-        
         for i, duration_str in enumerate(chunks):
-            # IBKR Error 10339: Continuous futures do not allow specific end date/time.
-            # The most recent chunk must be requested with an empty string.
-            if i == 0:
-                end_dt_str = ""
-            else:
-                end_dt_str = current_end.strftime("%Y%m%d %H:%M:%S")
-                log.warning("IBKR may reject specific end datetimes for continuous futures (chunk %d).", i + 1)
+            # Keep endDateTime blank for continuous futures (required by IBKR).
+            end_dt_str = ""
 
             log.info(
                 "Backfill chunk %d/%d: requesting %s ending %s ...",
@@ -489,11 +481,6 @@ class DataManager:
                 throttle_seconds=0.5,
             )
             
-            # Step backward for the next chunk
-            days_match = re.search(r"(\d+)\s*D", duration_str)
-            if days_match:
-                current_end -= pd.Timedelta(days=int(days_match.group(1)))
-
             if not bars:
                 log.warning("Backfill chunk %d: no bars returned.", i + 1)
                 continue
@@ -951,25 +938,20 @@ class DataManager:
             log.info("Ledger gap < 10 minutes — no IBKR fetch needed.")
             return None
 
+        # Continuous futures reject specific endDateTime values (IBKR 10339).
+        # Use a single NOW-anchored request covering the whole range.
         gap_td = timedelta(seconds=gap.total_seconds())
-        chunks = split_duration_into_chunks(
-            gap_td, max_chunk_days=_MAX_IB_REQUEST_DAYS
-        )
+        gap_days = max(1, int((gap_td.total_seconds() + 86_399) // 86_400))
+        chunks = [f"{gap_days} D"]
 
         contract = build_cl_contract(continuous=True)
         contract = self.ibkr_manager.qualify_contract(contract)
 
-        import re
-        current_end = pd.Timestamp.now(tz="UTC")
-        
         all_dfs = []
         for i, duration_str in enumerate(chunks):
-            if i == 0:
-                end_dt_str = ""
-            else:
-                end_dt_str = current_end.strftime("%Y%m%d %H:%M:%S")
-                log.warning("IBKR may reject specific end datetimes for continuous futures (chunk %d).", i + 1)
-                
+            # Keep endDateTime blank for continuous futures (required by IBKR).
+            end_dt_str = ""
+
             log.info(
                 "Ledger fetch chunk %d/%d: %s ending %s",
                 i + 1, len(chunks), duration_str, end_dt_str if end_dt_str else "NOW"
@@ -986,10 +968,6 @@ class DataManager:
                 throttle_seconds=0.5,
             )
             
-            # Step backward for the next chunk
-            days_match = re.search(r"(\d+)\s*D", duration_str)
-            if days_match:
-                current_end -= pd.Timedelta(days=int(days_match.group(1)))
             if bars:
                 all_dfs.append(ib_bars_to_dataframe(bars))
 

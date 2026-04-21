@@ -2,6 +2,12 @@
 
 This workflow executes the institutional-grade Automated Smoke Test to verify the health of the live trading architecture. It checks Database & Logging Integrity, Cache & Artifact Validation, and Train-Serve Parity.
 
+It now also validates `warm_start_cache*.parquet` cadence based on filename:
+- `warm_start_cache.parquet` -> 5-minute bars
+- `warm_start_cache_1h.parquet` -> 1-hour bars
+- `warm_start_cache_2h.parquet` -> 2-hour bars
+- `warm_start_cache_4h.parquet` -> 4-hour bars
+
 ## Usage
 Trigger this workflow by asking the agent to run the `/smoketest` workflow.
 
@@ -34,6 +40,7 @@ Review the terminal output:
 - Ensure all 3 Stages pass ([PASS]).
 - If any stage fails ([FAIL]), halt deployment operations immediately and alert the user to the specific failure point.
 - The `tests/smoke_test_pipeline.py` script automatically appends the result to `reports/HEALTH_REPORT.txt`.
+- Ensure `CACHE_STEP_*` checks are `PASS` for all discovered warm-start caches.
 
 ### 3. Report Results
 Summarize the results of the test back to the user, highlighting any warnings or performance issues noted in the output.

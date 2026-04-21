@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -54,7 +55,7 @@ sys.path.insert(0, str(_project_root))
 from dotenv import load_dotenv
 load_dotenv(_project_root / ".env")
 
-from src.data_paths import get_data_path, get_reports_root
+from src.data_paths import get_data_path, get_data_root, get_reports_root
 from src.live_execution.live_trader import build_live_features
 from src.live_execution.strategies.configurable_strategy import ConfigurableStrategy
 
@@ -233,18 +234,113 @@ def stage_2_artifact_validation(strategy_config_path: Path) -> bool:
             else:
                 _record(f"OOS_{direction.upper()}", "PASS", "oos_predictions.csv exists")
 
-        # Check warm-start cache
-        cache_1h = get_data_path("processed/warm_start_cache_1h.parquet")
-        if cache_1h.exists():
-            _record("CACHE_1H", "PASS", f"warm_start_cache_1h.parquet exists")
-        else:
-            _record("CACHE_1H", "WARN", "1h warm-start cache not found (will backfill)")
+        # Validate warm-start parquet cadence by filename timestep.
+        # This prevents subtle cache contamination (e.g., 5m rows in 1h cache).
+        if not _validate_warm_start_cache_cadence():
+            all_ok = False
 
         return all_ok
 
     except Exception as e:
         _record("ARTIFACT_CHECK", "FAIL", str(e))
         return False
+
+
+def _expected_cache_timestep(cache_name: str) -> pd.Timedelta | None:
+    """Infer expected timestep from warm-start cache filename."""
+    if cache_name == "warm_start_cache.parquet":
+        return pd.Timedelta(minutes=5)
+
+    match = re.fullmatch(r"warm_start_cache_(\d+)([mh])\.parquet", cache_name)
+    if not match:
+        return None
+
+    qty = int(match.group(1))
+    unit = match.group(2)
+    if unit == "m":
+        return pd.Timedelta(minutes=qty)
+    if unit == "h":
+        return pd.Timedelta(hours=qty)
+    return None
+
+
+def _validate_single_cache_cadence(cache_path: Path, expected_step: pd.Timedelta) -> tuple[bool, str]:
+    """Return (is_valid, detail) after validating cache timestamp cadence."""
+    try:
+        df = pd.read_parquet(cache_path)
+    except Exception as exc:
+        return False, f"Failed to read parquet: {exc}"
+
+    if "DateTime" in df.columns:
+        ts = pd.to_datetime(df["DateTime"], errors="coerce")
+    else:
+        ts = pd.to_datetime(df.index, errors="coerce")
+
+    ts = pd.Series(ts).dropna().sort_values().drop_duplicates()
+    if len(ts) < 3:
+        return False, f"Not enough timestamps to validate cadence ({len(ts)})"
+
+    diffs = ts.diff().dropna()
+    diffs = diffs[diffs > pd.Timedelta(0)]
+    if len(diffs) == 0:
+        return False, "No positive timestamp deltas found"
+
+    observed = diffs.median()
+
+    # Tolerance guards natural market/session gaps while catching wrong cadence.
+    lower = expected_step * 0.75
+    upper = expected_step * 1.25
+    if not (lower <= observed <= upper):
+        return (
+            False,
+            f"Cadence mismatch: expected~{expected_step}, observed median={observed}",
+        )
+
+    return True, f"Cadence OK: expected~{expected_step}, observed median={observed}"
+
+
+def _validate_warm_start_cache_cadence() -> bool:
+    """Validate all known warm_start_cache*.parquet files in processed data."""
+    all_ok = True
+
+    candidates: list[Path] = []
+    processed_shared = get_data_root() / "processed"
+    if processed_shared.exists():
+        candidates.extend(sorted(processed_shared.glob("warm_start_cache*.parquet")))
+
+    processed_local = _project_root / "data" / "processed"
+    if processed_local.exists():
+        candidates.extend(sorted(processed_local.glob("warm_start_cache*.parquet")))
+
+    # De-duplicate identical paths while preserving order
+    seen: set[str] = set()
+    unique_candidates: list[Path] = []
+    for path in candidates:
+        key = str(path.resolve()) if path.exists() else str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_candidates.append(path)
+
+    if not unique_candidates:
+        _record("CACHE_CADENCE", "WARN", "No warm_start_cache*.parquet files found")
+        return True
+
+    for cache_path in unique_candidates:
+        expected = _expected_cache_timestep(cache_path.name)
+        stage_name = f"CACHE_STEP_{cache_path.name}"
+        if expected is None:
+            _record(stage_name, "WARN", "Unknown timestep naming convention; skipped")
+            continue
+
+        ok, detail = _validate_single_cache_cadence(cache_path, expected)
+        if ok:
+            _record(stage_name, "PASS", detail)
+        else:
+            _record(stage_name, "FAIL", f"{cache_path}: {detail}")
+            all_ok = False
+
+    return all_ok
 
 
 # ---------------------------------------------------------------------------
