@@ -316,10 +316,14 @@ def build_live_features(
         return None
 
     # Warn if cache depth is below recommended minimum for long-window
-    # features (MACRO_3M needs 2160h × 12 = 25,920 5m-bars + warmup).
-    # Scale by bar_size: 26,000 for 5m, ~2,167 for 1h.
+    # features (MACRO_3M needs 2160h of data).
+    # Convert the 5m threshold to the current bar size:
+    #   5m  → divisor 1   → 26,000 bars
+    #   1h  → divisor 12  → ~2,167 bars
+    #   2h  → divisor 24  → ~1,083 bars
+    #   4h  → divisor 48  → ~542 bars
     _MIN_RECOMMENDED_BARS_5M = 26_000
-    _bar_divisor = 12 if bar_size == "1h" else 1
+    _bar_divisor = {"5m": 1, "1h": 12, "2h": 24, "4h": 48}.get(bar_size, 1)
     _min_recommended = _MIN_RECOMMENDED_BARS_5M // _bar_divisor
     if len(df) < _min_recommended:
         log.warning(
@@ -344,7 +348,12 @@ def build_live_features(
         work["Time_DayOfWeek_Cos"] = np.cos(2 * np.pi * day_of_week / 5)
 
     # 2. Run AlphaFactory
-    factory = AlphaFactory(work)
+    # bars_per_hour determines the bar-count equivalent of rolling windows in
+    # add_macro_context (e.g. MACRO_3M = 2160 hours × bars_per_hour bars).
+    # Default of 12 is for 5m bars; must be 1 for 1h/2h/4h to avoid
+    # 12× over-sized macro windows that silently underestimate context range.
+    _bars_per_hour = {"5m": 12, "1h": 1, "2h": 1, "4h": 1}.get(bar_size, 12)
+    factory = AlphaFactory(work, bars_per_hour=_bars_per_hour)
     if lean:
         # Lean path: momentum + time features only (no macro, no extended)
         # This is 6-7x faster than the full pipeline
@@ -597,7 +606,7 @@ class LiveTrader:
             from src.data_paths import get_data_root as _get_data_root
             _data_root = _get_data_root()
             cache_path_1h = str(_data_root / "processed" / "warm_start_cache_1h.parquet")
-            seed_path_1h = str(_data_root / "processed" / "cl-1h_bk_HourSet_02.parquet")
+            seed_path_1h = str(_data_root / "processed" / "cl-1h_bk_HourSet_03.parquet")
             self.data_manager_1h = DataManager(
                 seed_path=seed_path_1h,
                 cache_path=cache_path_1h,

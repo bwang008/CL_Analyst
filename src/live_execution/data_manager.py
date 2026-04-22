@@ -277,8 +277,15 @@ class DataManager:
         os.close(fd)
 
         try:
-            # Reset index so DateTime becomes a column for clean storage
-            save_df = self._df.copy()
+            # Reset index so DateTime becomes a column for clean storage.
+            # Only persist OHLCV columns: extra columns (feature engineering
+            # artifacts, training labels, etc.) must never be written to the
+            # live cache — they introduce NaN-filled rows when new bars are
+            # appended as plain OHLCV, which can corrupt downstream features.
+            _required_cols = [c for c in
+                              ["DateTime", "Open", "High", "Low", "Close", "Volume"]
+                              if c in self._df.columns]
+            save_df = self._df[_required_cols].copy()
             if save_df.index.name == "DateTime":
                 save_df = save_df.reset_index(drop=True)
 
@@ -408,6 +415,22 @@ class DataManager:
                 "Cache file missing 'DateTime' column: "
                 f"{self.cache_path}"
             )
+
+        # Strip any non-OHLCV columns that may have been written by a bug
+        # (e.g. feature columns from a training dataset accidentally used as
+        # a cache, or a session that wrote enriched DataFrames to disk).
+        # Keeping extra columns propagates NaN-filled feature rows into the
+        # rolling window, which can silently corrupt downstream computations.
+        _ohlcv_cols = {"DateTime", "Open", "High", "Low", "Close", "Volume"}
+        extra_cols = set(df.columns) - _ohlcv_cols
+        if extra_cols:
+            log.warning(
+                "Cache %s has %d extra columns beyond OHLCV — stripping: %s",
+                self.cache_path.name, len(extra_cols),
+                sorted(extra_cols)[:10],
+            )
+            df = df[[c for c in ["DateTime", "Open", "High", "Low", "Close", "Volume"]
+                      if c in df.columns]]
 
         df["DateTime"] = pd.to_datetime(df["DateTime"])
         df = df.set_index("DateTime", drop=False)

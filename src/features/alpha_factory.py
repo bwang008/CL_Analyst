@@ -1,9 +1,12 @@
+import logging
 import warnings
 
 import numpy as np
 import pandas as pd
 import pandas_ta as ta  # noqa: F401
 from datetime import datetime
+
+log = logging.getLogger(__name__)
 
 # Suppress pandas PerformanceWarning about DataFrame fragmentation.
 # Feature generation naturally assigns many columns one at a time;
@@ -436,7 +439,25 @@ class AlphaFactory:
         else:
             self.df["MOM_RSI_14"] = np.nan
 
-        bb = self.df.ta.bbands(length=20, std=2)
+        # pandas_ta.bbands uses rolling(length).std() with default min_periods=length.
+        # Any NaN in a 20-bar window propagates to that window's output, and if NaN
+        # density > 1/20 the ENTIRE series becomes NaN.  Forward-fill the Close
+        # column before calling bbands so that single-bar gaps (rollover seams,
+        # IBKR placeholder bars, first-bar NaN from log_ret, etc.) do not silently
+        # zero-fill MOM_BB_Width / MOM_BB_PctB for the whole inference window.
+        # Use a lightweight 3-column slice (O/H/L/C/V accessor needs only Close)
+        # so we avoid copying hundreds of feature columns when the cache is warm.
+        nan_before = int(self.df["Close"].isna().sum())
+        if nan_before > 0:
+            log.warning(
+                "add_momentum_cluster: Close has %d NaN values — "
+                "ffill applied before bbands to prevent all-NaN output",
+                nan_before,
+            )
+        _close_for_bb = self.df["Close"].ffill()
+        _bb_slice = self.df[["Open", "High", "Low", "Volume"]].copy()
+        _bb_slice["Close"] = _close_for_bb
+        bb = _bb_slice.ta.bbands(length=20, std=2)
         if bb is not None and not bb.empty:
             bb_width = bb.get("BBB_20_2.0")
             if bb_width is None:
