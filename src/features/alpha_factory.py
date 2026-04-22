@@ -163,7 +163,7 @@ class AlphaFactory:
 
     REQUIRED_COLUMNS = {"Open", "High", "Low", "Close", "Volume"}
 
-    def __init__(self, df: pd.DataFrame, bars_per_hour: int = 12):
+    def __init__(self, df: pd.DataFrame, bars_per_hour: float = 12):
         missing = self.REQUIRED_COLUMNS - set(df.columns)
         if missing:
             missing_list = ", ".join(sorted(missing))

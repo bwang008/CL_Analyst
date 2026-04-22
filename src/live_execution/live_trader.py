@@ -292,16 +292,16 @@ def build_live_features(
         # 4h bars: windows are in 4h-bar units (6=1d, 18=3d, 42=7d, 84=14d, 210=35d)
         is_set_07 = True
         alpha_windows = [6, 18, 42, 84, 210]
-        macro_windows = {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320}
+        macro_windows = {"1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320}
     elif bar_size == "2h":
         # 2h bars: windows are in 2h-bar units (12=1d, 36=3d, 84=7d, 168=14d, 420=35d)
         is_set_07 = True
         alpha_windows = [12, 36, 84, 168, 420]
-        macro_windows = {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320}
+        macro_windows = {"1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320}
     elif bar_size == "1h":
         is_set_07 = True
         alpha_windows = [24, 72, 168, 336, 840]
-        macro_windows = {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320}
+        macro_windows = {"1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320}
     else:
         # Auto-detect set_07 pipeline (ignored if lean=True)
         is_set_07 = not lean and bool(_SET_07_SENTINEL_FEATURES & set(feature_names))
@@ -352,7 +352,7 @@ def build_live_features(
     # add_macro_context (e.g. MACRO_3M = 2160 hours × bars_per_hour bars).
     # Default of 12 is for 5m bars; must be 1 for 1h/2h/4h to avoid
     # 12× over-sized macro windows that silently underestimate context range.
-    _bars_per_hour = {"5m": 12, "1h": 1, "2h": 1, "4h": 1}.get(bar_size, 12)
+    _bars_per_hour = {"5m": 12, "1h": 1, "2h": 0.5, "4h": 0.25}.get(bar_size, 12)
     factory = AlphaFactory(work, bars_per_hour=_bars_per_hour)
     if lean:
         # Lean path: momentum + time features only (no macro, no extended)
