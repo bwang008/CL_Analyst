@@ -28,7 +28,8 @@ param(
     [string]$TargetShort = "",
     [switch]$NoShutdown,
     [switch]$SkipProvision,
-    [switch]$UseBuckets
+    [switch]$UseBuckets,
+    [string]$GcsPrefix = "canary"
 )
 
 # Add gcloud to PATH if not already there
@@ -133,7 +134,7 @@ if (-not $SkipProvision) {
 # --- [2/6] Create directory structure ---
 Write-Host "`n[2/6] Creating directory structure..."
 gcloud compute ssh $VmName --zone=$Zone --quiet `
-    --command="mkdir -p $RemoteProject/agent $RemoteProject/src/live_execution/strategies $RemoteProject/gcp $RemoteProject/configs/strategies $RemoteProject/models/optuna_studies $RemoteProject/reports $RemoteHome/data" 2>$null
+    --command="mkdir -p $RemoteProject/agent $RemoteProject/src/live_execution/strategies $RemoteProject/src/features $RemoteProject/gcp $RemoteProject/configs/strategies $RemoteProject/models/optuna_studies $RemoteProject/reports $RemoteHome/data" 2>$null
 
 # --- [3/6] Upload code ---
 Write-Host "`n[3/6] Uploading code..."
@@ -145,6 +146,8 @@ $codeFiles = @(
     @{ Local = "agent\__init__.py";              Remote = "agent/" },
     @{ Local = "src\util.py";                    Remote = "src/" },
     @{ Local = "src\__init__.py";                Remote = "src/" },
+    @{ Local = "src\LGBMLearner.py";             Remote = "src/" },
+    @{ Local = "src\data_processor.py";          Remote = "src/" },
     @{ Local = "src\live_execution\__init__.py";                   Remote = "src/live_execution/" },
     @{ Local = "src\live_execution\strategies\__init__.py";        Remote = "src/live_execution/strategies/" },
     @{ Local = "src\live_execution\strategies\execution_models.py"; Remote = "src/live_execution/strategies/" },
@@ -193,7 +196,8 @@ $targetFlags = ""
 if ($TargetLong) { $targetFlags += " --target-long=$TargetLong" }
 if ($TargetShort) { $targetFlags += " --target-short=$TargetShort" }
 $bucketFlag = if ($UseBuckets) { " --use-buckets" } else { "" }
-$launchCmd = "tmux kill-session -t canary 2>/dev/null; tmux new-session -d -s canary 'bash $RemoteProject/gcp/vm_canary_run.sh $shutdownFlag --dataset=$datasetName --strategy=$StrategyConfig --metrics=$Metrics$targetFlags$bucketFlag'"
+$prefixFlag = if ($GcsPrefix) { " --canary-prefix=$GcsPrefix" } else { "" }
+$launchCmd = "tmux kill-session -t canary 2>/dev/null; tmux new-session -d -s canary 'bash $RemoteProject/gcp/vm_canary_run.sh $shutdownFlag --dataset=$datasetName --strategy=$StrategyConfig --metrics=$Metrics$targetFlags$bucketFlag$prefixFlag'"
 gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd --quiet 2>$null
 
 Write-Host "  Canary pipeline launched!" -ForegroundColor Green
@@ -202,7 +206,7 @@ Write-Host "  Canary pipeline launched!" -ForegroundColor Green
 Write-Host "`n[6/6] Verifying tmux session..."
 Start-Sleep -Seconds 3
 $tmuxCheck = gcloud compute ssh $VmName --zone=$Zone `
-    --command="tmux has-session -t canary 2>/dev/null && echo RUNNING" `
+    --command="tmux has-session -t canary 2>/dev/null && echo RUNNING || echo NOT_RUNNING" `
     --quiet 2>$null
 
 if ($tmuxCheck -match "RUNNING") {
@@ -219,7 +223,7 @@ Write-Host "=====================================================" -ForegroundCo
 Write-Host ""
 Write-Host "  VM:           $VmName"
 Write-Host "  Expected:     ~30 minutes"
-$gcsOut = "gs://cltrainer-optuna-results/canary/"
+$gcsOut = "gs://cltrainer-optuna-results/$GcsPrefix/"
 Write-Host "  GCS output:   $gcsOut"
 Write-Host ""
 Write-Host "Useful commands:" -ForegroundColor Cyan

@@ -551,6 +551,9 @@ class LiveTrader:
         self._max_position_size: int = int(
             strategy_config.get("max_position_size", max_lots_from_tiers)
         )
+        self._emergency_halt: bool = False
+        self._order_timestamps: list[float] = []
+        self._last_filled_entry_order_id = None
         log.info("Strategy: %s  direction=%s", strategy.name, strategy.direction)
 
         # Read execution_symbol from strategy config (Brain=CL, Hands=CL or MCL)
@@ -1642,6 +1645,9 @@ class LiveTrader:
         )
 
         try:
+            if not self._check_order_rate_limit():
+                return
+                
             child_trades = self.manager.place_child_orders(
                 contract=contract,
                 parent_order_id=order_id,
@@ -1853,63 +1859,73 @@ class LiveTrader:
                             )
                         self._reset_position_state()
                 else:
-                    # Parent entry order filled — clear TTL tracking
-                    log.info(
-                        "[TRADE] FILLED: %s %.0f %s @ %.2f",
-                        action_str, qty, symbol_str, avg_price,
-                    )
-                    # ── Telegram: trade completely filled alert ────────────────────
-                    dctx = self._last_decision_context_by_order_id.get(order_id, {})
-                    prob_buy = dctx.get("buy_prob_str", "N/A")
-                    prob_sell = dctx.get("sell_prob_str", "N/A")
-                    bar_str = dctx.get("bar_str", "N/A")
-
-                    self._telegram.send(
-                        f"✅ *Trade Filled*\n"
-                        f"{action_str} {qty:.0f} `{symbol_str}` @ `{avg_price:.2f}`\n"
-                        f"Prob (B/S): `{prob_buy}` / `{prob_sell}`\n"
-                        f"Bar: {bar_str}"
-                    )
-                    self._pending_entry_order_id = None
-                    self._pending_entry_bar_time = None
-                    # Open position in the persistent ledger
-                    trade_id = uuid.uuid4().hex
-                    self._active_trade_id = trade_id
-                    side = "LONG" if action_str == "BOT" or action_str == "BUY" else "SHORT"
-                    try:
-                        self.telemetry.open_position(
-                            trade_id=trade_id,
-                            side=side,
-                            quantity=int(qty),
-                            entry_price=avg_price,
-                            entry_order_id=order_id,
-                            atr_at_entry=self._atr_at_entry,
-                            entry_time=self._utc_iso_now(),
-                            entry_bar_time=(
-                                self._position_entry_bar_time.isoformat()
-                                if self._position_entry_bar_time is not None
-                                else None
-                            ),
-                            trailing_atr_mult=self._trade_trailing_atr_mult,
-                            max_hold_bars=self._trade_max_hold_bars,
+                    if parent_id != 0:
+                        log.warning(
+                            "Untracked child exit order filled (orderId=%d, parentId=%d, type=%s)! "
+                            "Skipping entry logic to prevent bracket cascade.",
+                            order_id, parent_id, order_type
                         )
+                    elif getattr(self, "_last_filled_entry_order_id", None) == order_id:
+                        log.info("Ignoring duplicate Filled event for parent order %s", order_id)
+                    else:
+                        self._last_filled_entry_order_id = order_id
+                        # Parent entry order filled — clear TTL tracking
                         log.info(
-                            "[LEDGER] OPEN: trade_id=%s  side=%s  qty=%d  "
-                            "entry=%.2f  ATR=%.4f",
-                            trade_id, side, int(qty), avg_price,
-                            self._atr_at_entry or 0.0,
+                            "[TRADE] FILLED: %s %.0f %s @ %.2f",
+                            action_str, qty, symbol_str, avg_price,
                         )
-                    except Exception:
-                        log.exception("Failed to write OPEN to position ledger")
-                    # Phase 2: place TP/SL as standalone orders from actual fill price
-                    if order_id is not None:
-                        self._place_bracket_children_on_fill(
-                            order_id=order_id,
-                            fill_price=avg_price,
-                            action_str=action_str,
-                            qty=qty,
-                            contract=contract,
+                        # ── Telegram: trade completely filled alert ────────────────────
+                        dctx = self._last_decision_context_by_order_id.get(order_id, {})
+                        prob_buy = dctx.get("buy_prob_str", "N/A")
+                        prob_sell = dctx.get("sell_prob_str", "N/A")
+                        bar_str = dctx.get("bar_str", "N/A")
+
+                        self._telegram.send(
+                            f"✅ *Trade Filled*\n"
+                            f"{action_str} {qty:.0f} `{symbol_str}` @ `{avg_price:.2f}`\n"
+                            f"Prob (B/S): `{prob_buy}` / `{prob_sell}`\n"
+                            f"Bar: {bar_str}"
                         )
+                        self._pending_entry_order_id = None
+                        self._pending_entry_bar_time = None
+                        # Open position in the persistent ledger
+                        trade_id = uuid.uuid4().hex
+                        self._active_trade_id = trade_id
+                        side = "LONG" if action_str == "BOT" or action_str == "BUY" else "SHORT"
+                        try:
+                            self.telemetry.open_position(
+                                trade_id=trade_id,
+                                side=side,
+                                quantity=int(qty),
+                                entry_price=avg_price,
+                                entry_order_id=order_id,
+                                atr_at_entry=self._atr_at_entry,
+                                entry_time=self._utc_iso_now(),
+                                entry_bar_time=(
+                                    self._position_entry_bar_time.isoformat()
+                                    if self._position_entry_bar_time is not None
+                                    else None
+                                ),
+                                trailing_atr_mult=self._trade_trailing_atr_mult,
+                                max_hold_bars=self._trade_max_hold_bars,
+                            )
+                            log.info(
+                                "[LEDGER] OPEN: trade_id=%s  side=%s  qty=%d  "
+                                "entry=%.2f  ATR=%.4f",
+                                trade_id, side, int(qty), avg_price,
+                                self._atr_at_entry or 0.0,
+                            )
+                        except Exception:
+                            log.exception("Failed to write OPEN to position ledger")
+                        # Phase 2: place TP/SL as standalone orders from actual fill price
+                        if order_id is not None:
+                            self._place_bracket_children_on_fill(
+                                order_id=order_id,
+                                fill_price=avg_price,
+                                action_str=action_str,
+                                qty=qty,
+                                contract=contract,
+                            )
 
             order_id = getattr(order, "orderId", None)
             ctx = self._last_decision_context_by_order_id.get(order_id)
@@ -2541,8 +2557,34 @@ class LiveTrader:
     # Inference + Execution
     # ------------------------------------------------------------------
 
+    def _check_order_rate_limit(self) -> bool:
+        """Check if we are exceeding 10 orders per 60 seconds."""
+        if self._emergency_halt:
+            return False
+            
+        now = time.time()
+        # Keep only timestamps within the last 60 seconds
+        self._order_timestamps = [ts for ts in self._order_timestamps if now - ts <= 60.0]
+        
+        if len(self._order_timestamps) >= 10:
+            self._emergency_halt = True
+            msg = "🚨 CRITICAL: Order rate limit exceeded (10 orders / 60s). System HALTED."
+            log.critical(msg)
+            try:
+                self._telegram.send(msg)
+            except Exception:
+                pass
+            return False
+            
+        self._order_timestamps.append(now)
+        return True
+
     def _on_new_bar(self, bar_time: pd.Timestamp, rolling_df: pd.DataFrame, stream: str) -> None:
         """Run feature generation, strategy evaluation, update ledger, and net execution."""
+        if self._emergency_halt:
+            log.warning("EMERGENCY HALT ACTIVE — ignoring new bar")
+            return
+
         # 0a. Entry order TTL: cancel stale entry orders after 1 bar
         self._check_entry_order_ttl(bar_time)
 
@@ -2582,19 +2624,7 @@ class LiveTrader:
             symbol=self._execution_symbol,
         )
 
-        # Engine-level hard position cap (defense-in-depth)
-        if abs(current_position) >= self._max_position_size:
-            if abs(current_position) > self._max_position_size:
-                log.warning(
-                    "POSITION CAP BREACH: abs(position)=%d > max=%d — "
-                    "blocking ALL new entries",
-                    abs(current_position), self._max_position_size,
-                )
-            # Already at or above max — don't even run strategy eval
-            # for new entries (still log PNL and run trailing stop)
-            pass  # will be blocked by strategy's position guard
-
-        pending_cl_entry_orders = 0
+        pending_cl_entry_qty = 0.0
         try:
             for t in self.manager.ib.openTrades():
                 c = getattr(t, "contract", None)
@@ -2617,18 +2647,32 @@ class LiveTrader:
                 if parent_id == 0 and order_status in (
                     "Submitted", "PreSubmitted", "PendingSubmit",
                 ):
-                    pending_cl_entry_orders += 1
+                    pending_cl_entry_qty += float(getattr(o, "totalQuantity", 0) or 0)
         except Exception:
             log.debug("Failed to check pending orders", exc_info=True)
 
+        # Total exposure accounting for unfilled orders
+        total_exposure = abs(current_position) + pending_cl_entry_qty
+
+        # Engine-level hard position cap (defense-in-depth)
+        hard_blocked_by_engine = False
+        if total_exposure >= self._max_position_size:
+            if total_exposure > self._max_position_size:
+                log.warning(
+                    "POSITION CAP BREACH: abs(position)=%d + pending=%.0f > max=%d — "
+                    "blocking ALL new entries",
+                    abs(current_position), pending_cl_entry_qty, self._max_position_size,
+                )
+            hard_blocked_by_engine = True
+
         # Treat pending entry orders as an effective position to block duplicates
         effective_position = current_position
-        if pending_cl_entry_orders > 0 and current_position == 0:
-            effective_position = pending_cl_entry_orders  # non-zero → blocks entry
+        if pending_cl_entry_qty > 0 and current_position == 0:
+            effective_position = int(pending_cl_entry_qty)  # non-zero → blocks entry
             log.info(
-                "POSITION GUARD: portfolio=0 but %d pending CL entry order(s) "
+                "POSITION GUARD: portfolio=0 but %.0f pending CL entry qty "
                 "— treating as position=%d",
-                pending_cl_entry_orders, effective_position,
+                pending_cl_entry_qty, effective_position,
             )
 
         # Log human-friendly PnL + bracket summary when holding a position
@@ -2706,6 +2750,18 @@ class LiveTrader:
         )
         self._last_inference_time_sec = time.perf_counter() - t0
         self._last_inference_bar_time = bar_time  # track last successful inference
+
+        if hard_blocked_by_engine and signal.action in ("BUY", "SELL", "ENTER", "SHORT"):
+            log.warning("Engine overriding strategy signal %s to HOLD due to position cap", signal.action)
+            signal = TradeSignal(
+                action="HOLD",
+                probability=signal.probability,
+                confidence_pct=signal.confidence_pct,
+                signal_label="Hold",
+                skip_reason="HARD_POSITION_CAP",
+                buy_prob=signal.buy_prob,
+                sell_prob=signal.sell_prob,
+            )
 
         # Update Thread-Safe Virtual Ledger (Dual Stream Netting)
         if signal.action == "ENTER":
@@ -2939,6 +2995,9 @@ class LiveTrader:
         sl_offset = abs(signal.sl_price - current_price)
 
         try:
+            if not self._check_order_rate_limit():
+                return
+                
             # Phase 1: Submit entry order only (no TP/SL children).
             # TP/SL are placed in Phase 2 from _on_order_status fill callback
             # using the actual fill price to avoid SL/TP mispricing.

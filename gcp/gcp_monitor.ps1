@@ -22,7 +22,13 @@ param(
     [string]$OutputDir = "reports",
     [int]$PollIntervalSeconds = 60,
     [int]$StaleThresholdMin = 10,
-    [switch]$NoDownload
+    [switch]$NoDownload,
+    # --- Telegram / Batch options ---
+    [switch]$EnableTelegram,
+    [string]$ExperimentLabel = "",
+    [string]$BatchId = "",
+    [int]$ExperimentIndex = 0,
+    [int]$BatchTotal = 0
 )
 
 # Add gcloud to PATH if not already there
@@ -62,6 +68,8 @@ Write-Host ""
 $startTime = Get-Date
 $lastHeartbeat = $null          # Track last seen heartbeat timestamp
 $heartbeatUnchangedSince = $null # When we first noticed the heartbeat was stale
+$firstHeartbeatSent = $false     # Tracks whether we sent the "job started" Telegram message
+$scriptExitCode = 2              # Default: no log found (overwritten on completion)
 
 
 
@@ -291,6 +299,79 @@ function Write-Report {
 
 
 # ==========================================================
+# TELEGRAM HELPERS
+# ==========================================================
+
+function Read-DotEnv {
+    <# Parse .env file into a hashtable of KEY=value pairs #>
+    $result = @{}
+    $envPath = Join-Path $ProjectDir ".env"
+    if (Test-Path $envPath) {
+        Get-Content $envPath | ForEach-Object {
+            if ($_ -match '^([A-Z_][A-Z0-9_]*)=(.*)$') {
+                $result[$Matches[1]] = $Matches[2].Trim()
+            }
+        }
+    }
+    return $result
+}
+
+
+function Send-TelegramAlert {
+    <# Fire-and-forget Telegram notification. Reads token/chat from .env. #>
+    param([string]$Message)
+    if (-not $EnableTelegram) { return }
+
+    $env_vars = Read-DotEnv
+    $token  = if ($env_vars["TELEGRAM_BOT_TOKEN"]) { $env_vars["TELEGRAM_BOT_TOKEN"] } else { $env:TELEGRAM_BOT_TOKEN }
+    $chatId = if ($env_vars["TELEGRAM_CHAT_ID"])   { $env_vars["TELEGRAM_CHAT_ID"]   } else { $env:TELEGRAM_CHAT_ID   }
+
+    if (-not $token -or $token -eq "") {
+        Write-Host "  [Telegram] TELEGRAM_BOT_TOKEN not set — skipping." -ForegroundColor Gray
+        return
+    }
+
+    $ts      = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $label   = if ($ExperimentLabel) { "*[$ExperimentLabel]*" } else { "*[GCP Monitor]*" }
+    $batchSuffix = if ($BatchTotal -gt 0) { " _($ExperimentIndex/$BatchTotal)_" } else { "" }
+    $fullMsg = "_${ts}${batchSuffix}_`n${label}`n`n${Message}"
+
+    # Escape characters that break Telegram Markdown
+    $safeMsg = $fullMsg -replace '_(?![^*]*\*)', '\_'
+
+    $bodyObj = @{ chat_id = $chatId; text = $fullMsg; parse_mode = "Markdown" }
+    $bodyJson = $bodyObj | ConvertTo-Json -Compress -Depth 3
+    $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
+
+    try {
+        Invoke-RestMethod -Method Post `
+            -Uri "https://api.telegram.org/bot${token}/sendMessage" `
+            -ContentType "application/json; charset=utf-8" `
+            -Body $bodyBytes `
+            -TimeoutSec 8 -ErrorAction Stop | Out-Null
+        Write-Host "  [Telegram] Sent notification." -ForegroundColor DarkCyan
+    } catch {
+        Write-Host "  [Telegram] Send failed: $_" -ForegroundColor Yellow
+    }
+}
+
+
+function Get-SerialConsoleOom {
+    <#
+    Check GCP serial console output for OOM/kernel-kill signals.
+    Works even after the VM is gone (reads from GCP's stored console buffer).
+    #>
+    try {
+        $serial = gcloud compute instances get-serial-port-output $VmName --zone=$Zone 2>$null
+        if ($serial -match 'Out of memory|oom.kill|Killed process|Memory cgroup out of memory|oom-kill') {
+            return "OOM detected in serial console (kernel OOM killer triggered)"
+        }
+    } catch {}
+    return $null
+}
+
+
+# ==========================================================
 # MAIN POLLING LOOP
 # ==========================================================
 
@@ -312,6 +393,13 @@ while ($true) {
         if ($gcsStatus.current) { $searchInfo += " (current: $($gcsStatus.current))" }
         $lastUpdate = if ($gcsStatus.last_update) { $gcsStatus.last_update } else { "?" }
         Write-Host "[$now] VM=$vmStatus | $searchInfo | heartbeat=$lastUpdate | elapsed=${elapsed}m" -ForegroundColor Gray
+
+        # --- Telegram: fire "job started" on first heartbeat ---
+        if (-not $firstHeartbeatSent) {
+            $firstHeartbeatSent = $true
+            $totalSearches = if ($gcsStatus.total) { $gcsStatus.total } else { "?" }
+            Send-TelegramAlert "🚀 *Job Started*`nVM: ``$VmName```nGCS: ``$GcsBase/```nSearches: $totalSearches total`nPoll interval: ${PollIntervalSeconds}s"
+        }
         
         # ---- Stale heartbeat detection ----
         $currentHB = $gcsStatus.last_update
@@ -324,6 +412,10 @@ while ($true) {
             if ($staleMins -ge $StaleThresholdMin) {
                 Write-Host "  WARNING: STALE HEARTBEAT - unchanged for ${staleMins}m (threshold: ${StaleThresholdMin}m)" -ForegroundColor Red
                 Write-Host "    The search may have crashed or stalled. Check VM logs below." -ForegroundColor Red
+                # Send Telegram alert once per stale threshold crossing (not every poll)
+                if ($staleMins -lt ($StaleThresholdMin + ($PollIntervalSeconds / 60) + 1)) {
+                    Send-TelegramAlert "⚠️ *Stale Heartbeat*`nVM: ``$VmName```nHeartbeat unchanged for ${staleMins}min`n_Search may be stalled or crashed — check VM logs_"
+                }
                 
                 # Auto-shutdown logic if exceedingly stale (>15 mins) and still running
                 if ($staleMins -ge 15.0 -and $vmStatus -eq "RUNNING") {
@@ -352,7 +444,7 @@ while ($true) {
                         Write-Host "  >> VM is logically active (CPU or Procs). Awaiting natural termination." -ForegroundColor Yellow
                     }
                 }
-            }
+            } # end stale threshold block
         } else {
             # Heartbeat updated — reset tracker
             $heartbeatUnchangedSince = $null
@@ -414,37 +506,82 @@ while ($true) {
         
         # Generate report
         $monitorWallTime = "{0:N1} minutes" -f ((Get-Date) - $startTime).TotalMinutes
-        
+
+        # --- OOM: try serial console if SSH-based check wasn't possible ---
+        if (-not $oomResult) {
+            $oomResult = Get-SerialConsoleOom
+        }
+        # --- Detect SPOT preemption: INTERRUPTED termination + no shutdown log line ---
+        $wasPreempted = ($vmStatus -eq "TERMINATED" -and
+                         $logReport -and
+                         $logReport.TerminationReason -eq "INTERRUPTED")
+
         if ($logReport) {
             $reportPath = Write-Report -LogReport $logReport -OomResult $oomResult `
                 -FinalStatus $vmStatus -MonitorWallTime $monitorWallTime
-            
+
+            # Determine exit code: 0=OK, 1=partial/failed
+            $scriptExitCode = if ($logReport.E2ECompleted -and $logReport.Failed -eq 0) { 0 } else { 1 }
+
             # Print summary to console
+            $summaryColor = if ($scriptExitCode -eq 0) { "Green" } else { "Yellow" }
             Write-Host ""
-            Write-Host "========================================================" -ForegroundColor $(if ($logReport.E2ECompleted -and $logReport.Failed -eq 0) { "Green" } else { "Yellow" })
-            Write-Host " RUN RESULTS" -ForegroundColor $(if ($logReport.E2ECompleted -and $logReport.Failed -eq 0) { "Green" } else { "Yellow" })
-            Write-Host "========================================================" -ForegroundColor $(if ($logReport.E2ECompleted -and $logReport.Failed -eq 0) { "Green" } else { "Yellow" })
+            Write-Host "========================================================" -ForegroundColor $summaryColor
+            Write-Host " RUN RESULTS" -ForegroundColor $summaryColor
+            Write-Host "========================================================" -ForegroundColor $summaryColor
             Write-Host "  Termination:  $($logReport.TerminationReason)"
             Write-Host "  Agent:        $($logReport.AgentId)"
             Write-Host "  Passed:       $($logReport.Passed) searches"
             Write-Host "  Failed:       $($logReport.Failed) searches"
             Write-Host "  E2E Pipeline: $(if ($logReport.E2ECompleted) { 'COMPLETED' } else { 'NOT COMPLETED' })"
             Write-Host "  Wall Time:    $($logReport.WallTime)"
-            if ($oomResult) {
-                Write-Host "  OOM Events:   YES - check report" -ForegroundColor Red
-            }
+            if ($oomResult) { Write-Host "  OOM Events:   YES - check report" -ForegroundColor Red }
+            if ($wasPreempted) { Write-Host "  SPOT:         Preempted by GCP" -ForegroundColor Red }
             Write-Host "  Report:       $reportPath"
             Write-Host "  Artifacts:    $LocalOutputDir"
-            Write-Host "========================================================" -ForegroundColor $(if ($logReport.E2ECompleted -and $logReport.Failed -eq 0) { "Green" } else { "Yellow" })
+            Write-Host "========================================================" -ForegroundColor $summaryColor
+
+            # --- Telegram: completion message with ensemble PnL if available ---
+            $pnlLines = @()
+            $summaryJson = Join-Path $LocalOutputDir "pipeline_summary.json"
+            if (Test-Path $summaryJson) {
+                try {
+                    $ps = Get-Content $summaryJson -Raw | ConvertFrom-Json
+                    foreach ($key in $ps.backtest_results.PSObject.Properties.Name) {
+                        if ($key -match '^ensemble_') {
+                            $r = $ps.backtest_results.$key
+                            $pnlLines += "  ${key}: PF=$($r.profit_factor) PnL=`$$($r.total_pnl)"
+                        }
+                    }
+                } catch {}
+            }
+            $icon        = if ($scriptExitCode -eq 0) { "✅" } else { "❌" }
+            $statusLabel = if ($scriptExitCode -eq 0) { "SUCCESS" } else { "FAILED" }
+            $oomLine     = if ($oomResult)    { "`n💥 OOM: $oomResult" }    else { "" }
+            $preemptLine = if ($wasPreempted) { "`n⚡ SPOT preempted by GCP" } else { "" }
+            $pnlBlock    = if ($pnlLines)     { "`n*Ensemble Results:*`n" + ($pnlLines -join "`n") } else { "" }
+            Send-TelegramAlert ("$icon *Job $statusLabel*`n" +
+                "VM: ``$VmName```n" +
+                "Searches: $($logReport.Passed)/$($logReport.Total) passed`n" +
+                "E2E: $(if ($logReport.E2ECompleted) { 'COMPLETE ✅' } else { 'INCOMPLETE ❌' })`n" +
+                "Wall Time: $($logReport.WallTime)" +
+                $oomLine + $preemptLine + $pnlBlock)
+
         } else {
+            # No log found — VM died before producing output
+            $scriptExitCode = 2
+            $oomLine = if ($oomResult) { "`n💥 $oomResult" } else { "" }
             Write-Host ""
             Write-Host "  WARNING: No log file found in GCS" -ForegroundColor Red
             Write-Host "  The VM may have failed before any output was produced." -ForegroundColor Red
             Write-Host ('  Check serial console: gcloud compute instances get-serial-port-output ' + $VmName + ' --zone=' + $Zone)
+            Send-TelegramAlert ("💀 *VM Terminated — No Log Found*`n" +
+                "VM: ``$VmName```nStatus: $vmStatus`n" +
+                "_VM may have crashed before producing any output_" + $oomLine)
         }
-        
+
         Write-Host ""
-        break
+        exit $scriptExitCode
     }
     
     Start-Sleep -Seconds $PollIntervalSeconds

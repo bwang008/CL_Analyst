@@ -427,24 +427,26 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
         super().__init__(config)
         long_cfg = config.get("long", {})
         short_cfg = config.get("short", {})
-        self.long_tiers = self._parse_tiers(long_cfg.get("tiers", []))
-        self.short_tiers = self._parse_tiers(short_cfg.get("tiers", []))
+        self.long_tiers = self._parse_tiers(long_cfg.get("tiers", []), long_cfg)
+        self.short_tiers = self._parse_tiers(short_cfg.get("tiers", []), short_cfg)
         self.max_concurrent: int = config.get("max_concurrent", 1)
 
     @staticmethod
-    def _parse_tiers(raw: list[dict]) -> list[dict]:
+    def _parse_tiers(raw: list[dict], base_cfg: dict = None) -> list[dict]:
         """Parse and sort tiers by min_prob descending (first match wins)."""
         if not raw:
             return []
+        if base_cfg is None:
+            base_cfg = {}
         tiers = []
         for t in raw:
             tiers.append({
                 "min_prob": float(t.get("min_prob", 0.0)),
                 "lots": int(t.get("lots", 1)),
-                "tp_atr_mult": t.get("tp_atr_mult"),
-                "sl_atr_mult": t.get("sl_atr_mult"),
-                "trailing_atr_mult": t.get("trailing_atr_mult"),
-                "max_hold_bars": t.get("max_hold_bars"),
+                "tp_atr_mult": t.get("tp_atr_mult", base_cfg.get("tp_atr_mult")),
+                "sl_atr_mult": t.get("sl_atr_mult", base_cfg.get("sl_atr_mult")),
+                "trailing_atr_mult": t.get("trailing_atr_mult", base_cfg.get("trailing_atr_mult")),
+                "max_hold_bars": t.get("max_hold_bars", base_cfg.get("max_hold_bars")),
                 "label": t.get("label", ""),
             })
         tiers.sort(key=lambda x: x["min_prob"], reverse=True)
