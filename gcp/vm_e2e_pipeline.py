@@ -758,6 +758,14 @@ def run_pipeline(
             capture_output=True,
             text=True,
         )
+        # Also upload pipeline_summary.json separately to the root prefix for the orchestrator
+        gcs_root_dest = f"{gcs_bucket}/{gcs_prefix}" if gcs_prefix else gcs_bucket
+        subprocess.run(
+            ["gsutil", "cp", summary_path, f"{gcs_root_dest}/pipeline_summary.json"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         print(f"  ✓ Uploaded to GCS")
     except Exception as e:
         print(f"  ✗ GCS upload failed: {e}")

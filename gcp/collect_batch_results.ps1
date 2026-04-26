@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Collect and compare results from a completed canary batch run.
 .DESCRIPTION

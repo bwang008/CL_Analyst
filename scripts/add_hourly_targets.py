@@ -4,10 +4,10 @@ import time
 import os
 
 def main():
-    print('Loading HourSet_03...')
+    print('Loading HourSet_04...')
     start_time = time.time()
-    input_file = r'C:\CL_Analyst_Data\data\processed\cl-1h_bk_HourSet_03.parquet'
-    output_file = r'C:\CL_Analyst_Data\data\processed\cl-1h_bk_HourSet_04.parquet'
+    input_file = r'C:\CL_Analyst_Data\data\processed\cl-1h_bk_HourSet_04.parquet'
+    output_file = r'C:\CL_Analyst_Data\data\processed\cl-1h_bk_HourSet_05.parquet'
     
     if not os.path.exists(input_file):
         raise FileNotFoundError(f"Input file not found: {input_file}")
@@ -24,22 +24,45 @@ def main():
         '12H': 12
     }
     
-    tp_mult = 2.0
-    sl_mult = 1.0
     atr_period = 14
     
+    # ── Set 1: 1x ATR TP, 0.5x ATR SL ──────────────────────────
+    tp_mult_1 = 1.0
+    sl_mult_1 = 0.5
+    tag_1 = '1x0.5'
+    
     for label, max_bars in horizons.items():
-        print(f'Adding target TARGET_TRIPLE_2x1_{label}...')
+        prefix = f'TARGET_TRIPLE_{tag_1}_{label}'
+        print(f'Adding target {prefix} (TP={tp_mult_1}, SL={sl_mult_1}, horizon={max_bars})...')
         start_t = time.time()
         df = dp.add_triple_barrier_target(
             df, 
-            prefix=f'TARGET_TRIPLE_2x1_{label}', 
-            tp_atr_mult=tp_mult, 
-            sl_atr_mult=sl_mult, 
+            prefix=prefix, 
+            tp_atr_mult=tp_mult_1, 
+            sl_atr_mult=sl_mult_1, 
             max_horizon=max_bars, 
             atr_period=atr_period
         )
-        print(f'  Target {label} added in {time.time() - start_t:.2f}s')
+        print(f'  Target {prefix} added in {time.time() - start_t:.2f}s')
+
+    # ── Set 2: 1x ATR TP, 2x ATR SL ────────────────────────────
+    tp_mult_2 = 1.0
+    sl_mult_2 = 2.0
+    tag_2 = '1x2'
+    
+    for label, max_bars in horizons.items():
+        prefix = f'TARGET_TRIPLE_{tag_2}_{label}'
+        print(f'Adding target {prefix} (TP={tp_mult_2}, SL={sl_mult_2}, horizon={max_bars})...')
+        start_t = time.time()
+        df = dp.add_triple_barrier_target(
+            df, 
+            prefix=prefix, 
+            tp_atr_mult=tp_mult_2, 
+            sl_atr_mult=sl_mult_2, 
+            max_horizon=max_bars, 
+            atr_period=atr_period
+        )
+        print(f'  Target {prefix} added in {time.time() - start_t:.2f}s')
 
     print(f'New dataset shape: {df.shape}')
     
@@ -48,9 +71,11 @@ def main():
     df.to_parquet(output_file, engine='pyarrow')
     print(f'Saved in {time.time() - start_time:.2f}s')
     
-    # Print out the new target columns
-    new_targets = [c for c in df.columns if 'TARGET_TRIPLE_2x1' in c]
-    print(f'New Target Columns: {new_targets}')
+    # Print out ALL target columns for verification
+    all_targets = sorted([c for c in df.columns if c.startswith('TARGET_TRIPLE')])
+    print(f'\nAll Triple Barrier Target Columns ({len(all_targets)}):')
+    for t in all_targets:
+        print(f'  {t}')
     print('Done!')
 
 if __name__ == "__main__":

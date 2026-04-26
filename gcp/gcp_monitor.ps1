@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Monitor a GCP VM running Optuna experiments. Auto-downloads results when done.
 .DESCRIPTION
@@ -28,7 +28,8 @@ param(
     [string]$ExperimentLabel = "",
     [string]$BatchId = "",
     [int]$ExperimentIndex = 0,
-    [int]$BatchTotal = 0
+    [int]$BatchTotal = 0,
+    [string]$ExitCodeFile = ""  # If set, write exit code to this file for the orchestrator
 )
 
 # Add gcloud to PATH if not already there
@@ -103,8 +104,8 @@ function Get-GcsStatus {
 function Get-LatestLog {
     <# Find and download the most recent log file from GCS #>
     try {
-        $logFiles = gcloud storage ls "$LogsUrl" 2>$null | Sort-Object -Descending
-        if ($logFiles -and $logFiles.Count -gt 0) {
+        $logFiles = @(gcloud storage ls "$LogsUrl" 2>$null | Sort-Object -Descending)
+        if ($logFiles.Count -gt 0) {
             $latestLog = $logFiles[0].Trim()
             $logName = Split-Path -Leaf $latestLog
             $localLog = Join-Path $LocalOutputDir $logName
@@ -138,8 +139,8 @@ function Read-LogReport {
     }
     
     # Count passes and failures
-    $passLines = $lines | Where-Object { $_ -match "PASSED" }
-    $failLines = $lines | Where-Object { $_ -match "FAILED" }
+    $passLines = $lines | Where-Object { $_ -cmatch "PASSED" }
+    $failLines = $lines | Where-Object { $_ -cmatch "FAILED" }
     $report.Passed = @($passLines).Count
     $report.Failed = @($failLines).Count
     
@@ -159,7 +160,7 @@ function Read-LogReport {
     }
     
     # Detect termination reason
-    if ($content -match "RUN COMPLETE") {
+    if ($content -match "E2E PIPELINE COMPLETE") {
         $report.TerminationReason = "COMPLETED_OK"
     } elseif ($content -match "Shutting down") {
         $report.TerminationReason = "SELF_SHUTDOWN"
@@ -224,7 +225,7 @@ function Save-Artifacts {
     # Download production artifacts zip if it exists
     $zipUrl = "$GcsBase/production/"
     try {
-        $zipFiles = gcloud storage ls "$zipUrl*.zip" 2>$null
+        $zipFiles = @(gcloud storage ls "$zipUrl*.zip" 2>$null)
         foreach ($zip in $zipFiles) {
             if ($zip) {
                 $zipName = Split-Path -Leaf $zip.Trim()
@@ -245,6 +246,9 @@ function Save-Artifacts {
     $logsDir = Join-Path $LocalOutputDir "logs"
     if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
     gcloud storage cp -r "$LogsUrl*" $logsDir 2>$null
+    
+    # Download pipeline summary
+    gcloud storage cp "$GcsBase/pipeline_summary.json" $LocalOutputDir 2>$null
     
     Write-Host "  Artifacts saved to: $LocalOutputDir" -ForegroundColor Green
 }
@@ -332,14 +336,14 @@ function Send-TelegramAlert {
     }
 
     $ts      = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $label   = if ($ExperimentLabel) { "*[$ExperimentLabel]*" } else { "*[GCP Monitor]*" }
-    $batchSuffix = if ($BatchTotal -gt 0) { " _($ExperimentIndex/$BatchTotal)_" } else { "" }
-    $fullMsg = "_${ts}${batchSuffix}_`n${label}`n`n${Message}"
+    $label   = if ($ExperimentLabel) { "[$ExperimentLabel]" } else { "[GCP Monitor]" }
+    $batchSuffix = if ($BatchTotal -gt 0) { " ($ExperimentIndex/$BatchTotal)" } else { "" }
+    $fullMsg = "${ts}${batchSuffix}`n${label}`n`n${Message}"
 
-    # Escape characters that break Telegram Markdown
-    $safeMsg = $fullMsg -replace '_(?![^*]*\*)', '\_'
+    # Strip all Markdown formatting to avoid Telegram parse_mode errors
+    $plainMsg = $fullMsg -replace '\*', '' -replace '``', '' -replace '_', ''
 
-    $bodyObj = @{ chat_id = $chatId; text = $fullMsg; parse_mode = "Markdown" }
+    $bodyObj = @{ chat_id = $chatId; text = $plainMsg }
     $bodyJson = $bodyObj | ConvertTo-Json -Compress -Depth 3
     $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
 
@@ -424,8 +428,8 @@ while ($true) {
                     # Check CPU load average (1-min) via Python3 to avoid quoting/regex hell over SSH
                     $loadAvgStr = gcloud compute ssh $VmName --zone=$Zone --command="python3 -c `"import os; print(os.getloadavg()[0])`"" --quiet 2>$null
                     
-                    # Check for active optuna process
-                    $pyProcs = gcloud compute ssh $VmName --zone=$Zone --command="pgrep -f 'optuna' | wc -l" --quiet 2>$null
+                    # Check for active optuna OR e2e pipeline processes
+                    $pyProcs = gcloud compute ssh $VmName --zone=$Zone --command="pgrep -f 'optuna|vm_e2e_pipeline|vm_canary_run' | wc -l" --quiet 2>$null
                     
                     $loadAvg = 99.0
                     if ([double]::TryParse($loadAvgStr.Trim(), [ref]$loadAvg)) {}
@@ -433,10 +437,10 @@ while ($true) {
                     $procCount = 99
                     if ([int]::TryParse($pyProcs.Trim(), [ref]$procCount)) {}
                     
-                    Write-Host "  >> 1-Min Load Average: $loadAvg | Optuna Procs: $procCount" -ForegroundColor DarkGray
+                    Write-Host "  >> 1-Min Load Average: $loadAvg | Active Procs: $procCount" -ForegroundColor DarkGray
                     
-                    # If load avg is < 0.1 OR there are absolutely no Optuna processes
-                    if ($procCount -eq 0 -or $loadAvg -lt 0.1) {
+                    # Only stop if load is genuinely idle AND no pipeline processes are running
+                    if ($procCount -eq 0 -and $loadAvg -lt 0.1) {
                         Write-Host "  >> Verified IDLE state. Issuing automated stop command to save costs." -ForegroundColor Red
                         gcloud compute instances stop $VmName --zone=$Zone --quiet 2>$null
                         Write-Host "  >> Stop command issued. Status will update on next cycle." -ForegroundColor Yellow
@@ -581,6 +585,10 @@ while ($true) {
         }
 
         Write-Host ""
+        # Write exit code to file for the orchestrator to read
+        if ($ExitCodeFile) {
+            $scriptExitCode | Out-File -FilePath $ExitCodeFile -Encoding ascii -NoNewline
+        }
         exit $scriptExitCode
     }
     

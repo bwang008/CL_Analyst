@@ -240,6 +240,10 @@ if [ $COMPLETED -gt 0 ]; then
     echo "============================================================" | tee -a "$LOG"
     echo "" | tee -a "$LOG"
 
+    # Update STATUS.json so monitor knows Phase 2 is active (prevents stale heartbeat kill)
+    echo "{\"completed\": ${COMPLETED}, \"failed\": ${FAILED}, \"total\": ${TOTAL}, \"current\": \"e2e_pipeline\", \"phase\": \"e2e\", \"agent\": \"canary_bot\", \"last_update\": \"$(date -u +%Y-%m-%dT%H:%M:%S+00:00)\"}" \
+        | gsutil cp - "$BUCKET/$CANARY_PREFIX/STATUS.json" 2>/dev/null || true
+
     E2E_ARGS=(
         --data "$DATA"
         --train-cutoff-date "$CUTOFF"

@@ -457,7 +457,7 @@ def make_objective(
             params["bagging_fraction"] = trial.suggest_float("bagging_fraction", 0.3, 1.0)
             params["bagging_freq"] = trial.suggest_int("bagging_freq", 1, 7)
 
-        n_estimators = 5000
+        n_estimators = trial.suggest_int("n_estimators", 500, max_n_estimators, step=100)
 
         # Disable built-in metric — we use custom eval for early stopping
         params["metric"] = "None"

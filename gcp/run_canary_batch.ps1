@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Quota-aware batch orchestrator for canary Optuna experiments.
 .DESCRIPTION
@@ -79,8 +79,10 @@ function Send-BatchTelegram {
     }
 
     $ts      = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $fullMsg = "_${ts}_`n*[Batch: $BatchId]*`n`n${Message}"
-    $body    = @{ chat_id = $chatId; text = $fullMsg; parse_mode = "Markdown" } | ConvertTo-Json -Compress -Depth 3
+    $fullMsg = "${ts}`n[Batch: $BatchId]`n`n${Message}"
+    # Strip Markdown formatting to avoid Telegram parse_mode errors
+    $plainMsg = $fullMsg -replace '\*', '' -replace '``', '' -replace '_', ''
+    $body    = @{ chat_id = $chatId; text = $plainMsg } | ConvertTo-Json -Compress -Depth 3
     $bytes   = [System.Text.Encoding]::UTF8.GetBytes($body)
 
     try {
@@ -155,6 +157,7 @@ function Test-ArtifactsDownloaded {
             gcloud storage cp -r "$GcsBase/logs/*"    $logsDir    2>$null
             gcloud storage cp -r "$GcsBase/reports/*" $reportsDir 2>$null
             gcloud storage cp    "$GcsBase/STATUS.json" $LocalDir  2>$null
+            gcloud storage cp    "$GcsBase/pipeline_summary.json" $LocalDir 2>$null
             $tmpFile = [System.IO.Path]::GetTempFileName()
             gcloud storage cp "$GcsBase/logs/*" $tmpFile 2>$null
             Start-Sleep -Seconds 30
@@ -388,30 +391,37 @@ while (-not $allDone) {
         $expIdx_      = $exp.Index
         $expTotal_    = $expList.Count
         $tgEnabled_   = $EnableTelegram.IsPresent
-        $pollSecs_    = 300   # 5-minute poll for batch mode
+        $pollSecs_    = 90    # 90-second poll — fast enough to catch early-stopping completions
         $projDir_     = $ProjectDir
         $gcpBin_      = $gcloudBin
+        $exitCodeFile_= Join-Path $env:TEMP "monitor_exit_$($exp.VmName)_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
 
         $job = Start-Job -ScriptBlock {
-            param($monScript, $vmName, $gcsPrefix, $label, $batchId, $expIdx, $expTotal, $tgEnabled, $pollSecs, $projDir, $gcpBin)
+            param($monScript, $vmName, $gcsPrefix, $label, $batchId, $expIdx, $expTotal, $tgEnabled, $pollSecs, $projDir, $gcpBin, $exitCodeFile)
             $env:PATH = "$gcpBin;$env:PATH"
             Set-Location $projDir
-            $tgSwitch = if ($tgEnabled) { "-EnableTelegram" } else { "" }
-            & powershell -ExecutionPolicy Bypass -File $monScript `
-                -VmName $vmName `
-                -GcsPrefix $gcsPrefix `
-                -ExperimentLabel $label `
-                -BatchId $batchId `
-                -ExperimentIndex $expIdx `
-                -BatchTotal $expTotal `
-                -PollIntervalSeconds $pollSecs `
-                -EnableTelegram:$tgEnabled
+            # Build args array — cannot pass [switch] through -ArgumentList, so conditionally add -EnableTelegram
+            $monArgs = @(
+                "-ExecutionPolicy", "Bypass",
+                "-File", $monScript,
+                "-VmName", $vmName,
+                "-GcsPrefix", $gcsPrefix,
+                "-ExperimentLabel", $label,
+                "-BatchId", $batchId,
+                "-ExperimentIndex", $expIdx,
+                "-BatchTotal", $expTotal,
+                "-PollIntervalSeconds", $pollSecs,
+                "-ExitCodeFile", $exitCodeFile
+            )
+            if ($tgEnabled) { $monArgs += "-EnableTelegram" }
+            & powershell @monArgs
             return $LASTEXITCODE
-        } -ArgumentList $monScript, $vmName_, $gcsPrefix_, $label_, $batchId_, $expIdx_, $expTotal_, $tgEnabled_, $pollSecs_, $projDir_, $gcloudBin
+        } -ArgumentList $monScript, $vmName_, $gcsPrefix_, $label_, $batchId_, $expIdx_, $expTotal_, $tgEnabled_, $pollSecs_, $projDir_, $gcloudBin, $exitCodeFile_
 
-        $exp.StartTime = Get-Date
-        $exp.Job       = $job
-        $exp.Status    = "RUNNING"
+        $exp.StartTime    = Get-Date
+        $exp.Job          = $job
+        $exp.Status       = "RUNNING"
+        $exp.ExitCodeFile = $exitCodeFile_
         [void]$activeSlots.Add($exp)
         Write-Host "  Monitor job started (PS Job ID: $($job.Id))" -ForegroundColor Green
     }
@@ -440,7 +450,13 @@ while (-not $allDone) {
 
         if ($job.State -in @("Completed", "Failed", "Stopped")) {
             $jobOutput  = Receive-Job $job -ErrorAction SilentlyContinue
-            $exitCode   = $jobOutput | Select-Object -Last 1
+            # Read exit code from temp file written by the monitor
+            $exitCode = 1
+            if ($slot.ExitCodeFile -and (Test-Path $slot.ExitCodeFile)) {
+                $raw = (Get-Content $slot.ExitCodeFile -Raw).Trim()
+                if ($raw -match '^\d+$') { $exitCode = [int]$raw }
+                Remove-Item $slot.ExitCodeFile -Force -ErrorAction SilentlyContinue
+            }
             Remove-Job $job -Force -ErrorAction SilentlyContinue
 
             Write-Host ""
@@ -454,8 +470,7 @@ while (-not $allDone) {
             if (-not $artOk) {
                 Send-BatchTelegram ("⚠️ *Artifact Download Failed: $($slot.Label)*`n" +
                     "pipeline_summary.json or logs not found locally after 3 retries.`n" +
-                    "Manual recovery: ``gsutil -m cp -r $gcsBase/ $localDir\```n" +
-                    "_VM will be deleted to free quota._")
+                    "VM will be deleted to free quota.")
             }
             $slot.ArtifactOk = $artOk
 
@@ -527,7 +542,7 @@ Write-Host "============================================================" -Foreg
 Send-BatchTelegram ("$(if ($batchState.failed -eq 0) { '🏁' } else { '⚠️' }) *Batch Complete*`n" +
     "Completed: $($batchState.completed)/$($batchState.total)`n" +
     "Failed: $($batchState.failed)`n" +
-    "_Run collect_batch_results.ps1 to generate the comparison report._")
+    "Run collect_batch_results.ps1 to generate the comparison report.")
 
 Write-Host ""
 Write-Host "Next: generate the consolidated report:" -ForegroundColor Cyan

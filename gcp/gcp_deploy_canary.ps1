@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Provisions a canary VM, uploads code + downloads data from GCS, and launches the light canary pipeline.
 .DESCRIPTION
@@ -118,6 +118,14 @@ if (-not $SkipProvision) {
     $maxWait = 300; $elapsed = 0
     while ($elapsed -lt $maxWait) {
         Start-Sleep -Seconds 15; $elapsed += 15
+        
+        # Check if VM was preempted/terminated while we wait
+        $vmStatus = gcloud compute instances describe $VmName --zone=$Zone --format="get(status)" 2>$null
+        if ($vmStatus -and $vmStatus.ToString().Trim() -in @("TERMINATED", "STOPPED")) {
+            Write-Host "`n  FATAL: VM is $vmStatus during startup. It was likely preempted by GCP." -ForegroundColor Red
+            exit 3
+        }
+
         try {
             $ready = gcloud compute ssh $VmName --zone=$Zone `
                 --command="test -f /tmp/startup_done && echo READY" `
@@ -126,7 +134,12 @@ if (-not $SkipProvision) {
         } catch {}
         Write-Host "  Installing... (${elapsed}s elapsed)" -ForegroundColor Gray
     }
-    Write-Host "  VM is ready!" -ForegroundColor Green
+    
+    if ($elapsed -ge $maxWait) {
+        Write-Host "  WARNING: Reached 300s timeout waiting for startup script. Proceeding anyway." -ForegroundColor Yellow
+    } else {
+        Write-Host "  VM is ready!" -ForegroundColor Green
+    }
 } else {
     Write-Host "`n[1/6] Skipping provision (-SkipProvision)" -ForegroundColor Yellow
 }
