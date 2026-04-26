@@ -10,7 +10,7 @@
     "allow_concurrent": false,
     "max_concurrent": 1,
     "max_position_size": 1,
-    "execution_symbol": "MCL",
+    "execution_symbol": "CL",
     "bar_size": "1h",
     "live_config": {
         "client_id": 25,
