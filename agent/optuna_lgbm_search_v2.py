@@ -458,6 +458,7 @@ def make_objective(
             params["bagging_freq"] = trial.suggest_int("bagging_freq", 1, 7)
 
         n_estimators = trial.suggest_int("n_estimators", 500, max_n_estimators, step=100)
+        lookback_window_years = trial.suggest_int("lookback_window_years", 2, 10)
 
         # Disable built-in metric — we use custom eval for early stopping
         params["metric"] = "None"
@@ -475,6 +476,14 @@ def make_objective(
             y_train = y.iloc[train_start:train_end]
             X_test = X[trial_features].iloc[test_start:test_end]
             y_test = y.iloc[test_start:test_end]
+
+            # Apply lookback window
+            # X.index is the chronologically ordered DatetimeIndex
+            train_end_time = X.index[train_end - 1]
+            lookback_start_time = train_end_time - pd.DateOffset(years=lookback_window_years)
+            mask = X_train.index >= lookback_start_time
+            X_train = X_train.loc[mask]
+            y_train = y_train.loc[mask]
 
             # Apply class balancing
             if balance_mode == "downsample":
