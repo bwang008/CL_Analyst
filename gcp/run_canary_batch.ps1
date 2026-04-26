@@ -299,6 +299,7 @@ foreach ($exp in $expList) {
         Metrics      = if ($exp.metrics)             { $exp.metrics             } else { $defaults.metrics            }
         TargetLong   = if ($exp.target_long)         { $exp.target_long         } else { ""                           }
         TargetShort  = if ($exp.target_short)        { $exp.target_short        } else { ""                           }
+        UseBuckets   = if ($exp.use_buckets -ne $null) { $exp.use_buckets       } else { $defaults.use_buckets        }
         TimeoutMins  = if ($exp.timeout_minutes)     { [int]$exp.timeout_minutes } else { $timeoutMins                }
         StartTime    = $null
         Job          = $null
@@ -354,11 +355,11 @@ while (-not $allDone) {
             "-StrategyConfig", $exp.StrategyConf,
             "-Metrics",     $exp.Metrics,
             "-GcsPrefix",   $exp.GcsPrefix,
-            "-ProvisioningModel", $exp.Provisioning,
-            "-NoShutdown"   # Monitor handles lifecycle; don't let VM self-delete
+            "-ProvisioningModel", $exp.Provisioning
         )
         if ($exp.TargetLong)  { $deployArgs += @("-TargetLong",  $exp.TargetLong)  }
         if ($exp.TargetShort) { $deployArgs += @("-TargetShort", $exp.TargetShort) }
+        if ($exp.UseBuckets)  { $deployArgs += @("-UseBuckets") }
 
         Write-Host "  Deploying VM..." -ForegroundColor Yellow
         $deployOutput = & powershell @deployArgs 2>&1

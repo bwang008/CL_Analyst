@@ -130,12 +130,11 @@ def train_final_model(
 ) -> lgb.Booster:
     """Train a final LightGBM model on the full train split and save .pkl."""
 
-    lookback_window_years = params.get("lookback_window_years")
-    if lookback_window_years is not None:
-        end_time = df_train.index.max()
-        start_time = end_time - pd.DateOffset(years=lookback_window_years)
-        print(f"  Applying {lookback_window_years}-year lookback window (>= {start_time.date()})")
-        df_train = df_train[df_train.index >= start_time]
+    lookback_window_years = params.pop("lookback_window_years", 100)  # Default 100 disables lookback
+    end_time = df_train.index.max()
+    start_time = end_time - pd.DateOffset(years=lookback_window_years)
+    print(f"  Applying {lookback_window_years}-year lookback window (>= {start_time.date()})")
+    df_train = df_train[df_train.index >= start_time]
 
     X = df_train[feature_cols]
     y = df_train[target_col].astype(int)
