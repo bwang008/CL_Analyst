@@ -458,7 +458,7 @@ def make_objective(
             params["bagging_freq"] = trial.suggest_int("bagging_freq", 1, 7)
 
         n_estimators = trial.suggest_int("n_estimators", 500, max_n_estimators, step=100)
-        lookback_window_years = trial.suggest_int("lookback_window_years", 2, 10)
+        lookback_window_years = trial.suggest_int("lookback_window_years", 2, 5)
 
         # Disable built-in metric — we use custom eval for early stopping
         params["metric"] = "None"
