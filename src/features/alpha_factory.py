@@ -186,6 +186,8 @@ class AlphaFactory:
         include_macro: bool = True,
         include_extended: bool = False,
         include_exhaustion_divergence: bool = False,
+        include_dma: bool = False,
+        include_ichimoku: bool = False,
         macro_windows: dict[str, int] | None = None,
         log_progress: bool = False,
     ) -> pd.DataFrame:
@@ -249,6 +251,22 @@ class AlphaFactory:
             self.add_macro_context(macro_windows=macro_windows)
             if log_progress:
                 print(f"[AlphaFactory] Macro done at {datetime.now().isoformat(timespec='seconds')}")
+
+        if include_dma:
+            if log_progress:
+                print("[AlphaFactory] DMA start")
+            self.add_dma_cluster()
+            if log_progress:
+                from datetime import datetime as _dt
+                print(f"[AlphaFactory] DMA done at {_dt.now().isoformat(timespec='seconds')}")
+
+        if include_ichimoku:
+            if log_progress:
+                print("[AlphaFactory] Ichimoku start")
+            self.add_ichimoku_cluster()
+            if log_progress:
+                from datetime import datetime as _dt
+                print(f"[AlphaFactory] Ichimoku done at {_dt.now().isoformat(timespec='seconds')}")
 
         self.df.replace([np.inf, -np.inf], np.nan, inplace=True)
         if log_progress:
@@ -355,7 +373,12 @@ class AlphaFactory:
 
         prices = self.close.to_numpy(dtype=np.float64)
         slopes, r2s = _rolling_slope_r2_numba(prices, window)
-        self.df[f"TREND_LR_SLOPE{suffix}"] = slopes
+        # Normalise: divide raw $/bar slope by Close -> unitless %/bar,
+        # invariant to Panama Canal back-adjustment offsets.
+        close_arr = self.close.to_numpy(dtype=np.float64)
+        self.df[f"TREND_LR_SLOPE{suffix}"] = np.where(
+            close_arr != 0.0, slopes / close_arr, np.nan
+        )
         self.df[f"TREND_LR_R2{suffix}"] = r2s
 
         return self.df
@@ -477,12 +500,16 @@ class AlphaFactory:
             self.df["MOM_DMP_14"] = adx.iloc[:, 1]
             self.df["MOM_DMN_14"] = adx.iloc[:, 2]
         
-        # MACD (Trend Intensity)
-        macd = self.df.ta.macd(fast=12, slow=26, signal=9)
-        if macd is not None:
-            self.df["MOM_MACD"] = macd.iloc[:, 0]
-            self.df["MOM_MACD_Signal"] = macd.iloc[:, 1]
-            self.df["MOM_MACD_Hist"] = macd.iloc[:, 2]
+        # PPO (Percentage Price Oscillator) - normalised replacement for MACD.
+        # Raw MACD is in $/bar; PPO divides by EMA_slow -> dimensionless ratio
+        # invariant to Panama Canal continuous-contract price offsets.
+        ema_fast = self.close.ewm(span=12, adjust=False).mean()
+        ema_slow = self.close.ewm(span=26, adjust=False).mean()
+        ppo_line = (ema_fast - ema_slow) / ema_slow.replace(0, np.nan)
+        ppo_signal = ppo_line.ewm(span=9, adjust=False).mean()
+        self.df["MOM_PPO"] = ppo_line
+        self.df["MOM_PPO_Signal"] = ppo_signal
+        self.df["MOM_PPO_Hist"] = ppo_line - ppo_signal
 
         # Iteration 4: Spread-Adjusted Momentum Interaction
         if "MOM_RSI_14" in self.df.columns and "LIQ_CORWIN_24" in self.df.columns:
@@ -680,5 +707,97 @@ class AlphaFactory:
                 self.df["VOLFLOW_VWAP_DIST_288"]
                 - self.df["VOLFLOW_VWAP_DIST_10080"]
             )
+
+        return self.df
+
+    # ------------------------------------------------------------------
+    # Stationary DMA (Displaced Moving Average)
+    # ------------------------------------------------------------------
+
+    def add_dma_cluster(
+        self,
+        period: int = 25,
+        displacement: int = 5,
+    ) -> pd.DataFrame:
+        """Displaced Moving Average expressed as a percentage distance.
+
+        Computes a ``period``-bar SMA of Close, shifts it forward by
+        ``displacement`` bars (dma[t] == sma[t - displacement]), then:
+
+            TREND_DMA_DIST_{period}_{displacement} = (Close - DMA) / DMA
+
+        Both Close and the SMA are shifted equally by Panama Canal
+        back-adjustment so the ratio is invariant to the price offset.
+
+        Args:
+            period: SMA lookback window in bars (default 25).
+            displacement: Bars to displace the average (default 5).
+        """
+        sma = self.close.rolling(period).mean()
+        dma_shifted = sma.shift(displacement)
+        col = f"TREND_DMA_DIST_{period}_{displacement}"
+        self.df[col] = (self.close - dma_shifted) / dma_shifted.replace(0, np.nan)
+        return self.df
+
+    # ------------------------------------------------------------------
+    # Stationary Ichimoku Cloud
+    # ------------------------------------------------------------------
+
+    def add_ichimoku_cluster(
+        self,
+        tenkan_period: int = 9,
+        kijun_period: int = 26,
+        senkou_b_period: int = 52,
+        cloud_shift: int = 26,
+    ) -> pd.DataFrame:
+        """Ichimoku Cloud decomposed into four stationary relational features.
+
+        The cloud visible at bar t was computed cloud_shift bars earlier.
+        We recover it via .shift(cloud_shift): strictly backward-looking,
+        zero lookahead.  All outputs are dimensionless ratios or booleans,
+        invariant to Panama Canal back-adjustment price offsets.
+
+        Features
+        --------
+        ICHIMOKU_TK_SPREAD       : (Tenkan - Kijun) / Kijun
+        ICHIMOKU_CLOUD_DIST      : (Close - Senkou_A) / Senkou_A
+        ICHIMOKU_CLOUD_THICKNESS : (Senkou_A - Senkou_B) / Senkou_B
+        ICHIMOKU_ABOVE_CLOUD     : 1 if Close > max(Senkou_A, Senkou_B) else 0
+        """
+        tenkan = (
+            self.high.rolling(tenkan_period).max()
+            + self.low.rolling(tenkan_period).min()
+        ) / 2
+
+        kijun = (
+            self.high.rolling(kijun_period).max()
+            + self.low.rolling(kijun_period).min()
+        ) / 2
+
+        # .shift(n)[t] == value[t-n] -> no lookahead bias
+        senkou_a = ((tenkan + kijun) / 2).shift(cloud_shift)
+        senkou_b = (
+            (
+                self.high.rolling(senkou_b_period).max()
+                + self.low.rolling(senkou_b_period).min()
+            ) / 2
+        ).shift(cloud_shift)
+
+        kijun_safe    = kijun.replace(0, np.nan)
+        senkou_a_safe = senkou_a.replace(0, np.nan)
+        senkou_b_safe = senkou_b.replace(0, np.nan)
+
+        self.df["ICHIMOKU_TK_SPREAD"]       = (tenkan - kijun) / kijun_safe
+        self.df["ICHIMOKU_CLOUD_DIST"]      = (self.close - senkou_a) / senkou_a_safe
+        self.df["ICHIMOKU_CLOUD_THICKNESS"] = (senkou_a - senkou_b) / senkou_b_safe
+
+        cloud_top = pd.Series(
+            np.maximum(
+                senkou_a.to_numpy(dtype=np.float64),
+                senkou_b.to_numpy(dtype=np.float64),
+            ),
+            index=self.df.index,
+        )
+        self.df["ICHIMOKU_ABOVE_CLOUD"] = (self.close > cloud_top).astype(int)
 
         return self.df
