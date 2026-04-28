@@ -28,7 +28,8 @@ param(
     [string]$TargetShort = "",
     [switch]$NoShutdown,
     [switch]$SkipProvision,
-    [switch]$UseBuckets
+    [switch]$UseBuckets,
+    [string]$GcsPrefix = "scout"
 )
 
 # Add gcloud to PATH if not already there
@@ -193,7 +194,8 @@ $targetFlags = ""
 if ($TargetLong) { $targetFlags += " --target-long=$TargetLong" }
 if ($TargetShort) { $targetFlags += " --target-short=$TargetShort" }
 $bucketFlag = if ($UseBuckets) { " --use-buckets" } else { "" }
-$launchCmd = "tmux kill-session -t canary 2>/dev/null; tmux new-session -d -s canary 'bash $RemoteProject/gcp/vm_scout_run.sh $shutdownFlag --dataset=$datasetName --strategy=$StrategyConfig --metrics=$Metrics$targetFlags$bucketFlag'"
+$prefixFlag = if ($GcsPrefix) { " --canary-prefix=$GcsPrefix" } else { "" }
+$launchCmd = "tmux kill-session -t canary 2>/dev/null; tmux new-session -d -s canary 'bash $RemoteProject/gcp/vm_scout_run.sh $shutdownFlag --dataset=$datasetName --strategy=$StrategyConfig --metrics=$Metrics$targetFlags$bucketFlag$prefixFlag'"
 gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd --quiet 2>$null
 
 Write-Host "  Canary pipeline launched!" -ForegroundColor Green
@@ -219,7 +221,7 @@ Write-Host "=====================================================" -ForegroundCo
 Write-Host ""
 Write-Host "  VM:           $VmName"
 Write-Host "  Expected:     ~30 minutes"
-$gcsOut = "gs://cltrainer-optuna-results/canary/"
+$gcsOut = "gs://cltrainer-optuna-results/$GcsPrefix/"
 Write-Host "  GCS output:   $gcsOut"
 Write-Host ""
 Write-Host "Useful commands:" -ForegroundColor Cyan

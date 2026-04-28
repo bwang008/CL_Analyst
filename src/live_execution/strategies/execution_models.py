@@ -438,15 +438,30 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
             return []
         if base_cfg is None:
             base_cfg = {}
+            
+        def _get_override(key: str):
+            val = base_cfg.get(key)
+            if val is not None:
+                return val
+            tiered_exits = base_cfg.get("tiered_exits", [])
+            if tiered_exits and len(tiered_exits) > 0:
+                return tiered_exits[0].get(key)
+            return None
+
+        base_tp = _get_override("tp_atr_mult")
+        base_sl = _get_override("sl_atr_mult")
+        base_trail = _get_override("trailing_atr_mult")
+        base_mhb = _get_override("max_hold_bars")
+
         tiers = []
         for t in raw:
             tiers.append({
                 "min_prob": float(t.get("min_prob", 0.0)),
                 "lots": int(t.get("lots", 1)),
-                "tp_atr_mult": t.get("tp_atr_mult", base_cfg.get("tp_atr_mult")),
-                "sl_atr_mult": t.get("sl_atr_mult", base_cfg.get("sl_atr_mult")),
-                "trailing_atr_mult": t.get("trailing_atr_mult", base_cfg.get("trailing_atr_mult")),
-                "max_hold_bars": t.get("max_hold_bars", base_cfg.get("max_hold_bars")),
+                "tp_atr_mult": t.get("tp_atr_mult", base_tp),
+                "sl_atr_mult": t.get("sl_atr_mult", base_sl),
+                "trailing_atr_mult": t.get("trailing_atr_mult", base_trail),
+                "max_hold_bars": t.get("max_hold_bars", base_mhb),
                 "label": t.get("label", ""),
             })
         tiers.sort(key=lambda x: x["min_prob"], reverse=True)

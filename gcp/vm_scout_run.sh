@@ -64,6 +64,7 @@ for arg in "$@"; do
         --target-long=*) TARGET_LONG="${arg#*=}" ;;
         --target-short=*) TARGET_SHORT="${arg#*=}" ;;
         --strategy=*) STRATEGY="configs/strategies/${arg#*=}" ;;
+        --canary-prefix=*) CANARY_PREFIX="${arg#*=}" ;;
         --use-buckets) USE_BUCKETS=true ;;
     esac
 done

@@ -604,12 +604,12 @@ class LiveTrader:
         self.data_manager_1h = None
         if self._bar_size in ("1h", "2h", "4h"):
             # 1h models use a dedicated 1h data manager to avoid pacing limits.
-            # Seed from the full historical 1H parquet (cl-1h_bk_HourSet_02.parquet)
+            # Seed from the full historical 1H parquet (cl-1h_bk_HourSet_06.parquet)
             # which lives alongside the processed datasets in CL_DATA_ROOT/data/processed/.
             from src.data_paths import get_data_root as _get_data_root
             _data_root = _get_data_root()
             cache_path_1h = str(_data_root / "processed" / "warm_start_cache_1h.parquet")
-            seed_path_1h = str(_data_root / "processed" / "cl-1h_bk_HourSet_03.parquet")
+            seed_path_1h = str(_data_root / "processed" / "cl-1h_bk_HourSet_06.parquet")
             self.data_manager_1h = DataManager(
                 seed_path=seed_path_1h,
                 cache_path=cache_path_1h,

@@ -1,6 +1,6 @@
 {
   "description": "Documentation for processed datasets in the CL Analyst ML pipeline",
-  "last_updated": "2026-03-22",
+  "last_updated": "2026-04-27",
   "datasets": {
     "set_01": {
       "name": "Cyclical Time Feature Set",
@@ -77,13 +77,28 @@
     "set_06": {
       "name": "Ultimate Dataset",
       "summary": "Alias for set_05 features + targets.",
-      "targets": ["(same as set_05)"]
+      "targets": [
+        "(same as set_05)"
+      ]
     },
     "set_07": {
       "name": "Extended Feature Set",
       "summary": "set_05 targets with extended features: 1-day (288) bar window, expanded macro windows (1D/3D/1W/2W/1M/3M), return distribution (DIST_*), stochastic oscillator (MOM_STOCH_*), Chaikin Money Flow (VOLFLOW_CMF_*), cross-timeframe ratios (CROSS_*), and day-of-week encoding (Time_DayOfWeek_Sin/Cos).",
-      "windows": [288, 864, 2016, 4032, 10080],
-      "macro_windows": {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160},
+      "windows": [
+        288,
+        864,
+        2016,
+        4032,
+        10080
+      ],
+      "macro_windows": {
+        "1D": 24,
+        "3D": 72,
+        "1W": 168,
+        "2W": 336,
+        "1M": 840,
+        "3M": 2160
+      },
       "targets": [
         "TARGET_TRIPLE_2x1_12H_LONG",
         "TARGET_TRIPLE_2x1_12H_SHORT",
@@ -96,8 +111,21 @@
     "set_08": {
       "name": "Exhaustion Feature Set",
       "summary": "set_07 features plus exhaustion cluster: cumulative return (EXHAUST_CUM_RET_*), ATR-normalised exhaustion (EXHAUST_CUM_ATR_*), and distance from recent high in ATR units (EXHAUST_DIST_HIGH_*). These help the model detect overextended moves where snap-back is likely.",
-      "windows": [288, 864, 2016, 4032, 10080],
-      "macro_windows": {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160},
+      "windows": [
+        288,
+        864,
+        2016,
+        4032,
+        10080
+      ],
+      "macro_windows": {
+        "1D": 24,
+        "3D": 72,
+        "1W": 168,
+        "2W": 336,
+        "1M": 840,
+        "3M": 2160
+      },
       "new_features": [
         "EXHAUST_CUM_RET_*",
         "EXHAUST_CUM_ATR_*",
@@ -114,10 +142,23 @@
     },
     "set_09": {
       "name": "MACRO Lookahead Fix",
-      "summary": "Identical to set_08 but with fixed MACRO features: replaced resample('1h') lookahead with causally-safe bar-level rolling windows. MACRO_POS_* and MACRO_WIDTH_* are now computed directly on 5-min bars using rolling(hours × 12). No hourly resample, no forward-fill, no lookahead bias.",
-      "windows": [288, 864, 2016, 4032, 10080],
-      "macro_windows": {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160},
-      "change_from_set_08": "MACRO feature computation only — all other features identical",
+      "summary": "Identical to set_08 but with fixed MACRO features: replaced resample('1h') lookahead with causally-safe bar-level rolling windows. MACRO_POS_* and MACRO_WIDTH_* are now computed directly on 5-min bars using rolling(hours \u00d7 12). No hourly resample, no forward-fill, no lookahead bias.",
+      "windows": [
+        288,
+        864,
+        2016,
+        4032,
+        10080
+      ],
+      "macro_windows": {
+        "1D": 24,
+        "3D": 72,
+        "1W": 168,
+        "2W": 336,
+        "1M": 840,
+        "3M": 2160
+      },
+      "change_from_set_08": "MACRO feature computation only \u2014 all other features identical",
       "new_features": [],
       "targets": [
         "TARGET_TRIPLE_2x1_12H_LONG",
@@ -131,9 +172,22 @@
     "set_10": {
       "name": "Causally Safe Dataset",
       "summary": "Identical features to set_09 (fixed MACRO rolling) but with causally-safe cleanup: bfill() removed (was a lookahead bias), warmup increased from 10,500 to 26,000 rows to cover MACRO_3M (25,920 bars) and VOL_VOLVOL_10080 (20,160 bars). Forward-fill only.",
-      "windows": [288, 864, 2016, 4032, 10080],
-      "macro_windows": {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160},
-      "change_from_set_09": "Cleanup method only — bfill removed, warmup 10500→26000",
+      "windows": [
+        288,
+        864,
+        2016,
+        4032,
+        10080
+      ],
+      "macro_windows": {
+        "1D": 24,
+        "3D": 72,
+        "1W": 168,
+        "2W": 336,
+        "1M": 840,
+        "3M": 2160
+      },
+      "change_from_set_09": "Cleanup method only \u2014 bfill removed, warmup 10500\u219226000",
       "new_features": [],
       "targets": [
         "TARGET_TRIPLE_2x1_12H_LONG",
@@ -144,29 +198,27 @@
         "TARGET_TRIPLE_3x1_24H_SHORT"
       ]
     },
-    "HourSet_01": {
-      "name": "1-Hour Macro Swing-Trading Dataset",
-      "summary": "5-min bars resampled to 1H. Swing-trading targets at 72H and 120H horizons with 1.5x, 2.0x, 2.5x ATR multipliers. AlphaFactory runs with bars_per_hour=1. Feature windows: 24H, 72H, 168H, 336H, 840H. Macro windows: 1W, 2W, 1M, 3M, 6M.",
-      "bar_frequency": "1H",
-      "windows": [24, 72, 168, 336, 840],
-      "macro_windows": {"1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320},
-      "targets": [
-        "TARGET_TRIPLE_1p5x1_72H_LONG", "TARGET_TRIPLE_1p5x1_72H_SHORT",
-        "TARGET_TRIPLE_2p0x1_72H_LONG", "TARGET_TRIPLE_2p0x1_72H_SHORT",
-        "TARGET_TRIPLE_2p5x1_72H_LONG", "TARGET_TRIPLE_2p5x1_72H_SHORT",
-        "TARGET_TRIPLE_1p5x1_120H_LONG", "TARGET_TRIPLE_1p5x1_120H_SHORT",
-        "TARGET_TRIPLE_2p0x1_120H_LONG", "TARGET_TRIPLE_2p0x1_120H_SHORT",
-        "TARGET_TRIPLE_2p5x1_120H_LONG", "TARGET_TRIPLE_2p5x1_120H_SHORT"
-      ]
-    },
     "set_11": {
       "name": "Extended Clean Dataset (Latest 5-min)",
       "summary": "Extension of set_10 (causally safe) with new features. 199 features total. No leakage. Canary result: long_logloss 319 trades, PF 0.84 (unprofitable). Marginal improvement over set_10 (0 trades) but still no profitable signals.",
       "bar_frequency": "5min",
       "features": 199,
       "rows": 1192395,
-      "windows": [288, 864, 2016, 4032, 10080],
-      "macro_windows": {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160},
+      "windows": [
+        288,
+        864,
+        2016,
+        4032,
+        10080
+      ],
+      "macro_windows": {
+        "1D": 24,
+        "3D": 72,
+        "1W": 168,
+        "2W": 336,
+        "1M": 840,
+        "3M": 2160
+      },
       "change_from_set_10": "Additional features (199 vs 156). Same cleanup and MACRO methods.",
       "gcs_path": "gs://cltrainer-optuna-results/data/cl-5m_bk_set_11.parquet",
       "canary_result": "long_logloss: 319 trades, PF 0.84, -$8,913. Others: 0-5 trades.",
@@ -175,32 +227,27 @@
         "TARGET_TRIPLE_2x1_24H_SHORT"
       ]
     },
-    "HourSet_02": {
-      "name": "Extended 1-Hour Dataset (Latest Hourly)",
-      "summary": "Extension of HourSet_01 with new features. 199 features, ~101K rows. Uses 120H triple-barrier targets with 2.0x ATR. Canary result: short_f0.5 38 trades, PF 0.74 (unprofitable). No profitable signals found.",
-      "bar_frequency": "1H",
-      "features": 199,
-      "windows": [24, 72, 168, 336, 840],
-      "macro_windows": {"1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320},
-      "gcs_path": "gs://cltrainer-optuna-results/data/cl-1h_bk_HourSet_02.parquet",
-      "canary_result": "short_f0.5: 38 trades, PF 0.74, -$6,251. Others: 0-24 trades.",
-      "targets": [
-        "TARGET_TRIPLE_1p5x1_72H_LONG", "TARGET_TRIPLE_1p5x1_72H_SHORT",
-        "TARGET_TRIPLE_2p0x1_72H_LONG", "TARGET_TRIPLE_2p0x1_72H_SHORT",
-        "TARGET_TRIPLE_2p5x1_72H_LONG", "TARGET_TRIPLE_2p5x1_72H_SHORT",
-        "TARGET_TRIPLE_1p5x1_120H_LONG", "TARGET_TRIPLE_1p5x1_120H_SHORT",
-        "TARGET_TRIPLE_2p0x1_120H_LONG", "TARGET_TRIPLE_2p0x1_120H_SHORT",
-        "TARGET_TRIPLE_2p5x1_120H_LONG", "TARGET_TRIPLE_2p5x1_120H_SHORT"
-      ]
-    },
     "set_12": {
       "name": "Exhaustion Divergence Dataset (Cumulative)",
       "summary": "Cumulative dataset: all set_11 features + Spread-Adjusted Momentum + Exhaustion Divergence cluster + TARGET_VOL_EXPANSION. 227 features. Bucket pruning (EXP-034) confirmed EXHDIV divergence features are toxic noise. Vol expansion target labels top-20% 24H forward True Range events.",
       "bar_frequency": "5min",
       "features": 227,
       "rows": 1192395,
-      "windows": [288, 864, 2016, 4032, 10080],
-      "macro_windows": {"1D": 24, "3D": 72, "1W": 168, "2W": 336, "1M": 840, "3M": 2160},
+      "windows": [
+        288,
+        864,
+        2016,
+        4032,
+        10080
+      ],
+      "macro_windows": {
+        "1D": 24,
+        "3D": 72,
+        "1W": 168,
+        "2W": 336,
+        "1M": 840,
+        "3M": 2160
+      },
       "change_from_set_11": "Added EXHDIV_SLOPE_DIVERGE_*, EXHDIV_PEAK_OFFSET_*, EXHDIV_EFFORT_REWARD_* at each window + TARGET_VOL_EXPANSION",
       "gcs_path": "gs://cltrainer-optuna-results/data/cl-5m_bk_set_12.parquet",
       "new_features": [
@@ -219,8 +266,74 @@
       ],
       "canary_results": {
         "EXP-034_TripleBarrier": "273 trades, PF 0.66, -$15,127. Divergence OFF in all 4 searches.",
-        "EXP-036_VolExpansion": "455 trades, PF 0.61, -$32,603. Directionless — needs direction filter."
+        "EXP-036_VolExpansion": "455 trades, PF 0.61, -$32,603. Directionless \u2014 needs direction filter."
       }
+    },
+    "HourSet_06": {
+      "name": "Consolidated 1-Hour Pipeline (Current)",
+      "summary": "Single-command hourly pipeline superseding HourSet_01/02/04/05. 1H bars from 5-min CSV. Stationary indicators: PPO (replaces MACD), normalised LR slope (%/bar), TREND_DMA_DIST_25_5, and 4 Ichimoku relational features (TK_SPREAD, CLOUD_DIST, CLOUD_THICKNESS, ABOVE_CLOUD). Full target suite: 1.5x/2.0x/2.5x ATR @ 72H/120H swing targets, 2x1/1x0.5/1x2 ATR @ 3H/6H/12H short-horizon targets, TARGET_RET_72/120. 211 feature cols, 47 target cols, ~101K rows, zero NaN in features.",
+      "bar_frequency": "1H",
+      "features": 211,
+      "rows": 101857,
+      "windows": [
+        24,
+        72,
+        168,
+        336,
+        840
+      ],
+      "macro_windows": {
+        "1W": 168,
+        "2W": 336,
+        "1M": 840,
+        "3M": 2160,
+        "6M": 4320
+      },
+      "new_features_vs_HourSet_02": [
+        "MOM_PPO / MOM_PPO_Signal / MOM_PPO_Hist  (replaces MOM_MACD*)",
+        "TREND_LR_SLOPE_* normalised by Close ($/bar -> %/bar)",
+        "TREND_DMA_DIST_25_5",
+        "ICHIMOKU_TK_SPREAD",
+        "ICHIMOKU_CLOUD_DIST",
+        "ICHIMOKU_CLOUD_THICKNESS",
+        "ICHIMOKU_ABOVE_CLOUD"
+      ],
+      "file": "cl-1h_bk_HourSet_06.parquet",
+      "gcs_path": "gs://cltrainer-optuna-results/data/cl-1h_bk_HourSet_06.parquet",
+      "targets": [
+        "TARGET_TRIPLE_1p5x1_72H_LONG",
+        "TARGET_TRIPLE_1p5x1_72H_SHORT",
+        "TARGET_TRIPLE_2p0x1_72H_LONG",
+        "TARGET_TRIPLE_2p0x1_72H_SHORT",
+        "TARGET_TRIPLE_2p5x1_72H_LONG",
+        "TARGET_TRIPLE_2p5x1_72H_SHORT",
+        "TARGET_TRIPLE_1p5x1_120H_LONG",
+        "TARGET_TRIPLE_1p5x1_120H_SHORT",
+        "TARGET_TRIPLE_2p0x1_120H_LONG",
+        "TARGET_TRIPLE_2p0x1_120H_SHORT",
+        "TARGET_TRIPLE_2p5x1_120H_LONG",
+        "TARGET_TRIPLE_2p5x1_120H_SHORT",
+        "TARGET_TRIPLE_2x1_3H_LONG",
+        "TARGET_TRIPLE_2x1_3H_SHORT",
+        "TARGET_TRIPLE_2x1_6H_LONG",
+        "TARGET_TRIPLE_2x1_6H_SHORT",
+        "TARGET_TRIPLE_2x1_12H_LONG",
+        "TARGET_TRIPLE_2x1_12H_SHORT",
+        "TARGET_TRIPLE_1x0.5_3H_LONG",
+        "TARGET_TRIPLE_1x0.5_3H_SHORT",
+        "TARGET_TRIPLE_1x0.5_6H_LONG",
+        "TARGET_TRIPLE_1x0.5_6H_SHORT",
+        "TARGET_TRIPLE_1x0.5_12H_LONG",
+        "TARGET_TRIPLE_1x0.5_12H_SHORT",
+        "TARGET_TRIPLE_1x2_3H_LONG",
+        "TARGET_TRIPLE_1x2_3H_SHORT",
+        "TARGET_TRIPLE_1x2_6H_LONG",
+        "TARGET_TRIPLE_1x2_6H_SHORT",
+        "TARGET_TRIPLE_1x2_12H_LONG",
+        "TARGET_TRIPLE_1x2_12H_SHORT",
+        "TARGET_RET_72",
+        "TARGET_RET_120"
+      ]
     }
   }
 }
