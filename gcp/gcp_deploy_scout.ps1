@@ -29,7 +29,9 @@ param(
     [switch]$NoShutdown,
     [switch]$SkipProvision,
     [switch]$UseBuckets,
-    [string]$GcsPrefix = "scout"
+    [string]$GcsPrefix = "scout",
+    [int]$OptTrials = 0,
+    [string]$HoldoutCutoffDate = ""
 )
 
 # Add gcloud to PATH if not already there
@@ -229,7 +231,9 @@ if ($TargetLong) { $targetFlags += " --target-long=$TargetLong" }
 if ($TargetShort) { $targetFlags += " --target-short=$TargetShort" }
 $bucketFlag = if ($UseBuckets) { " --use-buckets" } else { "" }
 $prefixFlag = if ($GcsPrefix) { " --canary-prefix=$GcsPrefix" } else { "" }
-$launchCmd = "tmux kill-session -t canary 2>/dev/null; tmux new-session -d -s canary 'bash $RemoteProject/gcp/vm_scout_run.sh $shutdownFlag --dataset=$datasetName --strategy=$StrategyConfig --metrics=$Metrics$targetFlags$bucketFlag$prefixFlag'"
+$optTrialsFlag = if ($OptTrials -gt 0) { " --opt-trials=$OptTrials" } else { "" }
+$holdoutCutoffFlag = if ($HoldoutCutoffDate) { " --holdout-cutoff-date=$HoldoutCutoffDate" } else { "" }
+$launchCmd = "tmux kill-session -t canary 2>/dev/null; tmux new-session -d -s canary 'bash $RemoteProject/gcp/vm_scout_run.sh $shutdownFlag --dataset=$datasetName --strategy=$StrategyConfig --metrics=$Metrics$targetFlags$bucketFlag$prefixFlag$optTrialsFlag$holdoutCutoffFlag'"
 gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd --quiet 2>$null
 
 Write-Host "  Canary pipeline launched!" -ForegroundColor Green

@@ -293,6 +293,75 @@ def run_backtest(
 
 
 # ---------------------------------------------------------------------------
+# Execution Optimization
+# ---------------------------------------------------------------------------
+
+def optimize_ensemble_params(
+    ensemble_cfg: dict,
+    predictions_df: pd.DataFrame,
+    ohlcv_df: pd.DataFrame,
+    n_trials: int = 100,
+    output_dir: str = "production_output",
+) -> dict:
+    """Optimize execution parameters (thresholds, holding limits) on validation data."""
+    import copy
+    import optuna
+
+    print(f"\n  Running autonomous execution optimization ({n_trials} trials)...")
+
+    # Single-objective: maximize PF
+    study = optuna.create_study(direction="maximize")
+    
+    # We create a restricted objective function here to freeze TP/SL
+    def restricted_objective(trial: optuna.Trial) -> float:
+        cfg = copy.deepcopy(ensemble_cfg)
+        
+        # Restricted sweep parameters (no TP/SL)
+        cfg["cooldown_bars"] = trial.suggest_int("cooldown_bars", 0, 30, step=5)
+        cfg["max_hold_bars"] = trial.suggest_int("max_hold_bars", 72, 576, step=72)
+        cfg["consecutive_signal_threshold"] = trial.suggest_int("consecutive_signal_threshold", 0, 4, step=1)
+        
+        threshold = trial.suggest_float("entry_threshold", 0.50, 0.80, step=0.05)
+        cfg["entry_threshold"] = threshold
+        if "models" in cfg:
+            for direction in cfg["models"]:
+                cfg["models"][direction]["threshold"] = threshold
+
+        from agent.backtest_engine import BacktestEngine
+        engine = BacktestEngine.from_config(cfg)
+        result = engine.run(predictions_df, ohlcv_df)
+
+        if result.trade_count < 30:
+            return -999999.0
+
+        return result.profit_factor
+
+    study.optimize(restricted_objective, n_trials=n_trials, show_progress_bar=False)
+
+    best_trial = study.best_trial
+    print(f"    Best trial #{best_trial.number}: PF={best_trial.value:.4f}")
+    print(f"    Params: {best_trial.params}")
+
+    # Patch config with best params
+    opt_cfg = copy.deepcopy(ensemble_cfg)
+    opt_cfg["cooldown_bars"] = best_trial.params["cooldown_bars"]
+    opt_cfg["max_hold_bars"] = best_trial.params["max_hold_bars"]
+    opt_cfg["consecutive_signal_threshold"] = best_trial.params["consecutive_signal_threshold"]
+    threshold = best_trial.params["entry_threshold"]
+    opt_cfg["entry_threshold"] = threshold
+    if "models" in opt_cfg:
+        for direction in opt_cfg["models"]:
+            opt_cfg["models"][direction]["threshold"] = threshold
+
+    # Save to lab output
+    os.makedirs(os.path.join(output_dir, "lab"), exist_ok=True)
+    with open(os.path.join(output_dir, "lab", f"optimized_ensemble_cfg.json"), "w") as f:
+        json.dump(opt_cfg, f, indent=4)
+
+    return opt_cfg
+
+
+# ---------------------------------------------------------------------------
 # Registry bundle creation
 # ---------------------------------------------------------------------------
 
@@ -406,6 +475,8 @@ def run_pipeline(
     metrics: list[str] | None = None,
     targets: list[str] | None = None,
     study_prefix: str | None = None,
+    holdout_cutoff_date: str | None = None,
+    opt_trials: int = 100,
 ):
     """Run the full E2E pipeline."""
 
@@ -445,19 +516,32 @@ def run_pipeline(
     df = pd.read_parquet(data_path)
     feature_cols = util.get_feature_columns(df)
     cutoff = pd.Timestamp(train_cutoff_date)
+
+    if holdout_cutoff_date is None:
+        holdout_cutoff = cutoff + pd.DateOffset(years=1)
+    else:
+        holdout_cutoff = pd.Timestamp(holdout_cutoff_date)
+
+    assert cutoff < holdout_cutoff, f"train_cutoff_date ({cutoff.date()}) must be before holdout_cutoff_date ({holdout_cutoff.date()})"
+
     df_train = df[df.index < cutoff].copy()
-    df_vault = df[df.index >= cutoff].copy()
-    print(f"  Train: {len(df_train):,} rows → {df_train.index.max().date()}")
-    print(f"  Vault: {len(df_vault):,} rows → {df_vault.index.max().date()}")
+    df_val = df[(df.index >= cutoff) & (df.index < holdout_cutoff)].copy()
+    df_vault = df[df.index >= holdout_cutoff].copy() # aliasing holdout as vault
+
+    print(f"  Train:   {len(df_train):,} rows → {df_train.index.max().date()}")
+    print(f"  Val:     {len(df_val):,} rows → {df_val.index.max().date()}")
+    print(f"  Holdout: {len(df_vault):,} rows → {df_vault.index.max().date()}")
     print(f"  Features: {len(feature_cols)}")
 
     # Drop rows with NaN targets from both splits
     for target_name, _ in targets:
         target_col = util.get_target_column(df, target_name)
         df_train = df_train.dropna(subset=[target_col])
+        df_val = df_val.dropna(subset=[target_col])
         df_vault = df_vault.dropna(subset=[target_col])
-    print(f"  Train (clean): {len(df_train):,} rows")
-    print(f"  Vault (clean): {len(df_vault):,} rows")
+    print(f"  Train (clean):   {len(df_train):,} rows")
+    print(f"  Val (clean):     {len(df_val):,} rows")
+    print(f"  Holdout (clean): {len(df_vault):,} rows")
 
     os.makedirs(output_dir, exist_ok=True)
     all_bundles = []
@@ -536,7 +620,18 @@ def run_pipeline(
             )
 
             # Step 4: Generate OOS predictions
-            print(f"\n[4a/5] Generating OOS predictions for {combo_name}...")
+            print(f"\n[4a/5] Generating Validation predictions for {combo_name}...")
+            val_preds_path = os.path.join(output_dir, f"val_predictions_{combo_name}.csv")
+            val_preds_df = generate_oos_predictions(
+                model=model,
+                df_vault=df_val,
+                feature_cols=feature_cols,
+                target_col=target_col,
+                direction=direction,
+                output_path=val_preds_path,
+            )
+
+            print(f"       Generating Holdout predictions for {combo_name}...")
             preds_path = os.path.join(output_dir, f"oos_predictions_{combo_name}.csv")
             preds_df = generate_oos_predictions(
                 model=model,
@@ -600,14 +695,18 @@ def run_pipeline(
     # Group OOS predictions by metric so we can create ensemble configs
     ensemble_reports = {}
     preds_by_metric = {}  # metric → {direction → predictions_path}
+    val_preds_by_metric = {}
     for target_name, direction in targets:
         for metric_name in metrics:
             combo_name = f"{direction}_{metric_name}"
             preds_path = os.path.join(output_dir, f"oos_predictions_{combo_name}.csv")
+            val_preds_path = os.path.join(output_dir, f"val_predictions_{combo_name}.csv")
             if os.path.exists(preds_path):
                 if metric_name not in preds_by_metric:
                     preds_by_metric[metric_name] = {}
+                    val_preds_by_metric[metric_name] = {}
                 preds_by_metric[metric_name][direction] = preds_path
+                val_preds_by_metric[metric_name][direction] = val_preds_path
 
     # For each metric that has both long + short, create an ensemble config and run combined backtest
     for metric_name, direction_paths in preds_by_metric.items():
@@ -641,6 +740,28 @@ def run_pipeline(
         }
         ensemble_cfg["nickname"] = f"E2E_{dataset_tag}_{metric_name}_ensemble"
 
+        ohlcv = pd.read_parquet(data_path) # Load here since optimizer and backtest needs it
+
+        # Auto-optimize strategy parameters on Validation set
+        if opt_trials > 0 and "long" in val_preds_by_metric[metric_name] and "short" in val_preds_by_metric[metric_name]:
+            val_long_df = pd.read_csv(val_preds_by_metric[metric_name]["long"], index_col=0, parse_dates=True)
+            val_short_df = pd.read_csv(val_preds_by_metric[metric_name]["short"], index_col=0, parse_dates=True)
+
+            val_long_prob_col = [c for c in val_long_df.columns if "buy" in c.lower() or "Buy" in c][0]
+            val_short_prob_col = [c for c in val_short_df.columns if "sell" in c.lower() or "Sell" in c][0]
+            
+            val_long_probs = val_long_df[[val_long_prob_col]].rename(columns={val_long_prob_col: "prob_Buy"})
+            val_short_probs = val_short_df[[val_short_prob_col]].rename(columns={val_short_prob_col: "prob_Sell"})
+            val_preds_merged = val_long_probs.join(val_short_probs, how="outer").fillna(0.0)
+
+            ensemble_cfg = optimize_ensemble_params(
+                ensemble_cfg=ensemble_cfg,
+                predictions_df=val_preds_merged,
+                ohlcv_df=ohlcv,
+                n_trials=opt_trials,
+                output_dir=output_dir,
+            )
+
         # Write temporary ensemble config
         ensemble_cfg_path = os.path.join(output_dir, f"ensemble_config_{metric_name}.json")
         with open(ensemble_cfg_path, "w") as f:
@@ -669,9 +790,6 @@ def run_pipeline(
             short_probs = short_df[[short_prob_col[0]]].rename(columns={short_prob_col[0]: "prob_Sell"})
             preds = long_probs.join(short_probs, how="outer").fillna(0.0)
             print(f"    Merged: {len(preds):,} rows ({preds['prob_Buy'].gt(0).sum():,} buy, {preds['prob_Sell'].gt(0).sum():,} sell)")
-
-            # Load OHLCV from original parquet
-            ohlcv = pd.read_parquet(data_path)
 
             # Run backtest
             result = bt.run(preds, ohlcv, label=f"Ensemble ({metric_name})")
@@ -834,6 +952,16 @@ def main():
         default="",
         help="GCS subfolder prefix (e.g. 'canary'). If set, uploads to bucket/prefix/ instead of bucket/",
     )
+    parser.add_argument(
+        "--holdout-cutoff-date",
+        default=None,
+        help="Holdout split date (YYYY-MM-DD). Validation = [train_cutoff, holdout_cutoff). "
+             "If omitted, defaults to train_cutoff + 1 year.",
+    )
+    parser.add_argument(
+        "--opt-trials", type=int, default=100,
+        help="Optuna trials for execution param optimization (0 to skip)",
+    )
 
     args = parser.parse_args()
 
@@ -849,6 +977,8 @@ def main():
         metrics=args.metrics,
         targets=args.targets,
         study_prefix=args.study_prefix,
+        holdout_cutoff_date=args.holdout_cutoff_date,
+        opt_trials=args.opt_trials,
     )
 
 

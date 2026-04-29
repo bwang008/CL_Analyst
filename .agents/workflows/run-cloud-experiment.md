@@ -19,6 +19,7 @@ gcloud compute instances delete optuna-runner-canary --zone=us-central1-a --quie
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\gcp\gcp_deploy_canary.ps1 -ProvisioningModel STANDARD
 ```
+*(Note: To enable autonomous optimization during the run, you can pass `-OptTrials <number>` and `-HoldoutCutoffDate <YYYY-MM-DD>`)*
 
 3. Start the local monitor wrapper to auto-track progress and download results:
 ```powershell

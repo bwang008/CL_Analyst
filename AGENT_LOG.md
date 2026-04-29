@@ -65,6 +65,28 @@ The recent unconstrained scout run for hourly_ensemble_005 (HourSet_06 dataset, 
 
 ---
 
+### 8. Pipeline Wrapper Updates & Scout Ablation (Feature Buckets)
+**Context**: The m_e2e_pipeline.py was successfully upgraded with the Holdout Architecture (--opt-trials and --holdout-cutoff-date). However, the GCP PowerShell deployment scripts (gcp_deploy_scout.ps1, etc.) and the VM startup scripts (m_scout_run.sh) have not been updated to expose these new CLI arguments to the user.
+**Goal**: Update the deployment wrappers to support the new arguments, then launch the first ablation study: running the exact same 72H Logloss Scout, but with **Feature Buckets enabled**, to see if the OOS metrics improve over the previous 1.65 PF baseline.
+
+**Agent Prompt**:
+> We recently upgraded gcp/vm_e2e_pipeline.py with two new arguments (--opt-trials and --holdout-cutoff-date) to support autonomous holdout optimization. 
+> 
+> **Step 1: Wrapper Updates**
+> Please update the deployment wrapper scripts (gcp/gcp_deploy_scout.ps1 and gcp/vm_scout_run.sh) to accept and pass --opt-trials and --holdout-cutoff-date down to the python pipeline. Also, please briefly document these new arguments in .agents/workflows/run-cloud-experiment.md.
+> 
+> **Step 2: Launch the Ablation Study**
+> Once the wrappers are updated, please launch a scout experiment for the Logloss model on the HourSet_06 dataset using the 72H targets (TARGET_TRIPLE_2p0x1_72H_LONG / _SHORT). 
+> **CRITICAL**: For this run, you must enable **Feature Buckets** in the deployment config.
+> 
+> **Step 3: Metric Comparison**
+> Once the scout run finishes and downloads the final backtest report, compare the OOS Profit Factor and Drawdown against our previous un-bucketed baseline.
+> *Reference*: You can find the previous baseline's optimal configuration in configs/experiments/scout_ensemble_logloss_opt_04282026_1838.json and its metrics logged in gent/experiment_log.json.
+> 
+> Please report back with the final metric comparison!
+
+---
+
 # AGENT_LOG
 
 Historical progress and completed track summaries (reverse-chronological; newest first).

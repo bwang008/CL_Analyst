@@ -44,6 +44,8 @@ LOG="canary_run_$(date +%Y%m%d_%H%M%S).log"
 SHUTDOWN=false
 USE_BUCKETS=false
 AGENT_ID="${AGENT_ID:-canary_bot}"
+OPT_TRIALS=""
+HOLDOUT_CUTOFF_DATE=""
 
 # Search space constraints (fast canary)
 MAX_DEPTH_MIN=3
@@ -66,6 +68,8 @@ for arg in "$@"; do
         --strategy=*) STRATEGY="configs/strategies/${arg#*=}" ;;
         --canary-prefix=*) CANARY_PREFIX="${arg#*=}" ;;
         --use-buckets) USE_BUCKETS=true ;;
+        --opt-trials=*) OPT_TRIALS="${arg#*=}" ;;
+        --holdout-cutoff-date=*) HOLDOUT_CUTOFF_DATE="${arg#*=}" ;;
     esac
 done
 
@@ -262,6 +266,13 @@ if [ $COMPLETED -gt 0 ]; then
         --study-prefix "$CANARY_PREFIX"
         --targets "$TARGET_LONG" "$TARGET_SHORT"
     )
+
+    if [ -n "$OPT_TRIALS" ]; then
+        E2E_ARGS+=(--opt-trials "$OPT_TRIALS")
+    fi
+    if [ -n "$HOLDOUT_CUTOFF_DATE" ]; then
+        E2E_ARGS+=(--holdout-cutoff-date "$HOLDOUT_CUTOFF_DATE")
+    fi
 
     python gcp/vm_e2e_pipeline.py "${E2E_ARGS[@]}" 2>&1 | tee -a "$LOG" || true
     E2E_EXIT=${PIPESTATUS[0]}
