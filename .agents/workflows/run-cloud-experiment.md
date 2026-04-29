@@ -115,3 +115,22 @@ gcloud compute ssh optuna-runner-5m --zone=us-central1-a --command="tmux capture
 - CPU validation will FATAL error if cores don't match the config
 - If changing machine type, update N_JOBS/NUM_THREADS in the shell scripts
 - SPOT VMs can be preempted — use STANDARD for runs that must complete
+
+## Configuration Naming & File Tracking Conventions
+
+To maintain a clean tracking environment for cloud experiments and live production:
+
+1. **Experimental Configurations**
+   - Any JSON configuration generated from a VM run, Optuna sweep, or manual ablation study MUST be saved to configs/experiments/.
+   - The file name MUST have the execution date and time appended to it.
+   - **Format:** [base_name]_[MMDDYYYY]_[HHMM].json
+   - **Example:** scout_ensemble_logloss_opt_04282026_1838.json
+   - Use these files as inputs for --strategy-config when backtesting new ideas.
+
+2. **Production Configurations**
+   - Verified, deployment-ready configurations MUST be saved to configs/strategies/.
+   - These represent the baseline systems used for live trading or official E2E reporting.
+   - **Format:** [horizon_or_name]_ensemble_[version].json
+   - **Example:** hourly_ensemble_006.json
+
+Always ensure new configs are moved to the correct directory based on their lifecycle stage.

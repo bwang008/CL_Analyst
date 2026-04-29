@@ -37,14 +37,31 @@ The recent unconstrained scout run for hourly_ensemble_005 (HourSet_06 dataset, 
 **Agent Prompt**:
 > Please inspect src/features/feature_buckets.py and cross-reference it against the latest HourSet_06 dataset columns. Verify that the new momentum and trend features (PPO, Normalised Slope, DMA/Ichimoku) have been properly categorized into their respective buckets. If they are missing, please update the bucket definitions to include them before we launch any bucketed experiments.
 
-### 7. Pipeline Upgrade: Autonomous Strategy Optimization
-**Context**: Currently, m_e2e_pipeline.py blindly uses a hardcoded strategy JSON to backtest newly trained models. If we train on a 120H target, but the pipeline evaluates it using a JSON tuned for 72H, the report metrics will be garbage.
-**Goal**: Integrate strategy_optimizer.py directly into the E2E pipeline. Before running the final backtest report, the pipeline should run a mini-Optuna sweep (e.g., 50-100 trials) to automatically find the optimal TP, SL, and thresholds for the newly trained model. The final backtest report should reflect the model's true potential.
+### 7. Pipeline Upgrade: Autonomous Strategy Optimization (The Holdout Architecture)
+**Context**: Currently, m_e2e_pipeline.py blindly uses a static strategy config to evaluate predictions. We need to auto-optimize the execution parameters (thresholds, cooldowns), but we **cannot** optimize them on the OOS test set, as that causes catastrophic Data Leakage. We also **cannot** mutate the 	p_atr_mult or sl_atr_mult, as those are Pre-Train Label Parameters baked into the dataset target.
+**Goal**: Implement a strict 3-way data split (Train / Validation / Holdout) in m_e2e_pipeline.py to support autonomous, mathematically sound execution optimization.
 
 **Agent Prompt**:
-> Please review gcp/vm_e2e_pipeline.py. Currently, it runs a final backtest using a static strategy_cfg loaded from disk. This completely invalidates the backtest if we are scouting new targets (like 120H) because the execution parameters won't match. 
+> Please review gcp/vm_e2e_pipeline.py. We need to implement an autonomous strategy optimization step, but we must use a strict **Train / Validation / Holdout** architecture to prevent Data Leakage.
 > 
-> I need you to implement an autonomous optimization step. Before the final backtest is executed in the pipeline, have the script invoke the optimization logic from gent/strategy_optimizer.py (doing a mini-sweep of ~100 trials) to automatically discover the best TP, SL, Threshold, and Consecutive Signal parameters for the predictions. Then, apply those optimized parameters to the ensemble_cfg and generate the final report. This turns our pipeline into a fully self-tuning evaluation engine!
+> Currently, the pipeline splits data at 	rain_cutoff_date (e.g. 2022-01-01) into df_train and df_vault.
+> 
+> **Step 1: The 3-Way Split**
+> Update the pipeline to accept a new CLI argument --holdout-cutoff-date (defaulting to e.g. '2023-01-01').
+> - df_train: Before 	rain_cutoff_date
+> - df_val: Between 	rain_cutoff_date and holdout_cutoff_date
+> - df_holdout: After holdout_cutoff_date
+> 
+> **Step 2: Prediction Generation**
+> The LGBMLearner must generate two sets of OOS predictions: one for df_val and one for df_holdout.
+> 
+> **Step 3: Execution Optimization (The Lockdown)**
+> Create a new function optimize_ensemble_params() that uses Optuna to optimize execution parameters on the **Validation** predictions.
+> **CRITICAL**: The optimizer MUST NOT mutate 	p_atr_mult or sl_atr_mult! Those are Label Parameters. It may only sweep entry_threshold, cooldown_bars, max_hold_bars, and consecutive_signal_threshold.
+> 
+> **Step 4: The True OOS Backtest**
+> Apply the discovered execution parameters to the ensemble_cfg, and run the final BacktestEngine report strictly on the **Holdout** predictions. 
+> This turns our pipeline into a mathematically rigorous, self-tuning evaluation engine!
 
 ---
 
