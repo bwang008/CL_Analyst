@@ -30,8 +30,8 @@ cd "$PROJECT_DIR"
 # Configuration — CANARY OVERRIDES
 DATASET_NAME="cl-5m_bk_set_11c"
 METRICS="logloss,average_precision"
-TARGET_LONG="TARGET_TRIPLE_2x1_24H_LONG"
-TARGET_SHORT="TARGET_TRIPLE_2x1_24H_SHORT"
+TARGET_LONG=""
+TARGET_SHORT=""
 CUTOFF="2022-01-01"
 N_TRIALS=300
 N_WORKERS=4
@@ -71,6 +71,12 @@ done
 
 # Resolve DATA path from DATASET_NAME
 DATA="/home/$(whoami)/data/${DATASET_NAME}.parquet"
+
+if [ -z "$TARGET_LONG" ] || [ -z "$TARGET_SHORT" ]; then
+    echo "FATAL: --target-long and --target-short must be explicitly specified!" | tee -a "$LOG"
+    exit 1
+fi
+
 
 # ---------- CPU VALIDATION ----------
 SYSTEM_CPUS=$(nproc)
@@ -186,6 +192,10 @@ done
 
 echo "" | tee -a "$LOG"
 echo "  All $TOTAL searches launched — waiting for completion..." | tee -a "$LOG"
+
+# Upload initial STATUS.json so the monitor can send a "Job Started" notification immediately
+echo "{\"completed\": 0, \"failed\": 0, \"total\": $TOTAL, \"current\": \"starting\", \"agent\": \"$AGENT_ID\", \"last_update\": \"$(date -Iseconds)\"}" | \
+    gsutil cp - "$BUCKET/$CANARY_PREFIX/STATUS.json" 2>/dev/null || true
 
 # Wait for all searches and capture exit codes
 for idx in "${!SEARCH_PIDS[@]}"; do

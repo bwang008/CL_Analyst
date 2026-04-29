@@ -140,6 +140,7 @@ $codeFiles = @(
     @{ Local = "agent\__init__.py";              Remote = "agent/" },
     @{ Local = "src\util.py";                    Remote = "src/" },
     @{ Local = "src\__init__.py";                Remote = "src/" },
+    @{ Local = "src\LGBMLearner.py";             Remote = "src/" },
     @{ Local = "src\features\__init__.py";       Remote = "src/features/" },
     @{ Local = "src\features\feature_buckets.py"; Remote = "src/features/" },
     @{ Local = "src\live_execution\__init__.py";                   Remote = "src/live_execution/" },

@@ -1,0 +1,68 @@
+{
+    "nickname": "scout_ensemble_precision",
+    "description": "Scout run Average Precision optimized ensemble config.",
+    "execution_class": "TieredEnsembleStrategy",
+    "exit_mode": "TIERED",
+    "tp_atr_mult": 2.0,
+    "sl_atr_mult": 1.0,
+    "trailing_atr_mult": 100.0,
+    "tp_cooldown_bars": 0,
+    "sl_cooldown_bars": 4,
+    "max_hold_bars": 288,
+    "allow_concurrent": false,
+    "max_concurrent": 1,
+    "max_position_size": 1,
+    "execution_symbol": "CL",
+    "bar_size": "1h",
+    "live_config": {
+        "client_id": 25,
+        "entry_mode": "marketable_limit",
+        "exit_mode": "marketable_limit"
+    },
+    "models": {
+        "long": {
+            "experiment_id": "scout_long_average_precision",
+            "model_path": "reports/scout_local_e2e/registry/E2E_HourSet_06_long_average_precision/final_model.pkl",
+            "predictions_path": "reports/scout_local_e2e/oos_predictions_long_average_precision.csv",
+            "threshold": 0.55
+        },
+        "short": {
+            "experiment_id": "scout_short_average_precision",
+            "model_path": "reports/scout_local_e2e/registry/E2E_HourSet_06_short_average_precision/final_model.pkl",
+            "predictions_path": "reports/scout_local_e2e/oos_predictions_short_average_precision.csv",
+            "threshold": 0.55
+        }
+    },
+    "long": {
+        "tp_atr_mult": 2.0,
+        "sl_atr_mult": 1.0,
+        "tiered_exits": [
+            {
+                "qty_pct": 1.0,
+                "tp_atr_mult": 2.0
+            }
+        ],
+        "tiers": [
+            {
+                "min_prob": 0.55,
+                "lots": 1
+            }
+        ]
+    },
+    "short": {
+        "tp_atr_mult": 2.0,
+        "sl_atr_mult": 1.0,
+        "tiered_exits": [
+            {
+                "qty_pct": 1.0,
+                "tp_atr_mult": 2.0
+            }
+        ],
+        "tiers": [
+            {
+                "min_prob": 0.55,
+                "lots": 1
+            }
+        ]
+    }
+}

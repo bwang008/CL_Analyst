@@ -659,6 +659,11 @@ class LiveTrader:
         # TP/SL order tracking for software-side OCA (no parentId linkage)
         self._tp_order_ids: list[int] = []
         self._sl_order_id: Optional[int] = None
+        # Persistent set of order IDs already processed as TP/SL exits.
+        # Intentionally NOT cleared by _reset_position_state() so that a
+        # duplicate IBKR Filled callback arriving after the state reset cannot
+        # misidentify the same exit order as a new entry fill.
+        self._processed_exit_order_ids: set[int] = set()
         # Active trade ID for position ledger tracking (OOB close detection)
         self._active_trade_id: Optional[str] = None
         self._run_id = (
@@ -1760,10 +1765,35 @@ class LiveTrader:
                 # Extract order_id BEFORE the TP/SL check (was previously
                 # only assigned in the else branch, causing UnboundLocalError)
                 order_id = getattr(order, "orderId", None)
+
+                # FIX: Duplicate-exit guard.
+                # IBKR routinely fires orderStatusEvent twice for the same fill.
+                # After _reset_position_state() clears _tp_order_ids / _sl_order_id,
+                # the second callback can no longer identify the order as an exit
+                # and falls through to the entry-fill branch, opening a phantom
+                # position and placing fresh TP/SL children — causing an
+                # exponential cascade.  Check the persistent set first.
+                if order_id is not None and order_id in self._processed_exit_order_ids:
+                    log.info(
+                        "Ignoring duplicate Filled event for already-processed "
+                        "exit order %d (SL/TP cascade guard active)",
+                        order_id,
+                    )
+                    return
+
                 # Detect TP/SL fill by tracked order IDs (no parentId linkage)
                 is_tp_fill = (order_id is not None and order_id in self._tp_order_ids)
                 is_sl_fill = (order_id is not None and order_id == self._sl_order_id)
                 if is_tp_fill or is_sl_fill:
+                    # Immediately register in the persistent set so any subsequent
+                    # duplicate callback for this same order is blocked above.
+                    if order_id is not None:
+                        self._processed_exit_order_ids.add(order_id)
+                        # Trim to prevent unbounded growth (cap at 500 entries).
+                        if len(self._processed_exit_order_ids) > 500:
+                            self._processed_exit_order_ids = set(
+                                list(self._processed_exit_order_ids)[-500:]
+                            )
                     # Exit order filled — log and apply software-side OCA
                     exit_type = "TP HIT" if is_tp_fill else "SL HIT"
                     exit_icon = "🟢" if is_tp_fill else "🔴"
@@ -1868,6 +1898,37 @@ class LiveTrader:
                     elif getattr(self, "_last_filled_entry_order_id", None) == order_id:
                         log.info("Ignoring duplicate Filled event for parent order %s", order_id)
                     else:
+                        # Defense-in-depth Fix A: require a stored decision context.
+                        # Every legitimate entry order has a context set in _on_new_bar()
+                        # before it is submitted.  An order with no context is either
+                        # an external/manual order or a stale exit order that slipped
+                        # past the duplicate-exit guard above.
+                        _entry_ctx = self._last_decision_context_by_order_id.get(order_id)
+                        if _entry_ctx is None:
+                            log.warning(
+                                "PHANTOM FILL BLOCKED: orderId=%d has no decision context "
+                                "and is not a tracked TP/SL — likely a stale exit callback. "
+                                "Ignoring to prevent phantom position accumulation.",
+                                order_id,
+                            )
+                            return
+
+                        # Defense-in-depth Fix B: callback-level position cap.
+                        # The bar-driven guard in _on_new_bar() cannot block entries
+                        # that arrive via asynchronous fill callbacks.  Check the
+                        # live IBKR position directly here before opening any ledger
+                        # position or placing bracket children.
+                        _cb_position = self.manager.get_cl_position(
+                            symbol=self._execution_symbol
+                        )
+                        if abs(_cb_position) >= self._max_position_size:
+                            log.warning(
+                                "CALLBACK POSITION CAP: position=%d >= max=%d — "
+                                "blocking entry from fill callback for orderId=%d",
+                                abs(_cb_position), self._max_position_size, order_id,
+                            )
+                            return
+
                         self._last_filled_entry_order_id = order_id
                         # Parent entry order filled — clear TTL tracking
                         log.info(

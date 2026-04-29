@@ -126,14 +126,22 @@ def _make_trader_stub(
     trader._tp_order_ids = []
     trader._sl_order_id = None
     trader._active_trade_id = None
+    # Persistent duplicate-exit guard (introduced in cascade fix)
+    trader._processed_exit_order_ids = set()
 
-    # Engine-level position cap
+    # Engine-level position cap and emergency halt
     trader._max_position_size = 3
+    trader._emergency_halt = False
+    trader._order_timestamps = []
+
+    # Duplicate entry fill guard
+    trader._last_filled_entry_order_id = None
 
     # Consecutive signal threshold state
     trader._consecutive_signal_threshold = 0
     trader._consecutive_buy_count = 0
     trader._consecutive_sell_count = 0
+    trader._consecutive_exit_count = 0
 
     trader._virtual_ledger = {"5m": 0, "1h": 0}
 

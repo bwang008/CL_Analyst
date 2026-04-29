@@ -130,6 +130,10 @@ echo "" | tee -a "$LOG"
 # PHASE 1: Run all 6 Optuna searches (with smart resume)
 # =============================================================================
 
+# Upload initial STATUS.json so the monitor can send a "Job Started" notification immediately
+echo "{\"completed\": 0, \"failed\": 0, \"total\": $TOTAL, \"current\": \"starting\", \"agent\": \"$AGENT_ID\", \"last_update\": \"$(date -Iseconds)\"}" | \
+    gsutil cp - "$BUCKET/STATUS.json" 2>/dev/null || true
+
 for i in "${!COMBOS[@]}"; do
     combo="${COMBOS[$i]}"
     read -r TARGET METRIC <<< "$combo"

@@ -158,6 +158,7 @@ def make_objective(
         cfg["trailing_atr_mult"] = trial.suggest_float("trailing_atr_mult", 0.5, 5.0, step=0.5)
         cfg["cooldown_bars"] = trial.suggest_int("cooldown_bars", 0, 30, step=5)
         cfg["max_hold_bars"] = trial.suggest_int("max_hold_bars", 72, 576, step=72)
+        cfg["consecutive_signal_threshold"] = trial.suggest_int("consecutive_signal_threshold", 0, 4, step=1)
         
         if base_cfg.get("execution_class") == "BreakoutStraddleStrategy":
             cfg["breakout_window"] = trial.suggest_int("breakout_window", 2, 24, step=2)
@@ -364,6 +365,7 @@ def run_optimization(
     best_cfg["trailing_atr_mult"] = best_trial.params["trailing_atr_mult"]
     best_cfg["cooldown_bars"] = best_trial.params["cooldown_bars"]
     best_cfg["max_hold_bars"] = best_trial.params["max_hold_bars"]
+    best_cfg["consecutive_signal_threshold"] = best_trial.params["consecutive_signal_threshold"]
     if "breakout_window" in best_trial.params:
         best_cfg["breakout_window"] = best_trial.params["breakout_window"]
     threshold = best_trial.params["entry_threshold"]

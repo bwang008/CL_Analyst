@@ -38,8 +38,8 @@ FEATURE_BUCKETS: dict[str, list[str]] = {
     # RSI, MACD, ADX, Spread-Adjusted RSI
     "momentum": ["MOM_"],
 
-    # Linear regression slope, R², trend strength
-    "trend": ["TREND_"],
+    # Linear regression slope, R², trend strength, Ichimoku cloud
+    "trend": ["TREND_", "ICHIMOKU_"],
 
     # Corwin-Schultz spread, Kyle lambda (bid-ask microstructure)
     "microstructure": ["LIQ_"],

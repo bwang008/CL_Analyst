@@ -46,6 +46,39 @@ $RemoteHome = "/home/${GcpUser}"
 $RemoteProject = "${RemoteHome}/project"
 $DataFileName = Split-Path -Leaf $GcsDataPath
 
+function Send-TelegramAlert {
+    param([string]$Message)
+    $envPath = Join-Path $ProjectDir ".env"
+    $env_vars = @{}
+    if (Test-Path $envPath) {
+        Get-Content $envPath | ForEach-Object {
+            if ($_ -match '^([A-Z_][A-Z0-9_]*)=(.*)$') {
+                $env_vars[$Matches[1]] = $Matches[2].Trim()
+            }
+        }
+    }
+    $token = if ($env_vars["TELEGRAM_BOT_TOKEN"]) { $env_vars["TELEGRAM_BOT_TOKEN"] } else { $env:TELEGRAM_BOT_TOKEN }
+    $chatId = if ($env_vars["TELEGRAM_CHAT_ID"]) { $env_vars["TELEGRAM_CHAT_ID"] } else { $env:TELEGRAM_CHAT_ID }
+    if (-not $token) { return }
+    
+    # Strip Markdown to avoid parse errors
+    $plainMsg = $Message -replace '\*', '' -replace '``', '' -replace '_', ''
+    
+    $bodyObj = @{ chat_id = $chatId; text = $plainMsg }
+    $bodyJson = $bodyObj | ConvertTo-Json -Compress
+    $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
+    try {
+        Invoke-RestMethod -Method Post -Uri "https://api.telegram.org/bot$token/sendMessage" -ContentType 'application/json; charset=utf-8' -Body $bodyBytes | Out-Null
+    } catch {}
+}
+
+if ([string]::IsNullOrWhiteSpace($TargetLong) -or [string]::IsNullOrWhiteSpace($TargetShort)) {
+    $errMsg = "FATAL: -TargetLong and -TargetShort must be explicitly specified! No defaults are provided."
+    Write-Host "`n$errMsg" -ForegroundColor Red
+    Send-TelegramAlert "🚫 Deploy Failed: Scout Run`n$errMsg"
+    exit 1
+}
+
 Write-Host ""
 Write-Host "=====================================================" -ForegroundColor Magenta
 Write-Host " DEPLOY CANARY (LIGHT) PIPELINE" -ForegroundColor Magenta
@@ -146,6 +179,7 @@ $codeFiles = @(
     @{ Local = "agent\__init__.py";              Remote = "agent/" },
     @{ Local = "src\util.py";                    Remote = "src/" },
     @{ Local = "src\__init__.py";                Remote = "src/" },
+    @{ Local = "src\LGBMLearner.py";             Remote = "src/" },
     @{ Local = "src\live_execution\__init__.py";                   Remote = "src/live_execution/" },
     @{ Local = "src\live_execution\strategies\__init__.py";        Remote = "src/live_execution/strategies/" },
     @{ Local = "src\live_execution\strategies\execution_models.py"; Remote = "src/live_execution/strategies/" },

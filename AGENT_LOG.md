@@ -1,3 +1,53 @@
+## 2026-04-28 — Next Steps: Logloss Production & Scout Ablation Studies
+
+### 1. Full Production Sweep (Baseline Logloss)
+The recent unconstrained scout run for hourly_ensemble_005 (HourSet_06 dataset, Logloss) yielded phenomenal baseline results (PF 1.65, Sharpe 1.24, .9k PnL) after the threshold/consecutive signal optimizer was run.
+**Goal**: Run a full production Optuna sweep (e.g., 2000 trials) to pinpoint the absolute best hyperparameters for the logloss models.
+
+**Agent Prompt**:
+> \/run-cloud-experiment\ Launch a full production sweep (2,000 trials) for both long and short Logloss models on the HourSet_06 dataset using the standard configurations (no bucketing, no lookback). Ensure we capture the final E2E ensemble backtest markdown.
+
+### 2. Ablation Study: Feature Buckets
+**Goal**: Determine if pruning overlapping feature buckets improves OOS performance by reducing collinearity and noise.
+
+**Agent Prompt**:
+> \/run-cloud-experiment\ Rerun the scout experiment (Logloss, HourSet_06) with Feature Buckets turned ON in the deployment manifest. Run the strategy_optimizer.py on the resulting predictions and record the metrics in the tracker.
+
+### 3. Ablation Study: Lookback Windows
+**Goal**: Determine if constraining the model memory (e.g., 2-10 year lookback) improves the model's ability to adapt to recent market regimes compared to full historical training.
+
+**Agent Prompt**:
+> \/run-cloud-experiment\ Rerun the scout experiment (Logloss, HourSet_06) with Lookback Windows explicitly enabled in the search space. Once complete, run the strategy_optimizer.py to calculate the final metrics.
+
+### 4. Synergy Run: Lookback + Buckets
+**Goal**: Test the combined effect of dynamic feature bucketing and restricted lookback windows.
+
+**Agent Prompt**:
+> \/run-cloud-experiment\ Launch a scout run combining BOTH Feature Buckets and Lookback Windows. Compare the final optimized metrics against the baseline, Bucket-only, and Lookback-only runs to evaluate synergy.
+
+### 5. Target Horizon Bake-off
+**Goal**: Determine if altering the Triple Barrier horizon (e.g., targeting 24H or 120H instead of 72H) yields better optimal models on the new dataset.
+
+**Agent Prompt**:
+> \/run-cloud-experiment\ Rerun the unconstrained scout experiment on the HourSet_06 dataset, but change the target arguments in the run script to a different horizon (e.g. 24H or 120H). Run the optimizer on the outputs and compare the Profit Factor to the 72H baseline.
+
+### 6. Prerequisite: Verify Feature Buckets
+**Goal**: Before running the Feature Buckets ablation study, we must verify that the bucket definitions correctly capture the newly engineered features (PPO, Normalised Slope, DMA/Ichimoku, etc.).
+
+**Agent Prompt**:
+> Please inspect src/features/feature_buckets.py and cross-reference it against the latest HourSet_06 dataset columns. Verify that the new momentum and trend features (PPO, Normalised Slope, DMA/Ichimoku) have been properly categorized into their respective buckets. If they are missing, please update the bucket definitions to include them before we launch any bucketed experiments.
+
+### 7. Pipeline Upgrade: Autonomous Strategy Optimization
+**Context**: Currently, m_e2e_pipeline.py blindly uses a hardcoded strategy JSON to backtest newly trained models. If we train on a 120H target, but the pipeline evaluates it using a JSON tuned for 72H, the report metrics will be garbage.
+**Goal**: Integrate strategy_optimizer.py directly into the E2E pipeline. Before running the final backtest report, the pipeline should run a mini-Optuna sweep (e.g., 50-100 trials) to automatically find the optimal TP, SL, and thresholds for the newly trained model. The final backtest report should reflect the model's true potential.
+
+**Agent Prompt**:
+> Please review gcp/vm_e2e_pipeline.py. Currently, it runs a final backtest using a static strategy_cfg loaded from disk. This completely invalidates the backtest if we are scouting new targets (like 120H) because the execution parameters won't match. 
+> 
+> I need you to implement an autonomous optimization step. Before the final backtest is executed in the pipeline, have the script invoke the optimization logic from gent/strategy_optimizer.py (doing a mini-sweep of ~100 trials) to automatically discover the best TP, SL, Threshold, and Consecutive Signal parameters for the predictions. Then, apply those optimized parameters to the ensemble_cfg and generate the final report. This turns our pipeline into a fully self-tuning evaluation engine!
+
+---
+
 # AGENT_LOG
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
