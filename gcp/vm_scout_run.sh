@@ -32,7 +32,7 @@ DATASET_NAME="cl-5m_bk_set_11c"
 METRICS="logloss,average_precision"
 TARGET_LONG=""
 TARGET_SHORT=""
-CUTOFF="2022-01-01"
+CUTOFF="2020-01-01"
 N_TRIALS=300
 N_WORKERS=4
 THREADS_PER_WORKER=12
@@ -70,6 +70,7 @@ for arg in "$@"; do
         --use-buckets) USE_BUCKETS=true ;;
         --opt-trials=*) OPT_TRIALS="${arg#*=}" ;;
         --holdout-cutoff-date=*) HOLDOUT_CUTOFF_DATE="${arg#*=}" ;;
+        --train-cutoff-date=*) CUTOFF="${arg#*=}" ;;
     esac
 done
 

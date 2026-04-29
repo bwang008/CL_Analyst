@@ -87,6 +87,30 @@ The recent unconstrained scout run for hourly_ensemble_005 (HourSet_06 dataset, 
 
 ---
 
+### 9. Target Horizon Bake-off: 120H Scout (With Holdout Auto-Tuning)
+**Context**: The ablation studies on the 72H target (Buckets and Lookback) failed to improve upon the unconstrained baseline. The next logical step is to perform a **Broad Search** across different time horizons. The new HourSet_06 features might be naturally tuned for longer-term predictions. We also need to test our newly upgraded Holdout Auto-Tuner in production!
+**Goal**: Launch a scout run for the 120-Hour targets (TARGET_TRIPLE_2p0x1_120H_LONG / _SHORT) using the new autonomous holdout architecture.
+
+**Agent Prompt**:
+> Our ablation studies on the 72H target didn't pan out, so it's time to scout new horizons! We need to test if the HourSet_06 features are better suited for predicting longer 120H moves. 
+> 
+> We are also going to test out the newly upgraded Holdout Auto-Tuner to make sure the pipeline autonomously optimizes the execution metrics correctly!
+> 
+> **Step 1: Launch the 120H Scout**
+> Please deploy a canary/scout VM using gcp_deploy_scout.ps1.
+> - **Dataset**: cl-1h_bk_HourSet_06.parquet
+> - **Strategy**: configs/strategies/hourly_ensemble_006.json
+> - **Targets**: TARGET_TRIPLE_2p0x1_120H_LONG and TARGET_TRIPLE_2p0x1_120H_SHORT
+> - **Metrics**: logloss
+> - **NEW ARGS**: Pass -OptTrials 100 and -HoldoutCutoffDate 2023-01-01 to the PowerShell script. 
+> 
+> **Step 2: Monitor & Report**
+> Let the run finish and wait for the monitor wrapper to download the results.
+> Check the 
+eports/scout/run_report.md (or whatever prefix you used) to verify that the auto-tuner successfully patched the config, and report back the final **Holdout Profit Factor** for the 120H ensemble!
+
+---
+
 # AGENT_LOG
 
 Historical progress and completed track summaries (reverse-chronological; newest first).

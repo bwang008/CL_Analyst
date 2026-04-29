@@ -317,11 +317,11 @@ def optimize_ensemble_params(
         cfg = copy.deepcopy(ensemble_cfg)
         
         # Restricted sweep parameters (no TP/SL)
-        cfg["cooldown_bars"] = trial.suggest_int("cooldown_bars", 0, 30, step=5)
+        cfg["cooldown_bars"] = trial.suggest_int("cooldown_bars", 0, 10, step=2)
         cfg["max_hold_bars"] = trial.suggest_int("max_hold_bars", 72, 576, step=72)
-        cfg["consecutive_signal_threshold"] = trial.suggest_int("consecutive_signal_threshold", 0, 4, step=1)
+        cfg["consecutive_signal_threshold"] = trial.suggest_int("consecutive_signal_threshold", 0, 1, step=1)
         
-        threshold = trial.suggest_float("entry_threshold", 0.50, 0.80, step=0.05)
+        threshold = trial.suggest_float("entry_threshold", 0.50, 0.70, step=0.05)
         cfg["entry_threshold"] = threshold
         if "models" in cfg:
             for direction in cfg["models"]:
@@ -331,27 +331,31 @@ def optimize_ensemble_params(
         engine = BacktestEngine.from_config(cfg)
         result = engine.run(predictions_df, ohlcv_df)
 
-        if result.trade_count < 30:
+        if result.trade_count < 100:
             return -999999.0
 
         return result.profit_factor
 
     study.optimize(restricted_objective, n_trials=n_trials, show_progress_bar=False)
 
-    best_trial = study.best_trial
-    print(f"    Best trial #{best_trial.number}: PF={best_trial.value:.4f}")
-    print(f"    Params: {best_trial.params}")
+    try:
+        best_trial = study.best_trial
+        print(f"    Best trial #{best_trial.number}: PF={best_trial.value:.4f}")
+        print(f"    Params: {best_trial.params}")
 
-    # Patch config with best params
-    opt_cfg = copy.deepcopy(ensemble_cfg)
-    opt_cfg["cooldown_bars"] = best_trial.params["cooldown_bars"]
-    opt_cfg["max_hold_bars"] = best_trial.params["max_hold_bars"]
-    opt_cfg["consecutive_signal_threshold"] = best_trial.params["consecutive_signal_threshold"]
-    threshold = best_trial.params["entry_threshold"]
-    opt_cfg["entry_threshold"] = threshold
-    if "models" in opt_cfg:
-        for direction in opt_cfg["models"]:
-            opt_cfg["models"][direction]["threshold"] = threshold
+        # Patch config with best params
+        opt_cfg = copy.deepcopy(ensemble_cfg)
+        opt_cfg["cooldown_bars"] = best_trial.params["cooldown_bars"]
+        opt_cfg["max_hold_bars"] = best_trial.params["max_hold_bars"]
+        opt_cfg["consecutive_signal_threshold"] = best_trial.params["consecutive_signal_threshold"]
+        threshold = best_trial.params["entry_threshold"]
+        opt_cfg["entry_threshold"] = threshold
+        if "models" in opt_cfg:
+            for direction in opt_cfg["models"]:
+                opt_cfg["models"][direction]["threshold"] = threshold
+    except ValueError:
+        print("    WARNING: Optimizer failed to find valid parameters (e.g. no trials met 100-trade min), falling back to base config")
+        opt_cfg = copy.deepcopy(ensemble_cfg)
 
     # Save to lab output
     os.makedirs(os.path.join(output_dir, "lab"), exist_ok=True)
