@@ -70,6 +70,7 @@ from sklearn.metrics import (
     log_loss,
     precision_score,
     recall_score,
+    roc_auc_score,
 )
 
 import src.util as util
@@ -120,15 +121,22 @@ def _log_mem(label: str, **kwargs) -> None:
     wtag = f"[W{_worker_id}] " if _worker_id > 0 else ""
     print(f"{wtag}[MEM] {label} RSS={rss:.2f}GB peak={peak:.2f}GB thread={tid} {parts}", flush=True)
 
-def _write_worker_status(trials_done: int, total_trials: int, status: str = "running") -> None:
+def _write_worker_status(trials_done: int, total_trials: int, status: str = "running", best_score: float = None, target: str = "", metric: str = "") -> None:
     """Write per-worker status file for monitor aggregation."""
     if _worker_id <= 0:
         return
     import json as _json
     status_path = f"/tmp/worker_W{_worker_id}_status.json"
     try:
+        data = {"trials_done": trials_done, "total_trials": total_trials, "status": status, "pid": os.getpid()}
+        if best_score is not None:
+            data["best_score"] = best_score
+        if target:
+            data["target"] = target
+        if metric:
+            data["metric"] = metric
         with open(status_path, "w") as f:
-            _json.dump({"trials_done": trials_done, "total_trials": total_trials, "status": status, "pid": os.getpid()}, f)
+            _json.dump(data, f)
     except Exception:
         pass
 
@@ -442,10 +450,10 @@ def make_objective(
             "verbose": -1,
             "num_threads": num_threads,
             "num_leaves": trial.suggest_int("num_leaves", num_leaves_range[0], num_leaves_range[1]),
-            "min_child_samples": trial.suggest_int("min_child_samples", 20, 300),
-            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.1, log=True),
+            "min_child_samples": trial.suggest_int("min_child_samples", 150, 400),
+            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.02, log=True),
             "feature_fraction": trial.suggest_float("feature_fraction", 0.3, 1.0),
-            "reg_alpha": trial.suggest_float("reg_alpha", 0.01, 10.0, log=True),
+            "reg_alpha": trial.suggest_float("reg_alpha", 0.01, 1.0, log=True),
             "reg_lambda": trial.suggest_float("reg_lambda", 0.01, 10.0, log=True),
             "max_depth": trial.suggest_int("max_depth", max_depth_range[0], max_depth_range[1]),
             "min_gain_to_split": trial.suggest_float("min_gain_to_split", 0.0, 2.0),
@@ -550,9 +558,20 @@ def make_objective(
             preds_binary = (probs >= 0.5).astype(int)
             fold_f1 = f1_score(y_true, preds_binary, zero_division=0)
             fold_prec = precision_score(y_true, preds_binary, zero_division=0)
+            fold_f05 = fbeta_score(y_true, preds_binary, beta=0.5, zero_division=0)
+            probs_clipped = np.clip(probs, 1e-7, 1 - 1e-7)
+            fold_logloss = log_loss(y_true, probs_clipped)
+            try:
+                fold_roc_auc = roc_auc_score(y_true, probs)
+            except ValueError:
+                fold_roc_auc = 0.5
+
             fold_details.append({
                 "f1": fold_f1,
                 "precision": fold_prec,
+                "f0.5": fold_f05,
+                "logloss": fold_logloss,
+                "roc_auc": fold_roc_auc,
                 "score": score,
                 "best_iteration": best_iter,
                 "n_estimators_budget": n_estimators,
@@ -571,9 +590,17 @@ def make_objective(
         # Log intermediate metrics
         avg_f1 = float(np.mean([d["f1"] for d in fold_details]))
         avg_prec = float(np.mean([d["precision"] for d in fold_details]))
+        avg_f05 = float(np.mean([d["f0.5"] for d in fold_details]))
+        avg_logloss = float(np.mean([d["logloss"] for d in fold_details]))
+        avg_roc_auc = float(np.mean([d["roc_auc"] for d in fold_details]))
+
         iterations = [d["best_iteration"] for d in fold_details]
         trial.set_user_attr("avg_f1", round(avg_f1, 4))
         trial.set_user_attr("avg_precision", round(avg_prec, 4))
+        trial.set_user_attr("avg_f0.5", round(avg_f05, 4))
+        trial.set_user_attr("avg_logloss", round(avg_logloss, 4))
+        trial.set_user_attr("avg_roc_auc", round(avg_roc_auc, 4))
+
         trial.set_user_attr("n_folds_evaluated", len(fold_scores))
         trial.set_user_attr("fold_scores", [round(s, 4) for s in fold_scores])
         trial.set_user_attr("std_score", round(float(np.std(fold_scores)), 4))
@@ -597,7 +624,11 @@ def make_objective(
         finally:
             gc.collect()
             _log_mem("trial_end", trial=trial.number)
-            _write_worker_status(trial.number + 1, _total_trials)
+            try:
+                best_val = trial.study.best_value
+            except ValueError:
+                best_val = None
+            _write_worker_status(trial.number + 1, _total_trials, "running", best_val, target_name, ml_metric)
 
     return objective_with_cleanup
 
@@ -700,6 +731,21 @@ def run_search(
     target_col = util.get_target_column(df, target_name)
     df = df.dropna(subset=[target_col])
 
+    # ---- Filter Features if Strategy Config provided ----
+    strategy_cfg = None
+    if strategy_config_path:
+        import fnmatch
+        with open(strategy_config_path) as f:
+            strategy_cfg = json.load(f)
+        
+        if strategy_cfg.get("features"):
+            filtered_cols = []
+            for col in feature_cols:
+                if any(fnmatch.fnmatch(col, pat) for pat in strategy_cfg["features"]):
+                    filtered_cols.append(col)
+            print(f"  [ISOLATION STUDY] Filtering from {len(feature_cols)} to {len(set(filtered_cols))} features based on strategy config.")
+            feature_cols = list(set(filtered_cols))
+
     # Split into gym (for WF folds) and vault (untouched holdout)
     if train_cutoff_date:
         cutoff = pd.Timestamp(train_cutoff_date)
@@ -742,7 +788,6 @@ def run_search(
 
     # ---- Load OHLCV if sharpe mode ----
     ohlcv_gym = None
-    strategy_cfg = None
     if ml_metric == "sharpe":
         print("\n[2b/4] Loading OHLCV + strategy config for sharpe evaluation...")
         from agent.backtest_engine import load_ohlcv
@@ -753,18 +798,23 @@ def run_search(
             ohlcv_gym = ohlcv_full.iloc[:n_gym].copy()
         print(f"  OHLCV gym: {len(ohlcv_gym):,} bars")
 
-        with open(strategy_config_path) as f:
-            strategy_cfg = json.load(f)
+        if not strategy_cfg:
+            with open(strategy_config_path) as f:
+                strategy_cfg = json.load(f)
         print(f"  Strategy: {strategy_cfg.get('nickname', Path(strategy_config_path).stem)}")
 
     # ---- Run Optuna ----
     print(f"\n[3/4] Running Optuna search ({n_trials} trials, {len(folds)} folds each)...")
 
     os.makedirs(db_dir, exist_ok=True)
-    journal_path = os.path.join(db_dir, f"{study_name}.journal")
-    storage = optuna.storages.JournalStorage(
-        optuna.storages.journal.JournalFileBackend(journal_path),
-    )
+    if os.name == 'nt':
+        db_path = os.path.join(db_dir, f"{study_name}.db")
+        storage = f"sqlite:///{db_path}"
+    else:
+        journal_path = os.path.join(db_dir, f"{study_name}.journal")
+        storage = optuna.storages.JournalStorage(
+            optuna.storages.journal.JournalFileBackend(journal_path),
+        )
 
     study = optuna.create_study(
         study_name=study_name,
@@ -866,8 +916,10 @@ def run_search(
     print("=" * 70)
     print(f"\nBest Trial #{best.number}:")
     print(f"  {ml_metric}:       {best.value:.4f}")
-    print(f"  Avg F1:        {best.user_attrs.get('avg_f1', 0):.4f}")
+    print(f"  Avg F0.5:      {best.user_attrs.get('avg_f0.5', 0):.4f}")
     print(f"  Avg Precision: {best.user_attrs.get('avg_precision', 0):.4f}")
+    print(f"  Avg ROC-AUC:   {best.user_attrs.get('avg_roc_auc', 0):.4f}")
+    print(f"  Avg Logloss:   {best.user_attrs.get('avg_logloss', 0):.4f}")
     print(f"  Fold StdDev:   {best.user_attrs.get('std_score', 0):.4f}")
     print(f"  Folds used:    {best.user_attrs.get('n_folds_evaluated', 0)}")
     print(f"  Avg Iters:     {best.user_attrs.get('avg_iterations', 0):.0f}"
@@ -973,7 +1025,8 @@ def run_search(
     _append_to_log(experiment_record)
     print(f"  Logged as {exp_id}")
 
-    print(f"\n  Study journal: {journal_path}")
+    if os.name != 'nt':
+        print(f"\n  Study journal: {journal_path}")
     print(f"  Resume: --study-name {study_name}")
     print(f"\n  NEXT STEP: Run Phase 2 threshold optimization, then Phase 3 OOS test")
     print(f"  See: python agent/strategy_optimizer.py --help")

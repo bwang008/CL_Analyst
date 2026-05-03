@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Provisions a canary VM, uploads code + downloads data from GCS, and launches the light canary pipeline.
 .DESCRIPTION
@@ -29,7 +29,8 @@ param(
     [switch]$NoShutdown,
     [switch]$SkipProvision,
     [switch]$UseBuckets,
-    [string]$GcsPrefix = "canary"
+    [string]$GcsPrefix = "canary",
+    [switch]$NoMonitor
 )
 
 # Add gcloud to PATH if not already there
@@ -45,6 +46,32 @@ $GcpUser = $env:USERNAME
 $RemoteHome = "/home/${GcpUser}"
 $RemoteProject = "${RemoteHome}/project"
 $DataFileName = Split-Path -Leaf $GcsDataPath
+
+function Send-TelegramAlert {
+    param([string]$Message)
+    $envPath = Join-Path $ProjectDir ".env"
+    $env_vars = @{}
+    if (Test-Path $envPath) {
+        Get-Content $envPath | ForEach-Object {
+            if ($_ -match '^([A-Z_][A-Z0-9_]*)=(.*)$') {
+                $env_vars[$Matches[1]] = $Matches[2].Trim()
+            }
+        }
+    }
+    $token = if ($env_vars["TELEGRAM_BOT_TOKEN"]) { $env_vars["TELEGRAM_BOT_TOKEN"] } else { $env:TELEGRAM_BOT_TOKEN }
+    $chatId = if ($env_vars["TELEGRAM_CHAT_ID"]) { $env_vars["TELEGRAM_CHAT_ID"] } else { $env:TELEGRAM_CHAT_ID }
+    if (-not $token) { return }
+    
+    # Strip Markdown to avoid parse errors
+    $plainMsg = $Message -replace '\*', '' -replace '``', '' -replace '_', ''
+    
+    $bodyObj = @{ chat_id = $chatId; text = $plainMsg }
+    $bodyJson = $bodyObj | ConvertTo-Json -Compress
+    $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
+    try {
+        Invoke-RestMethod -Method Post -Uri "https://api.telegram.org/bot$token/sendMessage" -ContentType 'application/json; charset=utf-8' -Body $bodyBytes | Out-Null
+    } catch {}
+}
 
 Write-Host ""
 Write-Host "=====================================================" -ForegroundColor Magenta
@@ -224,9 +251,27 @@ $tmuxCheck = gcloud compute ssh $VmName --zone=$Zone `
 
 if ($tmuxCheck -match "RUNNING") {
     Write-Host "  tmux session 'canary' is active!" -ForegroundColor Green
+    
+    Send-TelegramAlert "🎬 Deploy Success: Canary Run`nVM: $VmName`nGCS: gs://cltrainer-optuna-results/$GcsPrefix/`nCheck status with: .\gcp\gcp_monitor.ps1 -VmName $VmName -GcsPrefix $GcsPrefix"
+    
+    if (-not $NoMonitor) {
+        $monScript = Join-Path $ScriptDir "gcp_monitor.ps1"
+        $monArgs = @("-ExecutionPolicy", "Bypass", "-File", $monScript, "-VmName", $VmName, "-GcsPrefix", $GcsPrefix, "-ExperimentLabel", "Canary Run")
+        
+        # Check if telegram is configured to pass the flag
+        $envPath = Join-Path $ProjectDir ".env"
+        $hasTelegram = ((Test-Path $envPath) -and (Select-String -Path $envPath -Pattern "TELEGRAM_BOT_TOKEN" -Quiet))
+        if ($hasTelegram -or $env:TELEGRAM_BOT_TOKEN) { $monArgs += "-EnableTelegram" }
+        
+        Write-Host "  Starting detached monitor for health checks & telegram alerts..." -ForegroundColor Yellow
+        Start-Process powershell -WindowStyle Hidden -ArgumentList $monArgs
+    } else {
+        Write-Host "  Skipping detached monitor launch (-NoMonitor specified)." -ForegroundColor Yellow
+    }
 } else {
     Write-Host "  WARNING: tmux session may not have started." -ForegroundColor Yellow
     Write-Host "  Debug with: gcloud compute ssh $VmName --command='tmux attach -t canary'"
+    Send-TelegramAlert "⚠️ Deploy Warning: Canary Run`nVM: $VmName`ntmux session may not have started. Check logs."
 }
 
 Write-Host ""

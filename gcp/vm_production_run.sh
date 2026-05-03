@@ -130,9 +130,35 @@ echo "" | tee -a "$LOG"
 # PHASE 1: Run all 6 Optuna searches (with smart resume)
 # =============================================================================
 
-# Upload initial STATUS.json so the monitor can send a "Job Started" notification immediately
-echo "{\"completed\": 0, \"failed\": 0, \"total\": $TOTAL, \"current\": \"starting\", \"agent\": \"$AGENT_ID\", \"last_update\": \"$(date -Iseconds)\"}" | \
-    gsutil cp - "$BUCKET/STATUS.json" 2>/dev/null || true
+cat << 'EOF' > /tmp/update_status.py
+import json, glob, datetime
+try:
+    with open('/tmp/base_status.json') as f: out = json.load(f)
+except:
+    out = {}
+workers = []
+for f in glob.glob('/tmp/worker_W*_status.json'):
+    try:
+        workers.append(json.load(open(f)))
+    except: pass
+out['workers'] = workers
+out['last_update'] = datetime.datetime.now().isoformat()
+with open('/tmp/STATUS.json', 'w') as f: json.dump(out, f)
+EOF
+
+echo "{\"completed\": 0, \"failed\": 0, \"total\": $TOTAL, \"current\": \"starting\", \"agent\": \"$AGENT_ID\", \"skipped\": 0}" > /tmp/base_status.json
+python /tmp/update_status.py
+gsutil cp /tmp/STATUS.json "$BUCKET/STATUS.json" 2>/dev/null || true
+
+# Start background updater
+(
+while true; do
+    sleep 60
+    python /tmp/update_status.py
+    gsutil cp /tmp/STATUS.json "$BUCKET/STATUS.json" 2>/dev/null || true
+done
+) &
+UPDATER_PID=$!
 
 for i in "${!COMBOS[@]}"; do
     combo="${COMBOS[$i]}"
@@ -234,11 +260,13 @@ for i in "${!COMBOS[@]}"; do
     echo "  Uploaded ${STUDY}.db to GCS" | tee -a "$LOG"
 
     # Upload STATUS.json for monitor polling
-    echo "{\"completed\": $COMPLETED, \"failed\": $FAILED, \"total\": $TOTAL, \"current\": \"${DIR}_${METRIC}\", \"agent\": \"$AGENT_ID\", \"skipped\": $SKIPPED, \"last_update\": \"$(date -Iseconds)\"}" | \
-        gsutil cp - "$BUCKET/STATUS.json" 2>/dev/null || true
+    echo "{\"completed\": $COMPLETED, \"failed\": $FAILED, \"total\": $TOTAL, \"current\": \"${DIR}_${METRIC}\", \"agent\": \"$AGENT_ID\", \"skipped\": $SKIPPED}" > /tmp/base_status.json
+    python /tmp/update_status.py
+    gsutil cp /tmp/STATUS.json "$BUCKET/STATUS.json" 2>/dev/null || true
 done
 
 SEARCH_ELAPSED=$(( $(date +%s) - START_TIME ))
+kill $UPDATER_PID 2>/dev/null || true
 echo "" | tee -a "$LOG"
 echo "============================================================" | tee -a "$LOG"
 echo " ALL SEARCHES COMPLETE" | tee -a "$LOG"

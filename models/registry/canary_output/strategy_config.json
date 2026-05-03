@@ -1,14 +1,14 @@
 {
-    "nickname": "hourly_ensemble_006",
-    "description": "HourSet_06 modern timeline (2023 train cutoff, 2025 holdout). TP 2.0x, SL 1.0x.",
+    "nickname": "hourly_ensemble_007",
+    "description": "HourSet_07 modern timeline (2023 train cutoff, 2025 holdout). TP 1.5x, SL 1.0x.",
     "execution_class": "TieredEnsembleStrategy",
     "exit_mode": "TIERED",
-    "tp_atr_mult": 2.0,
+    "tp_atr_mult": 1.5,
     "sl_atr_mult": 1.0,
     "trailing_atr_mult": 100.0,
     "tp_cooldown_bars": 0,
     "sl_cooldown_bars": 4,
-    "max_hold_bars": 288,
+    "max_hold_bars": 24,
     "allow_concurrent": false,
     "max_concurrent": 1,
     "max_position_size": 1,
@@ -21,25 +21,25 @@
     },
     "models": {
         "long": {
-            "experiment_id": "E2E_HourSet_06_long_logloss",
-            "model_path": "models/registry/E2E_HourSet_06_long_logloss/final_model.pkl",
-            "predictions_path": "models/registry/E2E_HourSet_06_long_logloss/oos_predictions.csv",
+            "experiment_id": "E2E_HourSet_07_long_logloss",
+            "model_path": "models/registry/E2E_HourSet_07_long_logloss/final_model.pkl",
+            "predictions_path": "models/registry/E2E_HourSet_07_long_logloss/oos_predictions.csv",
             "threshold": 0.55
         },
         "short": {
-            "experiment_id": "E2E_HourSet_06_short_logloss",
-            "model_path": "models/registry/E2E_HourSet_06_short_logloss/final_model.pkl",
-            "predictions_path": "models/registry/E2E_HourSet_06_short_logloss/oos_predictions.csv",
+            "experiment_id": "E2E_HourSet_07_short_logloss",
+            "model_path": "models/registry/E2E_HourSet_07_short_logloss/final_model.pkl",
+            "predictions_path": "models/registry/E2E_HourSet_07_short_logloss/oos_predictions.csv",
             "threshold": 0.55
         }
     },
     "long": {
-        "tp_atr_mult": 2.0,
+        "tp_atr_mult": 1.5,
         "sl_atr_mult": 1.0,
         "tiered_exits": [
             {
                 "qty_pct": 1.0,
-                "tp_atr_mult": 2.0
+                "tp_atr_mult": 1.5
             }
         ],
         "tiers": [
@@ -50,12 +50,12 @@
         ]
     },
     "short": {
-        "tp_atr_mult": 2.0,
+        "tp_atr_mult": 1.5,
         "sl_atr_mult": 1.0,
         "tiered_exits": [
             {
                 "qty_pct": 1.0,
-                "tp_atr_mult": 2.0
+                "tp_atr_mult": 1.5
             }
         ],
         "tiers": [

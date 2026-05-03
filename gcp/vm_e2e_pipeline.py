@@ -519,6 +519,16 @@ def run_pipeline(
     print("\n[1/5] Loading data...")
     df = pd.read_parquet(data_path)
     feature_cols = util.get_feature_columns(df)
+    
+    if strategy_cfg.get("features"):
+        import fnmatch
+        filtered_cols = []
+        for col in feature_cols:
+            if any(fnmatch.fnmatch(col, pat) for pat in strategy_cfg["features"]):
+                filtered_cols.append(col)
+        print(f"  [ISOLATION STUDY] Filtering from {len(feature_cols)} to {len(set(filtered_cols))} features based on strategy config.")
+        feature_cols = list(set(filtered_cols))
+        
     cutoff = pd.Timestamp(train_cutoff_date)
 
     if holdout_cutoff_date is None:
@@ -528,24 +538,40 @@ def run_pipeline(
 
     assert cutoff < holdout_cutoff, f"train_cutoff_date ({cutoff.date()}) must be before holdout_cutoff_date ({holdout_cutoff.date()})"
 
-    df_train = df[df.index < cutoff].copy()
-    df_val = df[(df.index >= cutoff) & (df.index < holdout_cutoff)].copy()
-    df_vault = df[df.index >= holdout_cutoff].copy() # aliasing holdout as vault
-
-    print(f"  Train:   {len(df_train):,} rows → {df_train.index.max().date()}")
-    print(f"  Val:     {len(df_val):,} rows → {df_val.index.max().date()}")
-    print(f"  Holdout: {len(df_vault):,} rows → {df_vault.index.max().date()}")
+    # --- Data split logic ---
+    # DEFAULT (2-way): Train = all data before cutoff. Vault = all data >= cutoff.
+    # OPT-IN (3-way): Only activated when --holdout-cutoff-date is explicitly passed.
+    #   Train = before cutoff. Val = [cutoff, holdout_cutoff). Vault = >= holdout_cutoff.
+    if holdout_cutoff_date is None:
+        # Original 2-way split — maximises training data, vault = full OOS
+        df_train = df[df.index < cutoff].copy()
+        df_val = None
+        df_vault = df[df.index >= cutoff].copy()
+        print(f"  Split mode:  2-way (default)")
+        print(f"  Train:   {len(df_train):,} rows → {df_train.index.max().date()}")
+        print(f"  Vault:   {len(df_vault):,} rows → {df_vault.index.max().date()}")
+    else:
+        # Explicit 3-way split — execution optimizer runs on val, backtest on vault
+        df_train = df[df.index < cutoff].copy()
+        df_val = df[(df.index >= cutoff) & (df.index < holdout_cutoff)].copy()
+        df_vault = df[df.index >= holdout_cutoff].copy()
+        print(f"  Split mode:  3-way (holdout_cutoff_date={holdout_cutoff.date()})")
+        print(f"  Train:   {len(df_train):,} rows → {df_train.index.max().date()}")
+        print(f"  Val:     {len(df_val):,} rows → {df_val.index.max().date()}")
+        print(f"  Holdout: {len(df_vault):,} rows → {df_vault.index.max().date()}")
     print(f"  Features: {len(feature_cols)}")
 
-    # Drop rows with NaN targets from both splits
+    # Drop rows with NaN targets from all active splits
     for target_name, _ in targets:
         target_col = util.get_target_column(df, target_name)
         df_train = df_train.dropna(subset=[target_col])
-        df_val = df_val.dropna(subset=[target_col])
+        if df_val is not None:
+            df_val = df_val.dropna(subset=[target_col])
         df_vault = df_vault.dropna(subset=[target_col])
-    print(f"  Train (clean):   {len(df_train):,} rows")
-    print(f"  Val (clean):     {len(df_val):,} rows")
-    print(f"  Holdout (clean): {len(df_vault):,} rows")
+    print(f"  Train (clean): {len(df_train):,} rows")
+    if df_val is not None:
+        print(f"  Val (clean):   {len(df_val):,} rows")
+    print(f"  Vault (clean): {len(df_vault):,} rows")
 
     os.makedirs(output_dir, exist_ok=True)
     all_bundles = []
@@ -623,19 +649,23 @@ def run_pipeline(
                 output_path=model_path,
             )
 
-            # Step 4: Generate OOS predictions
-            print(f"\n[4a/5] Generating Validation predictions for {combo_name}...")
-            val_preds_path = os.path.join(output_dir, f"val_predictions_{combo_name}.csv")
-            val_preds_df = generate_oos_predictions(
-                model=model,
-                df_vault=df_val,
-                feature_cols=feature_cols,
-                target_col=target_col,
-                direction=direction,
-                output_path=val_preds_path,
-            )
+            # Step 4: Generate predictions
+            # -- Validation predictions (only in 3-way split mode) --
+            if df_val is not None:
+                print(f"\n[4a/5] Generating Validation predictions for {combo_name}...")
+                val_preds_path = os.path.join(output_dir, f"val_predictions_{combo_name}.csv")
+                generate_oos_predictions(
+                    model=model,
+                    df_vault=df_val,
+                    feature_cols=feature_cols,
+                    target_col=target_col,
+                    direction=direction,
+                    output_path=val_preds_path,
+                )
+                print(f"       Generating Holdout/OOS predictions for {combo_name}...")
+            else:
+                print(f"\n[4a/5] Generating OOS predictions for {combo_name}...")
 
-            print(f"       Generating Holdout predictions for {combo_name}...")
             preds_path = os.path.join(output_dir, f"oos_predictions_{combo_name}.csv")
             preds_df = generate_oos_predictions(
                 model=model,
@@ -746,8 +776,15 @@ def run_pipeline(
 
         ohlcv = pd.read_parquet(data_path) # Load here since optimizer and backtest needs it
 
-        # Auto-optimize strategy parameters on Validation set
-        if opt_trials > 0 and "long" in val_preds_by_metric[metric_name] and "short" in val_preds_by_metric[metric_name]:
+        # Auto-optimize strategy parameters on Validation set (3-way split mode only)
+        val_preds_exist = (
+            metric_name in val_preds_by_metric
+            and "long" in val_preds_by_metric[metric_name]
+            and "short" in val_preds_by_metric[metric_name]
+            and os.path.exists(val_preds_by_metric[metric_name]["long"])
+            and os.path.exists(val_preds_by_metric[metric_name]["short"])
+        )
+        if opt_trials > 0 and val_preds_exist:
             val_long_df = pd.read_csv(val_preds_by_metric[metric_name]["long"], index_col=0, parse_dates=True)
             val_short_df = pd.read_csv(val_preds_by_metric[metric_name]["short"], index_col=0, parse_dates=True)
 

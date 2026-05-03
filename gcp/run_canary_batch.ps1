@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Quota-aware batch orchestrator for canary Optuna experiments.
 .DESCRIPTION
@@ -355,7 +355,8 @@ while (-not $allDone) {
             "-StrategyConfig", $exp.StrategyConf,
             "-Metrics",     $exp.Metrics,
             "-GcsPrefix",   $exp.GcsPrefix,
-            "-ProvisioningModel", $exp.Provisioning
+            "-ProvisioningModel", $exp.Provisioning,
+            "-NoMonitor"
         )
         if ($exp.TargetLong)  { $deployArgs += @("-TargetLong",  $exp.TargetLong)  }
         if ($exp.TargetShort) { $deployArgs += @("-TargetShort", $exp.TargetShort) }

@@ -1,0 +1,23 @@
+{
+  "experiment_id": "E2E_HourSet_07_long_logloss",
+  "strategy": "e2e_alpha_factory_long_logloss",
+  "timestamp": "2026-05-01T01:56:27",
+  "target_name": "TARGET_TRIPLE_1p5x1_24H_LONG",
+  "type": "Long",
+  "dataset_path": "/home/bwang/data/cl-1h_bk_HourSet_07.parquet",
+  "model_params": {
+    "boosting_type": "gbdt",
+    "num_leaves": 22,
+    "min_child_samples": 265,
+    "learning_rate": 0.0065331620120528885,
+    "feature_fraction": 0.31233666583368574,
+    "reg_alpha": 0.012291500336688443,
+    "reg_lambda": 0.4796728845959154,
+    "max_depth": 3,
+    "min_gain_to_split": 0.4618301467948217,
+    "path_smooth": 0.9382836164403004,
+    "bagging_fraction": 0.3134900781938219,
+    "bagging_freq": 4,
+    "n_estimators": 500
+  }
+}

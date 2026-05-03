@@ -1,0 +1,21 @@
+{
+  "experiment_id": "E2E_HourSet_07_short_f0.5",
+  "strategy": "e2e_alpha_factory_short_f0.5",
+  "timestamp": "2026-05-01T11:51:37",
+  "target_name": "TARGET_TRIPLE_1p5x1_24H_SHORT",
+  "type": "Short",
+  "dataset_path": "C:/CL_Analyst_Data/data/processed/cl-1h_bk_HourSet_07.parquet",
+  "model_params": {
+    "boosting_type": "goss",
+    "num_leaves": 78,
+    "min_child_samples": 367,
+    "learning_rate": 0.016419530196192956,
+    "feature_fraction": 0.9291949898419922,
+    "reg_alpha": 0.033091292926535,
+    "reg_lambda": 0.1637367413309072,
+    "max_depth": 5,
+    "min_gain_to_split": 0.002338705502511279,
+    "path_smooth": 7.246195134545734,
+    "n_estimators": 1300
+  }
+}

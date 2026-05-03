@@ -187,6 +187,36 @@ done
 echo "" | tee -a "$LOG"
 echo "  All $TOTAL searches launched — waiting for completion..." | tee -a "$LOG"
 
+cat << 'EOF' > /tmp/update_status.py
+import json, glob, datetime
+try:
+    with open('/tmp/base_status.json') as f: out = json.load(f)
+except:
+    out = {}
+workers = []
+for f in glob.glob('/tmp/worker_W*_status.json'):
+    try:
+        workers.append(json.load(open(f)))
+    except: pass
+out['workers'] = workers
+out['last_update'] = datetime.datetime.now().isoformat()
+with open('/tmp/STATUS.json', 'w') as f: json.dump(out, f)
+EOF
+
+echo "{\"completed\": 0, \"failed\": 0, \"total\": $TOTAL, \"current\": \"starting\", \"agent\": \"$AGENT_ID\"}" > /tmp/base_status.json
+python /tmp/update_status.py
+gsutil cp /tmp/STATUS.json "$BUCKET/$CANARY_PREFIX/STATUS.json" 2>/dev/null || true
+
+# Start background updater
+(
+while true; do
+    sleep 60
+    python /tmp/update_status.py
+    gsutil cp /tmp/STATUS.json "$BUCKET/$CANARY_PREFIX/STATUS.json" 2>/dev/null || true
+done
+) &
+UPDATER_PID=$!
+
 # Wait for all searches and capture exit codes
 for idx in "${!SEARCH_PIDS[@]}"; do
     wait ${SEARCH_PIDS[$idx]}
@@ -213,11 +243,13 @@ for idx in "${!SEARCH_PIDS[@]}"; do
     gsutil -m cp reports/optuna_*_${DIR}_${METRIC}.* "$BUCKET/$CANARY_PREFIX/reports/" 2>/dev/null || true
 
     # Upload STATUS.json
-    echo "{\"completed\": $COMPLETED, \"failed\": $FAILED, \"total\": $TOTAL, \"current\": \"${DIR}_${METRIC}\", \"agent\": \"$AGENT_ID\", \"last_update\": \"$(date -Iseconds)\"}" | \
-        gsutil cp - "$BUCKET/$CANARY_PREFIX/STATUS.json" 2>/dev/null || true
+    echo "{\"completed\": $COMPLETED, \"failed\": $FAILED, \"total\": $TOTAL, \"current\": \"${DIR}_${METRIC}\", \"agent\": \"$AGENT_ID\"}" > /tmp/base_status.json
+    python /tmp/update_status.py
+    gsutil cp /tmp/STATUS.json "$BUCKET/$CANARY_PREFIX/STATUS.json" 2>/dev/null || true
 done
 
 # Upload log after all searches
+kill $UPDATER_PID 2>/dev/null || true
 gsutil cp "$LOG" "$BUCKET/$CANARY_PREFIX/logs/" 2>/dev/null || true
 
 SEARCH_ELAPSED=$(( $(date +%s) - START_TIME ))

@@ -224,7 +224,6 @@ class AlphaFactory:
             self.add_trend_cluster(window=window)
             self.add_volume_flow_cluster(window=window)
             if include_extended:
-                self.add_return_distribution_cluster(window=window)
                 self.add_stochastic_cluster(window=window)
                 self.add_exhaustion_cluster(window=window)
             if include_exhaustion_divergence:
@@ -233,6 +232,11 @@ class AlphaFactory:
                 print(f"[AlphaFactory] Window {window} done at {datetime.now().isoformat(timespec='seconds')}")
 
         if include_extended:
+            if log_progress:
+                print(f"[AlphaFactory] Return distribution start")
+            self.add_return_distribution_cluster(windows=[12, 24, 72, 120])
+            if log_progress:
+                print(f"[AlphaFactory] Return distribution done at {datetime.now().isoformat(timespec='seconds')}")
             if log_progress:
                 print(f"[AlphaFactory] Cross-timeframe ratios start")
             self.add_cross_timeframe_ratios()
@@ -523,23 +527,28 @@ class AlphaFactory:
     # Extended clusters (set_07+)
     # ------------------------------------------------------------------
 
-    def add_return_distribution_cluster(self, window: int) -> pd.DataFrame:
+    def add_return_distribution_cluster(self, windows: list[int] = None) -> pd.DataFrame:
         """Rolling return distribution shape features."""
-        suffix = f"_{window}"
+        if windows is None:
+            windows = [12, 24, 72, 120]
+            
         log_ret = self.df["log_ret"]
 
-        # Rolling skewness: asymmetry indicator
-        self.df[f"DIST_SKEW{suffix}"] = log_ret.rolling(window).skew()
+        for window in windows:
+            suffix = f"_{window}"
 
-        # Rolling kurtosis: tail thickness
-        self.df[f"DIST_KURT{suffix}"] = log_ret.rolling(window).kurt()
+            # Rolling skewness: asymmetry indicator
+            self.df[f"DIST_SKEW{suffix}"] = log_ret.rolling(window).skew()
 
-        # Rolling Z-score of current return vs recent distribution
-        roll_mean = log_ret.rolling(window).mean()
-        roll_std = log_ret.rolling(window).std()
-        self.df[f"DIST_ZSCORE{suffix}"] = (
-            (log_ret - roll_mean) / roll_std.replace(0, np.nan)
-        )
+            # Rolling kurtosis: tail thickness
+            self.df[f"DIST_KURT{suffix}"] = log_ret.rolling(window).kurt()
+
+            # Rolling Z-score of current return vs recent distribution
+            roll_mean = log_ret.rolling(window).mean()
+            roll_std = log_ret.rolling(window).std()
+            self.df[f"DIST_ZSCORE{suffix}"] = (
+                (log_ret - roll_mean) / roll_std.replace(0, np.nan)
+            )
 
         return self.df
 

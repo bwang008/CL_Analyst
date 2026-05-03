@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Monitor a GCP VM running Optuna experiments. Auto-downloads results when done.
 .DESCRIPTION
@@ -380,6 +380,7 @@ function Get-SerialConsoleOom {
 # ==========================================================
 
 $iteration = 0
+$lastPeriodicUpdate = 0
 while ($true) {
     $iteration++
     $now = Get-Date -Format "HH:mm:ss"
@@ -397,12 +398,28 @@ while ($true) {
         if ($gcsStatus.current) { $searchInfo += " (current: $($gcsStatus.current))" }
         $lastUpdate = if ($gcsStatus.last_update) { $gcsStatus.last_update } else { "?" }
         Write-Host "[$now] VM=$vmStatus | $searchInfo | heartbeat=$lastUpdate | elapsed=${elapsed}m" -ForegroundColor Gray
+        
+        # 5-minute periodic telegram update
+        if ($elapsed - $lastPeriodicUpdate -ge 5.0) {
+            $lastPeriodicUpdate = $elapsed
+            if ($gcsStatus.workers -and $vmStatus -eq "RUNNING") {
+                $msg = "Job Progress Update`nVM: $VmName`nElapsed: ${elapsed}m"
+                foreach ($w in $gcsStatus.workers) {
+                    if ($w.total_trials -gt 0) {
+                        $pct = [math]::Round(($w.trials_done / $w.total_trials) * 100)
+                        $score = if ($null -ne $w.best_score) { [math]::Round($w.best_score, 4) } else { "N/A" }
+                        $msg += "`n`nTarget: $($w.target) ($($w.metric))`n   Progress: $($w.trials_done)/$($w.total_trials) (${pct}%) | Best: $score"
+                    }
+                }
+                Send-TelegramAlert $msg
+            }
+        }
 
         # --- Telegram: fire "job started" on first heartbeat ---
         if (-not $firstHeartbeatSent) {
             $firstHeartbeatSent = $true
             $totalSearches = if ($gcsStatus.total) { $gcsStatus.total } else { "?" }
-            Send-TelegramAlert "🚀 *Job Started*`nVM: ``$VmName```nGCS: ``$GcsBase/```nSearches: $totalSearches total`nPoll interval: ${PollIntervalSeconds}s"
+            Send-TelegramAlert "Job Started`nVM: $VmName`nGCS: $GcsBase/`nSearches: $totalSearches total`nPoll interval: ${PollIntervalSeconds}s"
         }
         
         # ---- Stale heartbeat detection ----
@@ -418,7 +435,7 @@ while ($true) {
                 Write-Host "    The search may have crashed or stalled. Check VM logs below." -ForegroundColor Red
                 # Send Telegram alert once per stale threshold crossing (not every poll)
                 if ($staleMins -lt ($StaleThresholdMin + ($PollIntervalSeconds / 60) + 1)) {
-                    Send-TelegramAlert "⚠️ *Stale Heartbeat*`nVM: ``$VmName```nHeartbeat unchanged for ${staleMins}min`n_Search may be stalled or crashed — check VM logs_"
+                    Send-TelegramAlert "Stale Heartbeat`nVM: $VmName`nHeartbeat unchanged for ${staleMins}min`nSearch may be stalled or crashed - check VM logs"
                 }
                 
                 # Auto-shutdown logic if exceedingly stale (>15 mins) and still running
@@ -559,32 +576,36 @@ while ($true) {
                     }
                 } catch {}
             }
-            $icon        = if ($scriptExitCode -eq 0) { "✅" } else { "❌" }
+            $icon        = if ($scriptExitCode -eq 0) { "SUCCESS" } else { "FAILED" }
             $statusLabel = if ($scriptExitCode -eq 0) { "SUCCESS" } else { "FAILED" }
-            $oomLine     = if ($oomResult)    { "`n💥 OOM: $oomResult" }    else { "" }
-            $preemptLine = if ($wasPreempted) { "`n⚡ SPOT preempted by GCP" } else { "" }
-            $pnlBlock    = if ($pnlLines)     { "`n*Ensemble Results:*`n" + ($pnlLines -join "`n") } else { "" }
-            Send-TelegramAlert ("$icon *Job $statusLabel*`n" +
-                "VM: ``$VmName```n" +
+            $oomLine     = if ($oomResult)    { "`nOOM: $oomResult" }    else { "" }
+            $preemptLine = if ($wasPreempted) { "`nSPOT preempted by GCP" } else { "" }
+            $pnlBlock    = if ($pnlLines)     { "`nEnsemble Results:`n" + ($pnlLines -join "`n") } else { "" }
+            Send-TelegramAlert ("Job $statusLabel`n" +
+                "VM: $VmName`n" +
                 "Searches: $($logReport.Passed)/$($logReport.Total) passed`n" +
-                "E2E: $(if ($logReport.E2ECompleted) { 'COMPLETE ✅' } else { 'INCOMPLETE ❌' })`n" +
+                "E2E: $(if ($logReport.E2ECompleted) { 'COMPLETE' } else { 'INCOMPLETE' })`n" +
                 "Wall Time: $($logReport.WallTime)" +
                 $oomLine + $preemptLine + $pnlBlock)
 
         } else {
             # No log found — VM died before producing output
             $scriptExitCode = 2
-            $oomLine = if ($oomResult) { "`n💥 $oomResult" } else { "" }
+            $oomLine = if ($oomResult) { "`n$oomResult" } else { "" }
             Write-Host ""
             Write-Host "  WARNING: No log file found in GCS" -ForegroundColor Red
             Write-Host "  The VM may have failed before any output was produced." -ForegroundColor Red
             Write-Host ('  Check serial console: gcloud compute instances get-serial-port-output ' + $VmName + ' --zone=' + $Zone)
-            Send-TelegramAlert ("💀 *VM Terminated — No Log Found*`n" +
-                "VM: ``$VmName```nStatus: $vmStatus`n" +
-                "_VM may have crashed before producing any output_" + $oomLine)
+            Send-TelegramAlert ("VM Terminated - No Log Found`n" +
+                "VM: $VmName`nStatus: $vmStatus`n" +
+                "VM may have crashed before producing any output" + $oomLine)
         }
 
         Write-Host ""
+        Write-Host "  >> Cleaning up VM $VmName..." -ForegroundColor Yellow
+        gcloud compute instances delete $VmName --zone=$Zone --quiet 2>$null
+        Write-Host "  >> VM Deleted." -ForegroundColor Green
+
         # Write exit code to file for the orchestrator to read
         if ($ExitCodeFile) {
             $scriptExitCode | Out-File -FilePath $ExitCodeFile -Encoding ascii -NoNewline

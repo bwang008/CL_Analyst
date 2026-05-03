@@ -1,4 +1,4 @@
-## 2026-04-28 — Next Steps: Logloss Production & Scout Ablation Studies
+## 2026-05-01 — Naked Technicals Isolation Study\n\n### Goal\nRun an Isolation Study to see if ICHIMOKU and TREND_DMA features can produce predictive alpha (>0.51 ROC-AUC) when stripped of overshadowing macro/structural variables. Optimized for F0.5 Score and Logloss.\n\n### State\n[COMPLETED] (007 SHORT only)\n\n### Plan\n1. **In-Memory Filter**: Pass strategy config to optuna_lgbm_search_v2.py and m_e2e_pipeline.py to filter eature_cols dynamically without saving _filtered.parquet.\n2. **Optimization**: Optimize for 0.5 metric in Optuna alongside logloss (Optuna handles this if metric is specified).\n3. **Metrics Reporting**: Print ROC-AUC, Logloss, Precision, and F0.5 score during local validation reporting.\n\n## 2026-04-28 — Next Steps: Logloss Production & Scout Ablation Studies
 
 ### 1. Full Production Sweep (Baseline Logloss)
 The recent unconstrained scout run for hourly_ensemble_005 (HourSet_06 dataset, Logloss) yielded phenomenal baseline results (PF 1.65, Sharpe 1.24, .9k PnL) after the threshold/consecutive signal optimizer was run.
@@ -567,3 +567,4 @@ Root cause of set_10 initial 705K-row dataset: `VOLFLOW_CMF` used `(High - Low).
 
 > **Older entries (2026-03-20 and earlier)** have been archived to [`AGENT_LOG_ARCHIVE.md`](AGENT_LOG_ARCHIVE.md) for historical reference.
 
+\n\n## 2026-05-01 — Goldilocks Feature Integration\n\n### Goal\nBlend Naked Technicals with short-term structural context (<=72 bars) to improve Precision above the breakeven threshold. Long-term macro/structural variables are strictly excluded.\n\n### State\n[COMPLETED] (Holdout failed, WR 35.6%)\n\n### Plan\n1. **Config**: Create hourly_ensemble_008.json with the Goldilocks feature array.\n2. **Execution**: Run local Optuna sweeps (0.5) for both LONG and SHORT targets on HourSet_07 data.\n3. **Note**: 007 LONG sweep was skipped as the SHORT results already confirmed the hypothesis.\n\n

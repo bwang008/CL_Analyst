@@ -1,0 +1,62 @@
+{
+  "timestamp": "2026-05-01T12:01:08",
+  "data_path": "C:/CL_Analyst_Data/data/processed/cl-1h_bk_HourSet_07.parquet",
+  "train_cutoff_date": "2023-01-01",
+  "strategy_config": "configs/strategies/hourly_ensemble_008.json",
+  "wall_time_seconds": 576.2,
+  "backtest_results": {
+    "short_f0.5": {
+      "direction": "short",
+      "trade_count": 212,
+      "total_pnl": -23526.46,
+      "win_rate": 35.38,
+      "profit_factor": 0.6006,
+      "max_drawdown": -24358.16,
+      "exit_distribution": {
+        "TP": {
+          "count": 74,
+          "pct": 34.90566037735849
+        },
+        "SL": {
+          "count": 135,
+          "pct": 63.67924528301887
+        },
+        "TIME_BARRIER": {
+          "count": 3,
+          "pct": 1.4150943396226416
+        }
+      }
+    },
+    "long_f0.5": {
+      "direction": "long",
+      "trade_count": 7,
+      "total_pnl": -718.1,
+      "win_rate": 42.86,
+      "profit_factor": 0.5202,
+      "max_drawdown": -1012.51,
+      "exit_distribution": {
+        "SL": {
+          "count": 4,
+          "pct": 57.14285714285714
+        },
+        "TP": {
+          "count": 3,
+          "pct": 42.857142857142854
+        }
+      }
+    },
+    "ensemble_f0.5": {
+      "direction": "ensemble",
+      "metric": "f0.5",
+      "trade_count": 219,
+      "total_pnl": -23649.36,
+      "win_rate": 35.62,
+      "profit_factor": 0.6136,
+      "max_drawdown": -24100.91
+    }
+  },
+  "registry_bundles": [
+    "production_output\\registry\\E2E_HourSet_07_short_f0.5",
+    "production_output\\registry\\E2E_HourSet_07_long_f0.5"
+  ]
+}

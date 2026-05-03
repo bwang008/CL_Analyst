@@ -1,0 +1,49 @@
+{
+  "timestamp": "2026-05-01T02:00:41",
+  "data_path": "/home/bwang/data/cl-1h_bk_HourSet_07.parquet",
+  "train_cutoff_date": "2023-01-01",
+  "strategy_config": "configs/strategies/hourly_ensemble_007.json",
+  "wall_time_seconds": 256.9,
+  "backtest_results": {
+    "long_logloss": {
+      "direction": "long",
+      "trade_count": 0,
+      "total_pnl": 0,
+      "win_rate": 0.0,
+      "profit_factor": 0.0,
+      "max_drawdown": 0.0,
+      "exit_distribution": {}
+    },
+    "short_logloss": {
+      "direction": "short",
+      "trade_count": 11,
+      "total_pnl": 2061.74,
+      "win_rate": 54.55,
+      "profit_factor": 2.0407,
+      "max_drawdown": -1582.92,
+      "exit_distribution": {
+        "SL": {
+          "count": 5,
+          "pct": 45.45454545454545
+        },
+        "TP": {
+          "count": 6,
+          "pct": 54.54545454545454
+        }
+      }
+    },
+    "ensemble_logloss": {
+      "direction": "ensemble",
+      "metric": "logloss",
+      "trade_count": 11,
+      "total_pnl": 2061.74,
+      "win_rate": 54.55,
+      "profit_factor": 2.0407,
+      "max_drawdown": -1582.92
+    }
+  },
+  "registry_bundles": [
+    "/home/bwang/project/canary_output/registry/E2E_HourSet_07_long_logloss",
+    "/home/bwang/project/canary_output/registry/E2E_HourSet_07_short_logloss"
+  ]
+}

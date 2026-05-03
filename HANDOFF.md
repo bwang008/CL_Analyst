@@ -5,13 +5,12 @@
 ## Project
 Crude oil (CL) 5-minute bar ML trading system using LightGBM with focal loss, walk-forward validation, and IBKR live execution.
 
-## Current State (2026-03-29)
-- **Live Trader Subsystem**: Hardened observability for after-hours market tracking via heartbeat logging. Fixed the lean pipeline logic to directly compute Stochastics and DayOfWeek when requested (required for the new `production_lean_dual` model). Production `.pkl` models are now tracked in git.
-- **Hourly Optimal Models**: Found that `TARGET_TRIPLE_2p5x1_120H_SHORT` (logloss) is the most robust companion model on `HourSet_02` (26 trades, 61.5% WR, PF 1.58, +$6k) to pair with the existing 72H Long model.
-- **Production model**: EXP-037 `LeanMomentumShort` on `set_11c_lean` — 208 trades, 31.2% WR, PF 1.27, **+$5,816**. First statistically significant profitable clean model.
-- **Production config**: `configs/strategies/production_lean_momentum.json` — SHORT only, threshold 0.60, TP=3.5x, SL=1.5x, Brain=CL, Hands=MCL.
-- **Feature Bucket Architecture**: Implemented. Momentum = alpha. Structure/trend = noise. Divergence = toxic on set_12.
-- **Metric policy**: Optuna uses `logloss` + `average_precision` (PR-AUC). Do NOT use `f0.5` in Optuna for targets with <5% positive rate.
+## Current State (2026-04-29)
+- **Modern Alpha Pipeline Architecture**: Shifted the E2E ML pipeline to a true 3-way split (Train / Execution Validation / OOS Holdout) to support autonomous threshold optimization without data leakage.
+- **Data Starvation Fixed**: Identified that legacy splits (Train Cutoff = 2019) starved the model of critical COVID-era volatility. The new split timeline is `TrainCutoffDate = 2023-01-01` and `HoldoutCutoffDate = 2025-01-01`.
+- **Optuna Constriction**: Tightened LightGBM hyperparameter bounds (`min_child_samples` >= 150, `learning_rate` <= 0.02) to forcefully eliminate noise-memorization.
+- **Horizon Alignment**: Confirmed that 12H horizons are incompatible with 2.0x ATR execution targets. The primary focus is back on `72H` Triple Barrier targets utilizing the stationary `HourSet_06` features.
+- **Active Deployment**: The `hourly_ensemble_006.json` strategy is currently running a massive GCP Canary validation (`optuna-runner-72h-mod`) on the new 2023/2025 timeline.
 - **Bucket flag**: use `--use-buckets` (CLI) / `-UseBuckets` (PowerShell) for 150-trial bucket-enabled runs.
 
 ## Root Documentation — Reading Priority
@@ -61,9 +60,9 @@ To keep the AI context window sharp, all agents must follow these rules before e
 - `live_trader_test` (merged from `development` 2026-03-21)
 
 ## Last Completed Task
-- **HourSet_02 Canary Experiments (2026-03-29)**: Ran 4 Canary experiments targeting 1.5x, 2.0x, and 2.5x ATR shorts on 120H horizons. Identified `TARGET_TRIPLE_2p5x1_120H_SHORT` (Canary 4, logloss) as the optimal short companion model. Created `/sweep-ensembles` workflow to automate Cartesian combinations.
-- **Lean Canary Breakthrough & Production Deployment (2026-03-27)**: Threshold sweep found profitability at 0.56 (+$1,176 on 26 trades). Lean canary (26 features) validated "less is more" hypothesis: **EXP-037 short_logloss = 208 trades, PF 1.27, +$5,816**. Deployed production model (`models/production/`), config (`configs/strategies/production_lean_momentum.json`), and code changes for MCL routing + lean feature path.
-- **Feature Bucket Architecture & Winning Strategy Optimization (2026-03-26)**: Implemented feature bucket pruning (12 buckets, 11 toggleable) in Optuna. Ran 3 bucket canary experiments (EXP-034 through EXP-036). Key finding: **momentum = alpha** (ON in 10/12 searches), **structure = noise** (OFF in 11/12).
+- **Modern Pipeline GCP Strategy Validation (2026-04-29)**: Investigated why the 12H model failed (Profit Factor 0.87). Found that 12H horizons are mathematically incompatible with the 2.0x ATR take-profit expectation. Pivoted back to 72H targets. 
+- **Data Starvation Diagnosis (2026-04-29)**: Identified that the new 3-way E2E data split was starving the LightGBM models of COVID-era training data (TrainCutoff was pushed back to 2019 to leave room for the execution validation split). 
+- **Modern Alpha Timeline Shift (2026-04-29)**: Re-aligned the split structure (`TrainCutoffDate=2023-01-01`, `HoldoutCutoffDate=2025-01-01`) so the model trains on the highly volatile 2020-2022 period, ensuring a fair baseline comparison. Deployed the Modern Canary run (`optuna-runner-72h-mod`).
 
 ## Current Known Bugs / Issues
 - **~~MACRO resample lookahead bias~~** ✅ FIXED (2026-03-21): Replaced `resample("1h")` with bar-level `rolling(hours*12, min_periods=1)` + `ffill()` + `.clip(lower=1e-8)`.
@@ -333,13 +332,10 @@ Creates registry-compatible bundles + production_artifacts.zip → GCS
 > **CRITICAL FINDING (2026-03-22)**: All "alpha" in set_08 comes from lookahead leakage. Every leak-free dataset produces zero or unprofitable signals with the current model architecture (LightGBM + focal loss + current feature set). The model architecture and/or feature engineering need fundamental changes to find real alpha.
 
 ## Immediate Next Steps
-1. **Threshold sweep on EXP-035 (set_11c long_logloss)**: 34% WR / PF 0.98 is 4% above breakeven — sweep threshold 0.50→0.65 to generate more trades
-2. **Momentum Core hypothesis**: Test a lean 19-feature model using only `MOM_*` + `core` features
-3. **Vol Expansion + Direction combo**: Two-stage model (predict expansion, then direction)
-4. Read `experiment_tracker.json` for what's been tried
-5. Read `research_backlog.json` for prioritized ideas
+1. **Monitor Modern Canary Run**: `optuna-runner-72h-mod` is currently active. Wait for the `pipeline_summary.json` to be uploaded to `gs://cltrainer-optuna-results/scout_hourset06_72h_modern/`.
+2. **Analyze Profit Factor**: Compare the new 72H model (trained up to 2023, execution tuned to 2025) against the legacy PF 1.196 baseline. 
+3. **Production Deployment**: If the Modern Alpha Pipeline produces a profitable holdout curve (> 1.0 PF), package the new config and register it for live deployment. 
 
 ### Current Active Tasks
-- **✅ COMPLETE: Bucket Architecture** — 3 runs done (EXP-034–036). Best: EXP-035 set_11c (PF 0.98)
-- **Next: Threshold sweep** on set_11c long_logloss model to unlock profitability
-- Address `trailing_atr_mult = 0.0` bug (should disable trailing stop, currently triggers immediately)
+- **✅ COMPLETE: Data Starvation Fix** — Rolled splits forward to 2023/2025.
+- **Next: Wait for GCP VM completion** to get the final holdout PnL results.
