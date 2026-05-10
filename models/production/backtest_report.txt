@@ -1,0 +1,18 @@
+============================================================
+BACKTEST REPORT — SHORT
+============================================================
+
+Strategy Config: Ensemble6
+TP/SL ATR Mult:  3.5/1.5
+Consec. Signal:  2
+
+Trade Count:     208
+Total PnL:       $5,816.08
+Win Rate:        31.2%
+Profit Factor:   1.2691
+Max Drawdown:    $-6,444.79
+
+Exit Distribution:
+  TP: 56 (26.9%)
+  TRAILING_BE: 72 (34.6%)
+  SL: 80 (38.5%)
