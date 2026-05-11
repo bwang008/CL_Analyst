@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Monitor a GCP VM running Optuna experiments. Auto-downloads results when done.
 .DESCRIPTION

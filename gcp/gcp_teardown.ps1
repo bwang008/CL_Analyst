@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Downloads results and deletes the GCP VM to stop charges.
 .EXAMPLE

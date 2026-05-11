@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Provisions and launches the overnight three-prong alpha search VM.
 .DESCRIPTION

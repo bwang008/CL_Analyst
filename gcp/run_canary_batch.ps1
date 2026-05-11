@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Quota-aware batch orchestrator for canary Optuna experiments.
 .DESCRIPTION
@@ -323,7 +323,8 @@ while (-not $allDone) {
     while ($queue.Count -gt 0) {
         $usedCpus = Get-UsedVcpus
         if ($usedCpus + $vcpusPerVm -gt $maxVcpus) {
-            Write-Host "[$(Get-Date -F 'HH:mm:ss')] Quota cap reached ($usedCpus/$maxVcpus vCPU in use). Waiting for a slot..." -ForegroundColor Gray
+            $quotaMsg = "[$(Get-Date -F 'HH:mm:ss')] Quota cap reached `($usedCpus/$maxVcpus vCPU in use`). Waiting for a slot..."
+            Write-Host $quotaMsg -ForegroundColor Gray
             break
         }
 
@@ -548,7 +549,7 @@ Send-BatchTelegram ("$(if ($batchState.failed -eq 0) { '🏁' } else { '⚠️' 
 
 Write-Host ""
 Write-Host "Next: generate the consolidated report:" -ForegroundColor Cyan
-Write-Host "  powershell -ExecutionPolicy Bypass -File .\gcp\collect_batch_results.ps1 -BatchId $BatchId" -ForegroundColor Cyan
+Write-Host ('  powershell -ExecutionPolicy Bypass -File .\gcp\collect_batch_results.ps1 -BatchId ' + $BatchId) -ForegroundColor Cyan
 Write-Host ""
 
 exit $(if ($batchState.failed -eq 0) { 0 } else { 1 })

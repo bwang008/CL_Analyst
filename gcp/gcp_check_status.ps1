@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Check the status of a running Optuna search on GCP.
 .EXAMPLE

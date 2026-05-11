@@ -159,6 +159,21 @@ python scripts/plot_prediction_distributions.py --threshold 0.55
 **Output:** `reports/prediction_distributions/` — per-model distribution + temporal PNGs + `all_models_comparison.png`
 
 
+### Model Diagnostics (Early Stopping / Iterations)
+
+To verify if a trained LightGBM model hit early stopping or reached its maximum estimators, inspect the `.pkl` artifact directly using `joblib`. Since the framework saves the raw `lightgbm.basic.Booster` or the `LGBMClassifier` wrapper, you can extract the attributes like so:
+
+```python
+import joblib
+
+# Load the trained model
+model = joblib.load('models/registry/EXP-030_optuna_v2_set07_logloss/final_model.pkl')
+
+print(f"Num trees: {getattr(model, 'num_trees', lambda: 'unknown')()}")
+print(f"Best Iteration: {getattr(model, 'best_iteration', 'Not found')}")
+```
+If `Best Iteration` equals `Num trees` (e.g., 500 = 500), the model did not early stop and completed its full configured duration.
+
 ### Prediction + backtest file conventions
 This is the shared contract so prediction files can be used across backtesters.
 

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Provisions and launches the FULL PRODUCTION ALPHA SEARCH VM.
 .DESCRIPTION

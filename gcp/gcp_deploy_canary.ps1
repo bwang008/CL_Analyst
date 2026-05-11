@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Provisions a canary VM, uploads code + downloads data from GCS, and launches the light canary pipeline.
 .DESCRIPTION
