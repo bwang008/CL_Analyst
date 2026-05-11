@@ -268,7 +268,7 @@ class BacktestEngine:
         trailing_sl_atr_offset: float = 0.25,
         atr_period: int = 14,
         commission_per_side: float = 2.50,
-        slippage_per_side: float = 0.03,
+        slippage_per_side: float = 0.01,
         contract_multiplier: float = 1000.0,
         prob_threshold: float = 0.45,
         allow_concurrent: bool = False,
@@ -1641,7 +1641,7 @@ def main() -> None:
         "--commission-per-side", type=float, default=2.50, help="Commission per side ($)"
     )
     parser.add_argument(
-        "--slippage-per-side", type=float, default=0.03, help="Slippage per side"
+        "--slippage-per-side", type=float, default=0.01, help="Slippage per side"
     )
     parser.add_argument(
         "--contract-multiplier", type=float, default=1000.0, help="CL multiplier"
