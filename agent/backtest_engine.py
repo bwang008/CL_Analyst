@@ -337,6 +337,9 @@ class BacktestEngine:
         # Instantiate the execution strategy from config
         strategy = create_execution_strategy(cfg)
 
+        # Safety check: warn if top-level params are shadowed by tier overrides
+        cls._check_parameter_shadowing(cfg, strategy)
+
         kwargs = {
             "tp_atr_mult": cfg.get("tp_atr_mult", 2.0),
             "sl_atr_mult": cfg.get("sl_atr_mult", 1.0),
@@ -356,6 +359,48 @@ class BacktestEngine:
         )
         kwargs.update(overrides)
         return cls(**kwargs)
+
+    @staticmethod
+    def _check_parameter_shadowing(cfg: dict, strategy) -> None:
+        """Warn if engine-global TP/SL/threshold differ from tier overrides.
+
+        This catches the 'dead code' scenario where Optuna or a user sets
+        top-level values but a TieredEnsembleStrategy reads from nested
+        tier blocks instead, silently ignoring the top-level values.
+        """
+        import warnings
+        from src.live_execution.strategies.execution_models import TieredEnsembleStrategy
+
+        if not isinstance(strategy, TieredEnsembleStrategy):
+            return
+
+        top_tp = cfg.get("tp_atr_mult")
+        top_sl = cfg.get("sl_atr_mult")
+
+        for side_key in ("long", "short"):
+            side_cfg = cfg.get(side_key, {})
+            # Check tiered_exits for TP
+            tier_tp = side_cfg.get("tp_atr_mult")
+            if tier_tp is None:
+                exits = side_cfg.get("tiered_exits", [])
+                if exits:
+                    tier_tp = exits[0].get("tp_atr_mult")
+            tier_sl = side_cfg.get("sl_atr_mult")
+
+            if tier_tp is not None and top_tp is not None and tier_tp != top_tp:
+                warnings.warn(
+                    f"[PARAM SHADOW] {side_key}.tp_atr_mult={tier_tp} overrides "
+                    f"top-level tp_atr_mult={top_tp}. The tier value will execute.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+            if tier_sl is not None and top_sl is not None and tier_sl != top_sl:
+                warnings.warn(
+                    f"[PARAM SHADOW] {side_key}.sl_atr_mult={tier_sl} overrides "
+                    f"top-level sl_atr_mult={top_sl}. The tier value will execute.",
+                    UserWarning,
+                    stacklevel=3,
+                )
 
     def _reset_state(self) -> None:
         """Reset all FSM state for a new run."""

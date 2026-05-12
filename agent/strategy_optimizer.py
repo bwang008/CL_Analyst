@@ -6,14 +6,19 @@ cooldown, max hold bars, trailing stop) using BacktestEngine against OOS
 predictions.  This is distinct from ``optuna_lgbm_search.py`` which tunes
 LightGBM *model* hyperparameters.
 
+For TieredEnsembleStrategy configs, each side (long/short) is optimized
+independently and then merged into a final ensemble config.  This avoids
+the "dead code" bug where top-level params were silently overridden by
+hardcoded tier values.
+
 Usage:
     python agent/strategy_optimizer.py \\
         --config configs/strategies/manatee2.json \\
         --n-trials 1000
 
     python agent/strategy_optimizer.py \\
-        --config configs/strategies/koala2.json \\
-        --n-trials 1000
+        --config configs/strategies/hourly_ensemble_008.json \\
+        --n-trials 500
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ os.chdir(PROJECT_ROOT)
 
 import optuna
 from agent.backtest_engine import BacktestEngine, BacktestResult, load_ohlcv, load_predictions
+from src.live_execution.strategies.execution_models import create_execution_strategy
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -132,6 +138,46 @@ def extract_metrics(result: BacktestResult) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Prediction loading helpers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_prob_column(df: pd.DataFrame, keyword: str) -> str | None:
+    """Find a column containing `keyword` (case-insensitive)."""
+    kw = keyword.lower()
+    for col in df.columns:
+        if kw in col.lower():
+            return col
+    return None
+
+
+def _load_ensemble_predictions(base_cfg: dict) -> pd.DataFrame:
+    """Merge long + short OOS predictions from the models block."""
+    models = base_cfg.get("models", {})
+    long_path = models.get("long", {}).get("predictions_path")
+    short_path = models.get("short", {}).get("predictions_path")
+
+    dfs = {}
+    if long_path and os.path.exists(long_path):
+        long_df = load_predictions(long_path)
+        col = _resolve_prob_column(long_df, "buy")
+        if col:
+            dfs["prob_Buy"] = long_df[col]
+    if short_path and os.path.exists(short_path):
+        short_df = load_predictions(short_path)
+        col = _resolve_prob_column(short_df, "sell")
+        if col:
+            dfs["prob_Sell"] = short_df[col]
+
+    if not dfs:
+        raise FileNotFoundError(
+            f"Cannot load ensemble predictions: long={long_path}, short={short_path}"
+        )
+    merged = pd.DataFrame(dfs).fillna(0.0)
+    return merged
+
+
+# ---------------------------------------------------------------------------
 # Optuna objective
 # ---------------------------------------------------------------------------
 
@@ -141,47 +187,56 @@ def make_objective(
     predictions_df: pd.DataFrame,
     ohlcv_df: pd.DataFrame,
     results_cache: dict | None = None,
+    side: str | None = None,
 ):
     """Create a closure that Optuna can call with trial params.
 
-    If *results_cache* is provided (dict), the full BacktestResult is
-    stored under the trial number so the callback can read metrics
-    without re-running the backtest.
+    Args:
+        base_cfg: Base strategy config dict.
+        predictions_df: OOS predictions DataFrame.
+        ohlcv_df: OHLCV DataFrame.
+        results_cache: Optional dict to store BacktestResult per trial.
+        side: Optional "long" or "short" for per-side optimization.
+              When set, the opposite side's tiers are disabled.
     """
+    # Pre-create a strategy instance for parameter routing
+    strategy = create_execution_strategy(base_cfg)
 
     def objective(trial: optuna.Trial) -> tuple[float, float]:
         cfg = copy.deepcopy(base_cfg)
 
-        # Search space
-        cfg["tp_atr_mult"] = trial.suggest_float("tp_atr_mult", 1.5, 10.0, step=0.5)
-        cfg["sl_atr_mult"] = trial.suggest_float("sl_atr_mult", 0.5, 5.0, step=0.5)
-        cfg["trailing_atr_mult"] = trial.suggest_float("trailing_atr_mult", 0.5, 5.0, step=0.5)
-        cfg["cooldown_bars"] = trial.suggest_int("cooldown_bars", 0, 30, step=5)
-        cfg["max_hold_bars"] = trial.suggest_int("max_hold_bars", 72, 576, step=72)
-        cfg["consecutive_signal_threshold"] = trial.suggest_int("consecutive_signal_threshold", 0, 4, step=1)
-        
-        if base_cfg.get("execution_class") == "BreakoutStraddleStrategy":
-            cfg["breakout_window"] = trial.suggest_int("breakout_window", 2, 24, step=2)
+        # Disable the opposite side when optimizing per-side
+        if side == "long" and "short" in cfg:
+            cfg["short"]["tiers"] = []
+        elif side == "short" and "long" in cfg:
+            cfg["long"]["tiers"] = []
 
-        # Threshold — update in the models section if ensemble, else top-level
-        threshold = trial.suggest_float("entry_threshold", 0.50, 0.80, step=0.05)
-        cfg["entry_threshold"] = threshold
-        if "models" in cfg:
-            for direction in cfg["models"]:
-                cfg["models"][direction]["threshold"] = threshold
+        # Suggest all params
+        params = {
+            "tp_atr_mult": trial.suggest_float("tp_atr_mult", 1.5, 10.0, step=0.5),
+            "sl_atr_mult": trial.suggest_float("sl_atr_mult", 0.5, 5.0, step=0.5),
+            "trailing_atr_mult": trial.suggest_float("trailing_atr_mult", 0.5, 5.0, step=0.5),
+            "cooldown_bars": trial.suggest_int("cooldown_bars", 0, 30, step=5),
+            "max_hold_bars": trial.suggest_int("max_hold_bars", 72, 576, step=72),
+            "consecutive_signal_threshold": trial.suggest_int("consecutive_signal_threshold", 0, 4, step=1),
+            "entry_threshold": trial.suggest_float("entry_threshold", 0.50, 0.80, step=0.05),
+        }
+
+        if base_cfg.get("execution_class") == "BreakoutStraddleStrategy":
+            params["breakout_window"] = trial.suggest_int("breakout_window", 2, 24, step=2)
+
+        # Route params to the correct config locations via strategy
+        strategy.apply_trial_params(cfg, params, side=side)
 
         engine = BacktestEngine.from_config(cfg)
         result = engine.run(predictions_df, ohlcv_df)
 
-        # Cache result for the callback (avoids re-running the backtest)
         if results_cache is not None:
             results_cache[trial.number] = result
 
-        # Reject degenerate configs (too few trades)
         if result.trade_count < 50:
             return 0.0, -999999.0
 
-        # Multi-objective: maximize PF, maximize DD (DD is negative, so larger = better)
         return result.profit_factor, result.max_drawdown
 
     return objective
@@ -198,31 +253,22 @@ def save_trial_config(
     metrics: dict,
     output_dir: str,
     model_name: str,
+    side: str | None = None,
 ) -> str:
     """Save a trial config JSON to the lab directory."""
     cfg = copy.deepcopy(base_cfg)
 
-    # Apply trial params
-    cfg["tp_atr_mult"] = trial.params["tp_atr_mult"]
-    cfg["sl_atr_mult"] = trial.params["sl_atr_mult"]
-    cfg["trailing_atr_mult"] = trial.params["trailing_atr_mult"]
-    cfg["cooldown_bars"] = trial.params["cooldown_bars"]
-    cfg["max_hold_bars"] = trial.params["max_hold_bars"]
-    if "breakout_window" in trial.params:
-        cfg["breakout_window"] = trial.params["breakout_window"]
-    threshold = trial.params["entry_threshold"]
-    cfg["entry_threshold"] = threshold
-    if "models" in cfg:
-        for direction in cfg["models"]:
-            cfg["models"][direction]["threshold"] = threshold
+    # Apply trial params via strategy-aware routing
+    strategy = create_execution_strategy(cfg)
+    strategy.apply_trial_params(cfg, dict(trial.params), side=side)
 
-    # Add optimization info (new section, won't break existing code)
     cfg["optuna_info"] = {
         "trial_number": trial.number,
         "timestamp": pd.Timestamp.now().isoformat(timespec="seconds"),
         "optimizer": "strategy_optimizer",
         "params": dict(trial.params),
         "metrics": metrics,
+        "side": side,
     }
 
     fname = f"{model_name}_trial_{trial.number:04d}.json"
@@ -231,6 +277,79 @@ def save_trial_config(
         json.dump(cfg, f, indent=4)
 
     return fpath
+
+
+# ---------------------------------------------------------------------------
+# Per-side study runner
+# ---------------------------------------------------------------------------
+
+
+def _run_study_for_side(
+    base_cfg: dict,
+    side: str,
+    predictions_df: pd.DataFrame,
+    ohlcv_df: pd.DataFrame,
+    n_trials: int,
+    model_name: str,
+    lab_dir: str,
+    start_time: float,
+) -> tuple[optuna.study.Study, dict, BacktestResult]:
+    """Run an Optuna study optimizing one side of a tiered config."""
+    results_cache: dict[int, BacktestResult] = {}
+    objective = make_objective(base_cfg, predictions_df, ohlcv_df, results_cache, side=side)
+    all_trial_rows: list[dict] = []
+
+    study = optuna.create_study(
+        directions=["maximize", "maximize"],
+        study_name=f"strategy_opt_{model_name}_{side}",
+    )
+
+    def trial_callback(study_: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        if trial.state != optuna.trial.TrialState.COMPLETE:
+            return
+        pf, dd = trial.values
+        cached = results_cache.pop(trial.number, None)
+        metrics = extract_metrics(cached) if cached else {"profit_factor": pf, "max_drawdown": dd}
+        save_trial_config(base_cfg, trial, metrics, lab_dir,
+                          f"{model_name}_{side}".lower().replace(" ", "_"), side=side)
+        all_trial_rows.append({"trial_number": trial.number, **trial.params, **metrics})
+        if (trial.number + 1) % 50 == 0:
+            elapsed = time.perf_counter() - start_time
+            print(f"  [{side.upper()}] Trial {trial.number + 1}/{n_trials}  "
+                  f"PF={pf:.2f}  DD=${dd:,.0f}  [{elapsed:.0f}s]")
+
+    print(f"\n--- OPTIMIZING {side.upper()} ({n_trials} trials) ---")
+    study.optimize(objective, n_trials=n_trials, callbacks=[trial_callback], show_progress_bar=True)
+
+    # Select best trial (highest PF from Pareto front)
+    pareto = study.best_trials
+    best_trial = max(pareto, key=lambda t: t.values[0])
+
+    # Run final backtest with best params
+    best_cfg = copy.deepcopy(base_cfg)
+    if side == "long" and "short" in best_cfg:
+        best_cfg["short"]["tiers"] = []
+    elif side == "short" and "long" in best_cfg:
+        best_cfg["long"]["tiers"] = []
+    strategy = create_execution_strategy(best_cfg)
+    strategy.apply_trial_params(best_cfg, dict(best_trial.params), side=side)
+
+    engine = BacktestEngine.from_config(best_cfg)
+    result = engine.run(predictions_df, ohlcv_df, label=f"Optimized_{side}")
+    metrics = extract_metrics(result)
+
+    print(f"\n  [{side.upper()}] Best trial #{best_trial.number}: "
+          f"PnL=${metrics['total_pnl']:,.2f}  PF={metrics['profit_factor']:.2f}  "
+          f"WR={metrics['win_rate']:.1%}  Trades={metrics['trade_count']}")
+    print(f"  [{side.upper()}] Params: {dict(best_trial.params)}")
+
+    # Save CSV
+    csv_path = f"reports/strategy_optimization_{model_name}_{side}.csv"
+    if all_trial_rows:
+        csv_df = pd.DataFrame(all_trial_rows).sort_values("profit_factor", ascending=False)
+        csv_df.to_csv(csv_path, index=False)
+
+    return study, dict(best_trial.params), result
 
 
 # ---------------------------------------------------------------------------
@@ -244,48 +363,65 @@ def run_optimization(
     predictions_path: str | None = None,
     ohlcv_path: str | None = None,
 ) -> tuple[dict, BacktestResult]:
-    """Run strategy parameter optimization for a single model.
+    """Run strategy parameter optimization.
+
+    For TieredEnsembleStrategy configs, optimizes each side independently
+    then merges into a final ensemble config.
 
     Returns:
         Tuple of (best_config, best_result).
     """
     start_time = time.perf_counter()
 
-    # Load base config
     with open(config_path) as f:
         base_cfg = json.load(f)
 
     model_name = base_cfg.get("nickname", Path(config_path).stem)
+    is_tiered = (
+        base_cfg.get("execution_class") == "TieredEnsembleStrategy"
+        and base_cfg.get("long", {}).get("tiers")
+        and base_cfg.get("short", {}).get("tiers")
+    )
+
     print("=" * 70)
     print(f"STRATEGY PARAMETER OPTIMIZATION: {model_name}")
     print(f"  Config: {config_path}")
     print(f"  Trials: {n_trials}")
+    print(f"  Mode: {'PER-SIDE TIERED' if is_tiered else 'SINGLE CONFIG'}")
     print("=" * 70)
 
-    # Resolve predictions and OHLCV from training_info if not provided
+    # Resolve OHLCV
     training_info = base_cfg.get("training_info", {})
-    if predictions_path is None:
-        predictions_path = training_info.get("oos_predictions", "reports/oos_predictions.csv")
     if ohlcv_path is None:
         ohlcv_path = training_info.get("data", "data/processed/CL_set_06.parquet")
+
+    # Resolve predictions — ensemble configs need merging from per-model files
+    if predictions_path is not None:
+        predictions_df = load_predictions(predictions_path)
+    elif "models" in base_cfg:
+        try:
+            predictions_df = _load_ensemble_predictions(base_cfg)
+            predictions_path = "<merged from models block>"
+        except FileNotFoundError:
+            predictions_path = training_info.get("oos_predictions", "reports/oos_predictions.csv")
+            predictions_df = load_predictions(predictions_path)
+    else:
+        predictions_path = training_info.get("oos_predictions", "reports/oos_predictions.csv")
+        predictions_df = load_predictions(predictions_path)
 
     print(f"  Predictions: {predictions_path}")
     print(f"  OHLCV data: {ohlcv_path}")
 
-    # Load data
     print("\nLoading data...")
-    predictions_df = load_predictions(predictions_path)
     ohlcv_df = load_ohlcv(ohlcv_path)
     print(f"  Predictions: {len(predictions_df):,} rows  cols={list(predictions_df.columns)}")
     print(f"  OHLCV: {len(ohlcv_df):,} rows")
     print(f"  Date range: {predictions_df.index.min()} to {predictions_df.index.max()}")
 
-    # Create lab directory for trial configs
     lab_dir = os.path.join("configs", "lab", "ensemble2")
     os.makedirs(lab_dir, exist_ok=True)
-    print(f"  Trial configs: {lab_dir}/")
 
-    # Run baseline first
+    # Run baseline
     print("\n--- BASELINE ---")
     baseline_engine = BacktestEngine.from_config(base_cfg)
     baseline_result = baseline_engine.run(predictions_df, ohlcv_df, label="Baseline")
@@ -296,126 +432,131 @@ def run_optimization(
           f"Trades: {baseline_metrics['trade_count']}  "
           f"DD: ${baseline_metrics['max_drawdown']:,.2f}")
 
-    # Create Optuna study (multi-objective)
-    study = optuna.create_study(
-        directions=["maximize", "maximize"],  # PF, max_drawdown (less negative = better)
-        study_name=f"strategy_opt_{model_name}",
-    )
+    # ── Per-side tiered optimization ──────────────────────────────────
+    if is_tiered:
+        _, long_params, long_result = _run_study_for_side(
+            base_cfg, "long", predictions_df, ohlcv_df,
+            n_trials, model_name, lab_dir, start_time,
+        )
+        _, short_params, short_result = _run_study_for_side(
+            base_cfg, "short", predictions_df, ohlcv_df,
+            n_trials, model_name, lab_dir, start_time,
+        )
 
-    # Shared cache: objective stores BacktestResult, callback reads it
-    results_cache: dict[int, BacktestResult] = {}
-    objective = make_objective(base_cfg, predictions_df, ohlcv_df, results_cache)
+        # Merge both sides into final ensemble config
+        best_cfg = copy.deepcopy(base_cfg)
+        strategy = create_execution_strategy(best_cfg)
+        strategy.apply_trial_params(best_cfg, long_params, side="long")
+        strategy.apply_trial_params(best_cfg, short_params, side="short")
 
-    # Collect all trial results for CSV
-    all_trial_rows: list[dict] = []
+        # Run final ensemble backtest with both sides active
+        best_engine = BacktestEngine.from_config(best_cfg)
+        best_result = best_engine.run(predictions_df, ohlcv_df, label="Optimized_Ensemble")
+        best_metrics = extract_metrics(best_result)
 
-    def trial_callback(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
-        """Log each trial and save its config."""
-        if trial.state != optuna.trial.TrialState.COMPLETE:
-            return
+        elapsed = time.perf_counter() - start_time
+        print(f"\n--- ENSEMBLE RESULTS ({elapsed:.0f}s) ---")
+        print(f"  OPTIMIZED: PnL=${best_metrics['total_pnl']:,.2f}  "
+              f"PF={best_metrics['profit_factor']:.2f}  "
+              f"WR={best_metrics['win_rate']:.1%}  "
+              f"Trades={best_metrics['trade_count']}  "
+              f"DD=${best_metrics['max_drawdown']:,.2f}")
+        print(f"  BASELINE:  PnL=${baseline_metrics['total_pnl']:,.2f}  "
+              f"PF={baseline_metrics['profit_factor']:.2f}  "
+              f"WR={baseline_metrics['win_rate']:.1%}  "
+              f"Trades={baseline_metrics['trade_count']}  "
+              f"DD=${baseline_metrics['max_drawdown']:,.2f}")
 
-        pf, dd = trial.values
+        best_cfg["optuna_info"] = {
+            "timestamp": pd.Timestamp.now().isoformat(timespec="seconds"),
+            "optimizer": "strategy_optimizer",
+            "mode": "per_side_tiered",
+            "n_trials_per_side": n_trials,
+            "long_params": long_params,
+            "short_params": short_params,
+            "long_metrics": extract_metrics(long_result),
+            "short_metrics": extract_metrics(short_result),
+            "ensemble_metrics": best_metrics,
+            "baseline_metrics": baseline_metrics,
+            "wall_time_seconds": round(elapsed, 1),
+        }
 
-        # Retrieve cached result (no re-run needed)
-        cached_result = results_cache.pop(trial.number, None)
-        if cached_result is not None:
-            metrics = extract_metrics(cached_result)
-        else:
-            # Fallback: re-run if cache miss (shouldn't happen)
-            metrics = {"profit_factor": pf, "max_drawdown": dd}
+    # ── Single-config optimization (non-tiered) ──────────────────────
+    else:
+        results_cache: dict[int, BacktestResult] = {}
+        objective = make_objective(base_cfg, predictions_df, ohlcv_df, results_cache)
+        all_trial_rows: list[dict] = []
 
-        # Save trial config
-        save_trial_config(base_cfg, trial, metrics, lab_dir, model_name.lower().replace(" ", "_"))
+        study = optuna.create_study(
+            directions=["maximize", "maximize"],
+            study_name=f"strategy_opt_{model_name}",
+        )
 
-        # Build CSV row
-        row = {"trial_number": trial.number, **trial.params, **metrics}
-        all_trial_rows.append(row)
+        def trial_callback(study_: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+            if trial.state != optuna.trial.TrialState.COMPLETE:
+                return
+            pf, dd = trial.values
+            cached = results_cache.pop(trial.number, None)
+            metrics = extract_metrics(cached) if cached else {"profit_factor": pf, "max_drawdown": dd}
+            save_trial_config(base_cfg, trial, metrics, lab_dir, model_name.lower().replace(" ", "_"))
+            all_trial_rows.append({"trial_number": trial.number, **trial.params, **metrics})
+            if (trial.number + 1) % 50 == 0:
+                elapsed = time.perf_counter() - start_time
+                print(f"  Trial {trial.number + 1}/{n_trials}  PF={pf:.2f}  DD=${dd:,.0f}  [{elapsed:.0f}s]")
 
-        # Progress logging every 50 trials
-        if (trial.number + 1) % 50 == 0:
-            elapsed = time.perf_counter() - start_time
-            print(f"  Trial {trial.number + 1}/{n_trials}  "
-                  f"PF={pf:.2f}  DD=${dd:,.0f}  "
-                  f"[{elapsed:.0f}s elapsed]")
+        print(f"\n--- OPTIMIZING ({n_trials} trials) ---")
+        study.optimize(objective, n_trials=n_trials, callbacks=[trial_callback], show_progress_bar=True)
 
-    print(f"\n--- OPTIMIZING ({n_trials} trials) ---")
-    study.optimize(
-        objective,
-        n_trials=n_trials,
-        callbacks=[trial_callback],
-        show_progress_bar=True,
-    )
+        elapsed = time.perf_counter() - start_time
+        pareto_trials = study.best_trials
+        best_trial = max(pareto_trials, key=lambda t: t.values[0])
 
-    elapsed = time.perf_counter() - start_time
+        print(f"\n--- RESULTS ({elapsed:.0f}s) ---")
+        print(f"Pareto-optimal trials: {len(pareto_trials)}")
+        print(f"Best trial #{best_trial.number}: {dict(best_trial.params)}")
 
-    # --- Select best trial (highest PF from Pareto front) ---
-    pareto_trials = study.best_trials
-    best_trial = max(pareto_trials, key=lambda t: t.values[0])  # highest PF
+        best_cfg = copy.deepcopy(base_cfg)
+        strategy = create_execution_strategy(best_cfg)
+        strategy.apply_trial_params(best_cfg, dict(best_trial.params))
 
-    print(f"\n--- RESULTS ({elapsed:.0f}s) ---")
-    print(f"Pareto-optimal trials: {len(pareto_trials)}")
-    print(f"Best trial #{best_trial.number}:")
-    print(f"  Params: {dict(best_trial.params)}")
-    print(f"  PF={best_trial.values[0]:.4f}  DD=${best_trial.values[1]:,.2f}")
+        best_engine = BacktestEngine.from_config(best_cfg)
+        best_result = best_engine.run(predictions_df, ohlcv_df, label="Optimized")
+        best_metrics = extract_metrics(best_result)
 
-    # Run final backtest with best params for full metrics
-    best_cfg = copy.deepcopy(base_cfg)
-    best_cfg["tp_atr_mult"] = best_trial.params["tp_atr_mult"]
-    best_cfg["sl_atr_mult"] = best_trial.params["sl_atr_mult"]
-    best_cfg["trailing_atr_mult"] = best_trial.params["trailing_atr_mult"]
-    best_cfg["cooldown_bars"] = best_trial.params["cooldown_bars"]
-    best_cfg["max_hold_bars"] = best_trial.params["max_hold_bars"]
-    best_cfg["consecutive_signal_threshold"] = best_trial.params["consecutive_signal_threshold"]
-    if "breakout_window" in best_trial.params:
-        best_cfg["breakout_window"] = best_trial.params["breakout_window"]
-    threshold = best_trial.params["entry_threshold"]
-    best_cfg["entry_threshold"] = threshold
-    if "models" in best_cfg:
-        for direction in best_cfg["models"]:
-            best_cfg["models"][direction]["threshold"] = threshold
+        print(f"\n  OPTIMIZED: PnL=${best_metrics['total_pnl']:,.2f}  "
+              f"PF={best_metrics['profit_factor']:.2f}  "
+              f"WR={best_metrics['win_rate']:.1%}  "
+              f"Trades={best_metrics['trade_count']}  "
+              f"DD=${best_metrics['max_drawdown']:,.2f}")
+        print(f"  BASELINE:  PnL=${baseline_metrics['total_pnl']:,.2f}  "
+              f"PF={baseline_metrics['profit_factor']:.2f}  "
+              f"WR={baseline_metrics['win_rate']:.1%}  "
+              f"Trades={baseline_metrics['trade_count']}  "
+              f"DD=${baseline_metrics['max_drawdown']:,.2f}")
 
-    best_engine = BacktestEngine.from_config(best_cfg)
-    best_result = best_engine.run(predictions_df, ohlcv_df, label="Optimized")
-    best_metrics = extract_metrics(best_result)
+        best_cfg["optuna_info"] = {
+            "trial_number": best_trial.number,
+            "timestamp": pd.Timestamp.now().isoformat(timespec="seconds"),
+            "optimizer": "strategy_optimizer",
+            "n_trials": n_trials,
+            "params": dict(best_trial.params),
+            "metrics": best_metrics,
+            "baseline_metrics": baseline_metrics,
+            "wall_time_seconds": round(elapsed, 1),
+        }
 
-    print(f"\n  OPTIMIZED: PnL=${best_metrics['total_pnl']:,.2f}  "
-          f"PF={best_metrics['profit_factor']:.2f}  "
-          f"WR={best_metrics['win_rate']:.1%}  "
-          f"Trades={best_metrics['trade_count']}  "
-          f"DD=${best_metrics['max_drawdown']:,.2f}  "
-          f"Sharpe={best_metrics['sharpe_ratio']:.2f}")
-    print(f"  BASELINE:  PnL=${baseline_metrics['total_pnl']:,.2f}  "
-          f"PF={baseline_metrics['profit_factor']:.2f}  "
-          f"WR={baseline_metrics['win_rate']:.1%}  "
-          f"Trades={baseline_metrics['trade_count']}  "
-          f"DD=${baseline_metrics['max_drawdown']:,.2f}")
+        csv_path = f"reports/strategy_optimization_{model_name.lower().replace(' ', '_')}.csv"
+        if all_trial_rows:
+            csv_df = pd.DataFrame(all_trial_rows).sort_values("profit_factor", ascending=False)
+            csv_df.to_csv(csv_path, index=False)
+            print(f"Saved trial report: {csv_path} ({len(csv_df)} rows)")
 
     # Save optimized config
     opt_config_name = Path(config_path).stem + "_opt.json"
     opt_config_path = os.path.join(os.path.dirname(config_path), opt_config_name)
-
-    best_cfg["optuna_info"] = {
-        "trial_number": best_trial.number,
-        "timestamp": pd.Timestamp.now().isoformat(timespec="seconds"),
-        "optimizer": "strategy_optimizer",
-        "n_trials": n_trials,
-        "params": dict(best_trial.params),
-        "metrics": best_metrics,
-        "baseline_metrics": baseline_metrics,
-        "wall_time_seconds": round(elapsed, 1),
-    }
-
     with open(opt_config_path, "w") as f:
         json.dump(best_cfg, f, indent=4)
     print(f"\nSaved optimized config: {opt_config_path}")
-
-    # Save CSV report
-    csv_path = f"reports/strategy_optimization_{model_name.lower().replace(' ', '_')}.csv"
-    if all_trial_rows:
-        csv_df = pd.DataFrame(all_trial_rows)
-        csv_df = csv_df.sort_values("profit_factor", ascending=False)
-        csv_df.to_csv(csv_path, index=False)
-        print(f"Saved trial report: {csv_path} ({len(csv_df)} rows)")
 
     return best_cfg, best_result
 
@@ -457,4 +598,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

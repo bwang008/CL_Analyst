@@ -121,6 +121,42 @@ class BaseExecutionStrategy(ABC):
                 return lots
         return 1
 
+    def apply_trial_params(
+        self, cfg: dict, params: dict, side: Optional[str] = None,
+    ) -> dict:
+        """Apply optimizer trial parameters to the config dict.
+
+        Routes params to the correct config locations so that the values
+        Optuna tests are the values the strategy actually reads.
+
+        Default implementation writes to top-level keys (correct for
+        SingleModelStrategy, ConservativeEnsembleStrategy, etc.).
+        Subclasses that read from nested locations (e.g. tier blocks)
+        must override this method.
+
+        Args:
+            cfg:    Mutable config dict (deep-copy of base config).
+            params: Dict of Optuna-suggested parameter values.
+            side:   Optional "long" or "short" to target one side only.
+                    None writes to both sides (where applicable).
+
+        Returns:
+            The mutated config dict.
+        """
+        for key in ("tp_atr_mult", "sl_atr_mult", "trailing_atr_mult",
+                    "cooldown_bars", "max_hold_bars",
+                    "consecutive_signal_threshold"):
+            if key in params:
+                cfg[key] = params[key]
+
+        if "entry_threshold" in params:
+            cfg["entry_threshold"] = params["entry_threshold"]
+            if "models" in cfg:
+                for direction in cfg["models"]:
+                    cfg["models"][direction]["threshold"] = params["entry_threshold"]
+
+        return cfg
+
     @abstractmethod
     def on_bar(
         self,
@@ -466,6 +502,69 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
             })
         tiers.sort(key=lambda x: x["min_prob"], reverse=True)
         return tiers
+
+    def apply_trial_params(
+        self, cfg: dict, params: dict, side: Optional[str] = None,
+    ) -> dict:
+        """Route optimizer params into tier blocks where TieredEnsembleStrategy reads.
+
+        Writes TP, SL, threshold, trailing, and max_hold into the
+        per-side ``tiers`` and ``tiered_exits`` arrays so the values
+        Optuna tests are the values that actually execute.
+
+        Also writes to top-level keys for BacktestEngine globals
+        (cooldown, trailing fallback) and to models.*.threshold.
+        """
+        tp = params.get("tp_atr_mult")
+        sl = params.get("sl_atr_mult")
+        threshold = params.get("entry_threshold")
+        trailing = params.get("trailing_atr_mult")
+        max_hold = params.get("max_hold_bars")
+
+        sides = [side] if side else ["long", "short"]
+        for s in sides:
+            side_cfg = cfg.get(s, {})
+
+            # Write TP/SL at the side level
+            if tp is not None:
+                side_cfg["tp_atr_mult"] = tp
+            if sl is not None:
+                side_cfg["sl_atr_mult"] = sl
+
+            # Write into tiered_exits blocks
+            for exit_tier in side_cfg.get("tiered_exits", []):
+                if tp is not None:
+                    exit_tier["tp_atr_mult"] = tp
+
+            # Write into each tier entry
+            for tier in side_cfg.get("tiers", []):
+                if threshold is not None:
+                    tier["min_prob"] = threshold
+                if tp is not None:
+                    tier["tp_atr_mult"] = tp
+                if sl is not None:
+                    tier["sl_atr_mult"] = sl
+                if trailing is not None:
+                    tier["trailing_atr_mult"] = trailing
+                if max_hold is not None:
+                    tier["max_hold_bars"] = max_hold
+
+            cfg[s] = side_cfg
+
+        # Also write top-level for engine globals (cooldown, trailing fallback)
+        for key in ("tp_atr_mult", "sl_atr_mult", "trailing_atr_mult",
+                    "cooldown_bars", "max_hold_bars",
+                    "consecutive_signal_threshold"):
+            if key in params:
+                cfg[key] = params[key]
+
+        if threshold is not None:
+            cfg["entry_threshold"] = threshold
+            if "models" in cfg:
+                for direction in cfg["models"]:
+                    cfg["models"][direction]["threshold"] = threshold
+
+        return cfg
 
     def _match_tier(
         self, probability: float, tiers: list[dict]
