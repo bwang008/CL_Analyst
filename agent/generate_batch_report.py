@@ -106,22 +106,24 @@ def main():
                 ens_res = bt[ens_key]
                 model_name = f"{label.replace(' ', '_')}_{metric}"
                 
+                # Retrieve ensemble config to use for both ensemble and isolated recalculations
+                threshold = "Unknown"
                 canary_dir = os.path.join(local_dir, "registry", "canary_output")
-                
+                config_path = os.path.join(canary_dir, f"ensemble_config_{metric}.json")
+                ens_cfg = None
+                if os.path.exists(config_path):
+                    with open(config_path, "r", encoding="utf-8-sig") as fc:
+                        ens_cfg = json.load(fc)
+                        threshold = ens_cfg.get("entry_threshold", "Unknown")
+
                 # --- RECALCULATE LONG / SHORT / ENSEMBLE LOCALLY ---
                 for dir_name in ["long", "short"]:
                     pred_file = os.path.join(canary_dir, f"oos_predictions_{dir_name}_{metric}.csv")
-                    # Try to get config
-                    cfg_file = os.path.join(local_dir, "registry", f"E2E_HourSet_07_{dir_name}_{metric}", "experiment_config.json")
-                    if not os.path.exists(cfg_file):
-                        cfg_file = os.path.join(local_dir, "reports", f"optuna_best_params_{dir_name}_{metric}.json")
-                    
-                    if os.path.exists(pred_file) and os.path.exists(cfg_file):
+                    if os.path.exists(pred_file) and ens_cfg is not None:
                         try:
                             preds = load_predictions(pred_file)
-                            with open(cfg_file, "r", encoding="utf-8-sig") as fc:
-                                side_cfg = json.load(fc)
-                            be = BacktestEngine.from_config(side_cfg)
+                            # Create engine using the ensemble config (so TP/SL/threshold are correct)
+                            be = BacktestEngine.from_config(ens_cfg)
                             res = be.run(preds, ohlcv_data)
                             bt[f"{dir_name}_{metric}"] = {
                                 "trade_count": res.trade_count,
@@ -133,10 +135,6 @@ def main():
                             }
                         except Exception as e:
                             pass
-                
-                # Recalculate Ensemble
-                threshold = "Unknown"
-                config_path = os.path.join(canary_dir, f"ensemble_config_{metric}.json")
                 merged_pred_path = os.path.join(canary_dir, f"oos_predictions_ensemble_{metric}.csv")
                 
                 if os.path.exists(config_path):
@@ -264,7 +262,7 @@ def main():
                     cmd = [
                         "python", "agent/strategy_optimizer.py",
                         "--config", config_path,
-                        "--n-trials", "500",
+                        "--n-trials", "5",
                         "--predictions", merged_pred_path,
                         "--data", DATASET
                     ]
@@ -283,7 +281,174 @@ def main():
                         }
 
     # 3. Build Markdown Report
-    model_results.sort(key=lambda x: x["profit_factor"], reverse=True)
+    
+    # --- Build ALL summary rows: Ensemble + individual Long + Short ---
+    all_summary_rows = []
+    
+    for m in model_results:
+        label = m["target_pair"]
+        metric = m["metric"]
+        m_name = m["model_name"]
+        detail = detailed_data.get(label, {}).get("models", {}).get(metric, {})
+        
+        # Early stopping for this ensemble's component models
+        long_es = detail.get("long_best_it", "—")
+        short_es = detail.get("short_best_it", "—")
+        
+        pf = m["profit_factor"]
+        trades = m["trades"]
+        if pf > 1.3 and trades >= 10:
+            verdict = "✅ Promote"
+        elif pf > 1.0:
+            verdict = "⚠️ Thin"
+        else:
+            verdict = "❌ No Edge"
+        
+        opt = opt_results.get(m_name, {})
+        opt_pf_val = opt.get("opt_pf", "—")
+        opt_pnl_val = opt.get("opt_pnl", "—")
+        if isinstance(opt_pnl_val, float):
+            opt_pnl_val = f"${opt_pnl_val:,.2f}"
+        if isinstance(opt_pf_val, float):
+            opt_pf_val = f"{opt_pf_val:.2f}"
+        
+        anchor = label.lower().replace(" ", "-").replace(".", "")
+        
+        # Ensemble row
+        all_summary_rows.append({
+            "sort_key": pf,
+            "type": "Ensemble",
+            "name": m_name,
+            "anchor": anchor,
+            "target": label,
+            "metric": metric,
+            "trades": trades,
+            "wr": f"{m['win_rate']:.1f}%",
+            "pf": f"{pf:.4f}",
+            "pnl": f"${m['pnl']:,.2f}",
+            "max_dd": f"${m['max_dd']:,.2f}",
+            "long_es": str(long_es),
+            "short_es": str(short_es),
+            "threshold": str(m["threshold"]),
+            "opt_pf": str(opt_pf_val),
+            "opt_pnl": str(opt_pnl_val),
+            "wall_time": m["wall_time"],
+            "verdict": verdict,
+        })
+        
+        # Individual Long row
+        long_res = detail.get("long", {})
+        long_pf = long_res.get("profit_factor", 0.0)
+        if isinstance(long_pf, str) and long_pf == "Infinity": long_pf = 999.0
+        long_trades = long_res.get("trade_count", 0)
+        if long_pf > 1.3 and long_trades >= 10:
+            long_verdict = "✅ Promote"
+        elif long_pf > 1.0:
+            long_verdict = "⚠️ Thin"
+        else:
+            long_verdict = "❌ No Edge"
+        all_summary_rows.append({
+            "sort_key": long_pf,
+            "type": "Long",
+            "name": f"{m_name}_long",
+            "anchor": anchor,
+            "target": label,
+            "metric": metric,
+            "trades": long_trades,
+            "wr": f"{long_res.get('win_rate', 0.0):.1f}%",
+            "pf": f"{long_pf:.4f}",
+            "pnl": f"${long_res.get('total_pnl', 0.0):,.2f}",
+            "max_dd": f"${long_res.get('max_drawdown', 0.0):,.2f}",
+            "long_es": str(long_es),
+            "short_es": "—",
+            "threshold": str(m["threshold"]),
+            "opt_pf": "—",
+            "opt_pnl": "—",
+            "wall_time": m["wall_time"],
+            "verdict": long_verdict,
+        })
+        
+        # Individual Short row
+        short_res = detail.get("short", {})
+        short_pf = short_res.get("profit_factor", 0.0)
+        if isinstance(short_pf, str) and short_pf == "Infinity": short_pf = 999.0
+        short_trades = short_res.get("trade_count", 0)
+        if short_pf > 1.3 and short_trades >= 10:
+            short_verdict = "✅ Promote"
+        elif short_pf > 1.0:
+            short_verdict = "⚠️ Thin"
+        else:
+            short_verdict = "❌ No Edge"
+        all_summary_rows.append({
+            "sort_key": short_pf,
+            "type": "Short",
+            "name": f"{m_name}_short",
+            "anchor": anchor,
+            "target": label,
+            "metric": metric,
+            "trades": short_trades,
+            "wr": f"{short_res.get('win_rate', 0.0):.1f}%",
+            "pf": f"{short_pf:.4f}",
+            "pnl": f"${short_res.get('total_pnl', 0.0):,.2f}",
+            "max_dd": f"${short_res.get('max_drawdown', 0.0):,.2f}",
+            "long_es": "—",
+            "short_es": str(short_es),
+            "threshold": str(m["threshold"]),
+            "opt_pf": "—",
+            "opt_pnl": "—",
+            "wall_time": m["wall_time"],
+            "verdict": short_verdict,
+        })
+    
+    # Sort all rows by PF descending
+    all_summary_rows.sort(key=lambda x: x["sort_key"], reverse=True)
+    
+    # --- Fixed-width column padding ---
+    headers = ["Rank", "Type", "Model Name", "Target Pair", "Metric", "Trades",
+               "WR", "PF", "PnL", "Max DD", "Long ES", "Short ES",
+               "Threshold", "Opt PF", "Opt PnL", "Wall Time", "Verdict"]
+    
+    # Pre-compute cell values for every row so we can measure max widths
+    row_cells = []
+    for idx, r in enumerate(all_summary_rows):
+        cells = [
+            str(idx + 1),
+            r["type"],
+            f"[{r['name']}](#{r['anchor']})" if r["type"] == "Ensemble" else r["name"],
+            r["target"],
+            r["metric"],
+            str(r["trades"]),
+            r["wr"],
+            r["pf"],
+            r["pnl"],
+            r["max_dd"],
+            r["long_es"],
+            r["short_es"],
+            r["threshold"],
+            r["opt_pf"],
+            r["opt_pnl"],
+            r["wall_time"],
+            r["verdict"],
+        ]
+        row_cells.append(cells)
+    
+    # Compute column widths (at least header width, at least 4)
+    col_widths = [max(4, len(h)) for h in headers]
+    for cells in row_cells:
+        for i, c in enumerate(cells):
+            col_widths[i] = max(col_widths[i], len(c))
+    
+    def pad_row(cells):
+        parts = []
+        for i, c in enumerate(cells):
+            parts.append(f" {c:<{col_widths[i]}} ")
+        return "|" + "|".join(parts) + "|"
+    
+    def separator_row():
+        parts = []
+        for w in col_widths:
+            parts.append("-" * (w + 2))
+        return "|" + "|".join(parts) + "|"
     
     lines = []
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -292,37 +457,15 @@ def main():
     lines.append(f"> Manifest: {MANIFEST}")
     lines.append("> Dataset: cl-1h_bk_HourSet_07.parquet (242 columns)")
     lines.append(f"> Train Cutoff: {TRAIN_CUTOFF}")
+    lines.append(f"> Slippage: 0.01 per side  |  Commission: $2.50 per side")
     lines.append(f"> Total Wall Clock Time: {total_time_str}")
     lines.append(f"> Experiments Run: {len(experiments)} target pairs × 2 metrics = {len(experiments)*2} model pairs\n")
     
     lines.append("## Executive Summary & Rankings\n")
-    lines.append("| Rank | Model Name | Target Pair | Metric | Trades | WR | PF | PnL | Max DD | Sharpe | Threshold | Opt PF | Opt PnL | Wall Time | Verdict |")
-    lines.append("|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|")
-    
-    for idx, m in enumerate(model_results):
-        m_name = m["model_name"]
-        t_pair = m["target_pair"]
-        anchor = t_pair.lower().replace(" ", "-").replace(".", "")
-        pf = m["profit_factor"]
-        trades = m["trades"]
-        
-        if pf > 1.3 and trades >= 10:
-            verdict = "✅ Promote"
-        elif pf > 1.0:
-            verdict = "⚠️ Thin"
-        else:
-            verdict = "❌ No Edge"
-            
-        opt = opt_results.get(m_name, {})
-        opt_pf = opt.get("opt_pf", "-")
-        opt_pnl = opt.get("opt_pnl", "-")
-        if isinstance(opt_pnl, float):
-            opt_pnl = f"${opt_pnl:,.2f}"
-            
-        sharpe = m["baseline_res"].get("sharpe_ratio", "N/A")
-        
-        row = f"| {idx+1} | [{m_name}](#{anchor}) | {t_pair} | {m['metric']} | {trades} | {m['win_rate']:.1f}% | {pf:.4f} | ${m['pnl']:,.2f} | ${m['max_dd']:,.2f} | {sharpe} | {m['threshold']} | {opt_pf} | {opt_pnl} | {m['wall_time']} | {verdict} |"
-        lines.append(row)
+    lines.append(pad_row(headers))
+    lines.append(separator_row())
+    for cells in row_cells:
+        lines.append(pad_row(cells))
         
     lines.append("\n---\n")
     lines.append("## Detailed Results per Target\n")

@@ -52,6 +52,11 @@ DATASET_VERSIONS = {
         '(1.5/2.0/2.5x1 @ 72H/120H, 2x1 @ 3H/6H/12H, 1x0.5 @ 3H/6H/12H, 1x2 @ 3H/6H/12H). '
         'Supersedes HourSet_01/02 — use this for all new experiments.'
     ),
+    'HourSet_08': (
+        'Precision-driven target refactor (process_hourset_08): '
+        'Removes noisy targets, expands asymmetric targets (3x1, 4x1, 5x1) '
+        'for 6H, 12H, 24H, and retains core 2x1.'
+    ),
 }
 
 
@@ -840,6 +845,8 @@ class DataProcessor:
             return self.process_hourset_06()
         elif self.dataset_version == "HourSet_07":
             return self.process_hourset_07()
+        elif self.dataset_version == "HourSet_08":
+            return self.process_hourset_08()
         else:
             raise ValueError(f"Unknown dataset version: {self.dataset_version}. "
                            f"Available: {list(DATASET_VERSIONS.keys())}")
@@ -2126,6 +2133,125 @@ class DataProcessor:
 
         print("=" * 60)
         print("Processing Complete — HourSet_07")
+        print(f"Output : {saved_path}")
+        print(f"Shape  : {df.shape}")
+        target_cols = sorted(c for c in df.columns if c.startswith("TARGET_"))
+        print(f"Targets: {target_cols}")
+        duration = datetime.now() - start_time
+        print(f"Wall time: {str(duration).split('.')[0]}")
+        print("=" * 60)
+
+        self.df = df
+        return df
+
+    def process_hourset_08(self) -> pd.DataFrame:
+        """Precision-driven target refactor for 1-Hour swing-trading dataset.
+        
+        Removes noisy 1x2 and 1x0.5 targets, expands asymmetric targets (3x1, 4x1, 5x1) 
+        for 6H, 12H, and 24H horizons, and retains core 2x1 targets.
+        """
+        start_time = datetime.now()
+        print("=" * 60)
+        print("Starting Data Processing Pipeline - HOURSET_08")
+        print("  1-Hour bars + stationary indicators + precision targets")
+        print(f"Started at: {start_time.isoformat(timespec='seconds')}")
+        print("=" * 60)
+
+        # ── Step 1: Load 5-min data and resample to 1H ───────────────
+        df = self.load_data()
+        print(f"  [10%] Loaded {len(df)} 5-min rows")
+        df = self.resample_to_hourly(df)
+        print(f"  [15%] Resampled to {len(df)} hourly bars at "
+              f"{datetime.now().isoformat(timespec='seconds')}")
+
+        # ── Step 2: Time features ─────────────────────────────────────
+        df = self.add_time_features(df, include_day_of_week=True)
+        print(f"  [20%] Time features added")
+
+        # ── Step 3: AlphaFactory — stationary indicators enabled ──────
+        windows = [24, 72, 168, 336, 840]
+        macro_windows = {
+            "1W": 168, "2W": 336, "1M": 840,
+            "3M": 2160, "6M": 4320,
+        }
+        df = AlphaFactory(df, bars_per_hour=1).add_all_features(
+            windows=windows,
+            include_momentum=True,
+            include_macro=True,
+            include_extended=True,
+            include_dma=True,
+            include_ichimoku=True,
+            macro_windows=macro_windows,
+            log_progress=True,
+        )
+        print(f"  [50%] AlphaFactory features added at "
+              f"{datetime.now().isoformat(timespec='seconds')}")
+
+        # ── Step 4: External macro features (FRED + COT) ─────────────
+        macro_engine = MacroFeatureEngine()
+        df = macro_engine.merge_all(df)
+        n_macro = len(macro_engine.get_feature_names())
+        print(f"  [55%] {n_macro} external macro features added at "
+              f"{datetime.now().isoformat(timespec='seconds')}")
+
+        # ── Step 5: RAW columns for evaluation (120H forward window) ──
+        raw_horizon = 120
+        future_high = (
+            df["High"].iloc[::-1]
+            .rolling(window=raw_horizon, min_periods=1)
+            .max().iloc[::-1].shift(-1)
+        )
+        future_low = (
+            df["Low"].iloc[::-1]
+            .rolling(window=raw_horizon, min_periods=1)
+            .min().iloc[::-1].shift(-1)
+        )
+        df["RAW_Close"] = df["Close"].copy()
+        df["RAW_Future_High"] = future_high
+        df["RAW_Future_Low"] = future_low
+        print("  - Added RAW_Close, RAW_Future_High, RAW_Future_Low")
+
+        # ── Step 6: Precision Target Suite ────────────────────────────
+        # 2x1 core targets + 3x1, 4x1, 5x1 asymmetric targets
+        target_multipliers = [2.0, 3.0, 4.0, 5.0]
+        target_horizons = [6, 12, 24]
+        
+        for tp_mult in target_multipliers:
+            tp_label = str(int(tp_mult)) if tp_mult.is_integer() else str(tp_mult).replace(".", "p")
+            for horizon_h in target_horizons:
+                df = self.add_triple_barrier_target(
+                    df,
+                    prefix=f"TARGET_TRIPLE_{tp_label}x1_{horizon_h}H",
+                    tp_atr_mult=tp_mult,
+                    sl_atr_mult=1.0,
+                    max_horizon=horizon_h,
+                    atr_period=14,
+                )
+
+        # 6c: Continuous return targets
+        df = self.add_return_target(df, horizons=[6, 12, 24, 72, 120])
+        print(f"  [80%] All targets created at "
+              f"{datetime.now().isoformat(timespec='seconds')}")
+
+        # ── Step 7: Normalize features ────────────────────────────────
+        df = self.normalize_features(df)
+
+        # ── Step 8: Cleanup ───────────────────────────────────────────
+        df = self.cleanup(
+            df,
+            drop_raw_returns=True,
+            warmup_rows=2200,
+            max_warmup_bars=2200,
+            keep_ohlcv=self.keep_ohlcv,
+        )
+
+        # ── Step 9: Save ──────────────────────────────────────────────
+        saved_path = self.save(df)
+        print(f"  [100%] Saved output at "
+              f"{datetime.now().isoformat(timespec='seconds')}")
+
+        print("=" * 60)
+        print("Processing Complete — HourSet_08")
         print(f"Output : {saved_path}")
         print(f"Shape  : {df.shape}")
         target_cols = sorted(c for c in df.columns if c.startswith("TARGET_"))

@@ -115,6 +115,27 @@ eports/scout/run_report.md (or whatever prefix you used) to verify that the auto
 
 Historical progress and completed track summaries (reverse-chronological; newest first).
 
+## 2026-05-11 — Target Refactor & Dynamic Class Weighting (HourSet_08)
+
+### Goal
+Transition the pipeline from a "noise-driven" (downsampled) configuration to a "precision-driven" (full dataset, asymmetric targets, dynamic weighting) configuration, and resolve reliability issues with the GCP batch orchestrator.
+
+### Dataset: HourSet_08
+- Engineered and generated `cl-1h_bk_HourSet_08.parquet` via `src/data_processor.py`
+- Deprecated noisy `1x2` and `1x0.5` targets
+- Implemented a precision-oriented, asymmetric target suite (`3x1`, `4x1`, `5x1`) for 6H, 12H, and 24H horizons
+- Uploaded successfully to Google Cloud Storage to unblock batch canary tests
+
+### Training Parameter Changes
+- **Removed Downsampling**: Removed `util.downsample_majority()` to preserve the massive majority class data volume for Gradient Boosting performance on tail-risk events.
+- **Dynamic Weighting**: Implemented dynamic per-fold `scale_pos_weight` calculation in `agent/optuna_lgbm_search_v2.py`. 
+- **New Hyperparameter**: Added `scale_pos_weight_mult` (range 0.8–1.2) to allow Optuna to fine-tune the class weights per cross-validation fold.
+
+### Orchestration & Workflow Updates
+- **Telegram Default**: Inverted notification logic across GCP orchestrators (`run_canary_batch.ps1`, `gcp_monitor.ps1`, `collect_batch_results.ps1`) to use a `[switch]$DisableTelegram` parameter so alerts are sent by default.
+- **Workflow Safety**: Added a strict GCS verification step to `.agents\workflows\run-cloud-batch.md` to prevent launching VMs without the required dataset.
+- **Bug Fixes**: Resolved critical PowerShell parsing errors caused by emoji characters in ANSI-encoded files by forcing UTF-8 BOM encodings and CRLF line endings.
+
 ## 2026-04-20 — Telegram Diagnostics, DataManager Seed Fix & Hard-Fail Pipeline
 
 ### Goal

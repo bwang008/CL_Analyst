@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Collect and compare results from a completed canary batch run.
 .DESCRIPTION
@@ -18,7 +18,7 @@
 
 param(
     [string]$BatchId        = "",
-    [switch]$EnableTelegram
+    [switch]$DisableTelegram
 )
 
 $ErrorActionPreference = "Continue"
@@ -80,7 +80,7 @@ function Read-DotEnv {
 
 function Send-TelegramMessage {
     param([string]$Message)
-    if (-not $EnableTelegram) { return }
+    if ($DisableTelegram) { return }
 
     $ev      = Read-DotEnv
     $token   = if ($ev["TELEGRAM_BOT_TOKEN"]) { $ev["TELEGRAM_BOT_TOKEN"] } else { $env:TELEGRAM_BOT_TOKEN }

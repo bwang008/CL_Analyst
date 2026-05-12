@@ -21,6 +21,8 @@
 
 set -eo pipefail
 
+export PYTHONIOENCODING=utf8
+
 # Activate environment
 source /opt/optuna-env/bin/activate
 

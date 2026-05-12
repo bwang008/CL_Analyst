@@ -459,6 +459,9 @@ def make_objective(
             "min_gain_to_split": trial.suggest_float("min_gain_to_split", 0.0, 2.0),
             "path_smooth": trial.suggest_float("path_smooth", 0.0, 10.0),
         }
+        
+        # Hyperparameter Tuning: Tune scale_pos_weight around the baseline estimate
+        imbalance_multiplier = trial.suggest_float("scale_pos_weight_mult", 0.8, 1.2)
 
         # GOSS uses gradient-based sampling — bagging params are ignored
         if boosting_type == "gbdt":
@@ -495,18 +498,19 @@ def make_objective(
 
             # Apply class balancing
             if balance_mode == "downsample":
-                try:
-                    X_train, y_train = util.downsample_majority(
-                        X_train, y_train, random_state=42 + fold_idx
-                    )
-                except ValueError:
-                    continue  # Skip degenerate fold
+                pass  # Downsampling is disabled in favor of dynamic scale_pos_weight
 
             # Split training into train/val for early stopping (chronological)
             val_frac = 0.1
             val_split = int(len(X_train) * (1 - val_frac))
             X_tr, X_val = X_train.iloc[:val_split], X_train.iloc[val_split:]
             y_tr, y_val = y_train.iloc[:val_split], y_train.iloc[val_split:]
+
+            # Dynamic Class Weighting: Calculate per-fold
+            n_neg = (y_tr == 0).sum()
+            n_pos = (y_tr == 1).sum()
+            estimated_weight = n_neg / n_pos if n_pos > 0 else 1.0
+            params["scale_pos_weight"] = estimated_weight * imbalance_multiplier
 
             # Train with early stopping
             # free_raw_data=False: avoids C++ deallocation race when multiple

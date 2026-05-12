@@ -32,7 +32,7 @@ param(
     [string]$ManifestPath        = "configs\canary_batch_manifest.json",
     [string]$Zone                = "us-central1-a",
     [switch]$DryRun,
-    [switch]$EnableTelegram,
+    [switch]$DisableTelegram,
     [int]$MaxConcurrentVcpus    = 0   # 0 = read from manifest defaults
 )
 
@@ -69,7 +69,7 @@ function Read-DotEnv {
 
 function Send-BatchTelegram {
     param([string]$Message)
-    if (-not $EnableTelegram) { return }
+    if ($DisableTelegram) { return }
 
     $ev      = Read-DotEnv
     $token   = if ($ev["TELEGRAM_BOT_TOKEN"]) { $ev["TELEGRAM_BOT_TOKEN"] } else { $env:TELEGRAM_BOT_TOKEN }
@@ -216,8 +216,9 @@ Write-Host "  Experiments:   $($expList.Count)"
 Write-Host "  Max vCPUs:     $maxVcpus  (allows $(  [math]::Floor($maxVcpus / $vcpusPerVm)) concurrent VMs)"
 Write-Host "  vCPU/VM:       $vcpusPerVm"
 Write-Host "  Timeout/exp:   ${timeoutMins}m"
+$tgStr = if ($DisableTelegram) { $false } else { $true }
 Write-Host "  Dry Run:       $DryRun"
-Write-Host "  Telegram:      $EnableTelegram"
+Write-Host "  Telegram:      $tgStr"
 Write-Host "  Output Dir:    $BatchDir"
 Write-Host "============================================================" -ForegroundColor Magenta
 Write-Host ""
@@ -393,7 +394,7 @@ while (-not $allDone) {
         $batchId_     = $BatchId
         $expIdx_      = $exp.Index
         $expTotal_    = $expList.Count
-        $tgEnabled_   = $EnableTelegram.IsPresent
+        $tgEnabled_   = if ($DisableTelegram) { $false } else { $true }
         $pollSecs_    = 90    # 90-second poll — fast enough to catch early-stopping completions
         $projDir_     = $ProjectDir
         $gcpBin_      = $gcloudBin
@@ -403,7 +404,7 @@ while (-not $allDone) {
             param($monScript, $vmName, $gcsPrefix, $label, $batchId, $expIdx, $expTotal, $tgEnabled, $pollSecs, $projDir, $gcpBin, $exitCodeFile)
             $env:PATH = "$gcpBin;$env:PATH"
             Set-Location $projDir
-            # Build args array — cannot pass [switch] through -ArgumentList, so conditionally add -EnableTelegram
+            # Build args array — cannot pass [switch] through -ArgumentList, so conditionally add -DisableTelegram
             $monArgs = @(
                 "-ExecutionPolicy", "Bypass",
                 "-File", $monScript,
@@ -416,7 +417,7 @@ while (-not $allDone) {
                 "-PollIntervalSeconds", $pollSecs,
                 "-ExitCodeFile", $exitCodeFile
             )
-            if ($tgEnabled) { $monArgs += "-EnableTelegram" }
+            if (-not $tgEnabled) { $monArgs += "-DisableTelegram" }
             & powershell @monArgs
             return $LASTEXITCODE
         } -ArgumentList $monScript, $vmName_, $gcsPrefix_, $label_, $batchId_, $expIdx_, $expTotal_, $tgEnabled_, $pollSecs_, $projDir_, $gcloudBin, $exitCodeFile_

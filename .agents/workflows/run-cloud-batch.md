@@ -78,13 +78,28 @@ For a different batch, create a new manifest file and pass it with `-ManifestPat
 
 ---
 
-## Step 2 — Dry Run (validate before spending money)
+## Step 2 — Verify Data on GCS (Critical)
+
+> [!CAUTION]
+> If the `gcs_data_path` specified in your manifest does not exist in Google Cloud Storage, the batch VM instances will crash immediately upon startup.
+
+Before launching, explicitly verify that your data has been uploaded to the bucket path declared in the manifest.
+
+```powershell
+# Example: Ensure the parquet file actually exists
+gcloud storage ls gs://cltrainer-optuna-results/data/cl-1h_bk_HourSet_08.parquet
+```
+
+If it fails to find the file, you must run the data processor and upload it manually before proceeding.
+
+---
+
+## Step 3 — Dry Run (validate before spending money)
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\gcp\run_canary_batch.ps1 `
     -ManifestPath configs\canary_batch_manifest.json `
-    -DryRun `
-    -EnableTelegram
+    -DryRun
 ```
 
 This will:
@@ -96,12 +111,14 @@ Review the output. If anything looks wrong, fix the manifest before continuing.
 
 ---
 
-## Step 3 — Launch the Batch
+## Step 4 — Launch the Batch
+
+> [!TIP]
+> Telegram notifications are sent by default. If you wish to run the batch silently, pass the `-DisableTelegram` flag.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\gcp\run_canary_batch.ps1 `
-    -ManifestPath configs\canary_batch_manifest.json `
-    -EnableTelegram
+    -ManifestPath configs\canary_batch_manifest.json
 ```
 
 The orchestrator will:
@@ -128,10 +145,10 @@ The orchestrator will:
 
 ---
 
-## Step 4 — Monitor Progress
+## Step 5 — Monitor Progress
 
 ### Telegram
-All key events are sent automatically if `-EnableTelegram` is passed.
+All key events are sent automatically (unless `-DisableTelegram` is passed).
 
 ### Console
 The orchestrator prints status every 30 seconds showing active job states and queue depth.
@@ -151,20 +168,18 @@ gcloud storage ls gs://cltrainer-optuna-results/canary_3h_<timestamp>/
 
 ---
 
-## Step 5 — Collect Results
+## Step 6 — Collect Results
 
 After the batch completes (or at any point to see partial results):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\gcp\collect_batch_results.ps1 `
-    -EnableTelegram
+powershell -ExecutionPolicy Bypass -File .\gcp\collect_batch_results.ps1
 ```
 
 Or target a specific batch:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\gcp\collect_batch_results.ps1 `
-    -BatchId batch_20260424_0954 `
-    -EnableTelegram
+    -BatchId batch_20260424_0954
 ```
 
 This generates:
@@ -235,7 +250,7 @@ reports/
 
 ## Running a Single Experiment (not a batch)
 
-To run the original single-experiment workflow with Telegram support:
+To run the original single-experiment workflow with Telegram support (which is now default):
 ```powershell
 # Deploy
 powershell -ExecutionPolicy Bypass -File .\gcp\gcp_deploy_canary.ps1 `
@@ -244,12 +259,11 @@ powershell -ExecutionPolicy Bypass -File .\gcp\gcp_deploy_canary.ps1 `
     -TargetLong TARGET_TRIPLE_2x1_3H_LONG `
     -TargetShort TARGET_TRIPLE_2x1_3H_SHORT
 
-# Monitor with Telegram
+# Monitor with Telegram (default)
 powershell -ExecutionPolicy Bypass -File .\gcp\gcp_monitor.ps1 `
     -VmName optuna-runner-canary `
     -GcsPrefix canary_3h `
     -ExperimentLabel "Canary 3H" `
-    -EnableTelegram `
     -PollIntervalSeconds 120
 ```
 

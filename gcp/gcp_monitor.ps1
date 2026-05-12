@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Monitor a GCP VM running Optuna experiments. Auto-downloads results when done.
 .DESCRIPTION
@@ -24,7 +24,7 @@ param(
     [int]$StaleThresholdMin = 10,
     [switch]$NoDownload,
     # --- Telegram / Batch options ---
-    [switch]$EnableTelegram,
+    [switch]$DisableTelegram,
     [string]$ExperimentLabel = "",
     [string]$BatchId = "",
     [int]$ExperimentIndex = 0,
@@ -324,14 +324,14 @@ function Read-DotEnv {
 function Send-TelegramAlert {
     <# Fire-and-forget Telegram notification. Reads token/chat from .env. #>
     param([string]$Message)
-    if (-not $EnableTelegram) { return }
+    if ($DisableTelegram) { return }
 
     $env_vars = Read-DotEnv
     $token  = if ($env_vars["TELEGRAM_BOT_TOKEN"]) { $env_vars["TELEGRAM_BOT_TOKEN"] } else { $env:TELEGRAM_BOT_TOKEN }
     $chatId = if ($env_vars["TELEGRAM_CHAT_ID"])   { $env_vars["TELEGRAM_CHAT_ID"]   } else { $env:TELEGRAM_CHAT_ID   }
 
     if (-not $token -or $token -eq "") {
-        Write-Host "  [Telegram] TELEGRAM_BOT_TOKEN not set — skipping." -ForegroundColor Gray
+        Write-Host "  [Telegram] TELEGRAM_BOT_TOKEN not set - skipping." -ForegroundColor Gray
         return
     }
 
@@ -397,7 +397,7 @@ while ($true) {
         $searchInfo = "search $($gcsStatus.completed)/$($gcsStatus.total)"
         if ($gcsStatus.current) { $searchInfo += " (current: $($gcsStatus.current))" }
         $lastUpdate = if ($gcsStatus.last_update) { $gcsStatus.last_update } else { "?" }
-        Write-Host "[$now] VM=$vmStatus | $searchInfo | heartbeat=$lastUpdate | elapsed=${elapsed}m" -ForegroundColor Gray
+        Write-Host "[$now] VM=$vmStatus - $searchInfo - heartbeat=$lastUpdate - elapsed=${elapsed}m" -ForegroundColor Gray
         
         # 5-minute periodic telegram update
         if ($elapsed - $lastPeriodicUpdate -ge 5.0) {
@@ -425,7 +425,7 @@ while ($true) {
         # ---- Stale heartbeat detection ----
         $currentHB = $gcsStatus.last_update
         if ($currentHB -and $lastHeartbeat -and $currentHB -eq $lastHeartbeat) {
-            # Heartbeat hasn't changed — track how long
+            # Heartbeat hasn't changed - track how long
             if (-not $heartbeatUnchangedSince) {
                 $heartbeatUnchangedSince = Get-Date
             }
@@ -467,7 +467,7 @@ while ($true) {
                 }
             } # end stale threshold block
         } else {
-            # Heartbeat updated — reset tracker
+            # Heartbeat updated - reset tracker
             $heartbeatUnchangedSince = $null
         }
         $lastHeartbeat = $currentHB
@@ -511,7 +511,7 @@ while ($true) {
         # Try OOM check (may fail if VM is terminated)
         $oomResult = $null
         if ($vmStatus -eq "STOPPED") {
-            # VM is stopped but accessible — check OOM
+            # VM is stopped but accessible - check OOM
             try {
                 gcloud compute instances start $VmName --zone=$Zone --quiet 2>$null
                 Start-Sleep -Seconds 20
@@ -542,7 +542,9 @@ while ($true) {
                 -FinalStatus $vmStatus -MonitorWallTime $monitorWallTime
 
             # Determine exit code: 0=OK, 1=partial/failed
-            $scriptExitCode = if ($logReport.E2ECompleted -and $logReport.Failed -eq 0) { 0 } else { 1 }
+            $summaryJson = Join-Path $LocalOutputDir "pipeline_summary.json"
+            $artOk = Test-Path $summaryJson
+            $scriptExitCode = if ($logReport.E2ECompleted -and $logReport.Failed -eq 0 -and $artOk) { 0 } else { 1 }
 
             # Print summary to console
             $summaryColor = if ($scriptExitCode -eq 0) { "Green" } else { "Yellow" }
@@ -555,17 +557,17 @@ while ($true) {
             Write-Host "  Passed:       $($logReport.Passed) searches"
             Write-Host "  Failed:       $($logReport.Failed) searches"
             Write-Host "  E2E Pipeline: $(if ($logReport.E2ECompleted) { 'COMPLETED' } else { 'NOT COMPLETED' })"
+            Write-Host "  Artifacts:    $(if ($artOk) { 'VERIFIED' } else { 'MISSING (pipeline_summary.json)' })"
             Write-Host "  Wall Time:    $($logReport.WallTime)"
             if ($oomResult) { Write-Host "  OOM Events:   YES - check report" -ForegroundColor Red }
             if ($wasPreempted) { Write-Host "  SPOT:         Preempted by GCP" -ForegroundColor Red }
             Write-Host "  Report:       $reportPath"
-            Write-Host "  Artifacts:    $LocalOutputDir"
+            Write-Host "  Artifact Path:$LocalOutputDir"
             Write-Host "========================================================" -ForegroundColor $summaryColor
 
             # --- Telegram: completion message with ensemble PnL if available ---
             $pnlLines = @()
-            $summaryJson = Join-Path $LocalOutputDir "pipeline_summary.json"
-            if (Test-Path $summaryJson) {
+            if ($artOk) {
                 try {
                     $ps = Get-Content $summaryJson -Raw | ConvertFrom-Json
                     foreach ($key in $ps.backtest_results.PSObject.Properties.Name) {
@@ -575,12 +577,15 @@ while ($true) {
                         }
                     }
                 } catch {}
+            } else {
+                $pnlLines += "⚠️ Artifact download failed (pipeline_summary.json not found locally)."
+                $pnlLines += "Check if E2E crashed or GCS upload was rate-limited."
             }
             $icon        = if ($scriptExitCode -eq 0) { "SUCCESS" } else { "FAILED" }
             $statusLabel = if ($scriptExitCode -eq 0) { "SUCCESS" } else { "FAILED" }
             $oomLine     = if ($oomResult)    { "`nOOM: $oomResult" }    else { "" }
             $preemptLine = if ($wasPreempted) { "`nSPOT preempted by GCP" } else { "" }
-            $pnlBlock    = if ($pnlLines)     { "`nEnsemble Results:`n" + ($pnlLines -join "`n") } else { "" }
+            $pnlBlock    = if ($pnlLines)     { "`nArtifact / Ensemble Results:`n" + ($pnlLines -join "`n") } else { "" }
             Send-TelegramAlert ("Job $statusLabel`n" +
                 "VM: $VmName`n" +
                 "Searches: $($logReport.Passed)/$($logReport.Total) passed`n" +
@@ -589,7 +594,7 @@ while ($true) {
                 $oomLine + $preemptLine + $pnlBlock)
 
         } else {
-            # No log found — VM died before producing output
+            # No log found - VM died before producing output
             $scriptExitCode = 2
             $oomLine = if ($oomResult) { "`n$oomResult" } else { "" }
             Write-Host ""
