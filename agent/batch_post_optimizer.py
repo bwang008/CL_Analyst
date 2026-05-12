@@ -97,6 +97,36 @@ def run_single_optimization(
         return {"status": "FAILED", "error": str(e)}
 
 
+def align_markdown_table(lines: list[str]) -> str:
+    if not lines:
+        return ""
+    parsed_rows = []
+    for line in lines:
+        if not line.strip():
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        parsed_rows.append(cells)
+    if not parsed_rows:
+        return ""
+    max_cols = max(len(r) for r in parsed_rows)
+    widths = [0] * max_cols
+    for row in parsed_rows:
+        for i, cell in enumerate(row):
+            if i < max_cols and not set(cell).issubset({'-', ' '}):
+                widths[i] = max(widths[i], len(cell))
+    aligned_lines = []
+    for row in parsed_rows:
+        formatted_cells = []
+        for i in range(max_cols):
+            cell = row[i] if i < len(row) else ""
+            if set(cell).issubset({'-', ' '}) and cell:
+                formatted_cells.append("-" * widths[i])
+            else:
+                formatted_cells.append(cell.ljust(widths[i]))
+        aligned_lines.append("| " + " | ".join(formatted_cells) + " |")
+    return "\n".join(aligned_lines)
+
+
 def generate_optimized_report(
     batch_dir: str,
     progress: dict,
@@ -121,8 +151,8 @@ def generate_optimized_report(
         for metric in metric_keys:
             lines.append(f"### {section_name} ({metric.replace('_', ' ').title()})")
             lines.append("")
-            lines.append("| Experiment | Trades (pre) | Trades (opt) | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | Opt Threshold | Opt TP | Opt SL |")
-            lines.append("|---|---|---|---|---|---|---|---|---|---|")
+            lines.append("| Experiment | Trades (pre) | Trades (opt) | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | Opt Thr | Opt TP | Opt SL | Opt Trail | Opt Cool | Opt Hold | Opt Consec |")
+            lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 
             for exp in progress.get("experiments", []):
                 if exp.get("status") != "COMPLETED":
@@ -153,9 +183,13 @@ def generate_optimized_report(
                 opt = all_results.get(opt_key, {})
 
                 if opt.get("status") == "OK":
-                    om = opt["metrics"]
-                    oc = opt.get("config", {})
-                    opt_info = oc.get("optuna_info", {})
+                    om = opt.get("metrics", {})
+                    # Handle both in-memory (with full config) and JSON-loaded (stripped) structures
+                    if "optuna_info" in opt:
+                        opt_info = opt["optuna_info"]
+                    else:
+                        opt_info = opt.get("config", {}).get("optuna_info", {})
+                    
                     params = opt_info.get("params", {})
                     opt_trades = om.get("trade_count", 0)
                     opt_pf = om.get("profit_factor", 0.0)
@@ -163,18 +197,22 @@ def generate_optimized_report(
                     opt_thr = params.get("entry_threshold", "-")
                     opt_tp = params.get("tp_atr_mult", "-")
                     opt_sl = params.get("sl_atr_mult", "-")
+                    opt_trail = params.get("trailing_atr_mult", "-")
+                    opt_cool = params.get("cooldown_bars", "-")
+                    opt_hold = params.get("max_hold_bars", "-")
+                    opt_consec = params.get("consecutive_signal_threshold", "-")
                     lines.append(
                         f"| {label} | {base_trades} | {opt_trades} | "
                         f"{base_pf:.2f} | {opt_pf:.2f} | "
                         f"${base_pnl:,.0f} | ${opt_pnl:,.0f} | "
-                        f"{opt_thr} | {opt_tp} | {opt_sl} |"
+                        f"{opt_thr} | {opt_tp} | {opt_sl} | {opt_trail} | {opt_cool} | {opt_hold} | {opt_consec} |"
                     )
                 else:
                     reason = opt.get("error", "not run") if opt else "not run"
                     lines.append(
                         f"| {label} | {base_trades} | - | "
                         f"{base_pf:.2f} | - | "
-                        f"${base_pnl:,.0f} | - | - | - | - |"
+                        f"${base_pnl:,.0f} | - | - | - | - | - | - | - | - |"
                     )
             lines.append("")
 
@@ -186,8 +224,11 @@ def generate_optimized_report(
     for key, result in sorted(all_results.items()):
         if result.get("status") != "OK":
             continue
-        cfg = result.get("config", {})
-        opt_info = cfg.get("optuna_info", {})
+        if "optuna_info" in result:
+            opt_info = result["optuna_info"]
+        else:
+            opt_info = result.get("config", {}).get("optuna_info", {})
+            
         params = opt_info.get("params", {})
         metrics = result.get("metrics", {})
         baseline = opt_info.get("baseline_metrics", {})
@@ -212,7 +253,19 @@ def generate_optimized_report(
         lines.append(f"| Wall Time | - | {opt_info.get('wall_time_seconds', '-')}s |")
         lines.append("")
 
-    return "\n".join(lines)
+    out_lines = []
+    table_lines = []
+    for line in lines:
+        if line.strip().startswith("|"):
+            table_lines.append(line)
+        else:
+            if table_lines:
+                out_lines.append(align_markdown_table(table_lines))
+                table_lines = []
+            out_lines.append(line)
+    if table_lines:
+        out_lines.append(align_markdown_table(table_lines))
+    return "\n".join(out_lines)
 
 
 def main():
