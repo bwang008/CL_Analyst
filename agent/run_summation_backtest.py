@@ -222,9 +222,20 @@ def print_comparison_table(
 def build_single_model_config(opt_cfg: dict, direction: str) -> dict:
     """Convert an optimizer-output config into a clean SingleModelStrategy config.
 
-    The optimizer writes TP/SL/trailing/threshold to top-level keys and
-    to cfg["models"]["long/short"]["threshold"]. This function reshapes
-    that into a proper SingleModelStrategy config.
+    CRITICAL: The optimizer output may be a TieredEnsembleStrategy config where
+    the ACTUAL effective parameters come from ``cfg["long"]["tiers"]`` or
+    ``cfg["short"]["tiers"]``, NOT from the top-level or optuna_info.params.
+
+    Tier-level values override top-level values in TieredEnsembleStrategy:
+        - tier.min_prob  → the real threshold (overrides entry_threshold)
+        - tier.tp_atr_mult → the real TP (overrides top-level tp_atr_mult)
+        - tier.sl_atr_mult → the real SL (overrides top-level sl_atr_mult)
+        - tier.trailing_atr_mult → the real trailing (if not None)
+        - tier.max_hold_bars → the real max hold (if not None)
+
+    This function detects TieredEnsembleStrategy configs and extracts the
+    true effective parameters from the tier, falling back to top-level/params
+    only when the tier value is None.
 
     Args:
         opt_cfg: Raw optimizer output JSON (e.g., _opt_long_logloss_opt.json).
@@ -234,30 +245,71 @@ def build_single_model_config(opt_cfg: dict, direction: str) -> dict:
         A clean config dict for BacktestEngine.from_config().
     """
     params = opt_cfg.get("optuna_info", {}).get("params", {})
+    dir_key = direction.lower()  # "long" or "short"
 
-    # Build a clean SingleModelStrategy config
+    # --- Detect TieredEnsembleStrategy tier overrides ---
+    # If the original config was TieredEnsembleStrategy, the tier values
+    # were the REAL effective parameters (they override the top-level).
+    tier_block = opt_cfg.get(dir_key, {})
+    tiers = tier_block.get("tiers", [])
+    tier = tiers[0] if tiers else {}
+
+    was_tiered = opt_cfg.get("execution_class") == "TieredEnsembleStrategy" and tier
+    if was_tiered:
+        # Tier values override top-level — extract the TRUE effective params
+        eff_threshold = tier.get("min_prob", 0.55)
+        eff_tp = tier.get("tp_atr_mult")  # may be None → falls back to top-level
+        eff_sl = tier.get("sl_atr_mult")  # may be None → falls back to top-level
+        eff_trail = tier.get("trailing_atr_mult")  # may be None → falls back to top-level
+        eff_mhb = tier.get("max_hold_bars")  # may be None → falls back to top-level
+
+        print(f"  [!] Detected TieredEnsembleStrategy config for {direction}.")
+        print(f"      Extracting TRUE effective params from tier (overrides top-level):")
+        print(f"      Tier threshold={eff_threshold}  tp={eff_tp}  sl={eff_sl}  "
+              f"trail={eff_trail}  mhb={eff_mhb}")
+    else:
+        eff_threshold = None
+        eff_tp = None
+        eff_sl = None
+        eff_trail = None
+        eff_mhb = None
+
+    # Resolve each parameter: tier override → optuna params → top-level config
+    def _resolve(tier_val, param_key, cfg_key, default):
+        if tier_val is not None:
+            return tier_val
+        if param_key in params:
+            return params[param_key]
+        return opt_cfg.get(cfg_key, default)
+
+    threshold = _resolve(eff_threshold, "entry_threshold", "entry_threshold", 0.55)
+    tp = _resolve(eff_tp, "tp_atr_mult", "tp_atr_mult", 2.0)
+    sl = _resolve(eff_sl, "sl_atr_mult", "sl_atr_mult", 1.0)
+    trail = _resolve(eff_trail, "trailing_atr_mult", "trailing_atr_mult", 1.0)
+    mhb = _resolve(eff_mhb, "max_hold_bars", "max_hold_bars", 288)
+
     cfg = {
         "nickname": f"{opt_cfg.get('nickname', 'unknown')}_{direction}",
         "execution_class": "SingleModelStrategy",
         "direction": direction,
-        "tp_atr_mult": params.get("tp_atr_mult", opt_cfg.get("tp_atr_mult", 2.0)),
-        "sl_atr_mult": params.get("sl_atr_mult", opt_cfg.get("sl_atr_mult", 1.0)),
-        "trailing_atr_mult": params.get("trailing_atr_mult", opt_cfg.get("trailing_atr_mult", 1.0)),
+        "tp_atr_mult": tp,
+        "sl_atr_mult": sl,
+        "trailing_atr_mult": trail,
         "trailing_sl_atr_offset": opt_cfg.get("trailing_sl_atr_offset", 0.25),
         "cooldown_bars": params.get("cooldown_bars", opt_cfg.get("cooldown_bars", 5)),
         "tp_cooldown_bars": opt_cfg.get("tp_cooldown_bars", 0),
         "sl_cooldown_bars": opt_cfg.get("sl_cooldown_bars", 4),
-        "max_hold_bars": params.get("max_hold_bars", opt_cfg.get("max_hold_bars", 288)),
+        "max_hold_bars": int(mhb),
         "allow_concurrent": False,
         "max_concurrent": 1,
-        "entry_threshold": params.get("entry_threshold", opt_cfg.get("entry_threshold", 0.55)),
+        "entry_threshold": threshold,
         "consecutive_signal_threshold": params.get(
             "consecutive_signal_threshold",
             opt_cfg.get("consecutive_signal_threshold", 0),
         ),
         "models": {
-            direction.lower(): {
-                "threshold": params.get("entry_threshold", opt_cfg.get("entry_threshold", 0.55)),
+            dir_key: {
+                "threshold": threshold,
             }
         },
     }

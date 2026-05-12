@@ -353,6 +353,10 @@ def build_live_features(
     # Default of 12 is for 5m bars; must be 1 for 1h/2h/4h to avoid
     # 12× over-sized macro windows that silently underestimate context range.
     _bars_per_hour = {"5m": 12, "1h": 1, "2h": 0.5, "4h": 0.25}.get(bar_size, 12)
+    _has_ichimoku = any(f.startswith("ICHIMOKU_") for f in feature_names)
+    _has_dma = any(f.startswith("TREND_DMA_") for f in feature_names)
+    _has_exh_div = any(f.startswith("EXHDIV_") for f in feature_names)
+
     factory = AlphaFactory(work, bars_per_hour=_bars_per_hour)
     if lean:
         # Lean path: momentum + time features only (no macro, no extended)
@@ -362,6 +366,9 @@ def build_live_features(
             include_momentum=True,
             include_macro=False,
             include_extended=False,
+            include_ichimoku=_has_ichimoku,
+            include_dma=_has_dma,
+            include_exhaustion_divergence=_has_exh_div,
         )
     elif is_set_07:
         work = factory.add_all_features(
@@ -370,12 +377,18 @@ def build_live_features(
             include_macro=True,
             include_extended=True,
             macro_windows=macro_windows,
+            include_ichimoku=_has_ichimoku,
+            include_dma=_has_dma,
+            include_exhaustion_divergence=_has_exh_div,
         )
     else:
         work = factory.add_all_features(
             windows=alpha_windows,
             include_momentum=True,
             include_macro=True,
+            include_ichimoku=_has_ichimoku,
+            include_dma=_has_dma,
+            include_exhaustion_divergence=_has_exh_div,
         )
 
     # 2b. Add STOCH specifically if lean but the strategy requests it
