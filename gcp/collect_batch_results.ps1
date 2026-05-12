@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Collect and compare results from a completed canary batch run.
 .DESCRIPTION
@@ -110,6 +110,46 @@ function Format-Metric {
     try { return ([double]$val).ToString($fmt) } catch { return "$val" }
 }
 
+
+
+function Align-MarkdownTable {
+    param([string[]]$Lines)
+    $validLines = $Lines | Where-Object { $_.Trim() -ne '' }
+    if ($validLines.Count -eq 0) { return '' }
+    
+    $parsedRows = @()
+    foreach ($line in $validLines) {
+        $cells = $line.Trim().Trim('|').Split('|') | ForEach-Object { $_.Trim() }
+        $parsedRows += ,$cells
+    }
+    
+    $maxCols = 0
+    foreach ($row in $parsedRows) { if ($row.Count -gt $maxCols) { $maxCols = $row.Count } }
+    
+    $widths = @(0) * $maxCols
+    foreach ($row in $parsedRows) {
+        for ($i = 0; $i -lt $row.Count; $i++) {
+            if ($row[$i] -match '^-+$') { continue }
+            $len = $row[$i].Length
+            # Emojis have length 2 but display as 1 or 2. We'll just use string length.
+            if ($len -gt $widths[$i]) { $widths[$i] = $len }
+        }
+    }
+    
+    $alignedLines = @()
+    foreach ($row in $parsedRows) {
+        $formattedCells = @()
+        for ($i = 0; $i -lt $row.Count; $i++) {
+            if ($row[$i] -match '^-+$') {
+                $formattedCells += '-' * $widths[$i]
+            } else {
+                $formattedCells += $row[$i].PadRight($widths[$i])
+            }
+        }
+        $alignedLines += '| ' + ($formattedCells -join ' | ') + ' |'
+    }
+    return $alignedLines -join "`n"
+}
 
 # ============================================================
 # COLLECT RESULTS FROM EACH EXPERIMENT
@@ -275,13 +315,54 @@ $artRows = $allRows | ForEach-Object {
     "| $($_.Label) | $($_.Status) | $artOk | $($_.LocalDir) |"
 }
 
-$reportContent = $header + ($llLongRows -join "`n") +
-    $apLongHeader  + ($llApRows    -join "`n") +
-    $shortLLHeader + ($shortLLRows -join "`n") +
-    $shortAPHeader + ($shortAPRows -join "`n") +
-    $ensHeader     + ($ensRows     -join "`n") +
-    $failSection   +
-    $artifactSection + "`n" + ($artRows -join "`n") + "`n"
+$headerLines = $header -split "`n"
+$llLongAligned = Align-MarkdownTable ($headerLines[-2..-1] + $llLongRows)
+$headerTop = ($headerLines[0..($headerLines.Count-3)] -join "`n")
+
+$apLongLines = $apLongHeader -split "`n"
+$llApAligned = Align-MarkdownTable ($apLongLines[-2..-1] + $llApRows)
+$apLongTop = ($apLongLines[0..($apLongLines.Count-3)] -join "`n")
+
+$shortLLLines = $shortLLHeader -split "`n"
+$shortLLAligned = Align-MarkdownTable ($shortLLLines[-2..-1] + $shortLLRows)
+$shortLLTop = ($shortLLLines[0..($shortLLLines.Count-3)] -join "`n")
+
+$shortAPLines = $shortAPHeader -split "`n"
+$shortAPAligned = Align-MarkdownTable ($shortAPLines[-2..-1] + $shortAPRows)
+$shortAPTop = ($shortAPLines[0..($shortAPLines.Count-3)] -join "`n")
+
+$ensLines = $ensHeader -split "`n"
+$ensAligned = Align-MarkdownTable ($ensLines[-2..-1] + $ensRows)
+$ensTop = ($ensLines[0..($ensLines.Count-3)] -join "`n")
+
+$failAligned = ""
+if ($failRows.Count -gt 0) {
+    $failLinesSplit = $failSection -split "`n"
+    # Find the table header
+    $tableStartIdx = -1
+    for ($i=0; $i -lt $failLinesSplit.Count; $i++) {
+        if ($failLinesSplit[$i] -match '^\| Experiment \|') { $tableStartIdx = $i; break }
+    }
+    if ($tableStartIdx -ge 0) {
+        $failAlignedTable = Align-MarkdownTable ($failLinesSplit[$tableStartIdx..($failLinesSplit.Count-1)])
+        $failTop = ($failLinesSplit[0..($tableStartIdx-1)] -join "`n")
+        $failAligned = $failTop + "`n" + $failAlignedTable + "`n"
+    } else {
+        $failAligned = $failSection
+    }
+}
+
+$artLines = $artifactSection -split "`n"
+$artAligned = Align-MarkdownTable ($artLines[-2..-1] + $artRows)
+$artTop = ($artLines[0..($artLines.Count-3)] -join "`n")
+
+$reportContent = $headerTop + "`n" + $llLongAligned + "`n" +
+    $apLongTop + "`n" + $llApAligned + "`n" +
+    $shortLLTop + "`n" + $shortLLAligned + "`n" +
+    $shortAPTop + "`n" + $shortAPAligned + "`n" +
+    $ensTop + "`n" + $ensAligned + "`n" +
+    $failAligned + "`n" +
+    $artTop + "`n" + $artAligned + "`n"
 
 $reportContent | Out-File -FilePath $ReportPath -Encoding utf8 -Force
 Write-Host "Report saved: $ReportPath" -ForegroundColor Green
@@ -313,7 +394,7 @@ foreach ($row in $rows) {
 if ($failRows.Count -gt 0) {
     $tgLines += "`n*Failed:* " + ($failRows | ForEach-Object { $_.Label }) -join ", "
 }
-$tgLines += "`n_Full report: $ReportPath_"
+$tgLines += "`n*Full report:* ``$ReportPath``"
 Send-TelegramMessage ($tgLines -join "`n")
 
 Write-Host ""

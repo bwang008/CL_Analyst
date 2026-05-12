@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Quota-aware batch orchestrator for canary Optuna experiments.
 .DESCRIPTION
@@ -546,11 +546,13 @@ Write-Host "============================================================" -Foreg
 Send-BatchTelegram ("$(if ($batchState.failed -eq 0) { '🏁' } else { '⚠️' }) *Batch Complete*`n" +
     "Completed: $($batchState.completed)/$($batchState.total)`n" +
     "Failed: $($batchState.failed)`n" +
-    "Run collect_batch_results.ps1 to generate the comparison report.")
+    "_Generating consolidated report..._")
 
 Write-Host ""
-Write-Host "Next: generate the consolidated report:" -ForegroundColor Cyan
-Write-Host ('  powershell -ExecutionPolicy Bypass -File .\gcp\collect_batch_results.ps1 -BatchId ' + $BatchId) -ForegroundColor Cyan
+Write-Host "Generating the consolidated report..." -ForegroundColor Cyan
+$collectArgs = @("-ExecutionPolicy", "Bypass", "-File", ".\gcp\collect_batch_results.ps1", "-BatchId", $BatchId)
+if ($DisableTelegram) { $collectArgs += "-DisableTelegram" }
+& powershell @collectArgs
 Write-Host ""
 
 exit $(if ($batchState.failed -eq 0) { 0 } else { 1 })
