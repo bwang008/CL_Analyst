@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Provisions and launches the FULL PRODUCTION ALPHA SEARCH VM.
 .DESCRIPTION
@@ -208,7 +208,7 @@ $tmuxCheck = gcloud compute ssh $VmName --zone=$Zone `
 if ($tmuxCheck -match "RUNNING") {
     Write-Host "  tmux session 'production' is active!" -ForegroundColor Green
     
-    Send-TelegramAlert "🎬 Deploy Success: Production Run`nVM: $VmName`nGCS: gs://cltrainer-optuna-results/production_4h_v2/`nCheck status with: .\gcp\gcp_monitor.ps1 -VmName $VmName -GcsPrefix production_4h_v2"
+    Send-TelegramAlert "[STARTING] Deploy Success: Production Run`nVM: $VmName`nGCS: gs://cltrainer-optuna-results/production_4h_v2/`nCheck status with: .\gcp\gcp_monitor.ps1 -VmName $VmName -GcsPrefix production_4h_v2"
     
     if (-not $NoMonitor) {
         $monScript = Join-Path $ScriptDir "gcp_monitor.ps1"
@@ -227,7 +227,7 @@ if ($tmuxCheck -match "RUNNING") {
 } else {
     Write-Host "  WARNING: tmux session may not have started." -ForegroundColor Yellow
     Write-Host "  Debug with: gcloud compute ssh $VmName --command='tmux attach -t production'"
-    Send-TelegramAlert "⚠️ Deploy Warning: Production Run`nVM: $VmName`ntmux session may not have started. Check logs."
+    Send-TelegramAlert "[WARNING] Deploy Warning: Production Run`nVM: $VmName`ntmux session may not have started. Check logs."
 }
 
 Write-Host ""

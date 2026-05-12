@@ -1,0 +1,26 @@
+{
+    "nickname": "Long_Independent",
+    "execution_class": "SingleModelStrategy",
+    "direction": "LONG",
+    "models": {
+        "long": {
+            "experiment_id": "E2E_HourSet_08_long_logloss",
+            "model_path": "reports/scout_hs08_3x1_6h_20260511_2116/registry/canary_output/final_long_model_logloss.pkl",
+            "predictions_path": "reports/scout_hs08_3x1_6h_20260511_2116/registry/canary_output/oos_predictions_long_logloss.csv",
+            "threshold": 0.55
+        }
+    },
+    "tp_atr_mult": 10.0,
+    "sl_atr_mult": 4.5,
+    "trailing_atr_mult": 2.5,
+    "max_hold_bars": 504,
+    "cooldown_bars": 5,
+    "tp_cooldown_bars": 0,
+    "sl_cooldown_bars": 4,
+    "consecutive_signal_threshold": 0,
+    "entry_threshold": 0.55,
+    "allow_concurrent": false,
+    "max_concurrent": 1,
+    "bar_size": "1h",
+    "execution_symbol": "CL"
+}

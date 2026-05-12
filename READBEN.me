@@ -255,6 +255,13 @@ python -m src.live_execution.live_trader --config configs/strategies/4h_ensemble
 #Backtest Hourly
 python agent/backtest_engine.py --config configs/strategies/hourly_ensemble_004.json --data "C:\CL_Analyst_Data\data\processed\cl-1h_bk_HourSet_03.parquet" --slippage-per-side 0.01
 
+python agent/backtest_engine.py --config configs/strategies/HourSet_08_Ensemble_01_opt.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" --slippage-per-side 0.01
+python agent/backtest_engine.py --config configs/strategies/HourSet_08_Ensemble_01_long.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" --slippage-per-side 0.01
+
+# Potentially new backtester, might delete this:
+python agent/run_summation_backtest.py --long-config configs/strategies/HourSet_08_Ensemble_01_long.json --short-config configs/strategies/HourSet_08_Ensemble_01_short.json --ohlcv data/processed/CL_HourSet_08.parquet
+
+
 Backtest 4H
 conda run -n trader python agent/backtest_engine.py --config configs/strategies/4h_ensemble_001.json --data C:\CL_Analyst_Data\data\processed\cl-4h_bk_set_01.parquet
 

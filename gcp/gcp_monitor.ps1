@@ -578,7 +578,7 @@ while ($true) {
                     }
                 } catch {}
             } else {
-                $pnlLines += "⚠️ Artifact download failed (pipeline_summary.json not found locally)."
+                $pnlLines += "[WARNING] Artifact download failed (pipeline_summary.json not found locally)."
                 $pnlLines += "Check if E2E crashed or GCS upload was rate-limited."
             }
             $icon        = if ($scriptExitCode -eq 0) { "SUCCESS" } else { "FAILED" }

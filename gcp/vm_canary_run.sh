@@ -289,6 +289,7 @@ if [ $COMPLETED -gt 0 ]; then
         --metrics logloss average_precision
         --study-prefix "$CANARY_PREFIX"
         --targets "$TARGET_LONG" "$TARGET_SHORT"
+        --opt-trials 300
     )
 
     python gcp/vm_e2e_pipeline.py "${E2E_ARGS[@]}" 2>&1 | tee -a "$LOG" || true

@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Provisions a canary VM, uploads code + downloads data from GCS, and launches the light canary pipeline.
 .DESCRIPTION
@@ -252,7 +252,7 @@ $tmuxCheck = gcloud compute ssh $VmName --zone=$Zone `
 if ($tmuxCheck -match "RUNNING") {
     Write-Host "  tmux session 'canary' is active!" -ForegroundColor Green
     
-    Send-TelegramAlert "🎬 Deploy Success: Canary Run`nVM: $VmName`nGCS: gs://cltrainer-optuna-results/$GcsPrefix/`nCheck status with: .\gcp\gcp_monitor.ps1 -VmName $VmName -GcsPrefix $GcsPrefix"
+    Send-TelegramAlert "[STARTING] Deploy Success: Canary Run`nVM: $VmName`nGCS: gs://cltrainer-optuna-results/$GcsPrefix/`nCheck status with: .\gcp\gcp_monitor.ps1 -VmName $VmName -GcsPrefix $GcsPrefix"
     
     if (-not $NoMonitor) {
         $monScript = Join-Path $ScriptDir "gcp_monitor.ps1"
@@ -271,7 +271,7 @@ if ($tmuxCheck -match "RUNNING") {
 } else {
     Write-Host "  WARNING: tmux session may not have started." -ForegroundColor Yellow
     Write-Host "  Debug with: gcloud compute ssh $VmName --command='tmux attach -t canary'"
-    Send-TelegramAlert "⚠️ Deploy Warning: Canary Run`nVM: $VmName`ntmux session may not have started. Check logs."
+    Send-TelegramAlert "[WARNING] Deploy Warning: Canary Run`nVM: $VmName`ntmux session may not have started. Check logs."
 }
 
 Write-Host ""

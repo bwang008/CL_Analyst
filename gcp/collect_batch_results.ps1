@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Collect and compare results from a completed canary batch run.
 .DESCRIPTION
@@ -168,12 +168,12 @@ foreach ($exp in $progress.experiments) {
         WallTimeMin    = $exp.wall_time_min
         ArtifactOk     = $exp.artifact_verified
         # Per-model metrics (filled below)
-        LongLL_Trades  = "—"; LongLL_WR  = "—"; LongLL_PF  = "—"; LongLL_PnL  = "—"
-        LongAP_Trades  = "—"; LongAP_WR  = "—"; LongAP_PF  = "—"; LongAP_PnL  = "—"
-        ShortLL_Trades = "—"; ShortLL_WR = "—"; ShortLL_PF = "—"; ShortLL_PnL = "—"
-        ShortAP_Trades = "—"; ShortAP_WR = "—"; ShortAP_PF = "—"; ShortAP_PnL = "—"
-        EnsLL_Trades   = "—"; EnsLL_WR   = "—"; EnsLL_PF   = "—"; EnsLL_PnL   = "—"
-        EnsAP_Trades   = "—"; EnsAP_WR   = "—"; EnsAP_PF   = "—"; EnsAP_PnL   = "—"
+        LongLL_Trades  = "-"; LongLL_WR  = "-"; LongLL_PF  = "-"; LongLL_PnL  = "-"
+        LongAP_Trades  = "-"; LongAP_WR  = "-"; LongAP_PF  = "-"; LongAP_PnL  = "-"
+        ShortLL_Trades = "-"; ShortLL_WR = "-"; ShortLL_PF = "-"; ShortLL_PnL = "-"
+        ShortAP_Trades = "-"; ShortAP_WR = "-"; ShortAP_PF = "-"; ShortAP_PnL = "-"
+        EnsLL_Trades   = "-"; EnsLL_WR   = "-"; EnsLL_PF   = "-"; EnsLL_PnL   = "-"
+        EnsAP_Trades   = "-"; EnsAP_WR   = "-"; EnsAP_PF   = "-"; EnsAP_PnL   = "-"
         FailureReason  = $exp.failure_reason
         LocalDir       = $localDir
     }
@@ -213,7 +213,7 @@ $allRows = $rows + $failRows
 
 $ts      = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 $header  = @"
-# Batch Experiment Summary — $BatchId
+# Batch Experiment Summary - $BatchId
 
 Generated: $ts
 Manifest: $($progress.manifest)
@@ -311,7 +311,7 @@ $artifactSection = @"
 |---|---|---|---|
 "@
 $artRows = $allRows | ForEach-Object {
-    $artOk = if ($_.ArtifactOk) { "✅" } elseif ($null -eq $_.ArtifactOk) { "—" } else { "❌" }
+    $artOk = if ($_.ArtifactOk) { "[SUCCESS]" } elseif ($null -eq $_.ArtifactOk) { "-" } else { "❌" }
     "| $($_.Label) | $($_.Status) | $artOk | $($_.LocalDir) |"
 }
 
@@ -376,7 +376,7 @@ Write-Host "ENSEMBLE SUMMARY (quick view):" -ForegroundColor Cyan
 Write-Host ("{0,-30} {1,-12} {2,-8} {3,-8} {4,-12} {5,-8} {6,-8} {7,-12}" -f "Experiment","Status","LL PF","LL PnL","AP PF","AP PnL","Wall(m)","ArtOk")
 Write-Host ("-" * 100)
 foreach ($row in $allRows) {
-    $artStr = if ($row.ArtifactOk) { "YES" } elseif ($null -eq $row.ArtifactOk) { "—" } else { "NO" }
+    $artStr = if ($row.ArtifactOk) { "YES" } elseif ($null -eq $row.ArtifactOk) { "-" } else { "NO" }
     $color  = if ($row.Status -eq "COMPLETED") { "White" } else { "Yellow" }
     Write-Host ("{0,-30} {1,-12} {2,-8} {3,-8} {4,-12} {5,-8} {6,-8} {7,-12}" -f `
         $row.Label, $row.Status, $row.EnsLL_PF, "`$$($row.EnsLL_PnL)", $row.EnsAP_PF, "`$$($row.EnsAP_PnL)", $row.WallTimeMin, $artStr) -ForegroundColor $color

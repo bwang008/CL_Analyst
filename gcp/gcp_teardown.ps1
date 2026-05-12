@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Downloads results and deletes the GCP VM to stop charges.
 .EXAMPLE
@@ -87,6 +87,6 @@ if ($CleanAll) {
 
 Write-Host ""
 Write-Host "=====================================================" -ForegroundColor Green
-Write-Host " TEARDOWN COMPLETE — NO MORE CHARGES" -ForegroundColor Green
+Write-Host " TEARDOWN COMPLETE - NO MORE CHARGES" -ForegroundColor Green
 Write-Host "=====================================================" -ForegroundColor Green
 Write-Host ""

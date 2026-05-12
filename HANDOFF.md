@@ -312,6 +312,9 @@ Creates registry-compatible bundles + production_artifacts.zip → GCS
 
 > **⚠️ CRITICAL (2026-03-23)**: Do NOT use `f0.5` in Optuna for targets with <5% positive rate. F0.5 uses a hard 0.50 threshold — on a 3% target, all probabilities fall below 0.50 and Optuna goes blind (every trial returns 0.00). Use `average_precision` instead.
 
+### 🚨 Script Encoding & Notification Rules
+**DO NOT use emojis** (🏁, ⚠️, 🚫, etc.) or multi-byte special characters in `.ps1` orchestration or monitor scripts (like `run_canary_batch.ps1` or `gcp_monitor.ps1`). PowerShell 5.1 incorrectly parses UTF-8 files without a BOM, reading emojis as garbage ANSI characters which frequently collide with syntax tokens (like quotes) and cause bizarre "missing terminator" or "missing closing '}'" crashes. Use bracketed ASCII tags instead (`[COMPLETE]`, `[WARNING]`, `[FAILED]`).
+
 ### Quota Notes
 | Quota | Current | Needed |
 |-------|:-------:|:------:|

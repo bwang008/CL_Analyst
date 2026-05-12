@@ -123,7 +123,7 @@ function Save-Progress {
 
 function Test-ArtifactsDownloaded {
     <#
-    Artifact verification gate — runs BEFORE deleting the VM.
+    Artifact verification gate - runs BEFORE deleting the VM.
     Returns $true only when the minimum expected artifacts are on disk.
     #>
     param(
@@ -142,7 +142,7 @@ function Test-ArtifactsDownloaded {
             return $true
         }
 
-        Write-Host "  [ArtifactGate] Attempt $attempt/$MaxRetries — missing artifacts:" -ForegroundColor Yellow
+        Write-Host "  [ArtifactGate] Attempt $attempt/$MaxRetries - missing artifacts:" -ForegroundColor Yellow
         if (-not $summaryOk) { Write-Host "    - pipeline_summary.json" -ForegroundColor Yellow }
         if (-not $logsOk)    { Write-Host "    - logs/ directory empty or missing" -ForegroundColor Yellow }
         if (-not $modelsOk)  { Write-Host "    - no *.pkl models found" -ForegroundColor Yellow }
@@ -225,7 +225,7 @@ Write-Host ""
 
 # DryRun: validate and exit
 if ($DryRun) {
-    Write-Host "=== DRY RUN — No VMs will be created ===" -ForegroundColor Cyan
+    Write-Host "=== DRY RUN - No VMs will be created ===" -ForegroundColor Cyan
     $idx = 0
     foreach ($exp in $expList) {
         $idx++
@@ -242,10 +242,10 @@ if ($DryRun) {
         Write-Host "    Machine:     $machineType"
         Write-Host "    Target L:    $targetLong"
         Write-Host "    Target S:    $targetShort"
-        Write-Host "    Local out:   reports\$tsPrefix\"
+        Write-Host "    Local out:   reports\$tsPrefix"
     }
     Write-Host ""
-    Send-BatchTelegram "🔍 *Dry Run Validated*`n$($expList.Count) experiments in manifest.`n_No VMs were created._"
+    Send-BatchTelegram "[DRY-RUN] *Dry Run Validated*`n$($expList.Count) experiments in manifest.`n_No VMs were created._"
     Write-Host "Dry run complete." -ForegroundColor Green
     exit 0
 }
@@ -268,7 +268,7 @@ $batchState = @{
 }
 Save-Progress $batchState
 
-Send-BatchTelegram ("🎬 *Batch Started*`n" +
+Send-BatchTelegram ("[STARTING] *Batch Started*`n" +
     "Experiments: $($expList.Count)`n" +
     "Max concurrent: $([math]::Floor($maxVcpus / $vcpusPerVm)) VMs`n" +
     "Timeout per experiment: ${timeoutMins}min")
@@ -372,7 +372,7 @@ while (-not $allDone) {
             $errText = ($deployOutput | Select-Object -Last 10) -join "`n"
             Write-Host "  DEPLOY FAILED (exit $deployExit):" -ForegroundColor Red
             Write-Host $errText -ForegroundColor Red
-            Send-BatchTelegram ("🚫 *Deploy Failed: $($exp.Label)*`n" +
+            Send-BatchTelegram ("[FAILED] *Deploy Failed: $($exp.Label)*`n" +
                 "VM: ``$($exp.VmName)```n" +
                 "Exit code: $deployExit`n" +
                 "``````$errText``````")
@@ -395,7 +395,7 @@ while (-not $allDone) {
         $expIdx_      = $exp.Index
         $expTotal_    = $expList.Count
         $tgEnabled_   = if ($DisableTelegram) { $false } else { $true }
-        $pollSecs_    = 90    # 90-second poll — fast enough to catch early-stopping completions
+        $pollSecs_    = 90    # 90-second poll - fast enough to catch early-stopping completions
         $projDir_     = $ProjectDir
         $gcpBin_      = $gcloudBin
         $exitCodeFile_= Join-Path $env:TEMP "monitor_exit_$($exp.VmName)_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
@@ -404,7 +404,7 @@ while (-not $allDone) {
             param($monScript, $vmName, $gcsPrefix, $label, $batchId, $expIdx, $expTotal, $tgEnabled, $pollSecs, $projDir, $gcpBin, $exitCodeFile)
             $env:PATH = "$gcpBin;$env:PATH"
             Set-Location $projDir
-            # Build args array — cannot pass [switch] through -ArgumentList, so conditionally add -DisableTelegram
+            # Build args array - cannot pass [switch] through -ArgumentList, so conditionally add -DisableTelegram
             $monArgs = @(
                 "-ExecutionPolicy", "Bypass",
                 "-File", $monScript,
@@ -443,7 +443,7 @@ while (-not $allDone) {
             Stop-Job $job -ErrorAction SilentlyContinue
             Remove-Job $job -Force -ErrorAction SilentlyContinue
             gcloud compute instances stop $slot.VmName --zone=$Zone --quiet 2>$null
-            Send-BatchTelegram ("⏱️ *Timeout: $($slot.Label)*`n" +
+            Send-BatchTelegram ("[TIMEOUT] *Timeout: $($slot.Label)*`n" +
                 "Exceeded $($slot.TimeoutMins)min limit`nVM stopped.")
             $slot.Status       = "TIMEOUT"
             $slot.FailureReason = "Exceeded timeout ($($slot.TimeoutMins)min)"
@@ -472,7 +472,7 @@ while (-not $allDone) {
             $artOk     = Test-ArtifactsDownloaded -LocalDir $localDir -GcsBase $gcsBase -MaxRetries 3
 
             if (-not $artOk) {
-                Send-BatchTelegram ("⚠️ *Artifact Download Failed: $($slot.Label)*`n" +
+                Send-BatchTelegram ("[WARNING] *Artifact Download Failed: $($slot.Label)*`n" +
                     "pipeline_summary.json or logs not found locally after 3 retries.`n" +
                     "VM will be deleted to free quota.")
             }
@@ -487,9 +487,13 @@ while (-not $allDone) {
                 $batchState.completed++
             } else {
                 $slot.Status       = "FAILED"
-                $slot.FailureReason = if (-not $artOk) { "Artifact download failed" } `
-                                      elseif ($exitCode -eq 2) { "No log found (VM died before output)" } `
-                                      else { "E2E pipeline incomplete (exit $exitCode)" }
+                if (-not $artOk) {
+                    $slot.FailureReason = "Artifact download failed"
+                } elseif ($exitCode -eq 2) {
+                    $slot.FailureReason = "No log found (VM died before output)"
+                } else {
+                    $slot.FailureReason = "E2E pipeline incomplete (exit $exitCode)"
+                }
                 $batchState.failed++
             }
             $slot.ExitCode = $exitCode
@@ -497,9 +501,9 @@ while (-not $allDone) {
 
             Write-Host "  Batch progress: $($batchState.completed) done, $($batchState.failed) failed, $($queue.Count) queued" -ForegroundColor Cyan
         } else {
-            # Still running — print a heartbeat
+            # Still running - print a heartbeat
             $elStr = "{0:N0}" -f $elapsed
-            Write-Host "[$(Get-Date -F 'HH:mm:ss')] $($slot.Label) — running ${elStr}m (job state: $($job.State))" -ForegroundColor Gray
+            Write-Host "[$(Get-Date -F 'HH:mm:ss')] $($slot.Label) - running ${elStr}m (job state: $($job.State))" -ForegroundColor Gray
         }
     }
 
@@ -543,7 +547,7 @@ Write-Host "  Failed:    $($batchState.failed)"
 Write-Host "  Progress:  $ProgressFile"
 Write-Host "============================================================" -ForegroundColor $(if ($batchState.failed -eq 0) { "Green" } else { "Yellow" })
 
-Send-BatchTelegram ("$(if ($batchState.failed -eq 0) { '🏁' } else { '⚠️' }) *Batch Complete*`n" +
+Send-BatchTelegram ("$(if ($batchState.failed -eq 0) { '[COMPLETE]' } else { '[WARNING]' }) *Batch Complete*`n" +
     "Completed: $($batchState.completed)/$($batchState.total)`n" +
     "Failed: $($batchState.failed)`n" +
     "_Generating consolidated report..._")
