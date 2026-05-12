@@ -76,16 +76,14 @@ class TradeState(Enum):
 
     Transitions:
         FLAT ──[buy signal ≥ threshold]──→ IN_POSITION
-        IN_POSITION ──[TP hit]──→ COOLDOWN (tp_cooldown_bars)
-        IN_POSITION ──[SL hit]──→ COOLDOWN (sl_cooldown_bars)
-        IN_POSITION ──[trailing stop hit]──→ COOLDOWN (tp_cooldown_bars)
+        IN_POSITION ──[TP hit]──→ FLAT
+        IN_POSITION ──[SL hit]──→ FLAT
+        IN_POSITION ──[trailing stop hit]──→ FLAT
         IN_POSITION ──[288 bars elapsed]──→ FLAT
-        COOLDOWN ──[cooldown elapsed]──→ FLAT
     """
 
     FLAT = auto()
     IN_POSITION = auto()
-    COOLDOWN = auto()
 
 
 class ExitReason(Enum):
@@ -261,9 +259,6 @@ class BacktestEngine:
         tp_atr_mult: float = 2.0,
         sl_atr_mult: float = 1.0,
         max_horizon: int = 288,
-        cooldown_bars: int = 5,
-        tp_cooldown_bars: Optional[int] = None,
-        sl_cooldown_bars: Optional[int] = None,
         trailing_atr_mult: float = 1.0,
         trailing_sl_atr_offset: float = 0.25,
         atr_period: int = 14,
@@ -279,9 +274,6 @@ class BacktestEngine:
         self.tp_atr_mult = tp_atr_mult
         self.sl_atr_mult = sl_atr_mult
         self.max_horizon = max_horizon
-        self.cooldown_bars = cooldown_bars  # backward compat
-        self.tp_cooldown_bars = tp_cooldown_bars if tp_cooldown_bars is not None else cooldown_bars
-        self.sl_cooldown_bars = sl_cooldown_bars if sl_cooldown_bars is not None else cooldown_bars
         self.trailing_atr_mult = trailing_atr_mult
         self.trailing_sl_atr_offset = trailing_sl_atr_offset
         self.atr_period = atr_period
@@ -291,10 +283,6 @@ class BacktestEngine:
         self.prob_threshold = prob_threshold
         self.allow_concurrent = allow_concurrent
         self.max_concurrent = max(1, max_concurrent)
-
-        # Consecutive signal threshold: require N consecutive above-threshold
-        # signals before executing a trade (0 = disabled, immediate entry).
-        self.consecutive_signal_threshold = consecutive_signal_threshold
 
         # Pluggable execution strategy (None = legacy signal_sides fallback)
         self._execution_strategy = execution_strategy
@@ -316,7 +304,6 @@ class BacktestEngine:
         self._bars_held: int = 0
         self._highest_high: float = 0.0
         self._lowest_low: float = float("inf")
-        self._cooldown_remaining: int = 0
         self._lots: int = 1
         self._trades: list[TradeRecord] = []
         # Per-trade overrides (set at entry from Order, reset on close)
@@ -346,17 +333,9 @@ class BacktestEngine:
             "prob_threshold": cfg.get("entry_threshold", 0.45),
             "allow_concurrent": cfg.get("allow_concurrent", False),
             "max_concurrent": cfg.get("max_concurrent", 1),
-            "cooldown_bars": cfg.get("cooldown_bars", 5),
-            "tp_cooldown_bars": cfg.get("tp_cooldown_bars"),
-            "sl_cooldown_bars": cfg.get("sl_cooldown_bars"),
-            "trailing_atr_mult": cfg.get("trailing_atr_mult", 1.0),
-            "trailing_sl_atr_offset": cfg.get("trailing_sl_atr_offset", 0.25),
             "max_horizon": cfg.get("max_hold_bars", 288),
             "execution_strategy": strategy,
         }
-        kwargs["consecutive_signal_threshold"] = cfg.get(
-            "consecutive_signal_threshold", 0
-        )
         kwargs.update(overrides)
         return cls(**kwargs)
 
@@ -425,23 +404,20 @@ class BacktestEngine:
         self._bars_held = 0
         self._highest_high = 0.0
         self._lowest_low = float("inf")
-        self._cooldown_remaining = 0
         self._trades = []
-        self._realized_pnl: float = 0.0
-        self._equity_curve: list[float] = []
+        self._realized_pnl = 0.0
+        self._equity_curve = []
         self._open_positions = []
         self._trade_max_horizon = self.max_horizon
         self._trade_trailing_atr_mult = self.trailing_atr_mult
-
-        # Consecutive signal counters
-        self._consecutive_buy_count: int = 0
-        self._consecutive_sell_count: int = 0
 
         # Reset mutable engine state
         self._engine_state.position = 0
         self._engine_state.side = 0
         self._engine_state.bars_held = 0
         self._engine_state.open_positions = 0
+        self._engine_state.last_exit_bars_ago_long = 9999
+        self._engine_state.last_exit_bars_ago_short = 9999
 
     def _apply_slippage(self, price: float, order_side: str) -> float:
         """Apply 1-tick slippage penalty in the adverse direction.
@@ -531,16 +507,14 @@ class BacktestEngine:
         self._trades.append(record)
         self._realized_pnl += net_pnl
 
-        # FSM transition: apply exit-type-specific cooldown
-        if exit_reason == ExitReason.SL:
-            self._state = TradeState.COOLDOWN
-            self._cooldown_remaining = self.sl_cooldown_bars
-        elif exit_reason in (ExitReason.TP, ExitReason.TRAILING_BE):
-            self._state = TradeState.COOLDOWN
-            self._cooldown_remaining = self.tp_cooldown_bars
-        else:
-            # TIME_BARRIER and any other exits → FLAT (no cooldown)
-            self._state = TradeState.FLAT
+        # Track exit for strategy-level cooldown logic
+        if self._side == 1:
+            self._engine_state.last_exit_bars_ago_long = 0
+        elif self._side == -1:
+            self._engine_state.last_exit_bars_ago_short = 0
+
+        # FSM transition: always transition directly back to FLAT
+        self._state = TradeState.FLAT
 
     def _on_flat(
         self,
@@ -683,14 +657,7 @@ class BacktestEngine:
                     )
                     self._trailing_activated = True
 
-    def _on_cooldown(self) -> None:
-        """COOLDOWN state: decrement counter and transition to FLAT when done.
-
-        All signals are rejected during cooldown.
-        """
-        self._cooldown_remaining -= 1
-        if self._cooldown_remaining <= 0:
-            self._state = TradeState.FLAT
+        pass
 
     # -------------------------------------------------------------------
     # Concurrent-mode helpers
@@ -995,15 +962,15 @@ class BacktestEngine:
             ts = pd.Timestamp(row.Index)
             atr = row.atr_
 
+            self._engine_state.last_exit_bars_ago_long += 1
+            self._engine_state.last_exit_bars_ago_short += 1
+
             if self._state == TradeState.FLAT:
                 sig = signal_sides.get(ts)
                 self._on_flat(ts, row, sig, atr)
 
             elif self._state == TradeState.IN_POSITION:
                 self._on_in_position(ts, row.Open, row.High, row.Low)
-
-            elif self._state == TradeState.COOLDOWN:
-                self._on_cooldown()
 
             # Record equity: realized + floating
             self._equity_curve.append(
@@ -1025,6 +992,10 @@ class BacktestEngine:
         for row in ohlcv.itertuples():
             ts = pd.Timestamp(row.Index)
             atr = row.atr_
+
+            # 0. Increment global bars since exit
+            self._engine_state.last_exit_bars_ago_long += 1
+            self._engine_state.last_exit_bars_ago_short += 1
 
             # 1. Check existing positions for exits
             surviving: list[_OpenPosition] = []
@@ -1083,52 +1054,32 @@ class BacktestEngine:
             ts = pd.Timestamp(row.Index)
             atr = row.atr_
 
+            self._engine_state.last_exit_bars_ago_long += 1
+            self._engine_state.last_exit_bars_ago_short += 1
+
+            if self._state == TradeState.IN_POSITION:
+                self._on_in_position(ts, row.Open, row.High, row.Low)
+
+            # Update engine state for strategy
+            self._update_engine_state()
+
+            # Get probabilities for this bar
+            pb = prob_buy_lookup.get(ts, 0.0)
+            ps = prob_sell_lookup.get(ts, 0.0)
+
+            # Ask strategy what to do
+            orders = strategy.on_bar(
+                ts, row.Open, row.High, row.Low, row.Close,
+                atr, pb, ps, self._engine_state,
+            )
+
+            # Dispatch orders to existing FSM entry point
             if self._state == TradeState.FLAT:
-                # Update engine state for strategy
-                self._update_engine_state()
-
-                # Get probabilities for this bar
-                pb = prob_buy_lookup.get(ts, 0.0)
-                ps = prob_sell_lookup.get(ts, 0.0)
-
-                # Ask strategy what to do
-                orders = strategy.on_bar(
-                    ts, row.Open, row.High, row.Low, row.Close,
-                    atr, pb, ps, self._engine_state,
-                )
-
-                # Dispatch orders to existing FSM entry point
                 for order in orders:
                     if order.action in ("BUY", "SELL"):
-                        # Consecutive signal filter
-                        if self.consecutive_signal_threshold > 0:
-                            if order.action == "BUY":
-                                self._consecutive_buy_count += 1
-                                self._consecutive_sell_count = 0
-                                if self._consecutive_buy_count < self.consecutive_signal_threshold:
-                                    break  # suppress entry, wait for more signals
-                                self._consecutive_buy_count = 0  # reset after firing
-                            else:  # SELL
-                                self._consecutive_sell_count += 1
-                                self._consecutive_buy_count = 0
-                                if self._consecutive_sell_count < self.consecutive_signal_threshold:
-                                    break
-                                self._consecutive_sell_count = 0
-
                         sig = order.side
                         self._on_flat(ts, row, sig, atr, lots=order.lots, order=order)
                         break  # single-position: only one entry per bar
-                else:
-                    # No BUY/SELL order this bar — reset counters
-                    if self.consecutive_signal_threshold > 0:
-                        self._consecutive_buy_count = 0
-                        self._consecutive_sell_count = 0
-
-            elif self._state == TradeState.IN_POSITION:
-                self._on_in_position(ts, row.Open, row.High, row.Low)
-
-            elif self._state == TradeState.COOLDOWN:
-                self._on_cooldown()
 
             # Record equity: realized + floating
             self._equity_curve.append(
@@ -1178,37 +1129,14 @@ class BacktestEngine:
             )
 
             # 4. Dispatch orders
-            dispatched = False
             for order in orders:
                 if order.action in ("BUY", "SELL"):
-                    # Consecutive signal filter
-                    if self.consecutive_signal_threshold > 0:
-                        if order.action == "BUY":
-                            self._consecutive_buy_count += 1
-                            self._consecutive_sell_count = 0
-                            if self._consecutive_buy_count < self.consecutive_signal_threshold:
-                                dispatched = True
-                                break
-                            self._consecutive_buy_count = 0
-                        else:  # SELL
-                            self._consecutive_sell_count += 1
-                            self._consecutive_buy_count = 0
-                            if self._consecutive_sell_count < self.consecutive_signal_threshold:
-                                dispatched = True
-                                break
-                            self._consecutive_sell_count = 0
-
                     if (
                         not (np.isnan(atr) if isinstance(atr, float) else False)
                         and atr > 0
                         and len(self._open_positions) < self.max_concurrent
                     ):
                         self._open_new_position(ts, row, order.side, atr, lots=order.lots, order=order)
-                        dispatched = True
-            if not dispatched and self.consecutive_signal_threshold > 0:
-                # No BUY/SELL order this bar — reset counters
-                self._consecutive_buy_count = 0
-                self._consecutive_sell_count = 0
 
             # 5. Record equity: realized + floating
             self._equity_curve.append(

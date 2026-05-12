@@ -518,24 +518,7 @@ class LiveTrader:
         self._max_hold_bars: int = int(
             strategy_config.get("max_hold_bars", _MAX_HOLD_BARS)
         )
-        # Cooldown: bars to wait after an exit before allowing new entries
-        # (parity with backtest engine FSM COOLDOWN state)
-        _cd_fallback: int = int(strategy_config.get("cooldown_bars", 5))
-        self._tp_cooldown_bars: int = int(
-            strategy_config.get("tp_cooldown_bars", _cd_fallback)
-        )
-        self._sl_cooldown_bars: int = int(
-            strategy_config.get("sl_cooldown_bars", _cd_fallback)
-        )
-        self._cooldown_remaining: int = 0
-        # Consecutive signal threshold: require N consecutive above-threshold
-        # signals before executing a trade (0 = disabled, immediate entry).
-        self._consecutive_signal_threshold: int = int(
-            strategy_config.get("consecutive_signal_threshold", 0)
-        )
-        self._consecutive_buy_count: int = 0
-        self._consecutive_sell_count: int = 0
-        self._consecutive_exit_count: int = 0
+
         # Trailing stop config (parity with backtest engine)
         self._trailing_atr_mult: float = float(
             strategy_config.get("trailing_atr_mult", 100.0)
@@ -1887,19 +1870,7 @@ class LiveTrader:
                                     "Failed to close ledger position",
                                     exc_info=True,
                                 )
-                        # Activate exit-type-specific cooldown
-                        if exit_type == "SL HIT" and self._sl_cooldown_bars > 0:
-                            self._cooldown_remaining = self._sl_cooldown_bars
-                            log.info(
-                                "COOLDOWN activated: %d bars after %s",
-                                self._sl_cooldown_bars, exit_type,
-                            )
-                        elif exit_type == "TP HIT" and self._tp_cooldown_bars > 0:
-                            self._cooldown_remaining = self._tp_cooldown_bars
-                            log.info(
-                                "COOLDOWN activated: %d bars after %s",
-                                self._tp_cooldown_bars, exit_type,
-                            )
+
                         self._reset_position_state()
                 else:
                     if parent_id != 0:
@@ -2662,11 +2633,7 @@ class LiveTrader:
         # 0a. Entry order TTL: cancel stale entry orders after 1 bar
         self._check_entry_order_ttl(bar_time)
 
-        # 0b. Track cooldown state
-        in_cooldown = False
-        if self._cooldown_remaining > 0:
-            self._cooldown_remaining -= 1
-            in_cooldown = True
+
 
         # 1. Generate features (always — needed for INFERENCE display)
         # Use stream for bar_size to inform feature engineering scale
@@ -2685,7 +2652,7 @@ class LiveTrader:
             atr_value = float(features["ATR_14"].iloc[0])
 
         # Enforce 24-hour time barrier on any open position (engine safety rail)
-        if not in_cooldown and self._check_time_barrier(
+        if self._check_time_barrier(
             bar_time=bar_time,
             current_price=current_price,
             atr_value=atr_value,
@@ -2906,29 +2873,10 @@ class LiveTrader:
                 signal.lots, atr_value or 0,
             )
 
-        # Enforce cooldown AFTER logging inference/bracket
-        if in_cooldown:
-            log.info(
-                "COOLDOWN: %d bar(s) remaining — skipping entry",
-                self._cooldown_remaining + 1,
-            )
-            self.telemetry.log_signal(
-                timestamp=bar_time,
-                signal=signal.signal_label,
-                confidence_pct=signal.confidence_pct,
-                action_taken="COOLDOWN",
-                current_price=current_price,
-                atr_value=atr_value,
-            )
-            return
+
 
         # 4. Handle HOLD signals
         if signal.action == "HOLD":
-            # No active signal — reset consecutive counters
-            if self._consecutive_signal_threshold > 0:
-                self._consecutive_buy_count = 0
-                self._consecutive_sell_count = 0
-                self._consecutive_exit_count = 0
             action_taken = signal.skip_reason or "HOLD"
             if signal.skip_reason == "POSITION_OPEN":
                 log.info(
@@ -2951,84 +2899,7 @@ class LiveTrader:
             )
             return
 
-        # 4b. Consecutive signal filter (parity with backtest engine)
-        if self._consecutive_signal_threshold > 0:
-            if signal.action in ("BUY", "ENTER"):
-                self._consecutive_buy_count += 1
-                self._consecutive_sell_count = 0
-                self._consecutive_exit_count = 0
-                if self._consecutive_buy_count < self._consecutive_signal_threshold:
-                    log.info(
-                        "CONSECUTIVE FILTER: BUY signal %d/%d — waiting for more",
-                        self._consecutive_buy_count,
-                        self._consecutive_signal_threshold,
-                    )
-                    self.telemetry.log_signal(
-                        timestamp=bar_time,
-                        signal=signal.signal_label,
-                        confidence_pct=signal.confidence_pct,
-                        action_taken="CONSECUTIVE_WAIT",
-                        current_price=current_price,
-                        atr_value=atr_value,
-                    )
-                    return
-                # Threshold met — reset counter and proceed to execute
-                log.info(
-                    "CONSECUTIVE FILTER: BUY threshold met (%d/%d) — executing",
-                    self._consecutive_buy_count,
-                    self._consecutive_signal_threshold,
-                )
-                self._consecutive_buy_count = 0
-            elif signal.action in ("SELL", "SHORT"):
-                self._consecutive_sell_count += 1
-                self._consecutive_buy_count = 0
-                self._consecutive_exit_count = 0
-                if self._consecutive_sell_count < self._consecutive_signal_threshold:
-                    log.info(
-                        "CONSECUTIVE FILTER: SELL signal %d/%d — waiting for more",
-                        self._consecutive_sell_count,
-                        self._consecutive_signal_threshold,
-                    )
-                    self.telemetry.log_signal(
-                        timestamp=bar_time,
-                        signal=signal.signal_label,
-                        confidence_pct=signal.confidence_pct,
-                        action_taken="CONSECUTIVE_WAIT",
-                        current_price=current_price,
-                        atr_value=atr_value,
-                    )
-                    return
-                log.info(
-                    "CONSECUTIVE FILTER: SELL threshold met (%d/%d) — executing",
-                    self._consecutive_sell_count,
-                    self._consecutive_signal_threshold,
-                )
-                self._consecutive_sell_count = 0
-            elif signal.action == "EXIT":
-                self._consecutive_exit_count += 1
-                self._consecutive_buy_count = 0
-                self._consecutive_sell_count = 0
-                if self._consecutive_exit_count < self._consecutive_signal_threshold:
-                    log.info(
-                        "CONSECUTIVE FILTER: EXIT netting signal %d/%d — waiting for more",
-                        self._consecutive_exit_count,
-                        self._consecutive_signal_threshold,
-                    )
-                    self.telemetry.log_signal(
-                        timestamp=bar_time,
-                        signal=signal.signal_label,
-                        confidence_pct=signal.confidence_pct,
-                        action_taken="CONSECUTIVE_WAIT",
-                        current_price=current_price,
-                        atr_value=atr_value,
-                    )
-                    return
-                log.info(
-                    "CONSECUTIVE FILTER: EXIT threshold met (%d/%d) — executing",
-                    self._consecutive_exit_count,
-                    self._consecutive_signal_threshold,
-                )
-                self._consecutive_exit_count = 0
+
 
         # 5. Active signal (BUY or SELL) — bracket already logged above
 

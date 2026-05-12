@@ -44,6 +44,8 @@ class EngineState:
     side: int = 0            # current position side (+1/-1)
     bars_held: int = 0       # bars since entry
     open_positions: int = 0  # count of open positions (concurrent mode)
+    last_exit_bars_ago_long: int = 9999
+    last_exit_bars_ago_short: int = 9999
 
 
 @dataclass
@@ -466,6 +468,12 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
         self.long_tiers = self._parse_tiers(long_cfg.get("tiers", []), long_cfg)
         self.short_tiers = self._parse_tiers(short_cfg.get("tiers", []), short_cfg)
         self.max_concurrent: int = config.get("max_concurrent", 1)
+        self._consecutive_long_signals = 0
+        self._consecutive_short_signals = 0
+        self.long_cooldown_bars = long_cfg.get("cooldown_bars", config.get("cooldown_bars", 0))
+        self.short_cooldown_bars = short_cfg.get("cooldown_bars", config.get("cooldown_bars", 0))
+        self.long_consecutive_threshold = long_cfg.get("consecutive_signal_threshold", config.get("consecutive_signal_threshold", 0))
+        self.short_consecutive_threshold = short_cfg.get("consecutive_signal_threshold", config.get("consecutive_signal_threshold", 0))
 
     @staticmethod
     def _parse_tiers(raw: list[dict], base_cfg: dict = None) -> list[dict]:
@@ -635,6 +643,33 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
         buy_ok = buy_tier is not None
         sell_ok = sell_tier is not None
 
+        # Track consecutive signals
+        if buy_ok:
+            self._consecutive_long_signals += 1
+        else:
+            self._consecutive_long_signals = 0
+            
+        if sell_ok:
+            self._consecutive_short_signals += 1
+        else:
+            self._consecutive_short_signals = 0
+            
+        # Check consecutive threshold rules
+        if self.long_consecutive_threshold > 0 and self._consecutive_long_signals < self.long_consecutive_threshold:
+            buy_ok = False
+            buy_tier = None
+        if self.short_consecutive_threshold > 0 and self._consecutive_short_signals < self.short_consecutive_threshold:
+            sell_ok = False
+            sell_tier = None
+
+        # Check cooldown rules
+        if state.last_exit_bars_ago_long <= self.long_cooldown_bars:
+            buy_ok = False
+            buy_tier = None
+        if state.last_exit_bars_ago_short <= self.short_cooldown_bars:
+            sell_ok = False
+            sell_tier = None
+
         # Virtual Ledger Netting: if already in a position, check for exact opposing signals
         if state.position != 0:
             if state.side == 1 and sell_ok:
@@ -649,13 +684,6 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
             
         if state.open_positions >= self.max_concurrent:
             return HOLD
-
-        # Match tiers
-        buy_tier = self._match_tier(prob_buy, self.long_tiers)
-        sell_tier = self._match_tier(prob_sell, self.short_tiers)
-
-        buy_ok = buy_tier is not None
-        sell_ok = sell_tier is not None
 
         if buy_ok and sell_ok:
             # Same-bar conflict: higher probability wins
