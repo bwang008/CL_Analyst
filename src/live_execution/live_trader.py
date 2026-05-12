@@ -562,11 +562,10 @@ class LiveTrader:
         )
         log.info(
             "Entry mode: %s  adaptive_priority=%s  max_hold_bars=%d  "
-            "tp_cooldown=%d  sl_cooldown=%d  trailing_atr_mult=%.2f  "
+            "trailing_atr_mult=%.2f  "
             "trailing_sl_offset=%.2f  exit_mode=%s  max_position=%d  "
             "execution_symbol=%s  lean_features=%s",
             entry_mode, adaptive_priority, self._max_hold_bars,
-            self._tp_cooldown_bars, self._sl_cooldown_bars,
             self._trailing_atr_mult,
             self._trailing_sl_atr_offset, self._exit_mode,
             self._max_position_size,
