@@ -41,6 +41,7 @@ log = logging.getLogger("LiveTrader")
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 from src.data_paths import get_model_path as _dp_model_path
+from src.live_execution.strategies.execution_models import create_execution_strategy, EngineState
 
 
 def _sigmoid(x: float) -> float:
@@ -282,6 +283,9 @@ class ConfigurableStrategy(Strategy):
 
         self.base_quantity = base_quantity
 
+        # ── Execution Strategy ──────────────────────────────────────────
+        self._exec_strategy = create_execution_strategy(self.config)
+
     def _load_model(self, experiment_id: str, label: str, model_path: str | None = None) -> LGBMLearner:
         """Load a LGBMLearner from the model registry or a direct path.
 
@@ -362,101 +366,78 @@ class ConfigurableStrategy(Strategy):
         if self._short_learner is not None:
             sell_prob = self._run_inference(self._short_learner, features)
 
-        # 2. Determine which signals pass their thresholds
-        buy_ok = buy_prob >= self._long_threshold and self._long_learner is not None
-        sell_ok = sell_prob >= self._short_threshold and self._short_learner is not None
+        # 2. Delegate decision to the execution strategy
+        side = 0
+        if current_position > 0:
+            side = 1
+        elif current_position < 0:
+            side = -1
 
-        # Pick the winning signal
-        if buy_ok and sell_ok:
-            # Conflict: higher probability wins (conservative)
-            if buy_prob >= sell_prob:
-                probability = buy_prob
-                active_label = "Buy"
-                active_action = "BUY"
-            else:
-                probability = sell_prob
-                active_label = "Sell"
-                active_action = "SELL"
-        elif buy_ok:
-            probability = buy_prob
-            active_label = "Buy"
-            active_action = "BUY"
-        elif sell_ok:
-            probability = sell_prob
-            active_label = "Sell"
-            active_action = "SELL"
-        else:
-            # Neither passes threshold — use higher prob for display
+        state = EngineState(
+            position=1 if current_position != 0 else 0,
+            side=side,
+            bars_held=0,  # Live trader tracks its own state, so we just provide FSM equivalents
+            open_positions=1 if current_position != 0 else 0,
+        )
+
+        # Dummy datetime for strategy interface
+        dt = pd.Timestamp.now()
+
+        orders = self._exec_strategy.on_bar(
+            dt=dt,
+            open_=current_price,
+            high=current_price,
+            low=current_price,
+            close=current_price,
+            atr=atr_value if atr_value is not None else 0.0,
+            prob_buy=buy_prob,
+            prob_sell=sell_prob,
+            state=state,
+        )
+
+        # 3. Handle HOLD
+        if not orders or orders[0].action == "HOLD":
             probability = max(buy_prob, sell_prob)
             return TradeSignal(
                 action="HOLD",
                 probability=probability,
                 confidence_pct=probability * 100.0,
                 signal_label="Hold",
-                skip_reason="BELOW_THRESHOLD",
+                skip_reason="ENGINE_HOLD",
                 buy_prob=buy_prob,
                 sell_prob=sell_prob,
             )
 
-        confidence_pct = probability * 100.0
+        # 4. Map first actionable order to TradeSignal
+        order = orders[0]
+        
+        # Determine actual probability used
+        if order.action == "BUY" or (order.action == "EXIT" and getattr(order, "reason", "") == "FLIP_EXIT_SHORT"):
+            probability = buy_prob
+            active_label = "Buy"
+        elif order.action == "SELL" or (order.action == "EXIT" and getattr(order, "reason", "") == "FLIP_EXIT_LONG"):
+            probability = sell_prob
+            active_label = "Sell"
+        else: # Regular exit
+            probability = max(buy_prob, sell_prob)
+            active_label = "Exit"
 
-        # 3. Position check
-        if not self.allow_concurrent and current_position != 0:
-            return TradeSignal(
-                action="HOLD",
-                probability=probability,
-                confidence_pct=confidence_pct,
-                signal_label=active_label,
-                skip_reason="POSITION_OPEN",
-                buy_prob=buy_prob,
-                sell_prob=sell_prob,
-            )
-
-        # 4. ATR validation
-        if atr_value is None or atr_value <= 0:
-            return TradeSignal(
-                action="HOLD",
-                probability=probability,
-                confidence_pct=confidence_pct,
-                signal_label=active_label,
-                skip_reason="ATR_INVALID",
-                buy_prob=buy_prob,
-                sell_prob=sell_prob,
-            )
-
-        # 5. Tier matching + bracket computation
-        tier_overrides: dict = {}  # per-trade override fields
-        tiers = self._long_tiers if active_action == "BUY" else self._short_tiers
-        matched_tier = self._match_tier(tiers, probability) if tiers else None
-
-        if matched_tier is not None:
-            # Use per-tier TP/SL (fallback to global config)
-            tp_mult = float(matched_tier.get("tp_atr_mult", self.tp_atr_mult))
-            sl_mult = float(matched_tier.get("sl_atr_mult", self.sl_atr_mult))
-            lots = int(matched_tier.get("lots", 1))
-            # Per-trade overrides for LiveTrader trailing/max_hold
-            if "trailing_atr_mult" in matched_tier:
-                tier_overrides["trailing_atr_mult"] = float(matched_tier["trailing_atr_mult"])
-            if "max_hold_bars" in matched_tier:
-                tier_overrides["max_hold_bars"] = int(matched_tier["max_hold_bars"])
-            tier_overrides["tp_atr_mult"] = tp_mult
-            tier_overrides["sl_atr_mult"] = sl_mult
-            tier_label = matched_tier.get("label", "")
-            if tier_label:
-                log.info(
-                    "[%s] Tier matched: %s (prob=%.4f, lots=%d, TP=%.1fx, SL=%.1fx)",
-                    self._nickname, tier_label, probability, lots, tp_mult, sl_mult,
-                )
-        else:
-            # No tier match — use global config multipliers + sizing
-            tp_mult = self.tp_atr_mult
-            sl_mult = self.sl_atr_mult
-            lots = self._prob_to_lots(probability)
+        # Apply per-trade overrides from Order object
+        tier_overrides = {}
+        tp_mult = order.tp_atr_mult if order.tp_atr_mult is not None else self.tp_atr_mult
+        sl_mult = order.sl_atr_mult if order.sl_atr_mult is not None else self.sl_atr_mult
+        
+        if order.trailing_atr_mult is not None:
+            tier_overrides["trailing_atr_mult"] = order.trailing_atr_mult
+        if order.max_hold_bars is not None:
+            tier_overrides["max_hold_bars"] = order.max_hold_bars
+        tier_overrides["tp_atr_mult"] = tp_mult
+        tier_overrides["sl_atr_mult"] = sl_mult
 
         tiered_tp_offsets = None
         if self.exit_mode == "TIERED":
-            exits_cfg = self._long_tiered_exits if active_action == "BUY" else self._short_tiered_exits
-            if exits_cfg:
+            exits_cfg = self._long_tiered_exits if order.action == "BUY" else self._short_tiered_exits
+            if exits_cfg and atr_value is not None and atr_value > 0:
                 tiered_tp_offsets = []
                 avg_mult = 0.0
                 total_pct = 0.0
@@ -468,49 +449,30 @@ class ConfigurableStrategy(Strategy):
                     avg_mult += pct * mult
                     total_pct += pct
                 if total_pct > 0:
-                    # Provide an averaged multi-tranche float as cosmetic fallback
                     tp_mult = avg_mult / total_pct
 
-        # Compute bracket prices (direction-aware)
-        if active_action == "SELL":
-            tp_price = round(current_price - tp_mult * atr_value, 2)
-            sl_price = round(current_price + sl_mult * atr_value, 2)
-        else:
-            tp_price = round(current_price + tp_mult * atr_value, 2)
-            sl_price = round(current_price - sl_mult * atr_value, 2)
+        # Compute bracket prices
+        tp_price = 0.0
+        sl_price = 0.0
+        if atr_value is not None and atr_value > 0:
+            if order.side == -1 or (order.action == "SELL"):
+                tp_price = round(current_price - tp_mult * atr_value, 2)
+                sl_price = round(current_price + sl_mult * atr_value, 2)
+            elif order.side == 1 or (order.action == "BUY"):
+                tp_price = round(current_price + tp_mult * atr_value, 2)
+                sl_price = round(current_price - sl_mult * atr_value, 2)
 
         return TradeSignal(
-            action=active_action,
+            action=order.action,
             probability=probability,
-            confidence_pct=confidence_pct,
+            confidence_pct=probability * 100.0,
             tp_price=tp_price,
             sl_price=sl_price,
-            lots=lots,
+            lots=order.lots,
             signal_label=active_label,
             buy_prob=buy_prob,
             sell_prob=sell_prob,
             tiered_tp_offsets=tiered_tp_offsets,
             **tier_overrides,
         )
-
-    # -- Internal helpers ----------------------------------------------------
-
-    @staticmethod
-    def _match_tier(tiers: list[dict], probability: float) -> Optional[dict]:
-        """Match probability to the highest-min_prob tier that qualifies.
-
-        Tiers are pre-sorted highest min_prob first; first match wins.
-        Returns None if no tier matches.
-        """
-        for tier in tiers:
-            if probability >= float(tier.get("min_prob", 0)):
-                return tier
-        return None
-
-    def _prob_to_lots(self, probability: float) -> int:
-        """Map model probability to lot count using config sizing tiers."""
-        for min_prob, lots in self.sizing_tiers:
-            if probability >= min_prob:
-                return lots
-        return self.base_quantity
 

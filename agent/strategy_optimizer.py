@@ -558,6 +558,29 @@ def run_optimization(
         json.dump(best_cfg, f, indent=4)
     print(f"\nSaved optimized config: {opt_config_path}")
 
+    # Extract standalone side configs
+    if is_tiered:
+        for side in ["long", "short"]:
+            side_cfg = copy.deepcopy(best_cfg)
+            # Remove the other side's models
+            if "models" in side_cfg:
+                other_side = "short" if side == "long" else "long"
+                if other_side in side_cfg["models"]:
+                    del side_cfg["models"][other_side]
+            
+            # Disable the other side in tiered setup by setting threshold to 1.0
+            other_side_key = "short" if side == "long" else "long"
+            if other_side_key in side_cfg:
+                if "tiers" in side_cfg[other_side_key]:
+                    for tier in side_cfg[other_side_key]["tiers"]:
+                        tier["min_prob"] = 1.0
+
+            side_config_name = Path(config_path).stem + f"_opt_{side}.json"
+            side_config_path = os.path.join(os.path.dirname(config_path), side_config_name)
+            with open(side_config_path, "w") as f:
+                json.dump(side_cfg, f, indent=4)
+            print(f"Saved {side}-only config: {side_config_path}")
+
     return best_cfg, best_result
 
 

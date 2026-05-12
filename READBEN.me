@@ -246,7 +246,7 @@ conda run -n trader python agent/backtest_engine.py --predictions reports/oos_en
 # Ensemble4 5min
 python -m src.live_execution.live_trader --config configs/strategies/ensemble4.json
 #Ensemble hourly
-python -m src.live_execution.live_trader --config configs/strategies/hourly_ensemble_008.json
+python -m src.live_execution.live_trader --config configs/strategies/HourSet_08_Ensemble_01_opt.json
 #Ensemble 2 Hourly (supported via 1h resampling)
 python -m src.live_execution.live_trader --config configs/strategies/2h_ensemble_001.json
 #Ensemble 4 Hourly (supported via 1h resampling)
@@ -256,11 +256,6 @@ python -m src.live_execution.live_trader --config configs/strategies/4h_ensemble
 python agent/backtest_engine.py --config configs/strategies/hourly_ensemble_004.json --data "C:\CL_Analyst_Data\data\processed\cl-1h_bk_HourSet_03.parquet" --slippage-per-side 0.01
 
 python agent/backtest_engine.py --config configs/strategies/HourSet_08_Ensemble_01_opt.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" --slippage-per-side 0.01
-python agent/backtest_engine.py --config configs/strategies/HourSet_08_Ensemble_01_long.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" --slippage-per-side 0.01
-
-# Potentially new backtester, might delete this:
-python agent/run_summation_backtest.py --long-config configs/strategies/HourSet_08_Ensemble_01_long.json --short-config configs/strategies/HourSet_08_Ensemble_01_short.json --ohlcv data/processed/CL_HourSet_08.parquet
-
 
 Backtest 4H
 conda run -n trader python agent/backtest_engine.py --config configs/strategies/4h_ensemble_001.json --data C:\CL_Analyst_Data\data\processed\cl-4h_bk_set_01.parquet
@@ -268,21 +263,6 @@ conda run -n trader python agent/backtest_engine.py --config configs/strategies/
 #Backtest 5m
 python agent/backtest_engine.py --config configs/strategies/ensemble4_set11.json --data "C:\CL_Analyst_Data\data\processed\cl-1h_bk_HourSet_03.parquet" --slippage-per-side 0.01
 
-
-
-
-```powershell
-# Dry run (no real orders -- logs signals only)
-conda run -n trader --no-capture-output python -m src.live_execution.live_trader --config configs/strategies/manatee.json --dry-run
-
-# Buy trading model
-conda run -n trader --no-capture-output python -m src.live_execution.live_trader --config configs/strategies/manatee.json
-
-# Short trading model
-conda run -n trader --no-capture-output python -m src.live_execution.live_trader --config configs/strategies/koala.json
-
-# Legacy strategy registry (still works)
-conda run -n trader --no-capture-output python -m src.live_execution.live_trader --strategy BUY70_SIZED_MANATEE
 ```
 
 **What happens when you run the live trader:**

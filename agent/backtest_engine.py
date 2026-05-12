@@ -362,45 +362,53 @@ class BacktestEngine:
 
     @staticmethod
     def _check_parameter_shadowing(cfg: dict, strategy) -> None:
-        """Warn if engine-global TP/SL/threshold differ from tier overrides.
+        """Raise an error if side-level parameters differ from tier overrides.
 
-        This catches the 'dead code' scenario where Optuna or a user sets
-        top-level values but a TieredEnsembleStrategy reads from nested
-        tier blocks instead, silently ignoring the top-level values.
+        In a properly generated config (via apply_trial_params), the side-level
+        values (e.g., cfg['long']['tp_atr_mult']) must match the tier-level values
+        (e.g., cfg['long']['tiers'][0]['tp_atr_mult']).
+        Top-level values are global fallbacks and are allowed to differ.
         """
-        import warnings
         from src.live_execution.strategies.execution_models import TieredEnsembleStrategy
 
         if not isinstance(strategy, TieredEnsembleStrategy):
             return
 
-        top_tp = cfg.get("tp_atr_mult")
-        top_sl = cfg.get("sl_atr_mult")
+        keys_to_check = [
+            "tp_atr_mult", "sl_atr_mult", "trailing_atr_mult",
+            "max_hold_bars", "cooldown_bars", "consecutive_signal_threshold"
+        ]
 
-        for side_key in ("long", "short"):
-            side_cfg = cfg.get(side_key, {})
-            # Check tiered_exits for TP
-            tier_tp = side_cfg.get("tp_atr_mult")
-            if tier_tp is None:
-                exits = side_cfg.get("tiered_exits", [])
-                if exits:
-                    tier_tp = exits[0].get("tp_atr_mult")
-            tier_sl = side_cfg.get("sl_atr_mult")
+        errors = []
 
-            if tier_tp is not None and top_tp is not None and tier_tp != top_tp:
-                warnings.warn(
-                    f"[PARAM SHADOW] {side_key}.tp_atr_mult={tier_tp} overrides "
-                    f"top-level tp_atr_mult={top_tp}. The tier value will execute.",
-                    UserWarning,
-                    stacklevel=3,
-                )
-            if tier_sl is not None and top_sl is not None and tier_sl != top_sl:
-                warnings.warn(
-                    f"[PARAM SHADOW] {side_key}.sl_atr_mult={tier_sl} overrides "
-                    f"top-level sl_atr_mult={top_sl}. The tier value will execute.",
-                    UserWarning,
-                    stacklevel=3,
-                )
+        for key in keys_to_check:
+            for side_key in ("long", "short"):
+                side_cfg = cfg.get(side_key, {})
+                side_val = side_cfg.get(key)
+                
+                # Cooldown and consecutive are not in tiers, so tier_val is side_val
+                if key in ("cooldown_bars", "consecutive_signal_threshold"):
+                    continue
+                else:
+                    tier_val = side_val
+                    if tier_val is None:
+                        # Fallback to tiered exits or tiers
+                        exits = side_cfg.get("tiered_exits", [])
+                        if exits and key in exits[0]:
+                            tier_val = exits[0].get(key)
+                        else:
+                            tiers = side_cfg.get("tiers", [])
+                            if tiers and key in tiers[0]:
+                                tier_val = tiers[0].get(key)
+
+                if tier_val is not None and side_val is not None and tier_val != side_val:
+                    errors.append(f"{side_key} tier {key}={tier_val} conflicts with {side_key}.{key}={side_val}")
+
+        if errors:
+            err_msg = "\n".join(set(errors))
+            raise ValueError(
+                f"PARAMETER SHADOWING DETECTED. Values must be consistent across side and tier levels:\n{err_msg}"
+            )
 
     def _reset_state(self) -> None:
         """Reset all FSM state for a new run."""

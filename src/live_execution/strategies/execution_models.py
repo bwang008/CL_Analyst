@@ -525,11 +525,19 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
         for s in sides:
             side_cfg = cfg.get(s, {})
 
-            # Write TP/SL at the side level
+            # Write params at the side level
             if tp is not None:
                 side_cfg["tp_atr_mult"] = tp
             if sl is not None:
                 side_cfg["sl_atr_mult"] = sl
+            if trailing is not None:
+                side_cfg["trailing_atr_mult"] = trailing
+            if max_hold is not None:
+                side_cfg["max_hold_bars"] = max_hold
+            if "cooldown_bars" in params:
+                side_cfg["cooldown_bars"] = params["cooldown_bars"]
+            if "consecutive_signal_threshold" in params:
+                side_cfg["consecutive_signal_threshold"] = params["consecutive_signal_threshold"]
 
             # Write into tiered_exits blocks
             for exit_tier in side_cfg.get("tiered_exits", []):

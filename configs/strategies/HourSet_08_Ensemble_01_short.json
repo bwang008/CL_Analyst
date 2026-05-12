@@ -1,1 +1,26 @@
-{"nickname": "Short_Independent", "execution_class": "SingleModelStrategy", "models": {"short": {"experiment_id": "E2E_HourSet_08_short_logloss", "model_path": "reports/scout_hs08_3x1_6h_20260511_2116/registry/canary_output/final_short_model_logloss.pkl", "predictions_path": "reports/scout_hs08_3x1_6h_20260511_2116/registry/canary_output/oos_predictions_short_logloss.csv", "threshold": 0.55}}, "tp_atr_mult": 6.5, "sl_atr_mult": 2.5, "trailing_atr_mult": 0.5, "max_hold_bars": 360, "cooldown_bars": 25, "consecutive_signal_threshold": 4, "entry_threshold": 0.55, "bar_size": "1h", "execution_symbol": "CL"}
+{
+    "nickname": "Short_Independent",
+    "execution_class": "SingleModelStrategy",
+    "direction": "SHORT",
+    "models": {
+        "short": {
+            "experiment_id": "E2E_HourSet_08_short_logloss",
+            "model_path": "reports/scout_hs08_3x1_6h_20260511_2116/registry/canary_output/final_short_model_logloss.pkl",
+            "predictions_path": "reports/scout_hs08_3x1_6h_20260511_2116/registry/canary_output/oos_predictions_short_logloss.csv",
+            "threshold": 0.55
+        }
+    },
+    "tp_atr_mult": 6.5,
+    "sl_atr_mult": 2.5,
+    "trailing_atr_mult": 1.0,
+    "max_hold_bars": 360,
+    "cooldown_bars": 25,
+    "tp_cooldown_bars": 0,
+    "sl_cooldown_bars": 4,
+    "consecutive_signal_threshold": 4,
+    "entry_threshold": 0.55,
+    "allow_concurrent": false,
+    "max_concurrent": 1,
+    "bar_size": "1h",
+    "execution_symbol": "CL"
+}
