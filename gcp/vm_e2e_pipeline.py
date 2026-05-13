@@ -776,12 +776,12 @@ def run_pipeline(
         ensemble_cfg["models"] = {
             "long": {
                 "experiment_id": f"E2E_{dataset_tag}_long_{metric_name}",
-                "predictions_path": direction_paths["long"],
+                "predictions_path": f"data/predictions/{os.path.basename(direction_paths['long'])}",
                 "threshold": strategy_cfg.get("models", {}).get("long", {}).get("threshold", 0.60),
             },
             "short": {
                 "experiment_id": f"E2E_{dataset_tag}_short_{metric_name}",
-                "predictions_path": direction_paths["short"],
+                "predictions_path": f"data/predictions/{os.path.basename(direction_paths['short'])}",
                 "threshold": strategy_cfg.get("models", {}).get("short", {}).get("threshold", 0.60),
             },
         }

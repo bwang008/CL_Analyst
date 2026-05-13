@@ -251,6 +251,35 @@ function Save-Artifacts {
     gcloud storage cp "$GcsBase/pipeline_summary.json" $LocalOutputDir 2>$null
     
     Write-Host "  Artifacts saved to: $LocalOutputDir" -ForegroundColor Green
+
+    # --- Auto-Routing ---
+    Write-Host "  Routing artifacts to active directories..." -ForegroundColor Cyan
+    
+    # 1. Route JSON configs to configs\strategies
+    $configsDir = Join-Path $ProjectDir "configs\strategies"
+    if (-not (Test-Path $configsDir)) { New-Item -ItemType Directory -Path $configsDir -Force | Out-Null }
+    Get-ChildItem -Path $registryDir -Filter "*_opt.json" -Recurse -ErrorAction SilentlyContinue |
+        Copy-Item -Destination $configsDir -Force -ErrorAction SilentlyContinue
+        
+    # 2. Route CSV predictions to data\predictions
+    $predsDir = Join-Path $ProjectDir "data\predictions"
+    if (-not (Test-Path $predsDir)) { New-Item -ItemType Directory -Path $predsDir -Force | Out-Null }
+    Get-ChildItem -Path $registryDir -Filter "*.csv" -Recurse -ErrorAction SilentlyContinue |
+        Copy-Item -Destination $predsDir -Force -ErrorAction SilentlyContinue
+        
+    # 3. Route Models to C:\CL_Analyst_Data\models\registry
+    $env_vars = Read-DotEnv
+    $dataRoot = if ($env_vars["CL_DATA_ROOT"]) { $env_vars["CL_DATA_ROOT"] } elseif ($env:CL_DATA_ROOT) { $env:CL_DATA_ROOT } else { "C:\CL_Analyst_Data" }
+    $modelsRegistry = Join-Path $dataRoot "models\registry"
+    
+    $bundleDirs = Get-ChildItem -Path $registryDir -Directory -Filter "E2E_*" -Recurse -ErrorAction SilentlyContinue
+    foreach ($bDir in $bundleDirs) {
+        $targetDir = Join-Path $modelsRegistry $bDir.Name
+        if (-not (Test-Path $targetDir)) { New-Item -ItemType Directory -Path $targetDir -Force | Out-Null }
+        Get-ChildItem -Path $bDir.FullName -File -ErrorAction SilentlyContinue |
+            Copy-Item -Destination $targetDir -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host "  Artifacts routed successfully." -ForegroundColor Green
 }
 
 

@@ -1,4 +1,30 @@
-## 2026-05-01 — Naked Technicals Isolation Study\n\n### Goal\nRun an Isolation Study to see if ICHIMOKU and TREND_DMA features can produce predictive alpha (>0.51 ROC-AUC) when stripped of overshadowing macro/structural variables. Optimized for F0.5 Score and Logloss.\n\n### State\n[COMPLETED] (007 SHORT only)\n\n### Plan\n1. **In-Memory Filter**: Pass strategy config to optuna_lgbm_search_v2.py and m_e2e_pipeline.py to filter eature_cols dynamically without saving _filtered.parquet.\n2. **Optimization**: Optimize for 0.5 metric in Optuna alongside logloss (Optuna handles this if metric is specified).\n3. **Metrics Reporting**: Print ROC-AUC, Logloss, Precision, and F0.5 score during local validation reporting.\n\n## 2026-04-28 — Next Steps: Logloss Production & Scout Ablation Studies
+## 2026-05-13 — Zero-Touch Automated Pipeline Orchestration
+
+### Goal
+Finalize the "zero-touch" ML pipeline by automating artifact routing and configuration path injection, allowing cloud-generated configs to be immediately ready for local backtesting and live execution without manual file manipulation.
+
+### Actions Taken
+- **Path Injection**: Updated `gcp/vm_e2e_pipeline.py` to natively inject relative prediction paths (`data/predictions/...`) into the generated ensemble configuration `.json` files, preventing hardcoded absolute Linux path errors on the Windows host.
+- **Auto-Routing (gcp_monitor.ps1)**: Added a post-download routing block to `Save-Artifacts`. It now unzips the downloaded zip and automatically copies the files into the active project directories:
+  - `*_opt.json` configs → `configs/strategies/`
+  - `*.csv` predictions → `data/predictions/`
+  - `E2E_*` model directories → `C:\CL_Analyst_Data\models\registry\`
+- **Result**: The end-to-end cloud pipeline is now fully plug-and-play. A completed GCP batch immediately drops ready-to-run configurations into the active workspace.
+
+## 2026-05-01 — Naked Technicals Isolation Study
+
+### Goal
+Run an Isolation Study to see if ICHIMOKU and TREND_DMA features can produce predictive alpha (>0.51 ROC-AUC) when stripped of overshadowing macro/structural variables. Optimized for F0.5 Score and Logloss.
+
+### State
+[COMPLETED] (007 SHORT only)
+
+### Plan
+1. **In-Memory Filter**: Pass strategy config to optuna_lgbm_search_v2.py and  m_e2e_pipeline.py to filter eature_cols dynamically without saving _filtered.parquet.
+2. **Optimization**: Optimize for 0.5 metric in Optuna alongside logloss (Optuna handles this if metric is specified).
+3. **Metrics Reporting**: Print ROC-AUC, Logloss, Precision, and F0.5 score during local validation reporting.
+
+## 2026-04-28 — Next Steps: Logloss Production & Scout Ablation Studies
 
 ### 1. Full Production Sweep (Baseline Logloss)
 The recent unconstrained scout run for hourly_ensemble_005 (HourSet_06 dataset, Logloss) yielded phenomenal baseline results (PF 1.65, Sharpe 1.24, .9k PnL) after the threshold/consecutive signal optimizer was run.

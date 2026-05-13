@@ -5,12 +5,12 @@
 ## Project
 Crude oil (CL) 5-minute bar ML trading system using LightGBM with focal loss, walk-forward validation, and IBKR live execution.
 
-## Current State (2026-04-29)
+## Current State (2026-05-13)
+- **Zero-Touch Pipeline**: The GCP Canary batch orchestrator now automatically routes downloaded JSON configs, CSV predictions, and PKL models to their active local directories (`configs/strategies`, `data/predictions`, `models/registry`), eliminating manual file moving.
 - **Modern Alpha Pipeline Architecture**: Shifted the E2E ML pipeline to a true 3-way split (Train / Execution Validation / OOS Holdout) to support autonomous threshold optimization without data leakage.
 - **Data Starvation Fixed**: Identified that legacy splits (Train Cutoff = 2019) starved the model of critical COVID-era volatility. The new split timeline is `TrainCutoffDate = 2023-01-01` and `HoldoutCutoffDate = 2025-01-01`.
 - **Optuna Constriction**: Tightened LightGBM hyperparameter bounds (`min_child_samples` >= 150, `learning_rate` <= 0.02) to forcefully eliminate noise-memorization.
 - **Horizon Alignment**: Confirmed that 12H horizons are incompatible with 2.0x ATR execution targets. The primary focus is back on `72H` Triple Barrier targets utilizing the stationary `HourSet_06` features.
-- **Active Deployment**: The `hourly_ensemble_006.json` strategy is currently running a massive GCP Canary validation (`optuna-runner-72h-mod`) on the new 2023/2025 timeline.
 - **Bucket flag**: use `--use-buckets` (CLI) / `-UseBuckets` (PowerShell) for 150-trial bucket-enabled runs.
 
 ## Root Documentation — Reading Priority
@@ -60,6 +60,7 @@ To keep the AI context window sharp, all agents must follow these rules before e
 - `live_trader_test` (merged from `development` 2026-03-21)
 
 ## Last Completed Task
+- **Zero-Touch Pipeline Automation (2026-05-13)**: Refactored `gcp_monitor.ps1` to automatically copy downloaded configs, predictions, and models into the active project folders. Also modified `vm_e2e_pipeline.py` to inject relative paths (`data/predictions/...`) into the generated `.json` configs.
 - **Modern Pipeline GCP Strategy Validation (2026-04-29)**: Investigated why the 12H model failed (Profit Factor 0.87). Found that 12H horizons are mathematically incompatible with the 2.0x ATR take-profit expectation. Pivoted back to 72H targets. 
 - **Data Starvation Diagnosis (2026-04-29)**: Identified that the new 3-way E2E data split was starving the LightGBM models of COVID-era training data (TrainCutoff was pushed back to 2019 to leave room for the execution validation split). 
 - **Modern Alpha Timeline Shift (2026-04-29)**: Re-aligned the split structure (`TrainCutoffDate=2023-01-01`, `HoldoutCutoffDate=2025-01-01`) so the model trains on the highly volatile 2020-2022 period, ensuring a fair baseline comparison. Deployed the Modern Canary run (`optuna-runner-72h-mod`).
@@ -257,6 +258,14 @@ Whenever a new bar size is added, verify all paths resolve and have minimum bars
 # 3. Monitor (auto-downloads results when VM terminates)
 .\gcp\gcp_monitor.ps1 -VmName optuna-runner-canary -GcsPrefix canary
 ```
+
+### Automated Artifact Routing (Zero-Touch)
+When `gcp_monitor.ps1` detects that the VM has finished, it automatically downloads the zip payload. It then automatically routes:
+- `.json` configs to `configs/strategies/`
+- `.csv` predictions to `data/predictions/`
+- `.pkl` model bundles to `C:\CL_Analyst_Data\models\registry\`
+
+You can immediately backtest or live-trade the generated `_opt.json` config without moving any files.
 
 ### E2E Pipeline Flow
 ```

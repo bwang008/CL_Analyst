@@ -83,6 +83,7 @@ Create a config file under `configs/experiments/` (see `EXP-030.json` as templat
 # Config-driven training (recommended — outputs isolated to reports/EXP-030/)
 python agent/experiment_runner.py --config configs/experiments/EXP-030.json
 
+
 # Legacy direct CLI (outputs go to reports/ directly, will overwrite)
 python agent/experiment_runner.py --id EXP-030 --data ... --target ... --train-cutoff-date 2022-01-01
 ```
