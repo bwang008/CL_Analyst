@@ -15,7 +15,7 @@
     "execution_symbol": "CL",
     "bar_size": "1h",
     "live_config": {
-        "client_id": 26,
+        "client_id": 1,
         "entry_mode": "marketable_limit",
         "exit_mode": "marketable_limit"
     },

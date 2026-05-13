@@ -61,7 +61,7 @@ load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 from src.features.alpha_factory import AlphaFactory
 from src.features.macro_features import MacroFeatureEngine
 from src.live_execution.strategy import Strategy, TradeSignal
-from src.live_execution.strategies.buy70_sized_manatee import Buy70SizedManatee
+
 from src.live_execution.strategies.configurable_strategy import ConfigurableStrategy
 from src.live_execution.data_manager import DataManager
 from src.live_execution.ibkr_client import (
@@ -139,10 +139,8 @@ _DEFAULT_QUANTITY = 1  # 1 CL contract (base lot)
 _MAX_HOLD_BARS = 288  # 24 hours on 5-min bars
 
 # Strategy registry — maps CLI names to strategy classes
-_STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
-    "BUY70_SIZED_MANATEE": Buy70SizedManatee,
-}
-_DEFAULT_STRATEGY = "BUY70_SIZED_MANATEE"
+_STRATEGY_REGISTRY: dict[str, type[Strategy]] = {}
+_DEFAULT_STRATEGY = None
 
 # Polling interval in seconds (ib.sleep)
 _POLL_INTERVAL = 5.0
@@ -1645,9 +1643,6 @@ class LiveTrader:
         )
 
         try:
-            if not self._check_order_rate_limit():
-                return
-                
             child_trades = self.manager.place_child_orders(
                 contract=contract,
                 parent_order_id=order_id,
@@ -3399,6 +3394,8 @@ def main() -> None:
         config_adaptive_priority = live_cfg.get("adaptive_priority")
         config_exit_mode = live_cfg.get("exit_mode")
     else:
+        if args.strategy is None:
+            parser.error("You must provide a --config path. Legacy strategies have been removed.")
         strategy_key = args.strategy.upper()
         if strategy_key not in _STRATEGY_REGISTRY:
             parser.error(

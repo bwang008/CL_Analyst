@@ -1,0 +1,790 @@
+(base) PS C:\Users\bwang\Documents\GitHub\CL_Analyst_Development> python agent/backtest_engine.py --config configs/strategies/HourSet_08_Canary_3x1_12H_logloss_opt.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" --slippage-per-side 0.01
+Loaded strategy config 'E2E_HourSet_08_logloss_ensemble': TP=5.5x  SL=3.0x  threshold=0.5  [single-position]
+Loading historical OHLCV from C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet...
+Auto-resolving predictions from config (dual-model):
+  Long:  /home/bwang/project/canary_output/oos_predictions_long_logloss.csv
+  Short: /home/bwang/project/canary_output/oos_predictions_short_logloss.csv
+Traceback (most recent call last):
+  File "C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\agent\backtest_engine.py", line 1906, in <module>
+    main()
+  File "C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\agent\backtest_engine.py", line 1809, in main
+    long_df = load_predictions(long_preds_path)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\agent\backtest_engine.py", line 1500, in load_predictions
+    df = pd.read_csv(
+         ^^^^^^^^^^^^
+  File "C:\Users\bwang\anaconda3\Lib\site-packages\pandas\io\parsers\readers.py", line 1026, in read_csv
+    return _read(filepath_or_buffer, kwds)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bwang\anaconda3\Lib\site-packages\pandas\io\parsers\readers.py", line 620, in _read
+    parser = TextFileReader(filepath_or_buffer, **kwds)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bwang\anaconda3\Lib\site-packages\pandas\io\parsers\readers.py", line 1620, in __init__
+    self._engine = self._make_engine(f, self.engine)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bwang\anaconda3\Lib\site-packages\pandas\io\parsers\readers.py", line 1880, in _make_engine
+    self.handles = get_handle(
+                   ^^^^^^^^^^^
+  File "C:\Users\bwang\anaconda3\Lib\site-packages\pandas\io\common.py", line 873, in get_handle
+    handle = open(
+             ^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/home/bwang/project/canary_output/oos_predictions_long_logloss.csv'
+(base) PS C:\Users\bwang\Documents\GitHub\CL_Analyst_Development> python agent/backtest_engine.py --config configs/strategies/HourSet_08_Canary_3x1_12H_logloss_opt.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" --slippage-per-side 0.01
+C:\Users\bwang\anaconda3\python.exe: can't open file 'C:\\Users\\bwang\\Documents\\GitHub\\CL_Analyst_Development\\agent\\backtest_engine.py': [Errno 2] No such file or directory
+(base) PS C:\Users\bwang\Documents\GitHub\CL_Analyst_Development> python agent/backtest_engine.py --config configs/strategies/HourSet_08_Canary_3x1_12H_logloss_opt.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" --slippage-per-side 0.01
+C:\Users\bwang\anaconda3\python.exe: can't open file 'C:\\Users\\bwang\\Documents\\GitHub\\CL_Analyst_Development\\agent\\backtest_engine.py': [Errno 2] No such file or directory
+(base) PS C:\Users\bwang\Documents\GitHub\CL_Analyst_Development> python agent/backtest_engine.py --config configs/strategies/HourSet_08_Canary_3x1_12H_logloss_opt.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" --slippage-per-side 0.01
+Traceback (most recent call last):
+  File "C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\agent\backtest_engine.py", line 1904, in <module>
+    main()
+  File "C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\agent\backtest_engine.py", line 1648, in main
+    with open(args.config) as f:
+         ^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'configs/strategies/HourSet_08_Canary_3x1_12H_logloss_opt.json'
+(base) PS C:\Users\bwang\Documents\GitHub\CL_Analyst_Development> python agent/backtest_engine.py --config configs/strategies/HourSet_08_Canary_3x1_12H_logloss_opt.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" --slippage-per-side 0.01
+Loaded strategy config 'E2E_HourSet_08_logloss_ensemble': TP=5.5x  SL=3.0x  threshold=0.5  [single-position]
+Loading historical OHLCV from C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet...
+Auto-resolving predictions from config (dual-model):
+  Long:  data/predictions/E2E_HourSet_08_long_logloss_preds.csv
+  Short: data/predictions/E2E_HourSet_08_short_logloss_preds.csv
+  Merged: 24,358 rows (24,358 buy signals, 24,358 sell signals)
+Running backtest on historical data...
+
+==========================================================================================
+                               BACKTEST REPORT: Historical
+==========================================================================================
+  Strategy:       E2E_HourSet_08_logloss_ensemble
+  Models:         E2E_HourSet_08_long_logloss (Long) + E2E_HourSet_08_short_logloss (Short)
+  Threshold:      Buy >= 0.5, Sell >= 0.5
+  TP / SL:        5.5x / 3.0x ATR
+  Trailing:       1.0x
+  Predictions:    (auto-resolved from config)
+  Data:           C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet
+  Trade Range:    2022-01-02 18:00:00 -> 2026-01-30 04:00:00
+==========================================================================================
+  AGGREGATE SUMMARY
+------------------------------------------------------------------------------------------
+  Total Trades:     673
+  Win Rate:         72.7%
+  Profit Factor:    1.61
+  Total Net PnL:    $    160,219.97
+  Max Drawdown:     $    -16,246.49
+
+==========================================================================================
+  MONTHLY BREAKDOWN
+------------------------------------------------------------------------------------------
+  Month      | Trades |  Buys | Sells |    WR% | Buy WR | Sell WR |     Net PnL |    PF
+------------------------------------------------------------------------------------------
+  2022-01    |      7 |     5 |     2 | 85.7%  | 80.0%  | 100.0%   | $ 11,292.91 |   inf
+  2022-02    |      6 |     5 |     1 | 66.7%  | 80.0%  |  0.0%   | $  1,501.56 |  1.35
+  2022-03    |      7 |     7 |     0 | 85.7%  | 85.7%  |    -    | $ 13,489.69 |  3.22
+  2022-04    |     12 |     7 |     5 | 91.7%  | 85.7%  | 100.0%   | $ 19,889.40 |  6.47
+  2022-05    |      9 |     6 |     3 | 55.6%  | 50.0%  | 66.7%   | $  3,617.88 |  1.27
+  2022-06    |     10 |     6 |     4 | 90.0%  | 83.3%  | 100.0%   | $  4,203.85 |  1.72
+  2022-07    |     13 |     7 |     6 | 69.2%  | 85.7%  | 50.0%   | $ -3,203.16 |  0.37
+  2022-08    |     17 |     9 |     8 | 76.5%  | 88.9%  | 62.5%   | $  1,938.09 |  1.22
+  2022-09    |     21 |    12 |     9 | 90.5%  | 91.7%  | 88.9%   | $ 15,871.00 |  7.91
+  2022-10    |     12 |     7 |     5 | 75.0%  | 85.7%  | 60.0%   | $    237.34 |  1.04
+  2022-11    |     20 |    13 |     7 | 80.0%  | 69.2%  | 100.0%   | $  5,110.41 |  1.51
+  2022-12    |      8 |     5 |     3 | 87.5%  | 80.0%  | 100.0%   | $  4,564.84 |  3.16
+------------------------------------------------------------------------------------------
+  2022 Total |    142 |    89 |    53 | 80.3%  | 80.9%  | 79.2%   | $ 78,513.81 |  2.15
+==========================================================================================
+  2023-01    |     13 |     8 |     5 | 76.9%  | 87.5%  | 60.0%   | $  1,107.48 |  1.20
+  2023-02    |     13 |     7 |     6 | 61.5%  | 71.4%  | 50.0%   | $     18.04 |  1.00
+  2023-03    |     11 |     6 |     5 | 72.7%  | 66.7%  | 80.0%   | $  1,027.37 |  1.14
+  2023-04    |      9 |     6 |     3 | 66.7%  | 50.0%  | 100.0%   | $ -3,923.30 |  0.39
+  2023-05    |     19 |    11 |     8 | 63.2%  | 54.5%  | 75.0%   | $    582.00 |  1.06
+  2023-06    |     13 |     8 |     5 | 84.6%  | 100.0%  | 60.0%   | $ 13,370.17 | 45.65
+  2023-07    |     13 |     9 |     4 | 84.6%  | 88.9%  | 75.0%   | $  5,894.86 |  3.83
+  2023-08    |     18 |    10 |     8 | 66.7%  | 70.0%  | 62.5%   | $   -978.46 |  0.86
+  2023-09    |     21 |    13 |     8 | 76.2%  | 84.6%  | 62.5%   | $  4,321.09 |  1.68
+  2023-10    |     19 |    11 |     8 | 52.6%  | 63.6%  | 37.5%   | $ -2,146.28 |  0.81
+  2023-11    |     20 |    11 |     9 | 65.0%  | 54.5%  | 77.8%   | $    779.62 |  1.07
+  2023-12    |     13 |     9 |     4 | 69.2%  | 77.8%  | 50.0%   | $  2,251.98 |  1.65
+------------------------------------------------------------------------------------------
+  2023 Total |    182 |   109 |    73 | 69.2%  | 72.5%  | 64.4%   | $ 22,304.55 |  1.29
+==========================================================================================
+  2024-01    |     14 |     8 |     6 | 85.7%  | 87.5%  | 83.3%   | $  3,662.53 |  2.17
+  2024-02    |      9 |     5 |     4 | 55.6%  | 60.0%  | 50.0%   | $  3,008.41 |  1.69
+  2024-03    |     12 |     7 |     5 | 75.0%  | 85.7%  | 60.0%   | $  2,571.17 |  1.74
+  2024-04    |     13 |     6 |     7 | 53.8%  | 50.0%  | 57.1%   | $ -6,123.84 |  0.31
+  2024-05    |     22 |    12 |    10 | 54.5%  | 50.0%  | 60.0%   | $ -4,308.30 |  0.52
+  2024-06    |     11 |     7 |     4 | 63.6%  | 71.4%  | 50.0%   | $  3,584.21 |  1.84
+  2024-07    |     17 |     9 |     8 | 58.8%  | 44.4%  | 75.0%   | $ -4,451.35 |  0.44
+  2024-08    |     19 |    11 |     8 | 63.2%  | 45.5%  | 87.5%   | $  7,539.36 |  1.92
+  2024-09    |     17 |    10 |     7 | 76.5%  | 80.0%  | 71.4%   | $  4,692.97 |  1.82
+  2024-10    |      9 |     5 |     4 | 88.9%  | 80.0%  | 100.0%   | $  8,442.65 |  4.42
+  2024-11    |     15 |     8 |     7 | 93.3%  | 87.5%  | 100.0%   | $  3,531.87 |  3.49
+  2024-12    |     21 |    12 |     9 | 81.0%  | 91.7%  | 66.7%   | $    428.28 |  1.13
+------------------------------------------------------------------------------------------
+  2024 Total |    179 |   100 |    79 | 70.4%  | 69.0%  | 72.2%   | $ 22,577.96 |  1.36
+==========================================================================================
+  2025-01    |     15 |     8 |     7 | 66.7%  | 87.5%  | 42.9%   | $  3,577.57 |  2.10
+  2025-02    |     10 |     5 |     5 | 90.0%  | 100.0%  | 80.0%   | $  4,690.22 |  7.88
+  2025-03    |     14 |     8 |     6 | 71.4%  | 75.0%  | 66.7%   | $ -1,024.11 |  0.80
+  2025-04    |     11 |     6 |     5 | 90.9%  | 83.3%  | 100.0%   | $ 13,739.44 |  5.97
+  2025-05    |     12 |     7 |     5 | 75.0%  | 85.7%  | 60.0%   | $  9,170.25 |  3.88
+  2025-06    |     14 |     9 |     5 | 78.6%  | 88.9%  | 60.0%   | $  6,775.86 |  2.14
+  2025-07    |     14 |     8 |     6 | 64.3%  | 75.0%  | 50.0%   | $ -1,623.70 |  0.72
+  2025-08    |     15 |     8 |     7 | 80.0%  | 75.0%  | 85.7%   | $   -901.12 |  0.80
+  2025-09    |     17 |     9 |     8 | 58.8%  | 55.6%  | 62.5%   | $    186.71 |  1.03
+  2025-10    |     10 |     7 |     3 | 70.0%  | 57.1%  | 100.0%   | $ -1,144.30 |  0.76
+  2025-11    |     13 |     7 |     6 | 53.8%  | 71.4%  | 33.3%   | $  2,006.23 |  1.45
+  2025-12    |     17 |     9 |     8 | 70.6%  | 55.6%  | 87.5%   | $ -2,907.45 |  0.46
+------------------------------------------------------------------------------------------
+  2025 Total |    162 |    91 |    71 | 71.6%  | 74.7%  | 67.6%   | $ 32,545.60 |  1.62
+==========================================================================================
+  2026-01    |      8 |     6 |     2 | 87.5%  | 100.0%  | 50.0%   | $  4,278.05 |  3.20
+------------------------------------------------------------------------------------------
+  2026 Total |      8 |     6 |     2 | 87.5%  | 100.0%  | 50.0%   | $  4,278.05 |  3.20
+==========================================================================================
+==========================================================================================
+  GRAND TOTAL |    673 |   395 |   278 | 72.7%  | 74.4%  | 70.1%   | $160,219.97 |  1.61
+==========================================================================================
+
+  EXIT DISTRIBUTION BY SIDE
+------------------------------------------------------------------------------------------
+  Exit Reason      |    Long |   Short |   Total
+------------------------------------------------------------------------------------------
+  TP               |      83 |      42 |     125
+  SL               |      95 |      46 |     141
+  TRAILING_BE      |     214 |     189 |     403
+  TIME_BARRIER     |       3 |       1 |       4
+------------------------------------------------------------------------------------------
+
+  NOTABLE PERIODS
+------------------------------------------------------------------------------------------
+  Best Month:       2022-04  ($ 19,889.40, 91.7% WR, 12 trades)
+  Worst Month:      2024-04  ($ -6,123.84, 53.8% WR, 13 trades)
+  Win Streak:       17 trades
+  Loss Streak:      3 trades
+  Best Trade:       $ 10,646.86  (2022-03-04 05:00, Long)
+  Worst Trade:      $ -6,065.93  (2022-03-24 20:00, Long)
+==========================================================================================
+(base) PS C:\Users\bwang\Documents\GitHub\CL_Analyst_Development> python agent/backtest_engine.py --config configs/strategies/HourSet_08_Canary_3x1_12H_logloss_opt.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" --slippage-per-side 0.01^C
+(base) PS C:\Users\bwang\Documents\GitHub\CL_Analyst_Development> python agent/backtest_engine.py --config configs/strategies/hs08_scout_3x1_12h_logloss_opt.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" --slippage-per-side 0.01
+Loaded strategy config 'E2E_HourSet_08_logloss_ensemble': TP=5.5x  SL=3.0x  threshold=0.5  [single-position]
+Loading historical OHLCV from C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet...
+Auto-resolving predictions from config (dual-model):
+  Long:  data/predictions/oos_predictions_hs08_scout_3x1_12h_long_logloss.csv
+  Short: data/predictions/oos_predictions_hs08_scout_3x1_12h_short_logloss.csv
+  Merged: 24,358 rows (24,358 buy signals, 24,358 sell signals)
+Running backtest on historical data...
+
+==========================================================================================
+                               BACKTEST REPORT: Historical
+==========================================================================================
+  Strategy:       E2E_HourSet_08_logloss_ensemble
+  Models:         E2E_HourSet_08_long_logloss (Long) + E2E_HourSet_08_short_logloss (Short)
+  Threshold:      Buy >= 0.5, Sell >= 0.5
+  TP / SL:        5.5x / 3.0x ATR
+  Trailing:       1.0x
+  Predictions:    (auto-resolved from config)
+  Data:           C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet
+  Trade Range:    2022-01-02 18:00:00 -> 2026-01-30 04:00:00
+==========================================================================================
+  AGGREGATE SUMMARY
+------------------------------------------------------------------------------------------
+  Total Trades:     673
+  Win Rate:         72.7%
+  Profit Factor:    1.61
+  Total Net PnL:    $    160,219.97
+  Max Drawdown:     $    -16,246.49
+
+==========================================================================================
+  MONTHLY BREAKDOWN
+------------------------------------------------------------------------------------------
+  Month      | Trades |  Buys | Sells |    WR% | Buy WR | Sell WR |     Net PnL |    PF
+------------------------------------------------------------------------------------------
+  2022-01    |      7 |     5 |     2 | 85.7%  | 80.0%  | 100.0%   | $ 11,292.91 |   inf
+  2022-02    |      6 |     5 |     1 | 66.7%  | 80.0%  |  0.0%   | $  1,501.56 |  1.35
+  2022-03    |      7 |     7 |     0 | 85.7%  | 85.7%  |    -    | $ 13,489.69 |  3.22
+  2022-04    |     12 |     7 |     5 | 91.7%  | 85.7%  | 100.0%   | $ 19,889.40 |  6.47
+  2022-05    |      9 |     6 |     3 | 55.6%  | 50.0%  | 66.7%   | $  3,617.88 |  1.27
+  2022-06    |     10 |     6 |     4 | 90.0%  | 83.3%  | 100.0%   | $  4,203.85 |  1.72
+  2022-07    |     13 |     7 |     6 | 69.2%  | 85.7%  | 50.0%   | $ -3,203.16 |  0.37
+  2022-08    |     17 |     9 |     8 | 76.5%  | 88.9%  | 62.5%   | $  1,938.09 |  1.22
+  2022-09    |     21 |    12 |     9 | 90.5%  | 91.7%  | 88.9%   | $ 15,871.00 |  7.91
+  2022-10    |     12 |     7 |     5 | 75.0%  | 85.7%  | 60.0%   | $    237.34 |  1.04
+  2022-11    |     20 |    13 |     7 | 80.0%  | 69.2%  | 100.0%   | $  5,110.41 |  1.51
+  2022-12    |      8 |     5 |     3 | 87.5%  | 80.0%  | 100.0%   | $  4,564.84 |  3.16
+------------------------------------------------------------------------------------------
+  2022 Total |    142 |    89 |    53 | 80.3%  | 80.9%  | 79.2%   | $ 78,513.81 |  2.15
+==========================================================================================
+  2023-01    |     13 |     8 |     5 | 76.9%  | 87.5%  | 60.0%   | $  1,107.48 |  1.20
+  2023-02    |     13 |     7 |     6 | 61.5%  | 71.4%  | 50.0%   | $     18.04 |  1.00
+  2023-03    |     11 |     6 |     5 | 72.7%  | 66.7%  | 80.0%   | $  1,027.37 |  1.14
+  2023-04    |      9 |     6 |     3 | 66.7%  | 50.0%  | 100.0%   | $ -3,923.30 |  0.39
+  2023-05    |     19 |    11 |     8 | 63.2%  | 54.5%  | 75.0%   | $    582.00 |  1.06
+  2023-06    |     13 |     8 |     5 | 84.6%  | 100.0%  | 60.0%   | $ 13,370.17 | 45.65
+  2023-07    |     13 |     9 |     4 | 84.6%  | 88.9%  | 75.0%   | $  5,894.86 |  3.83
+  2023-08    |     18 |    10 |     8 | 66.7%  | 70.0%  | 62.5%   | $   -978.46 |  0.86
+  2023-09    |     21 |    13 |     8 | 76.2%  | 84.6%  | 62.5%   | $  4,321.09 |  1.68
+  2023-10    |     19 |    11 |     8 | 52.6%  | 63.6%  | 37.5%   | $ -2,146.28 |  0.81
+  2023-11    |     20 |    11 |     9 | 65.0%  | 54.5%  | 77.8%   | $    779.62 |  1.07
+  2023-12    |     13 |     9 |     4 | 69.2%  | 77.8%  | 50.0%   | $  2,251.98 |  1.65
+------------------------------------------------------------------------------------------
+  2023 Total |    182 |   109 |    73 | 69.2%  | 72.5%  | 64.4%   | $ 22,304.55 |  1.29
+==========================================================================================
+  2024-01    |     14 |     8 |     6 | 85.7%  | 87.5%  | 83.3%   | $  3,662.53 |  2.17
+  2024-02    |      9 |     5 |     4 | 55.6%  | 60.0%  | 50.0%   | $  3,008.41 |  1.69
+  2024-03    |     12 |     7 |     5 | 75.0%  | 85.7%  | 60.0%   | $  2,571.17 |  1.74
+  2024-04    |     13 |     6 |     7 | 53.8%  | 50.0%  | 57.1%   | $ -6,123.84 |  0.31
+  2024-05    |     22 |    12 |    10 | 54.5%  | 50.0%  | 60.0%   | $ -4,308.30 |  0.52
+  2024-06    |     11 |     7 |     4 | 63.6%  | 71.4%  | 50.0%   | $  3,584.21 |  1.84
+  2024-07    |     17 |     9 |     8 | 58.8%  | 44.4%  | 75.0%   | $ -4,451.35 |  0.44
+  2024-08    |     19 |    11 |     8 | 63.2%  | 45.5%  | 87.5%   | $  7,539.36 |  1.92
+  2024-09    |     17 |    10 |     7 | 76.5%  | 80.0%  | 71.4%   | $  4,692.97 |  1.82
+  2024-10    |      9 |     5 |     4 | 88.9%  | 80.0%  | 100.0%   | $  8,442.65 |  4.42
+  2024-11    |     15 |     8 |     7 | 93.3%  | 87.5%  | 100.0%   | $  3,531.87 |  3.49
+  2024-12    |     21 |    12 |     9 | 81.0%  | 91.7%  | 66.7%   | $    428.28 |  1.13
+------------------------------------------------------------------------------------------
+  2024 Total |    179 |   100 |    79 | 70.4%  | 69.0%  | 72.2%   | $ 22,577.96 |  1.36
+==========================================================================================
+  2025-01    |     15 |     8 |     7 | 66.7%  | 87.5%  | 42.9%   | $  3,577.57 |  2.10
+  2025-02    |     10 |     5 |     5 | 90.0%  | 100.0%  | 80.0%   | $  4,690.22 |  7.88
+  2025-03    |     14 |     8 |     6 | 71.4%  | 75.0%  | 66.7%   | $ -1,024.11 |  0.80
+  2025-04    |     11 |     6 |     5 | 90.9%  | 83.3%  | 100.0%   | $ 13,739.44 |  5.97
+  2025-05    |     12 |     7 |     5 | 75.0%  | 85.7%  | 60.0%   | $  9,170.25 |  3.88
+  2025-06    |     14 |     9 |     5 | 78.6%  | 88.9%  | 60.0%   | $  6,775.86 |  2.14
+  2025-07    |     14 |     8 |     6 | 64.3%  | 75.0%  | 50.0%   | $ -1,623.70 |  0.72
+  2025-08    |     15 |     8 |     7 | 80.0%  | 75.0%  | 85.7%   | $   -901.12 |  0.80
+  2025-09    |     17 |     9 |     8 | 58.8%  | 55.6%  | 62.5%   | $    186.71 |  1.03
+  2025-10    |     10 |     7 |     3 | 70.0%  | 57.1%  | 100.0%   | $ -1,144.30 |  0.76
+  2025-11    |     13 |     7 |     6 | 53.8%  | 71.4%  | 33.3%   | $  2,006.23 |  1.45
+  2025-12    |     17 |     9 |     8 | 70.6%  | 55.6%  | 87.5%   | $ -2,907.45 |  0.46
+------------------------------------------------------------------------------------------
+  2025 Total |    162 |    91 |    71 | 71.6%  | 74.7%  | 67.6%   | $ 32,545.60 |  1.62
+==========================================================================================
+  2026-01    |      8 |     6 |     2 | 87.5%  | 100.0%  | 50.0%   | $  4,278.05 |  3.20
+------------------------------------------------------------------------------------------
+  2026 Total |      8 |     6 |     2 | 87.5%  | 100.0%  | 50.0%   | $  4,278.05 |  3.20
+==========================================================================================
+==========================================================================================
+  GRAND TOTAL |    673 |   395 |   278 | 72.7%  | 74.4%  | 70.1%   | $160,219.97 |  1.61
+==========================================================================================
+
+  EXIT DISTRIBUTION BY SIDE
+------------------------------------------------------------------------------------------
+  Exit Reason      |    Long |   Short |   Total
+------------------------------------------------------------------------------------------
+  TP               |      83 |      42 |     125
+  SL               |      95 |      46 |     141
+  TRAILING_BE      |     214 |     189 |     403
+  TIME_BARRIER     |       3 |       1 |       4
+------------------------------------------------------------------------------------------
+
+  NOTABLE PERIODS
+------------------------------------------------------------------------------------------
+  Best Month:       2022-04  ($ 19,889.40, 91.7% WR, 12 trades)
+  Worst Month:      2024-04  ($ -6,123.84, 53.8% WR, 13 trades)
+  Win Streak:       17 trades
+  Loss Streak:      3 trades
+  Best Trade:       $ 10,646.86  (2022-03-04 05:00, Long)
+  Worst Trade:      $ -6,065.93  (2022-03-24 20:00, Long)
+==========================================================================================
+(base) PS C:\Users\bwang\Documents\GitHub\CL_Analyst_Development>
+
+
+<<NEXT>>
+
+(base) PS C:\Users\bwang\Documents\GitHub\CL_Analyst_Development> python agent/batch_post_optimizer.py --batch-dir reports/batch_runs/batch_20260511_2116 --n-trials 1000
+OHLCV data: data\processed\CL_HourSet_08.parquet
+
+======================================================================
+ BATCH PROGRESS: 1/8 TARGETS (Elapsed: 0.0m)
+======================================================================
+
+============================================================
+OPTIMIZING: HS08 2x1 6H ENSEMBLE logloss
+============================================================
+======================================================================
+STRATEGY PARAMETER OPTIMIZATION: E2E_HourSet_08_logloss_ensemble
+  Config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_6h_20260511_2116\registry\canary_output\ensemble_config_logloss.json
+  Trials: 1000
+  Mode: SIMULTANEOUS DUAL-SIDE SCORE
+======================================================================
+  Predictions: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_6h_20260511_2116\registry\canary_output\_merged_ens_logloss.csv
+  OHLCV data: data\processed\CL_HourSet_08.parquet
+
+Loading data...
+  Predictions: 24,364 rows  cols=['prob_Buy', 'prob_Sell']
+  OHLCV: 101,261 rows
+  Date range: 2022-01-02 17:00:00 to 2026-02-15 17:00:00
+
+--- BASELINE ---
+  PnL: $-72,660.87  PF: 0.81  WR: 43.3%  Trades: 1927  DD: $-75,888.84
+
+--- OPTIMIZING (1000 trials) ---
+Best trial: 42. Best value: 0.793807:   5%|███▊                                                                          | 49/1000 [02:01<41:25,  2.61s/it]  Trial 50/1000  Score=-0.16  [126s]
+Best trial: 52. Best value: 1.05891:  10%|███████▊                                                                       | 99/1000 [04:06<33:03,  2.20s/it]  Trial 100/1000  Score=0.39  [251s]
+Best trial: 52. Best value: 1.05891:  15%|███████████▌                                                                  | 149/1000 [06:29<37:17,  2.63s/it]  Trial 150/1000  Score=0.32  [395s]
+Best trial: 184. Best value: 1.40424:  20%|███████████████▎                                                             | 199/1000 [08:41<30:54,  2.32s/it]  Trial 200/1000  Score=1.23  [526s]
+Best trial: 184. Best value: 1.40424:  25%|███████████████████▏                                                         | 249/1000 [10:55<32:18,  2.58s/it]  Trial 250/1000  Score=0.30  [660s]
+Best trial: 184. Best value: 1.40424:  30%|███████████████████████                                                      | 299/1000 [13:16<33:26,  2.86s/it]  Trial 300/1000  Score=0.74  [801s]
+Best trial: 184. Best value: 1.40424:  35%|██████████████████████████▊                                                  | 349/1000 [15:25<27:06,  2.50s/it]  Trial 350/1000  Score=1.38  [931s]
+Best trial: 184. Best value: 1.40424:  40%|██████████████████████████████▋                                              | 399/1000 [17:21<23:29,  2.34s/it]  Trial 400/1000  Score=1.02  [1046s]
+Best trial: 184. Best value: 1.40424:  45%|██████████████████████████████████▌                                          | 449/1000 [19:19<21:22,  2.33s/it]  Trial 450/1000  Score=1.39  [1164s]
+Best trial: 184. Best value: 1.40424:  50%|██████████████████████████████████████▍                                      | 499/1000 [21:17<19:44,  2.36s/it]  Trial 500/1000  Score=1.38  [1283s]
+Best trial: 184. Best value: 1.40424:  55%|██████████████████████████████████████████▎                                  | 549/1000 [23:31<20:16,  2.70s/it]  Trial 550/1000  Score=1.17  [1416s]
+Best trial: 184. Best value: 1.40424:  60%|██████████████████████████████████████████████                               | 599/1000 [26:08<25:30,  3.82s/it]  Trial 600/1000  Score=1.26  [1574s]
+Best trial: 184. Best value: 1.40424:  65%|█████████████████████████████████████████████████▉                           | 649/1000 [28:55<17:47,  3.04s/it]  Trial 650/1000  Score=0.48  [1740s]
+Best trial: 674. Best value: 1.41318:  70%|█████████████████████████████████████████████████████▊                       | 699/1000 [31:31<13:29,  2.69s/it]  Trial 700/1000  Score=1.36  [1897s]
+Best trial: 674. Best value: 1.41318:  75%|█████████████████████████████████████████████████████████▋                   | 749/1000 [33:48<11:36,  2.77s/it]  Trial 750/1000  Score=1.41  [2033s]
+Best trial: 674. Best value: 1.41318:  80%|█████████████████████████████████████████████████████████████▌               | 799/1000 [36:09<09:28,  2.83s/it]  Trial 800/1000  Score=1.05  [2175s]
+Best trial: 674. Best value: 1.41318:  85%|█████████████████████████████████████████████████████████████████▎           | 849/1000 [38:36<07:30,  2.98s/it]  Trial 850/1000  Score=-9999.00  [2322s]
+Best trial: 674. Best value: 1.41318:  90%|█████████████████████████████████████████████████████████████████████▏       | 899/1000 [40:39<03:58,  2.36s/it]  Trial 900/1000  Score=0.64  [2444s]
+Best trial: 674. Best value: 1.41318:  95%|█████████████████████████████████████████████████████████████████████████    | 949/1000 [42:33<01:52,  2.22s/it]  Trial 950/1000  Score=-0.35  [2559s]
+Best trial: 674. Best value: 1.41318: 100%|████████████████████████████████████████████████████████████████████████████▉| 999/1000 [44:25<00:02,  2.25s/it]  Trial 1000/1000  Score=1.41  [2670s]
+Best trial: 674. Best value: 1.41318: 100%|████████████████████████████████████████████████████████████████████████████| 1000/1000 [44:27<00:00,  2.67s/it]
+[*] Saved Top 5 candidate configurations to configs/strategies/candidates
+
+--- RESULTS (2670s) ---
+Best trial #674: Score=1.41
+
+  COMBINED PORTFOLIO: PnL=$68,885.53  PF=1.55  WR=69.5%  Trades=226  DD=$-12,187.00
+
+  LONG ONLY: PnL=$68,885.53  PF=1.55  WR=69.5%  Trades=226  DD=$-12,187.00
+  SHORT ONLY: PnL=$0.00  PF=0.00  WR=0.0%  Trades=0  DD=$0.00
+Saved trial report: reports/strategy_optimization_e2e_hourset_08_logloss_ensemble.csv (1000 rows)
+
+Saved combined optimized config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_6h_20260511_2116\registry\canary_output\ensemble_config_logloss_opt.json
+Saved long-only config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_6h_20260511_2116\registry\canary_output\ensemble_config_logloss_opt_long.json
+Saved short-only config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_6h_20260511_2116\registry\canary_output\ensemble_config_logloss_opt_short.json
+
+======================================================================
+ BATCH PROGRESS: 2/8 TARGETS (Elapsed: 44.6m)
+======================================================================
+
+============================================================
+OPTIMIZING: HS08 2x1 6H ENSEMBLE average_precision
+============================================================
+======================================================================
+STRATEGY PARAMETER OPTIMIZATION: E2E_HourSet_08_average_precision_ensemble
+  Config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_6h_20260511_2116\registry\canary_output\ensemble_config_average_precision.json
+  Trials: 1000
+  Mode: SIMULTANEOUS DUAL-SIDE SCORE
+======================================================================
+  Predictions: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_6h_20260511_2116\registry\canary_output\_merged_ens_average_precision.csv
+  OHLCV data: data\processed\CL_HourSet_08.parquet
+
+Loading data...
+  Predictions: 24,364 rows  cols=['prob_Buy', 'prob_Sell']
+  OHLCV: 101,261 rows
+  Date range: 2022-01-02 17:00:00 to 2026-02-15 17:00:00
+
+--- BASELINE ---
+  PnL: $-15,863.85  PF: 0.83  WR: 44.0%  Trades: 513  DD: $-22,969.65
+
+--- OPTIMIZING (1000 trials) ---
+Best trial: 22. Best value: 0.743212:   5%|███▊                                                                          | 49/1000 [01:47<34:35,  2.18s/it]  Trial 50/1000  Score=-9999.00  [112s]
+Best trial: 63. Best value: 0.937774:  10%|███████▋                                                                      | 99/1000 [03:38<33:37,  2.24s/it]  Trial 100/1000  Score=0.73  [224s]
+Best trial: 63. Best value: 0.937774:  15%|███████████▍                                                                 | 149/1000 [05:31<32:14,  2.27s/it]  Trial 150/1000  Score=-9999.00  [336s]
+Best trial: 63. Best value: 0.937774:  20%|███████████████▎                                                             | 199/1000 [07:24<30:13,  2.26s/it]  Trial 200/1000  Score=0.74  [449s]
+Best trial: 63. Best value: 0.937774:  25%|███████████████████▏                                                         | 249/1000 [09:36<29:42,  2.37s/it]  Trial 250/1000  Score=0.87  [581s]
+Best trial: 63. Best value: 0.937774:  30%|███████████████████████                                                      | 299/1000 [12:00<30:12,  2.59s/it]  Trial 300/1000  Score=0.87  [726s]
+Best trial: 324. Best value: 0.945541:  35%|██████████████████████████▌                                                 | 349/1000 [14:34<30:39,  2.83s/it]  Trial 350/1000  Score=0.90  [880s]
+Best trial: 375. Best value: 0.949745:  40%|██████████████████████████████▎                                             | 399/1000 [16:46<26:44,  2.67s/it]  Trial 400/1000  Score=0.84  [1011s]
+Best trial: 375. Best value: 0.949745:  45%|██████████████████████████████████                                          | 449/1000 [18:55<20:57,  2.28s/it]  Trial 450/1000  Score=0.81  [1141s]
+Best trial: 478. Best value: 0.956766:  50%|█████████████████████████████████████▉                                      | 499/1000 [20:47<18:32,  2.22s/it]  Trial 500/1000  Score=0.95  [1252s]
+Best trial: 509. Best value: 1.024:  55%|███████████████████████████████████████████▎                                   | 549/1000 [22:56<22:59,  3.06s/it]  Trial 550/1000  Score=0.61  [1382s]
+Best trial: 509. Best value: 1.024:  60%|███████████████████████████████████████████████▎                               | 599/1000 [25:19<18:37,  2.79s/it]  Trial 600/1000  Score=0.95  [1524s]
+Best trial: 509. Best value: 1.024:  65%|███████████████████████████████████████████████████▎                           | 649/1000 [27:41<16:06,  2.75s/it]  Trial 650/1000  Score=0.84  [1666s]
+Best trial: 509. Best value: 1.024:  70%|███████████████████████████████████████████████████████▏                       | 699/1000 [30:02<13:51,  2.76s/it]  Trial 700/1000  Score=0.94  [1808s]
+Best trial: 509. Best value: 1.024:  75%|███████████████████████████████████████████████████████████▏                   | 749/1000 [32:23<12:30,  2.99s/it]  Trial 750/1000  Score=0.83  [1949s]
+Best trial: 509. Best value: 1.024:  80%|███████████████████████████████████████████████████████████████                | 799/1000 [34:44<09:40,  2.89s/it]  Trial 800/1000  Score=-1.18  [2090s]
+Best trial: 509. Best value: 1.024:  85%|███████████████████████████████████████████████████████████████████            | 849/1000 [37:03<07:06,  2.82s/it]  Trial 850/1000  Score=0.83  [2229s]
+Best trial: 509. Best value: 1.024:  90%|███████████████████████████████████████████████████████████████████████        | 899/1000 [39:20<04:36,  2.73s/it]  Trial 900/1000  Score=-9999.00  [2366s]
+Best trial: 509. Best value: 1.024:  95%|██████████████████████████████████████████████████████████████████████████▉    | 949/1000 [41:40<02:15,  2.66s/it]  Trial 950/1000  Score=0.55  [2506s]
+Best trial: 509. Best value: 1.024: 100%|██████████████████████████████████████████████████████████████████████████████▉| 999/1000 [43:56<00:03,  3.07s/it]  Trial 1000/1000  Score=0.97  [2642s]
+Best trial: 509. Best value: 1.024: 100%|██████████████████████████████████████████████████████████████████████████████| 1000/1000 [44:00<00:00,  2.64s/it]
+[*] Saved Top 5 candidate configurations to configs/strategies/candidates
+
+--- RESULTS (2642s) ---
+Best trial #509: Score=1.02
+
+  COMBINED PORTFOLIO: PnL=$20,709.40  PF=1.72  WR=65.9%  Trades=85  DD=$-5,096.90
+
+  LONG ONLY: PnL=$16,793.94  PF=1.58  WR=65.5%  Trades=84  DD=$-6,870.42
+  SHORT ONLY: PnL=$3,915.45  PF=inf  WR=100.0%  Trades=1  DD=$-1,462.08
+Saved trial report: reports/strategy_optimization_e2e_hourset_08_average_precision_ensemble.csv (1000 rows)
+
+Saved combined optimized config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_6h_20260511_2116\registry\canary_output\ensemble_config_average_precision_opt.json
+Saved long-only config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_6h_20260511_2116\registry\canary_output\ensemble_config_average_precision_opt_long.json
+Saved short-only config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_6h_20260511_2116\registry\canary_output\ensemble_config_average_precision_opt_short.json
+
+======================================================================
+ BATCH PROGRESS: 3/8 TARGETS (Elapsed: 88.8m)
+======================================================================
+
+============================================================
+OPTIMIZING: HS08 2x1 12H ENSEMBLE logloss
+============================================================
+======================================================================
+STRATEGY PARAMETER OPTIMIZATION: E2E_HourSet_08_logloss_ensemble
+  Config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_12h_20260511_2116\registry\canary_output\ensemble_config_logloss.json
+  Trials: 1000
+  Mode: SIMULTANEOUS DUAL-SIDE SCORE
+======================================================================
+  Predictions: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_12h_20260511_2116\registry\canary_output\_merged_ens_logloss.csv
+  OHLCV data: data\processed\CL_HourSet_08.parquet
+
+Loading data...
+  Predictions: 24,358 rows  cols=['prob_Buy', 'prob_Sell']
+  OHLCV: 101,261 rows
+  Date range: 2022-01-02 17:00:00 to 2026-02-13 10:00:00
+
+--- BASELINE ---
+  PnL: $4,439.13  PF: 3.01  WR: 55.6%  Trades: 18  DD: $-1,556.97
+
+--- OPTIMIZING (1000 trials) ---
+Best trial: 42. Best value: 0.567324:   5%|███▊                                                                          | 49/1000 [02:11<41:36,  2.63s/it]  Trial 50/1000  Score=-0.44  [137s]
+Best trial: 96. Best value: 0.663636:  10%|███████▋                                                                      | 99/1000 [04:25<41:17,  2.75s/it]  Trial 100/1000  Score=0.66  [271s]
+Best trial: 145. Best value: 0.794176:  15%|███████████▎                                                                | 149/1000 [06:51<43:05,  3.04s/it]  Trial 150/1000  Score=-0.20  [417s]
+Best trial: 150. Best value: 0.905962:  20%|███████████████                                                             | 199/1000 [09:13<38:02,  2.85s/it]  Trial 200/1000  Score=0.81  [560s]
+Best trial: 150. Best value: 0.905962:  25%|██████████████████▉                                                         | 249/1000 [11:33<33:31,  2.68s/it]  Trial 250/1000  Score=0.81  [699s]
+Best trial: 150. Best value: 0.905962:  30%|██████████████████████▋                                                     | 299/1000 [13:51<31:18,  2.68s/it]  Trial 300/1000  Score=-0.72  [837s]
+Best trial: 150. Best value: 0.905962:  35%|██████████████████████████▌                                                 | 349/1000 [16:07<29:41,  2.74s/it]  Trial 350/1000  Score=0.65  [973s]
+Best trial: 150. Best value: 0.905962:  40%|██████████████████████████████▎                                             | 399/1000 [18:24<29:12,  2.92s/it]  Trial 400/1000  Score=0.53  [1111s]
+Best trial: 150. Best value: 0.905962:  45%|██████████████████████████████████                                          | 449/1000 [20:54<26:26,  2.88s/it]  Trial 450/1000  Score=0.83  [1260s]
+Best trial: 150. Best value: 0.905962:  50%|█████████████████████████████████████▉                                      | 499/1000 [23:16<23:58,  2.87s/it]  Trial 500/1000  Score=0.83  [1402s]
+Best trial: 150. Best value: 0.905962:  55%|█████████████████████████████████████████▋                                  | 549/1000 [25:41<20:43,  2.76s/it]  Trial 550/1000  Score=-9999.00  [1547s]
+Best trial: 150. Best value: 0.905962:  60%|█████████████████████████████████████████████▌                              | 599/1000 [28:06<20:38,  3.09s/it]  Trial 600/1000  Score=0.66  [1692s]
+Best trial: 150. Best value: 0.905962:  65%|█████████████████████████████████████████████████▎                          | 649/1000 [30:04<13:01,  2.23s/it]  Trial 650/1000  Score=-0.01  [1810s]
+Best trial: 150. Best value: 0.905962:  70%|█████████████████████████████████████████████████████                       | 699/1000 [31:56<11:15,  2.24s/it]  Trial 700/1000  Score=0.39  [1922s]
+Best trial: 150. Best value: 0.905962:  75%|████████████████████████████████████████████████████████▉                   | 749/1000 [33:48<09:19,  2.23s/it]  Trial 750/1000  Score=0.83  [2034s]
+Best trial: 150. Best value: 0.905962:  80%|████████████████████████████████████████████████████████████▋               | 799/1000 [35:40<07:29,  2.24s/it]  Trial 800/1000  Score=0.89  [2146s]
+Best trial: 150. Best value: 0.905962:  85%|████████████████████████████████████████████████████████████████▌           | 849/1000 [37:32<05:46,  2.29s/it]  Trial 850/1000  Score=0.89  [2258s]
+Best trial: 150. Best value: 0.905962:  90%|████████████████████████████████████████████████████████████████████▎       | 899/1000 [39:26<03:56,  2.34s/it]  Trial 900/1000  Score=0.89  [2371s]
+Best trial: 150. Best value: 0.905962:  95%|████████████████████████████████████████████████████████████████████████    | 949/1000 [41:23<01:58,  2.32s/it]  Trial 950/1000  Score=0.90  [2489s]
+Best trial: 975. Best value: 1.08757: 100%|████████████████████████████████████████████████████████████████████████████▉| 999/1000 [43:19<00:02,  2.34s/it]  Trial 1000/1000  Score=0.15  [2605s]
+Best trial: 975. Best value: 1.08757: 100%|████████████████████████████████████████████████████████████████████████████| 1000/1000 [43:22<00:00,  2.60s/it]
+[*] Saved Top 5 candidate configurations to configs/strategies/candidates
+
+--- RESULTS (2605s) ---
+Best trial #975: Score=1.09
+
+  COMBINED PORTFOLIO: PnL=$71,583.62  PF=1.40  WR=66.9%  Trades=522  DD=$-21,611.09
+
+  LONG ONLY: PnL=$0.00  PF=0.00  WR=0.0%  Trades=0  DD=$0.00
+  SHORT ONLY: PnL=$71,583.62  PF=1.40  WR=66.9%  Trades=522  DD=$-21,611.09
+Saved trial report: reports/strategy_optimization_e2e_hourset_08_logloss_ensemble.csv (1000 rows)
+
+Saved combined optimized config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_12h_20260511_2116\registry\canary_output\ensemble_config_logloss_opt.json
+Saved long-only config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_12h_20260511_2116\registry\canary_output\ensemble_config_logloss_opt_long.json
+Saved short-only config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_12h_20260511_2116\registry\canary_output\ensemble_config_logloss_opt_short.json
+
+======================================================================
+ BATCH PROGRESS: 4/8 TARGETS (Elapsed: 132.3m)
+======================================================================
+
+============================================================
+OPTIMIZING: HS08 2x1 12H ENSEMBLE average_precision
+============================================================
+======================================================================
+STRATEGY PARAMETER OPTIMIZATION: E2E_HourSet_08_average_precision_ensemble
+  Config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_12h_20260511_2116\registry\canary_output\ensemble_config_average_precision.json
+  Trials: 1000
+  Mode: SIMULTANEOUS DUAL-SIDE SCORE
+======================================================================
+  Predictions: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_12h_20260511_2116\registry\canary_output\_merged_ens_average_precision.csv
+  OHLCV data: data\processed\CL_HourSet_08.parquet
+
+Loading data...
+  Predictions: 24,358 rows  cols=['prob_Buy', 'prob_Sell']
+  OHLCV: 101,261 rows
+  Date range: 2022-01-02 17:00:00 to 2026-02-13 10:00:00
+
+--- BASELINE ---
+  PnL: $495.65  PF: 3.71  WR: 80.0%  Trades: 5  DD: $-262.62
+
+--- OPTIMIZING (1000 trials) ---
+Best trial: 23. Best value: 0.512261:   5%|███▊                                                                          | 49/1000 [01:51<36:07,  2.28s/it]  Trial 50/1000  Score=-0.09  [116s]
+Best trial: 88. Best value: 0.963319:  10%|███████▋                                                                      | 99/1000 [03:47<35:08,  2.34s/it]  Trial 100/1000  Score=0.73  [232s]
+Best trial: 137. Best value: 1.035:  15%|███████████▊                                                                   | 149/1000 [05:41<31:18,  2.21s/it]  Trial 150/1000  Score=1.03  [346s]
+Best trial: 137. Best value: 1.035:  20%|███████████████▋                                                               | 199/1000 [07:32<29:51,  2.24s/it]  Trial 200/1000  Score=0.48  [458s]
+Best trial: 137. Best value: 1.035:  25%|███████████████████▋                                                           | 249/1000 [09:24<27:44,  2.22s/it]  Trial 250/1000  Score=1.03  [570s]
+Best trial: 137. Best value: 1.035:  30%|███████████████████████▌                                                       | 299/1000 [11:16<25:56,  2.22s/it]  Trial 300/1000  Score=-9999.00  [681s]
+Best trial: 137. Best value: 1.035:  35%|███████████████████████████▌                                                   | 349/1000 [13:07<24:12,  2.23s/it]  Trial 350/1000  Score=0.07  [793s]
+Best trial: 137. Best value: 1.035:  40%|███████████████████████████████▌                                               | 399/1000 [15:01<24:13,  2.42s/it]  Trial 400/1000  Score=0.71  [906s]
+Best trial: 137. Best value: 1.035:  45%|███████████████████████████████████▍                                           | 449/1000 [16:57<21:21,  2.33s/it]  Trial 450/1000  Score=0.42  [1023s]
+Best trial: 137. Best value: 1.035:  50%|███████████████████████████████████████▍                                       | 499/1000 [18:53<19:14,  2.31s/it]  Trial 500/1000  Score=0.96  [1138s]
+Best trial: 137. Best value: 1.035:  55%|███████████████████████████████████████████▎                                   | 549/1000 [20:49<17:45,  2.36s/it]  Trial 550/1000  Score=0.42  [1255s]
+Best trial: 137. Best value: 1.035:  60%|███████████████████████████████████████████████▎                               | 599/1000 [22:46<15:34,  2.33s/it]  Trial 600/1000  Score=0.69  [1372s]
+Best trial: 137. Best value: 1.035:  65%|███████████████████████████████████████████████████▎                           | 649/1000 [24:42<13:38,  2.33s/it]  Trial 650/1000  Score=0.69  [1487s]
+Best trial: 137. Best value: 1.035:  70%|███████████████████████████████████████████████████████▏                       | 699/1000 [26:38<11:38,  2.32s/it]  Trial 700/1000  Score=-0.08  [1603s]
+Best trial: 137. Best value: 1.035:  75%|███████████████████████████████████████████████████████████▏                   | 749/1000 [28:36<09:49,  2.35s/it]  Trial 750/1000  Score=1.02  [1721s]
+Best trial: 790. Best value: 1.10859:  80%|█████████████████████████████████████████████████████████████▌               | 799/1000 [30:32<07:39,  2.29s/it]  Trial 800/1000  Score=-9999.00  [1837s]
+Best trial: 790. Best value: 1.10859:  85%|█████████████████████████████████████████████████████████████████▎           | 849/1000 [32:29<05:50,  2.32s/it]  Trial 850/1000  Score=0.14  [1954s]
+Best trial: 790. Best value: 1.10859:  90%|█████████████████████████████████████████████████████████████████████▏       | 899/1000 [34:25<03:55,  2.33s/it]  Trial 900/1000  Score=0.36  [2071s]
+Best trial: 790. Best value: 1.10859:  95%|█████████████████████████████████████████████████████████████████████████    | 949/1000 [36:22<01:58,  2.31s/it]  Trial 950/1000  Score=0.22  [2187s]
+Best trial: 790. Best value: 1.10859: 100%|████████████████████████████████████████████████████████████████████████████▉| 999/1000 [38:19<00:02,  2.32s/it]  Trial 1000/1000  Score=0.72  [2304s]
+Best trial: 790. Best value: 1.10859: 100%|████████████████████████████████████████████████████████████████████████████| 1000/1000 [38:21<00:00,  2.30s/it]
+[*] Saved Top 5 candidate configurations to configs/strategies/candidates
+
+--- RESULTS (2304s) ---
+Best trial #790: Score=1.11
+
+  COMBINED PORTFOLIO: PnL=$69,386.07  PF=1.19  WR=69.7%  Trades=969  DD=$-19,108.18
+
+  LONG ONLY: PnL=$69,386.07  PF=1.19  WR=69.7%  Trades=969  DD=$-19,108.18
+  SHORT ONLY: PnL=$0.00  PF=0.00  WR=0.0%  Trades=0  DD=$0.00
+Saved trial report: reports/strategy_optimization_e2e_hourset_08_average_precision_ensemble.csv (1000 rows)
+
+Saved combined optimized config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_12h_20260511_2116\registry\canary_output\ensemble_config_average_precision_opt.json
+Saved long-only config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_12h_20260511_2116\registry\canary_output\ensemble_config_average_precision_opt_long.json
+Saved short-only config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_2x1_12h_20260511_2116\registry\canary_output\ensemble_config_average_precision_opt_short.json
+
+======================================================================
+ BATCH PROGRESS: 5/8 TARGETS (Elapsed: 170.9m)
+======================================================================
+
+============================================================
+OPTIMIZING: HS08 3x1 6H ENSEMBLE logloss
+============================================================
+======================================================================
+STRATEGY PARAMETER OPTIMIZATION: E2E_HourSet_08_logloss_ensemble
+  Config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_6h_20260511_2116\registry\canary_output\ensemble_config_logloss.json
+  Trials: 1000
+  Mode: SIMULTANEOUS DUAL-SIDE SCORE
+======================================================================
+  Predictions: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_6h_20260511_2116\registry\canary_output\_merged_ens_logloss.csv
+  OHLCV data: data\processed\CL_HourSet_08.parquet
+
+Loading data...
+  Predictions: 24,364 rows  cols=['prob_Buy', 'prob_Sell']
+  OHLCV: 101,261 rows
+  Date range: 2022-01-02 17:00:00 to 2026-02-15 17:00:00
+
+--- BASELINE ---
+  PnL: $-53,494.02  PF: 0.81  WR: 44.0%  Trades: 1451  DD: $-69,187.24
+
+--- OPTIMIZING (1000 trials) ---
+Best trial: 43. Best value: 0.928077:   5%|███▊                                                                          | 49/1000 [01:53<36:23,  2.30s/it]  Trial 50/1000  Score=0.16  [119s]
+Best trial: 83. Best value: 0.929478:  10%|███████▋                                                                      | 99/1000 [03:48<34:47,  2.32s/it]  Trial 100/1000  Score=-9999.00  [233s]
+Best trial: 110. Best value: 1.1714:  15%|███████████▌                                                                  | 149/1000 [05:43<32:30,  2.29s/it]  Trial 150/1000  Score=1.00  [348s]
+Best trial: 110. Best value: 1.1714:  20%|███████████████▌                                                              | 199/1000 [07:41<30:44,  2.30s/it]  Trial 200/1000  Score=0.75  [466s]
+Best trial: 110. Best value: 1.1714:  25%|███████████████████▍                                                          | 249/1000 [09:36<28:26,  2.27s/it]  Trial 250/1000  Score=0.92  [582s]
+Best trial: 110. Best value: 1.1714:  30%|███████████████████████▎                                                      | 299/1000 [11:31<26:36,  2.28s/it]  Trial 300/1000  Score=0.52  [697s]
+Best trial: 110. Best value: 1.1714:  35%|███████████████████████████▏                                                  | 349/1000 [13:27<25:14,  2.33s/it]  Trial 350/1000  Score=1.13  [812s]
+Best trial: 381. Best value: 1.44841:  40%|██████████████████████████████▋                                              | 399/1000 [15:22<23:07,  2.31s/it]  Trial 400/1000  Score=1.14  [927s]
+Best trial: 381. Best value: 1.44841:  45%|██████████████████████████████████▌                                          | 449/1000 [17:18<21:24,  2.33s/it]  Trial 450/1000  Score=0.44  [1043s]
+Best trial: 381. Best value: 1.44841:  50%|██████████████████████████████████████▍                                      | 499/1000 [19:13<19:12,  2.30s/it]  Trial 500/1000  Score=1.31  [1159s]
+Best trial: 381. Best value: 1.44841:  55%|██████████████████████████████████████████▎                                  | 549/1000 [21:09<17:20,  2.31s/it]  Trial 550/1000  Score=1.29  [1274s]
+Best trial: 381. Best value: 1.44841:  60%|██████████████████████████████████████████████                               | 599/1000 [23:04<15:19,  2.29s/it]  Trial 600/1000  Score=0.99  [1390s]
+Best trial: 381. Best value: 1.44841:  65%|█████████████████████████████████████████████████▉                           | 649/1000 [25:01<13:39,  2.34s/it]  Trial 650/1000  Score=1.31  [1506s]
+Best trial: 381. Best value: 1.44841:  70%|█████████████████████████████████████████████████████▊                       | 699/1000 [26:57<11:41,  2.33s/it]  Trial 700/1000  Score=1.31  [1622s]
+Best trial: 381. Best value: 1.44841:  75%|█████████████████████████████████████████████████████████▋                   | 749/1000 [28:53<10:05,  2.41s/it]  Trial 750/1000  Score=1.31  [1738s]
+Best trial: 381. Best value: 1.44841:  80%|█████████████████████████████████████████████████████████████▌               | 799/1000 [30:49<07:48,  2.33s/it]  Trial 800/1000  Score=1.31  [1855s]
+Best trial: 381. Best value: 1.44841:  85%|█████████████████████████████████████████████████████████████████▎           | 849/1000 [32:46<05:44,  2.28s/it]  Trial 850/1000  Score=1.08  [1971s]
+Best trial: 381. Best value: 1.44841:  90%|█████████████████████████████████████████████████████████████████████▏       | 899/1000 [34:42<03:55,  2.33s/it]  Trial 900/1000  Score=0.17  [2088s]
+Best trial: 381. Best value: 1.44841:  95%|█████████████████████████████████████████████████████████████████████████    | 949/1000 [36:40<01:59,  2.35s/it]  Trial 950/1000  Score=0.91  [2205s]
+Best trial: 381. Best value: 1.44841: 100%|████████████████████████████████████████████████████████████████████████████▉| 999/1000 [38:37<00:02,  2.33s/it]  Trial 1000/1000  Score=1.31  [2322s]
+Best trial: 381. Best value: 1.44841: 100%|████████████████████████████████████████████████████████████████████████████| 1000/1000 [38:39<00:00,  2.32s/it]
+[*] Saved Top 5 candidate configurations to configs/strategies/candidates
+
+--- RESULTS (2322s) ---
+Best trial #381: Score=1.45
+
+  COMBINED PORTFOLIO: PnL=$77,516.42  PF=1.51  WR=63.0%  Trades=341  DD=$-13,908.63
+
+  LONG ONLY: PnL=$77,516.42  PF=1.51  WR=63.0%  Trades=341  DD=$-13,908.63
+  SHORT ONLY: PnL=$0.00  PF=0.00  WR=0.0%  Trades=0  DD=$0.00
+Saved trial report: reports/strategy_optimization_e2e_hourset_08_logloss_ensemble.csv (1000 rows)
+
+Saved combined optimized config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_6h_20260511_2116\registry\canary_output\ensemble_config_logloss_opt.json
+Saved long-only config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_6h_20260511_2116\registry\canary_output\ensemble_config_logloss_opt_long.json
+Saved short-only config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_6h_20260511_2116\registry\canary_output\ensemble_config_logloss_opt_short.json
+
+======================================================================
+ BATCH PROGRESS: 6/8 TARGETS (Elapsed: 209.7m)
+======================================================================
+
+============================================================
+OPTIMIZING: HS08 3x1 6H ENSEMBLE average_precision
+============================================================
+======================================================================
+STRATEGY PARAMETER OPTIMIZATION: E2E_HourSet_08_average_precision_ensemble
+  Config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_6h_20260511_2116\registry\canary_output\ensemble_config_average_precision.json
+  Trials: 1000
+  Mode: SIMULTANEOUS DUAL-SIDE SCORE
+======================================================================
+  Predictions: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_6h_20260511_2116\registry\canary_output\_merged_ens_average_precision.csv
+  OHLCV data: data\processed\CL_HourSet_08.parquet
+
+Loading data...
+  Predictions: 24,364 rows  cols=['prob_Buy', 'prob_Sell']
+  OHLCV: 101,261 rows
+  Date range: 2022-01-02 17:00:00 to 2026-02-15 17:00:00
+
+--- BASELINE ---
+  PnL: $405.56  PF: 1.06  WR: 46.6%  Trades: 58  DD: $-2,601.46
+
+--- OPTIMIZING (1000 trials) ---
+Best trial: 32. Best value: 1.2191:   5%|███▉                                                                            | 49/1000 [01:52<36:06,  2.28s/it]  Trial 50/1000  Score=-0.11  [117s]
+Best trial: 32. Best value: 1.2191:  10%|███████▉                                                                        | 99/1000 [03:47<35:09,  2.34s/it]  Trial 100/1000  Score=0.88  [232s]
+Best trial: 32. Best value: 1.2191:  15%|███████████▊                                                                   | 149/1000 [05:43<32:34,  2.30s/it]  Trial 150/1000  Score=0.83  [348s]
+Best trial: 32. Best value: 1.2191:  20%|███████████████▋                                                               | 199/1000 [07:39<30:37,  2.29s/it]  Trial 200/1000  Score=0.39  [464s]
+Best trial: 32. Best value: 1.2191:  25%|███████████████████▋                                                           | 249/1000 [09:35<29:37,  2.37s/it]  Trial 250/1000  Score=1.14  [580s]
+Best trial: 32. Best value: 1.2191:  30%|███████████████████████▌                                                       | 299/1000 [11:32<27:18,  2.34s/it]  Trial 300/1000  Score=0.71  [697s]
+Best trial: 32. Best value: 1.2191:  35%|███████████████████████████▌                                                   | 349/1000 [13:28<24:44,  2.28s/it]  Trial 350/1000  Score=0.71  [813s]
+Best trial: 393. Best value: 1.22832:  40%|██████████████████████████████▋                                              | 399/1000 [15:24<23:16,  2.32s/it]  Trial 400/1000  Score=1.08  [929s]
+Best trial: 393. Best value: 1.22832:  45%|██████████████████████████████████▌                                          | 449/1000 [17:22<21:10,  2.31s/it]  Trial 450/1000  Score=1.02  [1047s]
+Best trial: 393. Best value: 1.22832:  50%|██████████████████████████████████████▍                                      | 499/1000 [19:33<23:15,  2.79s/it]  Trial 500/1000  Score=1.01  [1179s]
+Best trial: 393. Best value: 1.22832:  55%|██████████████████████████████████████████▎                                  | 549/1000 [21:50<20:12,  2.69s/it]  Trial 550/1000  Score=0.86  [1315s]
+Best trial: 393. Best value: 1.22832:  60%|██████████████████████████████████████████████                               | 599/1000 [24:05<18:10,  2.72s/it]  Trial 600/1000  Score=0.55  [1450s]
+Best trial: 393. Best value: 1.22832:  65%|█████████████████████████████████████████████████▉                           | 649/1000 [26:22<16:24,  2.81s/it]  Trial 650/1000  Score=1.23  [1588s]
+Best trial: 393. Best value: 1.22832:  70%|█████████████████████████████████████████████████████▊                       | 699/1000 [28:49<13:50,  2.76s/it]  Trial 700/1000  Score=-9999.00  [1734s]
+Best trial: 393. Best value: 1.22832:  75%|█████████████████████████████████████████████████████████▋                   | 749/1000 [31:07<11:43,  2.80s/it]  Trial 750/1000  Score=1.23  [1873s]
+Best trial: 393. Best value: 1.22832:  80%|█████████████████████████████████████████████████████████████▌               | 799/1000 [33:30<10:09,  3.03s/it]  Trial 800/1000  Score=1.23  [2016s]
+Best trial: 809. Best value: 1.32444:  85%|█████████████████████████████████████████████████████████████████▎           | 849/1000 [35:46<06:44,  2.68s/it]  Trial 850/1000  Score=1.21  [2152s]
+Best trial: 809. Best value: 1.32444:  90%|█████████████████████████████████████████████████████████████████████▏       | 899/1000 [38:07<04:42,  2.80s/it]  Trial 900/1000  Score=0.91  [2293s]
+Best trial: 809. Best value: 1.32444:  95%|█████████████████████████████████████████████████████████████████████████    | 949/1000 [40:28<02:22,  2.80s/it]  Trial 950/1000  Score=1.10  [2434s]
+Best trial: 809. Best value: 1.32444: 100%|████████████████████████████████████████████████████████████████████████████▉| 999/1000 [42:33<00:02,  2.27s/it]  Trial 1000/1000  Score=1.02  [2558s]
+Best trial: 809. Best value: 1.32444: 100%|████████████████████████████████████████████████████████████████████████████| 1000/1000 [42:35<00:00,  2.56s/it]
+[*] Saved Top 5 candidate configurations to configs/strategies/candidates
+
+--- RESULTS (2558s) ---
+Best trial #809: Score=1.32
+
+  COMBINED PORTFOLIO: PnL=$81,272.46  PF=1.31  WR=42.6%  Trades=495  DD=$-17,302.16
+
+  LONG ONLY: PnL=$81,272.46  PF=1.31  WR=42.6%  Trades=495  DD=$-17,302.16
+  SHORT ONLY: PnL=$0.00  PF=0.00  WR=0.0%  Trades=0  DD=$0.00
+Saved trial report: reports/strategy_optimization_e2e_hourset_08_average_precision_ensemble.csv (1000 rows)
+
+Saved combined optimized config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_6h_20260511_2116\registry\canary_output\ensemble_config_average_precision_opt.json
+Saved long-only config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_6h_20260511_2116\registry\canary_output\ensemble_config_average_precision_opt_long.json
+Saved short-only config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_6h_20260511_2116\registry\canary_output\ensemble_config_average_precision_opt_short.json
+
+======================================================================
+ BATCH PROGRESS: 7/8 TARGETS (Elapsed: 252.4m)
+======================================================================
+
+============================================================
+OPTIMIZING: HS08 3x1 12H ENSEMBLE logloss
+============================================================
+======================================================================
+STRATEGY PARAMETER OPTIMIZATION: E2E_HourSet_08_logloss_ensemble
+  Config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_12h_20260511_2116\registry\canary_output\ensemble_config_logloss.json
+  Trials: 1000
+  Mode: SIMULTANEOUS DUAL-SIDE SCORE
+======================================================================
+  Predictions: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_12h_20260511_2116\registry\canary_output\_merged_ens_logloss.csv
+  OHLCV data: data\processed\CL_HourSet_08.parquet
+
+Loading data...
+  Predictions: 24,358 rows  cols=['prob_Buy', 'prob_Sell']
+  OHLCV: 101,261 rows
+  Date range: 2022-01-02 17:00:00 to 2026-02-13 10:00:00
+
+--- BASELINE ---
+  PnL: $-26,327.78  PF: 0.80  WR: 47.0%  Trades: 668  DD: $-31,345.46
+
+--- OPTIMIZING (1000 trials) ---
+Best trial: 32. Best value: 0.766557:   5%|███▊                                                                          | 49/1000 [01:54<43:11,  2.73s/it]  Trial 50/1000  Score=-9999.00  [119s]
+Best trial: 87. Best value: 0.849647:  10%|███████▋                                                                      | 99/1000 [04:22<35:00,  2.33s/it]  Trial 100/1000  Score=0.28  [267s]
+Best trial: 87. Best value: 0.849647:  15%|███████████▍                                                                 | 149/1000 [06:38<36:44,  2.59s/it]  Trial 150/1000  Score=-0.95  [404s]
+Best trial: 181. Best value: 1.63105:  20%|███████████████▎                                                             | 199/1000 [08:52<36:23,  2.73s/it]  Trial 200/1000  Score=1.35  [538s]
+Best trial: 246. Best value: 1.80698:  25%|███████████████████▏                                                         | 249/1000 [11:05<31:22,  2.51s/it]  Trial 250/1000  Score=1.14  [670s]
+Best trial: 246. Best value: 1.80698:  30%|███████████████████████                                                      | 299/1000 [13:41<43:12,  3.70s/it]  Trial 300/1000  Score=0.89  [827s]
+Best trial: 246. Best value: 1.80698:  35%|██████████████████████████▊                                                  | 349/1000 [16:12<31:05,  2.87s/it]  Trial 350/1000  Score=0.71  [978s]
+Best trial: 246. Best value: 1.80698:  40%|██████████████████████████████▋                                              | 399/1000 [18:36<28:03,  2.80s/it]  Trial 400/1000  Score=1.15  [1122s]
+Best trial: 246. Best value: 1.80698:  45%|██████████████████████████████████▌                                          | 449/1000 [21:04<25:20,  2.76s/it]  Trial 450/1000  Score=0.27  [1269s]
+Best trial: 492. Best value: 1.84416:  50%|██████████████████████████████████████▍                                      | 499/1000 [23:21<22:36,  2.71s/it]  Trial 500/1000  Score=0.73  [1407s]
+Best trial: 492. Best value: 1.84416:  55%|██████████████████████████████████████████▎                                  | 549/1000 [26:50<28:01,  3.73s/it]  Trial 550/1000  Score=0.39  [1616s]
+Best trial: 562. Best value: 2.25108:  60%|██████████████████████████████████████████████                               | 599/1000 [29:05<17:30,  2.62s/it]  Trial 600/1000  Score=1.56  [1750s]
+Best trial: 562. Best value: 2.25108:  65%|█████████████████████████████████████████████████▉                           | 649/1000 [31:06<13:52,  2.37s/it]  Trial 650/1000  Score=1.34  [1871s]
+Best trial: 562. Best value: 2.25108:  70%|█████████████████████████████████████████████████████▊                       | 699/1000 [33:28<18:05,  3.61s/it]  Trial 700/1000  Score=0.57  [2017s]
+Best trial: 704. Best value: 2.28596:  75%|█████████████████████████████████████████████████████████▋                   | 749/1000 [36:08<11:36,  2.77s/it]  Trial 750/1000  Score=1.50  [2173s]
+Best trial: 704. Best value: 2.28596:  80%|█████████████████████████████████████████████████████████████▌               | 799/1000 [38:32<10:00,  2.99s/it]  Trial 800/1000  Score=0.40  [2318s]
+Best trial: 704. Best value: 2.28596:  85%|█████████████████████████████████████████████████████████████████▎           | 849/1000 [40:53<08:07,  3.23s/it]  Trial 850/1000  Score=1.23  [2460s]
+Best trial: 704. Best value: 2.28596:  90%|█████████████████████████████████████████████████████████████████████▏       | 899/1000 [43:19<04:39,  2.77s/it]  Trial 900/1000  Score=0.55  [2605s]
+Best trial: 704. Best value: 2.28596:  95%|█████████████████████████████████████████████████████████████████████████    | 949/1000 [45:43<02:26,  2.88s/it]  Trial 950/1000  Score=1.75  [2748s]
+Best trial: 983. Best value: 2.38949: 100%|████████████████████████████████████████████████████████████████████████████▉| 999/1000 [48:09<00:03,  3.47s/it]  Trial 1000/1000  Score=1.61  [2895s]
+Best trial: 983. Best value: 2.38949: 100%|████████████████████████████████████████████████████████████████████████████| 1000/1000 [48:12<00:00,  2.89s/it]
+[*] Saved Top 5 candidate configurations to configs/strategies/candidates
+
+--- RESULTS (2895s) ---
+Best trial #983: Score=2.39
+
+  COMBINED PORTFOLIO: PnL=$160,219.97  PF=1.61  WR=72.7%  Trades=673  DD=$-16,246.49
+
+  LONG ONLY: PnL=$21,676.98  PF=1.08  WR=70.8%  Trades=456  DD=$-45,121.75
+  SHORT ONLY: PnL=$29,610.78  PF=1.16  WR=63.8%  Trades=635  DD=$-15,166.06
+Saved trial report: reports/strategy_optimization_e2e_hourset_08_logloss_ensemble.csv (1000 rows)
+
+Saved combined optimized config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_12h_20260511_2116\registry\canary_output\ensemble_config_logloss_opt.json
+Saved long-only config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_12h_20260511_2116\registry\canary_output\ensemble_config_logloss_opt_long.json
+Saved short-only config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_12h_20260511_2116\registry\canary_output\ensemble_config_logloss_opt_short.json
+
+======================================================================
+ BATCH PROGRESS: 8/8 TARGETS (Elapsed: 300.8m)
+======================================================================
+
+============================================================
+OPTIMIZING: HS08 3x1 12H ENSEMBLE average_precision
+============================================================
+======================================================================
+STRATEGY PARAMETER OPTIMIZATION: E2E_HourSet_08_average_precision_ensemble
+  Config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_12h_20260511_2116\registry\canary_output\ensemble_config_average_precision.json
+  Trials: 1000
+  Mode: SIMULTANEOUS DUAL-SIDE SCORE
+======================================================================
+  Predictions: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_12h_20260511_2116\registry\canary_output\_merged_ens_average_precision.csv
+  OHLCV data: data\processed\CL_HourSet_08.parquet
+
+Loading data...
+  Predictions: 24,358 rows  cols=['prob_Buy', 'prob_Sell']
+  OHLCV: 101,261 rows
+  Date range: 2022-01-02 17:00:00 to 2026-02-13 10:00:00
+
+--- BASELINE ---
+  PnL: $-45,994.69  PF: 0.80  WR: 43.8%  Trades: 1108  DD: $-47,263.80
+
+--- OPTIMIZING (1000 trials) ---
+Best trial: 30. Best value: 0.447495:   5%|███▊                                                                          | 49/1000 [02:22<45:46,  2.89s/it]  Trial 50/1000  Score=-0.37  [148s]
+Best trial: 67. Best value: 0.789432:  10%|███████▋                                                                      | 99/1000 [04:56<48:28,  3.23s/it]  Trial 100/1000  Score=0.50  [303s]
+Best trial: 139. Best value: 0.819175:  15%|███████████▎                                                                | 149/1000 [07:57<47:57,  3.38s/it]  Trial 150/1000  Score=-9999.00  [484s]
+Best trial: 187. Best value: 0.846569:  20%|███████████████                                                             | 199/1000 [10:21<39:12,  2.94s/it]  Trial 200/1000  Score=0.80  [627s]
+Best trial: 187. Best value: 0.846569:  25%|██████████████████▉                                                         | 249/1000 [12:36<29:22,  2.35s/it]  Trial 250/1000  Score=0.83  [761s]
+Best trial: 187. Best value: 0.846569:  30%|██████████████████████▋                                                     | 299/1000 [15:32<39:57,  3.42s/it]  Trial 300/1000  Score=0.40  [939s]
+Best trial: 187. Best value: 0.846569:  35%|██████████████████████████▌                                                 | 349/1000 [18:15<33:39,  3.10s/it]  Trial 350/1000  Score=0.53  [1102s]
+Best trial: 187. Best value: 0.846569:  40%|██████████████████████████████▎                                             | 399/1000 [20:59<45:37,  4.55s/it]  Trial 400/1000  Score=0.20  [1267s]
+Best trial: 417. Best value: 1.22495:  45%|██████████████████████████████████▌                                          | 449/1000 [23:49<32:18,  3.52s/it]  Trial 450/1000  Score=0.91  [1437s]
+Best trial: 417. Best value: 1.22495:  50%|██████████████████████████████████████▍                                      | 499/1000 [26:32<27:47,  3.33s/it]  Trial 500/1000  Score=1.18  [1598s]
+Best trial: 417. Best value: 1.22495:  55%|██████████████████████████████████████████▎                                  | 549/1000 [29:15<24:10,  3.22s/it]  Trial 550/1000  Score=1.18  [1762s]
+Best trial: 417. Best value: 1.22495:  60%|██████████████████████████████████████████████                               | 599/1000 [31:56<22:24,  3.35s/it]  Trial 600/1000  Score=1.18  [1923s]
+Best trial: 616. Best value: 1.24398:  65%|█████████████████████████████████████████████████▉                           | 649/1000 [34:30<14:37,  2.50s/it]  Trial 650/1000  Score=0.39  [2076s]
+Best trial: 616. Best value: 1.24398:  70%|█████████████████████████████████████████████████████▊                       | 699/1000 [37:19<13:48,  2.75s/it]  Trial 700/1000  Score=0.39  [2246s]
+Best trial: 616. Best value: 1.24398:  75%|█████████████████████████████████████████████████████████▋                   | 749/1000 [39:55<12:29,  2.99s/it]  Trial 750/1000  Score=1.19  [2402s]
+Best trial: 616. Best value: 1.24398:  80%|█████████████████████████████████████████████████████████████▌               | 799/1000 [42:37<12:09,  3.63s/it]  Trial 800/1000  Score=1.01  [2564s]
+Best trial: 616. Best value: 1.24398:  85%|█████████████████████████████████████████████████████████████████▎           | 849/1000 [45:19<07:19,  2.91s/it]  Trial 850/1000  Score=1.03  [2725s]
+Best trial: 890. Best value: 1.27772:  90%|█████████████████████████████████████████████████████████████████████▏       | 899/1000 [47:51<05:24,  3.22s/it]  Trial 900/1000  Score=0.65  [2877s]
+Best trial: 890. Best value: 1.27772:  95%|█████████████████████████████████████████████████████████████████████████    | 949/1000 [50:09<02:17,  2.70s/it]  Trial 950/1000  Score=1.01  [3015s]
+Best trial: 966. Best value: 1.30489: 100%|████████████████████████████████████████████████████████████████████████████▉| 999/1000 [52:31<00:02,  2.84s/it]  Trial 1000/1000  Score=1.03  [3157s]
+Best trial: 966. Best value: 1.30489: 100%|████████████████████████████████████████████████████████████████████████████| 1000/1000 [52:34<00:00,  3.15s/it]
+[*] Saved Top 5 candidate configurations to configs/strategies/candidates
+
+--- RESULTS (3157s) ---
+Best trial #966: Score=1.30
+
+  COMBINED PORTFOLIO: PnL=$82,696.42  PF=1.32  WR=76.3%  Trades=620  DD=$-27,179.41
+
+  LONG ONLY: PnL=$82,696.42  PF=1.32  WR=76.3%  Trades=620  DD=$-27,179.41
+  SHORT ONLY: PnL=$0.00  PF=0.00  WR=0.0%  Trades=0  DD=$0.00
+Saved trial report: reports/strategy_optimization_e2e_hourset_08_average_precision_ensemble.csv (1000 rows)
+
+Saved combined optimized config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_12h_20260511_2116\registry\canary_output\ensemble_config_average_precision_opt.json
+Saved long-only config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_12h_20260511_2116\registry\canary_output\ensemble_config_average_precision_opt_long.json
+Saved short-only config: C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\scout_hs08_3x1_12h_20260511_2116\registry\canary_output\ensemble_config_average_precision_opt_short.json
+
+============================================================
+ALL OPTIMIZATIONS COMPLETE - 21217s (353.6 min)
+============================================================
+
+Optimized report saved: reports/batch_runs/batch_20260511_2116\batch_summary_optimized.md
+Raw results: reports/batch_runs/batch_20260511_2116\optimization_results.json
+(base) PS C:\Users\bwang\Documents\GitHub\CL_Analyst_Development>                                                                                           
+

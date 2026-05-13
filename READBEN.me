@@ -1,3 +1,22 @@
+# To-do
+Development:
+-Move batch_post_optimizer to cloud
+-Have batch_post_optimizer run as part of the batch cloud process so it doesn't need to stop and be run locally to complete.
+	-If 4 targets take 7 hours, then 12 targets will be more than a full day. High costs... Let's make sure this is what we want to do. 
+
+Training:
+-Review the canary runs for the most recent 2x1,3x1,4x1,5x1 in C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\batch_runs\batch_20260512_2133
+	-Select the best targets that show promise of high number of trades, and decent PnL, then we will do a batch optimization of them, and do a production run as well if they are doing good. 
+	-Note: Expect the 3x1_12H to perform as well as the current best model we have.
+	
+-Backtest the 3x1_12H model against the full dataset including its training to see how it performs in the backtest.
+
+Major next steps:
+-Production run on hourly model
+-Maybe we can try to train a 5m model again? Or maybe we just move onto another ticker/future like NG or gold, copper, PL, etc.
+-OBSERVE THE MODEL. LET IT COOK. Expect minimum 10 trades a month. Let's see the performance, and identify bugs. This is our chance to make sure the order execution is rock solid. 
+
+
 # References for steps
 
 Step 1: Train
