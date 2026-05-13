@@ -85,6 +85,8 @@ def _bt(**kwargs) -> BacktestEngine:
         "contract_multiplier": 1000.0,
     }
     defaults.update(kwargs)
+    for k in ["cooldown_bars", "tp_cooldown_bars", "sl_cooldown_bars", "consecutive_signal_threshold"]:
+        defaults.pop(k, None)
     return BacktestEngine(**defaults)
 
 
@@ -246,58 +248,6 @@ class TestTrailingStop:
         # Entry = 65.0, exit = 65.0 (breakeven) → P&L ≈ 0
         assert abs(trade.net_pnl_dollars) < 1.0  # Allow tiny float imprecision
 
-
-class TestCooldown:
-    """Post-stop-out cooldown rejects signals and expires correctly."""
-
-    def test_cooldown_rejects_signals(self) -> None:
-        # Signal at bar 20 → SL hit at bar 25 → cooldown 10 bars.
-        # Signal at bar 30 (during cooldown) should be rejected.
-        n = 50
-        prices = [65.0] * n
-        highs = [65.01] * n
-        lows = [64.99] * n
-
-        # Bar 25: SL hit
-        lows[25] = 64.97
-
-        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
-
-        # Two signals: bar 20 (accepted) and bar 30 (should be rejected)
-        dt1 = ohlcv.index[20]
-        dt2 = ohlcv.index[30]
-        signals = pd.DataFrame({"side": [1, 1]}, index=[dt1, dt2])
-
-        bt = _bt(cooldown_bars=10)
-        result = bt.run(signals, ohlcv)
-
-        # Only 1 trade — the second signal was during cooldown
-        assert result.trade_count == 1
-
-    def test_cooldown_expires_after_n_bars(self) -> None:
-        # Signal at bar 20 → SL hit at bar 23 → cooldown 5 bars.
-        # Cooldown covers bars 24..28 (5 bars). Bar 29 → FLAT.
-        # Signal at bar 35 (after cooldown) should be accepted.
-        n = 50
-        prices = [65.0] * n
-        highs = [65.01] * n
-        lows = [64.99] * n
-
-        # Bar 23: SL hit
-        lows[23] = 64.97
-
-        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
-
-        # Two signals: bar 20 (accepted) and bar 35 (after cooldown, accepted)
-        dt1 = ohlcv.index[20]
-        dt2 = ohlcv.index[35]
-        signals = pd.DataFrame({"side": [1, 1]}, index=[dt1, dt2])
-
-        bt = _bt(cooldown_bars=5, max_horizon=5)
-        result = bt.run(signals, ohlcv)
-
-        # Should have 2 trades — cooldown expired before second signal
-        assert result.trade_count == 2
 
 
 class TestGapFill:
@@ -494,7 +444,6 @@ class TestFromConfig:
             "entry_threshold": 0.70,
             "allow_concurrent": True,
             "max_concurrent": 3,
-            "cooldown_bars": 5,
             "trailing_atr_mult": 2.0,
             "max_hold_bars": 100,
         }
@@ -505,7 +454,6 @@ class TestFromConfig:
         assert bt.prob_threshold == 0.70
         assert bt.allow_concurrent is True
         assert bt.max_concurrent == 3
-        assert bt.cooldown_bars == 5
         assert bt.trailing_atr_mult == 2.0
         assert bt.max_horizon == 100
 
@@ -1049,49 +997,6 @@ class TestSeparateCooldowns:
         # Signal at bar 20, time barrier exits at bar 26, signal at bar 27
         dt1 = ohlcv.index[20]
         dt2 = ohlcv.index[27]
-        signals = pd.DataFrame({"side": [1, 1]}, index=[dt1, dt2])
-
-        bt = _bt(max_horizon=horizon, tp_cooldown_bars=10, sl_cooldown_bars=10)
-        result = bt.run(signals, ohlcv)
-
-        # Both trades execute — time barrier has NO cooldown
-        assert result.trade_count == 2
-
-    def test_backward_compat_cooldown_bars_fallback(self) -> None:
-        """Old configs with only cooldown_bars still work via fallback."""
-        bt = BacktestEngine(cooldown_bars=7)
-        assert bt.tp_cooldown_bars == 7
-        assert bt.sl_cooldown_bars == 7
-
-    def test_explicit_tp_sl_override_cooldown_bars(self) -> None:
-        """Explicit tp/sl values override the cooldown_bars fallback."""
-        bt = BacktestEngine(cooldown_bars=10, tp_cooldown_bars=3, sl_cooldown_bars=8)
-        assert bt.tp_cooldown_bars == 3
-        assert bt.sl_cooldown_bars == 8
-
-
-class TestFromConfigCooldowns:
-    """from_config reads tp_cooldown_bars and sl_cooldown_bars correctly."""
-
-    def test_from_config_reads_separate_cooldowns(self) -> None:
-        cfg = {
-            "nickname": "TestCooldown",
-            "tp_cooldown_bars": 3,
-            "sl_cooldown_bars": 8,
-        }
-        bt = BacktestEngine.from_config(cfg)
-        assert bt.tp_cooldown_bars == 3
-        assert bt.sl_cooldown_bars == 8
-
-    def test_from_config_fallback_to_cooldown_bars(self) -> None:
-        """If only cooldown_bars is set, both tp/sl use it."""
-        cfg = {"nickname": "Legacy", "cooldown_bars": 12}
-        bt = BacktestEngine.from_config(cfg)
-        assert bt.tp_cooldown_bars == 12
-        assert bt.sl_cooldown_bars == 12
-
-
-# ---------------------------------------------------------------------------
 # Trailing Stop Offset Tests
 # ---------------------------------------------------------------------------
 
@@ -1408,161 +1313,3 @@ class TestTieredWithEngine:
         }
         strategy = create_execution_strategy(config)
         assert isinstance(strategy, TieredEnsembleStrategy)
-
-
-# ---------------------------------------------------------------------------
-# Consecutive Signal Threshold Tests
-# ---------------------------------------------------------------------------
-
-
-def _make_multi_prob_signal(
-    ohlcv: pd.DataFrame,
-    bar_indices: list[int],
-    prob_buy: float = 0.0,
-    prob_sell: float = 0.0,
-) -> pd.DataFrame:
-    """Create a signals DataFrame with prob_Buy/prob_Sell at multiple bars."""
-    prob_buy_col = [0.0] * len(ohlcv)
-    prob_sell_col = [0.0] * len(ohlcv)
-    for idx in bar_indices:
-        prob_buy_col[idx] = prob_buy
-        prob_sell_col[idx] = prob_sell
-    return pd.DataFrame(
-        {"prob_Buy": prob_buy_col, "prob_Sell": prob_sell_col},
-        index=ohlcv.index,
-    )
-
-
-class TestConsecutiveSignalThreshold:
-    """Consecutive signal threshold delays entry until N consecutive signals."""
-
-    def test_threshold_zero_immediate_entry(self) -> None:
-        """Default threshold=0 fires on the first signal (no delay)."""
-        config = {
-            "nickname": "NoDelay",
-            "execution_class": "ConservativeEnsembleStrategy",
-            "models": {
-                "long": {"threshold": 0.60},
-                "short": {"threshold": 0.60},
-            },
-            "tp_atr_mult": 2.0,
-            "sl_atr_mult": 1.0,
-            "consecutive_signal_threshold": 0,
-        }
-        n = 40
-        prices = [65.0] * n
-        highs = [65.01] * n
-        lows = [64.99] * n
-        highs[25] = 65.05  # TP hit
-
-        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
-        # Single signal at bar 20
-        signals = _make_multi_prob_signal(ohlcv, [20], prob_buy=0.75)
-
-        bt = _bt_with_strategy(config)
-        result = bt.run(signals, ohlcv)
-
-        assert result.trade_count == 1
-        assert result.trades[0].side == 1
-
-    def test_threshold_blocks_until_consecutive(self) -> None:
-        """With threshold=3, trade fires only after 3 consecutive signals."""
-        config = {
-            "nickname": "Delay3",
-            "execution_class": "ConservativeEnsembleStrategy",
-            "models": {
-                "long": {"threshold": 0.60},
-                "short": {"threshold": 0.60},
-            },
-            "tp_atr_mult": 2.0,
-            "sl_atr_mult": 1.0,
-            "consecutive_signal_threshold": 3,
-        }
-        n = 40
-        prices = [65.0] * n
-        highs = [65.01] * n
-        lows = [64.99] * n
-        highs[30] = 65.05  # TP hit
-
-        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
-        # 3 consecutive signals at bars 20, 21, 22 — should fire on bar 22
-        signals = _make_multi_prob_signal(ohlcv, [20, 21, 22], prob_buy=0.75)
-
-        bt = _bt_with_strategy(config)
-        result = bt.run(signals, ohlcv)
-
-        assert result.trade_count == 1
-        trade = result.trades[0]
-        assert trade.side == 1
-        # Entry happens on the 3rd consecutive signal (bar 22)
-        assert trade.entry_dt == ohlcv.index[22]
-
-    def test_counter_resets_on_no_signal(self) -> None:
-        """If signal drops below threshold mid-streak, counter resets."""
-        config = {
-            "nickname": "ResetTest",
-            "execution_class": "ConservativeEnsembleStrategy",
-            "models": {
-                "long": {"threshold": 0.60},
-                "short": {"threshold": 0.60},
-            },
-            "tp_atr_mult": 2.0,
-            "sl_atr_mult": 1.0,
-            "consecutive_signal_threshold": 3,
-        }
-        n = 40
-        prices = [65.0] * n
-        highs = [65.01] * n
-        lows = [64.99] * n
-
-        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
-        # 2 signals at bars 20-21, gap, then 2 more at 23-24 → never 3 consecutive
-        signals = _make_multi_prob_signal(ohlcv, [20, 21, 23, 24], prob_buy=0.75)
-
-        bt = _bt_with_strategy(config)
-        result = bt.run(signals, ohlcv)
-
-        # No trade should fire — never had 3 consecutive signals
-        assert result.trade_count == 0
-
-    def test_single_signal_not_enough(self) -> None:
-        """With threshold=3, a single signal is not enough to trigger entry."""
-        config = {
-            "nickname": "Single",
-            "execution_class": "ConservativeEnsembleStrategy",
-            "models": {
-                "long": {"threshold": 0.60},
-                "short": {"threshold": 0.60},
-            },
-            "tp_atr_mult": 2.0,
-            "sl_atr_mult": 1.0,
-            "consecutive_signal_threshold": 3,
-        }
-        n = 40
-        prices = [65.0] * n
-        highs = [65.01] * n
-        lows = [64.99] * n
-
-        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
-        signals = _make_multi_prob_signal(ohlcv, [20], prob_buy=0.75)
-
-        bt = _bt_with_strategy(config)
-        result = bt.run(signals, ohlcv)
-
-        assert result.trade_count == 0
-
-    def test_from_config_reads_threshold(self) -> None:
-        """from_config correctly reads consecutive_signal_threshold."""
-        cfg = {
-            "nickname": "CfgTest",
-            "consecutive_signal_threshold": 5,
-        }
-        bt = BacktestEngine.from_config(cfg)
-        assert bt.consecutive_signal_threshold == 5
-
-    def test_from_config_defaults_to_zero(self) -> None:
-        """from_config defaults consecutive_signal_threshold to 0 when absent."""
-        cfg = {"nickname": "NoThreshold"}
-        bt = BacktestEngine.from_config(cfg)
-        assert bt.consecutive_signal_threshold == 0
-

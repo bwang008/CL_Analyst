@@ -48,7 +48,65 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 # ---------------------------------------------------------------------------
 # Metrics helpers
 # ---------------------------------------------------------------------------
+import heapq
 
+class TopKTracker:
+    """Tracks the top K configurations by Consistency Score and generates a markdown summary."""
+    def __init__(self, k=5, save_dir="configs/strategies/candidates"):
+        self.k = k
+        self.save_dir = save_dir
+        self.top_configs = [] # Min-heap of (score, trial_number, config_dict, metrics)
+        os.makedirs(self.save_dir, exist_ok=True)
+
+    def add(self, score, trial_number, config, metrics=None):
+        heapq.heappush(self.top_configs, (score, trial_number, config, metrics or {}))
+        if len(self.top_configs) > self.k:
+            heapq.heappop(self.top_configs)
+
+    def save_best(self, min_sharpe=0.5):
+        sorted_configs = sorted(self.top_configs, key=lambda x: x[0], reverse=True)
+        
+        md_lines = [
+            "# Candidate Configurations Summary",
+            "",
+            "| Rank | File Name | Trial | Sharpe | PnL | Trades | Win Rate | PF |",
+            "|---|---|---|---|---|---|---|---|"
+        ]
+
+        saved_count = 0
+        for rank, (score, trial_num, config, metrics) in enumerate(sorted_configs):
+            if score < min_sharpe:
+                print(f"[*] Dropping Trial {trial_num} (Score: {score:.2f} < Min: {min_sharpe})")
+                continue
+
+            saved_count += 1
+            filename = f"Rank_{saved_count}_Trial_{trial_num}_Score_{score:.2f}.json"
+            filepath = os.path.join(self.save_dir, filename)
+            
+            config["_optimization_metadata"] = {
+                "rank": saved_count,
+                "trial": trial_num,
+                "consistency_score": score,
+                "performance_metrics": metrics
+            }
+            with open(filepath, 'w') as f:
+                json.dump(config, f, indent=4)
+                
+            pnl = metrics.get('total_pnl', 0.0)
+            trades = metrics.get('trade_count', 0)
+            wr = metrics.get('win_rate', 0.0)
+            pf = metrics.get('profit_factor', 0.0)
+            
+            md_lines.append(f"| {saved_count} | `{filename}` | {trial_num} | {score:.2f} | ${pnl:,.2f} | {trades} | {wr:.1f}% | {pf:.2f} |")
+
+        if saved_count > 0:
+            summary_path = os.path.join(self.save_dir, "CANDIDATES_SUMMARY.md")
+            with open(summary_path, "w") as f:
+                f.write("\n".join(md_lines))
+                
+            print(f"[*] Saved {saved_count} candidate configurations and summary to {self.save_dir}")
+        else:
+            print(f"[*] No candidate met the min_sharpe hurdle rate of {min_sharpe}.")
 
 def compute_sharpe(equity_curve: list[float], bars_per_year: int = 105120) -> float:
     """Annualized Sharpe ratio from bar-by-bar equity curve."""
@@ -211,15 +269,17 @@ def make_objective(
         elif side == "short" and "long" in cfg:
             cfg["long"]["tiers"] = []
 
-        # Suggest all params
+        # Suggest all params with tighter bounds and new indicators
         params = {
-            "tp_atr_mult": trial.suggest_float("tp_atr_mult", 1.5, 10.0, step=0.5),
-            "sl_atr_mult": trial.suggest_float("sl_atr_mult", 0.5, 5.0, step=0.5),
+            "tp_atr_mult": trial.suggest_float("tp_atr_mult", 1.5, 10.0, step=0.25),
+            "sl_atr_mult": trial.suggest_float("sl_atr_mult", 0.5, 4.5, step=0.25),
             "trailing_atr_mult": trial.suggest_float("trailing_atr_mult", 0.5, 5.0, step=0.5),
+            "trailing_activation_mult": trial.suggest_float("trailing_activation_mult", 1.0, 5.0, step=0.5),
             "cooldown_bars": trial.suggest_int("cooldown_bars", 0, 30, step=5),
             "max_hold_bars": trial.suggest_int("max_hold_bars", 72, 576, step=72),
             "consecutive_signal_threshold": trial.suggest_int("consecutive_signal_threshold", 0, 4, step=1),
-            "entry_threshold": trial.suggest_float("entry_threshold", 0.50, 0.80, step=0.05),
+            "entry_threshold": trial.suggest_float("entry_threshold", 0.50, 0.80, step=0.01),
+            "atr_period": trial.suggest_int("atr_period", 10, 40, step=2),
         }
 
         if base_cfg.get("execution_class") == "BreakoutStraddleStrategy":
@@ -298,6 +358,8 @@ def _run_study_for_side(
     results_cache: dict[int, BacktestResult] = {}
     objective = make_objective(base_cfg, predictions_df, ohlcv_df, results_cache, side=side)
     all_trial_rows: list[dict] = []
+    
+    tracker = TopKTracker(k=5, save_dir=f"configs/strategies/candidates/{model_name}_{side}")
 
     study = optuna.create_study(
         directions=["maximize", "maximize"],
@@ -310,6 +372,15 @@ def _run_study_for_side(
         pf, dd = trial.values
         cached = results_cache.pop(trial.number, None)
         metrics = extract_metrics(cached) if cached else {"profit_factor": pf, "max_drawdown": dd}
+        
+        cfg = copy.deepcopy(base_cfg)
+        strategy = create_execution_strategy(cfg)
+        strategy.apply_trial_params(cfg, dict(trial.params), side=side)
+        
+        if cached:
+            sharpe = compute_sharpe(cached.equity_curve)
+            tracker.add(sharpe, trial.number, cfg, metrics=metrics)
+            
         save_trial_config(base_cfg, trial, metrics, lab_dir,
                           f"{model_name}_{side}".lower().replace(" ", "_"), side=side)
         all_trial_rows.append({"trial_number": trial.number, **trial.params, **metrics})
@@ -320,6 +391,8 @@ def _run_study_for_side(
 
     print(f"\n--- OPTIMIZING {side.upper()} ({n_trials} trials) ---")
     study.optimize(objective, n_trials=n_trials, callbacks=[trial_callback], show_progress_bar=True)
+    
+    tracker.save_best()
 
     # Select best trial (highest PF from Pareto front)
     pareto = study.best_trials

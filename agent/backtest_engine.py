@@ -334,6 +334,9 @@ class BacktestEngine:
             "allow_concurrent": cfg.get("allow_concurrent", False),
             "max_concurrent": cfg.get("max_concurrent", 1),
             "max_horizon": cfg.get("max_hold_bars", 288),
+            "atr_period": cfg.get("atr_period", 14),
+            "trailing_atr_mult": cfg.get("trailing_atr_mult", 1.0),
+            "trailing_sl_atr_offset": cfg.get("trailing_activation_mult", 0.25),
             "execution_strategy": strategy,
         }
         kwargs.update(overrides)
@@ -369,16 +372,14 @@ class BacktestEngine:
                 if key in ("cooldown_bars", "consecutive_signal_threshold"):
                     continue
                 else:
-                    tier_val = side_val
-                    if tier_val is None:
-                        # Fallback to tiered exits or tiers
-                        exits = side_cfg.get("tiered_exits", [])
-                        if exits and key in exits[0]:
-                            tier_val = exits[0].get(key)
-                        else:
-                            tiers = side_cfg.get("tiers", [])
-                            if tiers and key in tiers[0]:
-                                tier_val = tiers[0].get(key)
+                    tier_val = None
+                    exits = side_cfg.get("tiered_exits", [])
+                    if exits and key in exits[0]:
+                        tier_val = exits[0].get(key)
+                    else:
+                        tiers = side_cfg.get("tiers", [])
+                        if tiers and key in tiers[0]:
+                            tier_val = tiers[0].get(key)
 
                 if tier_val is not None and side_val is not None and tier_val != side_val:
                     errors.append(f"{side_key} tier {key}={tier_val} conflicts with {side_key}.{key}={side_val}")

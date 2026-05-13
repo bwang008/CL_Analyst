@@ -657,6 +657,7 @@ class LiveTrader:
         # duplicate IBKR Filled callback arriving after the state reset cannot
         # misidentify the same exit order as a new entry fill.
         self._processed_exit_order_ids: set[int] = set()
+        self._processed_entry_order_ids: set[int] = set()
         # Active trade ID for position ledger tracking (OOB close detection)
         self._active_trade_id: Optional[str] = None
         self._run_id = (
@@ -711,6 +712,13 @@ class LiveTrader:
                     unrealized_pnl = float(item.unrealizedPNL)
                     realized_pnl = float(item.realizedPNL)
                     break
+            
+            # If position is flat, IBKR drops the contract from portfolio().
+            # Fall back to the daily account-level Realized PnL to prevent resetting to $0.
+            if current_position == 0:
+                for av in self.manager.ib.accountValues():
+                    if av.tag == "RealizedPnL" and av.currency == "USD":
+                        realized_pnl = float(av.value)
         except Exception:
             pass
 
@@ -1784,17 +1792,43 @@ class LiveTrader:
                             self._processed_exit_order_ids = set(
                                 list(self._processed_exit_order_ids)[-500:]
                             )
+                    # Calculate PnL for the Telegram alert
+                    pnl_str = ""
+                    pnl_val = 0.0
+                    if getattr(self, "_entry_price", None) is not None and self._entry_price > 0:
+                        try:
+                            mult_str = getattr(contract, "multiplier", "1000")
+                            multiplier = float(mult_str) if mult_str else 1000.0
+                        except Exception:
+                            multiplier = 1000.0
+
+                        if action_str == "SELL":  # closing a long
+                            pnl_val = (avg_price - self._entry_price) * qty * multiplier
+                        elif action_str == "BUY": # closing a short
+                            pnl_val = (self._entry_price - avg_price) * qty * multiplier
+                        
+                        sign = "" if pnl_val >= 0 else "-"
+                        pnl_str = f"\n  • PnL: `{sign}${abs(pnl_val):.2f}`"
+
+                    # Determine exit type and icon
+                    if is_sl_fill and getattr(self, "_trailing_activated", False):
+                        exit_type = "TRAILING SL HIT"
+                        exit_icon = "🟢" if pnl_val >= 0 else "🟡"
+                    else:
+                        exit_type = "TP HIT" if is_tp_fill else "SL HIT"
+                        exit_icon = "🟢" if is_tp_fill else "🔴"
+
                     # Exit order filled — log and apply software-side OCA
-                    exit_type = "TP HIT" if is_tp_fill else "SL HIT"
-                    exit_icon = "🟢" if is_tp_fill else "🔴"
                     log.info(
-                        "[TRADE] EXIT: %s %.0f %s @ %.2f (%s)",
-                        action_str, qty, symbol_str, avg_price, exit_type,
+                        "[TRADE] EXIT: %s %.0f %s @ %.2f (%s) PnL=%.2f",
+                        action_str, qty, symbol_str, avg_price, exit_type, pnl_val
                     )
                     # ── Telegram: trade exit alert ────────────────────
+                    entry_str = f"{self._entry_price:.2f}" if getattr(self, "_entry_price", None) else "Unknown"
                     self._telegram.send(
                         f"{exit_icon} *Trade Exit — {exit_type}*\n"
-                        f"{action_str} {qty:.0f} `{symbol_str}` @ `{avg_price:.2f}`",
+                        f"{action_str} {qty:.0f} `{symbol_str}` @ `{avg_price:.2f}`\n"
+                        f"  • Entry: `{entry_str}`{pnl_str}",
                     )
 
                     if is_sl_fill:
@@ -1873,12 +1907,9 @@ class LiveTrader:
                             "Skipping entry logic to prevent bracket cascade.",
                             order_id, parent_id, order_type
                         )
-                    elif getattr(self, "_last_filled_entry_order_id", None) == order_id:
+                    elif order_id is not None and order_id in self._processed_entry_order_ids:
                         log.info("Ignoring duplicate Filled event for parent order %s", order_id)
                     else:
-                        # Defense-in-depth Fix A: require a stored decision context.
-                        # Every legitimate entry order has a context set in _on_new_bar()
-                        # before it is submitted.  An order with no context is either
                         # an external/manual order or a stale exit order that slipped
                         # past the duplicate-exit guard above.
                         _entry_ctx = self._last_decision_context_by_order_id.get(order_id)
@@ -1892,22 +1923,23 @@ class LiveTrader:
                             return
 
                         # Defense-in-depth Fix B: callback-level position cap.
-                        # The bar-driven guard in _on_new_bar() cannot block entries
-                        # that arrive via asynchronous fill callbacks.  Check the
-                        # live IBKR position directly here before opening any ledger
-                        # position or placing bracket children.
+                        # Check the live IBKR position to detect overexposure.
                         _cb_position = self.manager.get_cl_position(
                             symbol=self._execution_symbol
                         )
-                        if abs(_cb_position) >= self._max_position_size:
+                        if abs(_cb_position) > self._max_position_size:
                             log.warning(
-                                "CALLBACK POSITION CAP: position=%d >= max=%d — "
-                                "blocking entry from fill callback for orderId=%d",
+                                "CALLBACK POSITION CAP BREACH: position=%d > max=%d "
+                                "after fill for orderId=%d. "
+                                "Processing fill anyway to ensure TP/SL protection.",
                                 abs(_cb_position), self._max_position_size, order_id,
                             )
-                            return
 
                         self._last_filled_entry_order_id = order_id
+                        if order_id is not None:
+                            self._processed_entry_order_ids.add(order_id)
+                            if len(self._processed_entry_order_ids) > 500:
+                                self._processed_entry_order_ids = set(list(self._processed_entry_order_ids)[-500:])
                         # Parent entry order filled — clear TTL tracking
                         log.info(
                             "[TRADE] FILLED: %s %.0f %s @ %.2f",

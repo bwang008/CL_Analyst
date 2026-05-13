@@ -167,7 +167,7 @@ def test_macro_context_integration(long_trend_data):
 
 def test_return_distribution_non_nan(perfect_trend_data):
     factory = AlphaFactory(perfect_trend_data)
-    df = factory.add_return_distribution_cluster(window=10)
+    df = factory.add_return_distribution_cluster(windows=[10])
 
     for col in ["DIST_SKEW_10", "DIST_KURT_10", "DIST_ZSCORE_10"]:
         assert col in df.columns, f"Missing column: {col}"
@@ -235,7 +235,7 @@ def test_add_all_features_extended(flat_line_data):
         f"Extended should have more columns ({n_ext} vs {n_basic})"
     )
     # Extended should add DIST_*, MOM_STOCH_* per window
-    assert "DIST_SKEW_10" in df_ext.columns
+    assert "DIST_SKEW_12" in df_ext.columns
     assert "MOM_STOCH_K_10" in df_ext.columns
 
 

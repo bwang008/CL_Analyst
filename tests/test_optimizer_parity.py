@@ -229,11 +229,11 @@ class TestParameterShadowing:
         from agent.backtest_engine import BacktestEngine
 
         cfg = copy.deepcopy(TIERED_CONFIG)
-        # Create a mismatch: top-level TP differs from tier TP
-        cfg["tp_atr_mult"] = 5.0  # top-level
-        cfg["long"]["tp_atr_mult"] = 1.5  # tier says 1.5
+        # Create a mismatch: side-level TP differs from tier TP
+        cfg["long"]["tp_atr_mult"] = 5.0  # side-level
+        cfg["long"]["tiered_exits"][0]["tp_atr_mult"] = 1.5  # tier says 1.5
 
-        with pytest.warns(UserWarning, match="PARAM SHADOW"):
+        with pytest.raises(ValueError, match="PARAMETER SHADOWING DETECTED"):
             BacktestEngine.from_config(cfg)
 
     def test_no_warning_when_aligned(self):

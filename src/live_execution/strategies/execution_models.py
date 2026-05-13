@@ -546,6 +546,10 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
                 side_cfg["cooldown_bars"] = params["cooldown_bars"]
             if "consecutive_signal_threshold" in params:
                 side_cfg["consecutive_signal_threshold"] = params["consecutive_signal_threshold"]
+            if "atr_period" in params:
+                side_cfg["atr_period"] = params["atr_period"]
+            if "trailing_activation_mult" in params:
+                side_cfg["trailing_activation_mult"] = params["trailing_activation_mult"]
 
             # Write into tiered_exits blocks
             for exit_tier in side_cfg.get("tiered_exits", []):
@@ -570,7 +574,7 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
         # Also write top-level for engine globals (cooldown, trailing fallback)
         for key in ("tp_atr_mult", "sl_atr_mult", "trailing_atr_mult",
                     "cooldown_bars", "max_hold_bars",
-                    "consecutive_signal_threshold"):
+                    "consecutive_signal_threshold", "atr_period", "trailing_activation_mult"):
             if key in params:
                 cfg[key] = params[key]
 
