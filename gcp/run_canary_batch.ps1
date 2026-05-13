@@ -98,10 +98,10 @@ function Send-BatchTelegram {
 
 
 function Get-UsedVcpus {
-    <# Count vCPUs consumed by all RUNNING VMs in the zone #>
+    <# Count vCPUs consumed by all RUNNING VMs globally #>
     try {
         $machineTypes = gcloud compute instances list `
-            --filter="status:RUNNING zone:$Zone" `
+            --filter="status:RUNNING" `
             --format="value(machineType.basename())" 2>$null
         $total = 0
         foreach ($mt in $machineTypes) {
@@ -170,17 +170,20 @@ function Test-ArtifactsDownloaded {
 
 
 function Remove-ExperimentVm {
-    param([string]$VmName)
-    Write-Host "  Deleting VM: $VmName ..." -ForegroundColor Yellow
+    param(
+        [string]$VmName,
+        [string]$VmZone = $Zone
+    )
+    Write-Host "  Deleting VM: $VmName in zone $VmZone ..." -ForegroundColor Yellow
     if (-not $DryRun) {
-        gcloud compute instances delete $VmName --zone=$Zone --quiet 2>$null
+        gcloud compute instances delete $VmName --zone=$VmZone --quiet 2>$null
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  VM deleted." -ForegroundColor Green
         } else {
             Write-Host "  VM delete returned non-zero (may already be gone)." -ForegroundColor Gray
         }
     } else {
-        Write-Host "  [DryRun] Would delete VM: $VmName" -ForegroundColor Cyan
+        Write-Host "  [DryRun] Would delete VM: $VmName in zone $VmZone" -ForegroundColor Cyan
     }
 }
 
@@ -256,9 +259,13 @@ if ($DryRun) {
 
 if (-not (Test-Path $BatchDir)) { New-Item -ItemType Directory -Path $BatchDir -Force | Out-Null }
 
+# Freeze manifest in the batch directory
+$savedManifestPath = Join-Path $BatchDir "manifest.json"
+Copy-Item $ManifestPath $savedManifestPath -Force
+
 $batchState = @{
     batch_id    = $BatchId
-    manifest    = $ManifestPath
+    manifest    = "manifest.json"
     started_at  = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
     total       = $expList.Count
     completed   = 0
@@ -346,31 +353,45 @@ while (-not $allDone) {
             Start-Sleep -Seconds 10
         }
 
-        # Deploy VM
-        $deployArgs = @(
-            "-ExecutionPolicy", "Bypass",
-            "-File", (Join-Path $ScriptDir "gcp_deploy_canary.ps1"),
-            "-VmName",      $exp.VmName,
-            "-MachineType", $exp.MachineType,
-            "-Zone",        $Zone,
-            "-GcsDataPath", $exp.GcsDataPath,
-            "-StrategyConfig", $exp.StrategyConf,
-            "-Metrics",     $exp.Metrics,
-            "-GcsPrefix",   $exp.GcsPrefix,
-            "-ProvisioningModel", $exp.Provisioning,
-            "-NoMonitor"
-        )
-        if ($exp.TargetLong)  { $deployArgs += @("-TargetLong",  $exp.TargetLong)  }
-        if ($exp.TargetShort) { $deployArgs += @("-TargetShort", $exp.TargetShort) }
-        if ($exp.UseBuckets)  { $deployArgs += @("-UseBuckets") }
+        # Deploy VM across fallback zones
+        $zoneList = $Zone -split ','
+        $deployExit = 1
+        $deployOutput = $null
 
-        Write-Host "  Deploying VM..." -ForegroundColor Yellow
-        $deployOutput = & powershell @deployArgs 2>&1
-        $deployExit   = $LASTEXITCODE
+        foreach ($z in $zoneList) {
+            $z = $z.Trim()
+            $deployArgs = @(
+                "-ExecutionPolicy", "Bypass",
+                "-File", (Join-Path $ScriptDir "gcp_deploy_canary.ps1"),
+                "-VmName",      $exp.VmName,
+                "-MachineType", $exp.MachineType,
+                "-Zone",        $z,
+                "-GcsDataPath", $exp.GcsDataPath,
+                "-StrategyConfig", $exp.StrategyConf,
+                "-Metrics",     $exp.Metrics,
+                "-GcsPrefix",   $exp.GcsPrefix,
+                "-ProvisioningModel", $exp.Provisioning,
+                "-NoMonitor"
+            )
+            if ($exp.TargetLong)  { $deployArgs += @("-TargetLong",  $exp.TargetLong)  }
+            if ($exp.TargetShort) { $deployArgs += @("-TargetShort", $exp.TargetShort) }
+            if ($exp.UseBuckets)  { $deployArgs += @("-UseBuckets") }
+
+            Write-Host "  Deploying VM in zone $z..." -ForegroundColor Yellow
+            $deployOutput = & powershell @deployArgs 2>&1
+            $deployExit   = $LASTEXITCODE
+
+            if ($deployExit -eq 0) {
+                $actualZone = $z
+                break
+            } else {
+                Write-Host "  Failed to deploy in zone $z (exit $deployExit)." -ForegroundColor Yellow
+            }
+        }
 
         if ($deployExit -ne 0) {
             $errText = ($deployOutput | Select-Object -Last 10) -join "`n"
-            Write-Host "  DEPLOY FAILED (exit $deployExit):" -ForegroundColor Red
+            Write-Host "  DEPLOY FAILED in all zones (last exit $deployExit):" -ForegroundColor Red
             Write-Host $errText -ForegroundColor Red
             Send-BatchTelegram ("[FAILED] *Deploy Failed: $($exp.Label)*`n" +
                 "VM: ``$($exp.VmName)```n" +
@@ -426,6 +447,7 @@ while (-not $allDone) {
         $exp.Job          = $job
         $exp.Status       = "RUNNING"
         $exp.ExitCodeFile = $exitCodeFile_
+        $exp.ActualZone   = $actualZone
         [void]$activeSlots.Add($exp)
         Write-Host "  Monitor job started (PS Job ID: $($job.Id))" -ForegroundColor Green
     }
@@ -442,7 +464,7 @@ while (-not $allDone) {
             Write-Host "  TIMEOUT: $($slot.Label) exceeded ${elapsed:N0}min (limit: $($slot.TimeoutMins)min)" -ForegroundColor Red
             Stop-Job $job -ErrorAction SilentlyContinue
             Remove-Job $job -Force -ErrorAction SilentlyContinue
-            gcloud compute instances stop $slot.VmName --zone=$Zone --quiet 2>$null
+            gcloud compute instances stop $slot.VmName --zone=$slot.ActualZone --quiet 2>$null
             Send-BatchTelegram ("[TIMEOUT] *Timeout: $($slot.Label)*`n" +
                 "Exceeded $($slot.TimeoutMins)min limit`nVM stopped.")
             $slot.Status       = "TIMEOUT"
@@ -479,7 +501,7 @@ while (-not $allDone) {
             $slot.ArtifactOk = $artOk
 
             # --- DELETE VM (quota freed here) ---
-            Remove-ExperimentVm -VmName $slot.VmName
+            Remove-ExperimentVm -VmName $slot.VmName -VmZone $slot.ActualZone
 
             # --- Update status ---
             if ($exitCode -eq 0 -and $artOk) {

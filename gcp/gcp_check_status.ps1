@@ -20,6 +20,12 @@ $Bucket = "gs://${Project}-optuna-results"
 Write-Host ""
 Write-Host "=== Optuna GCP Status ===" -ForegroundColor Cyan
 
+# --- Dynamically lookup the zone if the VM exists ---
+$discoveredZone = gcloud compute instances list --filter="name:^$VmName$" --format="value(zone)" 2>$null
+if ($discoveredZone) {
+    $Zone = $discoveredZone.Trim()
+}
+
 # --- Check VM ---
 $status = gcloud compute instances describe $VmName --zone=$Zone `
     --format="get(status)" 2>$null

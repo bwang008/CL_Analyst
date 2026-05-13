@@ -23,6 +23,12 @@ Write-Host "=====================================================" -ForegroundCo
 Write-Host " GCP OPTUNA VM TEARDOWN" -ForegroundColor Yellow
 Write-Host "=====================================================" -ForegroundColor Yellow
 
+# --- Dynamically lookup the zone if the VM exists ---
+$discoveredZone = gcloud compute instances list --filter="name:^$VmName$" --format="value(zone)" 2>$null
+if ($discoveredZone) {
+    $Zone = $discoveredZone.Trim()
+}
+
 # --- [1/3] Download results ---
 if (-not $SkipDownload) {
     Write-Host "`n[1/3] Downloading results..."

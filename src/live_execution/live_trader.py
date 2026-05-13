@@ -2925,15 +2925,50 @@ class LiveTrader:
             )
             return
 
-
-
-        # 5. Active signal (BUY or SELL) — bracket already logged above
+        # 5. Active signal (BUY, SELL, or EXIT)
 
         decision_timestamp_utc = bar_time.isoformat()
         signal_id = uuid.uuid4().hex
         decision_id = uuid.uuid4().hex
 
-        # 5. Execute or dry-run
+        # Handle explicit strategy EXIT signal
+        if signal.action == "EXIT":
+            if self.dry_run:
+                log.info("DRY RUN — would execute EXIT signal (closing position)")
+                action_taken = "DRY_RUN_EXIT"
+            else:
+                log.info("Executing EXIT signal: closing open position.")
+                try:
+                    cancelled = self.manager.cancel_open_cl_orders(
+                        symbol=self._execution_symbol,
+                    )
+                    if cancelled > 0:
+                        log.info("Cancelled %d open order(s) for EXIT signal.", cancelled)
+                    trade = self.manager.close_cl_position(
+                        symbol=self._execution_symbol,
+                        exit_mode=self._exit_mode,
+                        current_price=current_price,
+                    )
+                    action_taken = "EXECUTE_EXIT"
+                except Exception as e:
+                    log.error("Failed to execute EXIT signal: %s", e)
+                    action_taken = "ERROR_EXIT"
+
+            self.telemetry.log_signal(
+                timestamp=bar_time,
+                signal=signal.signal_label,
+                confidence_pct=signal.confidence_pct,
+                action_taken=action_taken,
+                current_price=current_price,
+                atr_value=atr_value,
+                direction="EXIT",
+                signal_id=signal_id,
+                decision_id=decision_id,
+                decision_timestamp_utc=decision_timestamp_utc,
+            )
+            return
+
+        # 6. Execute or dry-run (BUY / SELL)
         if self.dry_run:
             log.info(
                 "DRY RUN — would place bracket order %s %d CL (prob=%.2f)",

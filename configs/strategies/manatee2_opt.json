@@ -1,0 +1,100 @@
+{
+    "nickname": "Manatee2",
+    "description": "EXP-025 OOS Buy model (walk-forward, cutoff 2022-01-01). WR=42.1%, PF=2.97, PnL=$631K",
+    "direction": "LONG",
+    "entry_threshold": 0.75,
+    "tp_atr_mult": 7.0,
+    "sl_atr_mult": 2.5,
+    "trailing_atr_mult": 2.0,
+    "cooldown_bars": 20,
+    "max_hold_bars": 144,
+    "allow_concurrent": false,
+    "max_concurrent": 1,
+    "sizing_tiers": {
+        "0.80": 3,
+        "0.70": 3,
+        "0.60": 1,
+        "0.50": 1
+    },
+    "live_config": {
+        "experiment_id": "EXP-025_S_Ultimate_OOS",
+        "client_id": 10,
+        "exit_mode": "marketable_limit"
+    },
+    "training_info": {
+        "experiment_id": "EXP-025",
+        "target": "TARGET_TRIPLE_2x1_24H_LONG",
+        "target_description": "Triple Barrier: TP=2xATR(14), SL=1xATR(14), max_horizon=24h (288 bars)",
+        "data": "data/processed/CL_set_06.parquet",
+        "method": "walk_forward",
+        "balance_mode": "downsample",
+        "train_cutoff_date": "2022-01-01",
+        "oos_predictions": "reports/oos_predictions.csv",
+        "backtest_results": {
+            "win_rate": 0.421,
+            "profit_factor": 2.97,
+            "total_pnl": 631593.48,
+            "total_trades": 4530,
+            "max_drawdown": -27537.24
+        }
+    },
+    "optuna_info": {
+        "trial_number": 827,
+        "timestamp": "2026-03-08T16:54:10",
+        "optimizer": "strategy_optimizer",
+        "n_trials": 1000,
+        "params": {
+            "tp_atr_mult": 7.0,
+            "sl_atr_mult": 2.5,
+            "trailing_atr_mult": 2.0,
+            "cooldown_bars": 20,
+            "max_hold_bars": 144,
+            "entry_threshold": 0.75
+        },
+        "metrics": {
+            "total_pnl": 334855.14,
+            "profit_factor": 35.2398,
+            "win_rate": 0.8085,
+            "trade_count": 141,
+            "max_drawdown": -2608.11,
+            "sharpe_ratio": 3.3593,
+            "sortino_ratio": 1.02,
+            "calmar_ratio": 7.4471,
+            "avg_trade_pnl": 2374.86,
+            "avg_win": 3023.11,
+            "avg_loss": -362.21,
+            "largest_win": 11819.29,
+            "largest_loss": -2578.11,
+            "avg_duration_bars": 41.9,
+            "pct_tp": 66.67,
+            "pct_sl": 2.13,
+            "pct_time_barrier": 14.18,
+            "pct_trailing_be": 17.02,
+            "profit_per_drawdown": 128.3897,
+            "expectancy": 2374.86
+        },
+        "baseline_metrics": {
+            "total_pnl": 763830.42,
+            "profit_factor": 2.9644,
+            "win_rate": 0.4336,
+            "trade_count": 5885,
+            "max_drawdown": -27459.16,
+            "sharpe_ratio": 6.4206,
+            "sortino_ratio": 2.9708,
+            "calmar_ratio": 1.6135,
+            "avg_trade_pnl": 129.79,
+            "avg_win": 451.67,
+            "avg_loss": -116.66,
+            "largest_win": 17105.93,
+            "largest_loss": -1767.63,
+            "avg_duration_bars": 9.1,
+            "pct_tp": 43.53,
+            "pct_sl": 10.31,
+            "pct_time_barrier": 0,
+            "pct_trailing_be": 46.15,
+            "profit_per_drawdown": 27.817,
+            "expectancy": 129.79
+        },
+        "wall_time_seconds": 11850.6
+    }
+}

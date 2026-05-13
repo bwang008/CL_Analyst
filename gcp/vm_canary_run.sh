@@ -68,6 +68,7 @@ for arg in "$@"; do
         --strategy=*) STRATEGY="configs/strategies/${arg#*=}" ;;
         --canary-prefix=*) CANARY_PREFIX="${arg#*=}" ;;
         --use-buckets) USE_BUCKETS=true ;;
+        --holdout-cutoff-date=*) HOLDOUT_CUTOFF="${arg#*=}" ;;
     esac
 done
 
@@ -289,8 +290,12 @@ if [ $COMPLETED -gt 0 ]; then
         --metrics logloss average_precision
         --study-prefix "$CANARY_PREFIX"
         --targets "$TARGET_LONG" "$TARGET_SHORT"
-        --opt-trials 300
+        --opt-trials 1000
     )
+
+    if [ -n "$HOLDOUT_CUTOFF" ]; then
+        E2E_ARGS+=("--holdout-cutoff-date" "$HOLDOUT_CUTOFF")
+    fi
 
     python gcp/vm_e2e_pipeline.py "${E2E_ARGS[@]}" 2>&1 | tee -a "$LOG" || true
     E2E_EXIT=${PIPESTATUS[0]}

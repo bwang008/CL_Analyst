@@ -99,6 +99,7 @@ If it fails to find the file, you must run the data processor and upload it manu
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\gcp\run_canary_batch.ps1 `
     -ManifestPath configs\canary_batch_manifest.json `
+    -Zone "us-central1-a, us-central1-b, us-central1-c, us-central1-f" `
     -DryRun
 ```
 
@@ -118,7 +119,8 @@ Review the output. If anything looks wrong, fix the manifest before continuing.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\gcp\run_canary_batch.ps1 `
-    -ManifestPath configs\canary_batch_manifest.json
+    -ManifestPath configs\canary_batch_manifest.json `
+    -Zone "us-central1-a, us-central1-b, us-central1-c, us-central1-f"
 ```
 
 The orchestrator will:

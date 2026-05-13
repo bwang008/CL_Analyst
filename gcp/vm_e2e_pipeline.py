@@ -293,79 +293,6 @@ def run_backtest(
 
 
 # ---------------------------------------------------------------------------
-# Execution Optimization
-# ---------------------------------------------------------------------------
-
-def optimize_ensemble_params(
-    ensemble_cfg: dict,
-    predictions_df: pd.DataFrame,
-    ohlcv_df: pd.DataFrame,
-    n_trials: int = 100,
-    output_dir: str = "production_output",
-) -> dict:
-    """Optimize execution parameters (thresholds, holding limits) on validation data."""
-    import copy
-    import optuna
-
-    print(f"\n  Running autonomous execution optimization ({n_trials} trials)...")
-
-    # Single-objective: maximize PF
-    study = optuna.create_study(direction="maximize")
-    
-    # We create a restricted objective function here to freeze TP/SL
-    def restricted_objective(trial: optuna.Trial) -> float:
-        cfg = copy.deepcopy(ensemble_cfg)
-        
-        # Restricted sweep parameters (no TP/SL)
-        cfg["cooldown_bars"] = trial.suggest_int("cooldown_bars", 0, 10, step=2)
-        cfg["max_hold_bars"] = trial.suggest_int("max_hold_bars", 72, 576, step=72)
-        cfg["consecutive_signal_threshold"] = trial.suggest_int("consecutive_signal_threshold", 0, 1, step=1)
-        
-        threshold = trial.suggest_float("entry_threshold", 0.50, 0.70, step=0.05)
-        cfg["entry_threshold"] = threshold
-        if "models" in cfg:
-            for direction in cfg["models"]:
-                cfg["models"][direction]["threshold"] = threshold
-
-        from agent.backtest_engine import BacktestEngine
-        engine = BacktestEngine.from_config(cfg)
-        result = engine.run(predictions_df, ohlcv_df)
-
-        if result.trade_count < 100:
-            return -999999.0
-
-        return result.profit_factor
-
-    study.optimize(restricted_objective, n_trials=n_trials, show_progress_bar=False)
-
-    try:
-        best_trial = study.best_trial
-        print(f"    Best trial #{best_trial.number}: PF={best_trial.value:.4f}")
-        print(f"    Params: {best_trial.params}")
-
-        # Patch config with best params
-        opt_cfg = copy.deepcopy(ensemble_cfg)
-        opt_cfg["cooldown_bars"] = best_trial.params["cooldown_bars"]
-        opt_cfg["max_hold_bars"] = best_trial.params["max_hold_bars"]
-        opt_cfg["consecutive_signal_threshold"] = best_trial.params["consecutive_signal_threshold"]
-        threshold = best_trial.params["entry_threshold"]
-        opt_cfg["entry_threshold"] = threshold
-        if "models" in opt_cfg:
-            for direction in opt_cfg["models"]:
-                opt_cfg["models"][direction]["threshold"] = threshold
-    except ValueError:
-        print("    WARNING: Optimizer failed to find valid parameters (e.g. no trials met 100-trade min), falling back to base config")
-        opt_cfg = copy.deepcopy(ensemble_cfg)
-
-    # Save to lab output
-    os.makedirs(os.path.join(output_dir, "lab"), exist_ok=True)
-    with open(os.path.join(output_dir, "lab", f"optimized_ensemble_cfg.json"), "w") as f:
-        json.dump(opt_cfg, f, indent=4)
-
-    return opt_cfg
-
-
-# ---------------------------------------------------------------------------
 # Registry bundle creation
 # ---------------------------------------------------------------------------
 
@@ -808,22 +735,96 @@ def run_pipeline(
             val_short_probs = val_short_df[[val_short_prob_col]].rename(columns={val_short_prob_col: "prob_Sell"})
             val_preds_merged = val_long_probs.join(val_short_probs, how="outer").fillna(0.0)
 
-            ensemble_cfg = optimize_ensemble_params(
-                ensemble_cfg=ensemble_cfg,
-                predictions_df=val_preds_merged,
-                ohlcv_df=ohlcv,
+            val_merged_path = os.path.join(output_dir, f"_val_merged_{metric_name}.csv")
+            val_preds_merged.to_csv(val_merged_path)
+
+            # Write temporary ensemble config
+            cfg_filename = f"{fmt_prefix}_{metric_name}.json"
+            ensemble_cfg_path = os.path.join(output_dir, cfg_filename)
+            
+            # Use absolute paths for the VM run so the optimizer doesn't fail
+            import copy
+            temp_cfg = copy.deepcopy(ensemble_cfg)
+            if "long" in temp_cfg and "models" in temp_cfg["long"]:
+                temp_cfg["long"]["models"][0]["predictions_path"] = direction_paths['long']
+                temp_cfg["short"]["models"][0]["predictions_path"] = direction_paths['short']
+            else:
+                temp_cfg["models"]["long"]["predictions_path"] = direction_paths['long']
+                temp_cfg["models"]["short"]["predictions_path"] = direction_paths['short']
+
+            with open(ensemble_cfg_path, "w") as f:
+                json.dump(temp_cfg, f, indent=2)
+
+            from agent.strategy_optimizer import run_optimization
+            print(f"\n  Running autonomous execution optimization ({opt_trials} trials)...")
+            best_cfg, best_result = run_optimization(
+                config_path=ensemble_cfg_path,
                 n_trials=opt_trials,
-                output_dir=output_dir,
+                predictions_path=val_merged_path,
+                ohlcv_path=data_path
             )
 
-        # Write temporary ensemble config
-        cfg_filename = f"{fmt_prefix}_{metric_name}_opt.json" if opt_trials > 0 and val_preds_exist else f"{fmt_prefix}_{metric_name}.json"
-        ensemble_cfg_path = os.path.join(output_dir, cfg_filename)
-        with open(ensemble_cfg_path, "w") as f:
-            json.dump(ensemble_cfg, f, indent=2, default=str)
-        print(f"  Ensemble config: {ensemble_cfg_path}")
-        print(f"    Long:  {direction_paths['long']}")
-        print(f"    Short: {direction_paths['short']}")
+            long_preds_rel = f"data/predictions/{os.path.basename(direction_paths['long'])}"
+            short_preds_rel = f"data/predictions/{os.path.basename(direction_paths['short'])}"
+
+            # Handle Top-K Candidates
+            candidates_dir = "configs/strategies/candidates"
+            if os.path.exists(candidates_dir):
+                for filename in os.listdir(candidates_dir):
+                    if filename.endswith(".json"):
+                        filepath = os.path.join(candidates_dir, filename)
+                        with open(filepath, 'r') as f:
+                            candidate_cfg = json.load(f)
+                        
+                        # Re-inject relative paths for Windows compatibility
+                        if "long" in candidate_cfg and "models" in candidate_cfg["long"]:
+                            candidate_cfg["long"]["models"][0]["predictions_path"] = long_preds_rel
+                        if "short" in candidate_cfg and "models" in candidate_cfg["short"]:
+                            candidate_cfg["short"]["models"][0]["predictions_path"] = short_preds_rel
+                        
+                        if "models" in candidate_cfg:
+                            if "long" in candidate_cfg["models"]:
+                                candidate_cfg["models"]["long"]["predictions_path"] = long_preds_rel
+                            if "short" in candidate_cfg["models"]:
+                                candidate_cfg["models"]["short"]["predictions_path"] = short_preds_rel
+
+                        # Save into output_dir with metric_name in the filename
+                        final_name = f"{fmt_prefix}_{metric_name}_{filename}"
+                        final_dest = os.path.join(output_dir, final_name)
+                        with open(final_dest, 'w') as f:
+                            json.dump(candidate_cfg, f, indent=4)
+                
+                shutil.rmtree(candidates_dir)
+
+            # Clean up the single _opt files generated by the optimizer
+            if is_tiered := (best_cfg.get("execution_class") == "TieredEnsembleStrategy"):
+                for side in ["long", "short"]:
+                    side_cfg_path = ensemble_cfg_path.replace(".json", f"_opt_{side}.json")
+                    if os.path.exists(side_cfg_path): os.remove(side_cfg_path)
+            if os.path.exists(ensemble_cfg_path.replace(".json", "_opt.json")):
+                os.remove(ensemble_cfg_path.replace(".json", "_opt.json"))
+
+            # Save the unoptimized base config for the backtest baseline
+            with open(ensemble_cfg_path, "w") as f:
+                json.dump(ensemble_cfg, f, indent=2)
+
+            print(f"  Ensemble base config: {ensemble_cfg_path}")
+            print(f"    Long:  {direction_paths['long']}")
+            print(f"    Short: {direction_paths['short']}")
+            
+            ensemble_cfg = best_cfg
+            # Note: We continue to run the baseline backtest with the unoptimized config
+            # because the optimizer has already provided the optimized metrics. We keep
+            # the standard logging.
+
+        else:
+            cfg_filename = f"{fmt_prefix}_{metric_name}.json"
+            ensemble_cfg_path = os.path.join(output_dir, cfg_filename)
+            with open(ensemble_cfg_path, "w") as f:
+                json.dump(ensemble_cfg, f, indent=2, default=str)
+            print(f"  Ensemble config: {ensemble_cfg_path}")
+            print(f"    Long:  {direction_paths['long']}")
+            print(f"    Short: {direction_paths['short']}")
 
         # Run combined backtest via BacktestEngine
         try:

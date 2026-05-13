@@ -51,6 +51,12 @@ if (-not (Test-Path $LocalOutputDir)) {
     New-Item -ItemType Directory -Path $LocalOutputDir -Force | Out-Null
 }
 
+# Dynamically lookup the zone if the VM exists
+$discoveredZone = gcloud compute instances list --filter="name:^$VmName$" --format="value(zone)" 2>$null
+if ($discoveredZone) {
+    $Zone = $discoveredZone.Trim()
+}
+
 Write-Host ""
 Write-Host "========================================================" -ForegroundColor Cyan
 Write-Host " GCP EXPERIMENT MONITOR" -ForegroundColor Cyan

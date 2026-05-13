@@ -286,7 +286,9 @@ def main():
 
     # Resolve OHLCV data
     manifest_path = progress.get("manifest", "")
-    if not os.path.isabs(manifest_path):
+    if manifest_path == "manifest.json":
+        manifest_path = os.path.join(batch_dir, manifest_path)
+    elif not os.path.isabs(manifest_path):
         manifest_path = os.path.join(PROJECT_ROOT, manifest_path)
     ohlcv_path = find_ohlcv_path(manifest_path)
     print(f"OHLCV data: {ohlcv_path}")
@@ -295,8 +297,8 @@ def main():
     import agent.strategy_optimizer as so
     original_make_objective = so.make_objective
 
-    def patched_make_objective(base_cfg, predictions_df, ohlcv_df, results_cache=None):
-        obj = original_make_objective(base_cfg, predictions_df, ohlcv_df, results_cache)
+    def patched_make_objective(base_cfg, predictions_df, ohlcv_df, results_cache=None, side=None):
+        obj = original_make_objective(base_cfg, predictions_df, ohlcv_df, results_cache, side=side)
 
         def patched_objective(trial):
             result = obj(trial)

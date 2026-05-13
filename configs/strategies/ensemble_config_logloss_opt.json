@@ -1,0 +1,204 @@
+{
+    "nickname": "E2E_HourSet_08_logloss_ensemble",
+    "description": "HourSet_07 modern timeline (2023 train cutoff, 2025 holdout). TP 1.5x, SL 1.0x.",
+    "execution_class": "TieredEnsembleStrategy",
+    "exit_mode": "TIERED",
+    "tp_atr_mult": 6.0,
+    "sl_atr_mult": 1.5,
+    "trailing_atr_mult": 2.0,
+    "tp_cooldown_bars": 0,
+    "sl_cooldown_bars": 4,
+    "max_hold_bars": 72,
+    "allow_concurrent": false,
+    "max_concurrent": 1,
+    "max_position_size": 1,
+    "execution_symbol": "CL",
+    "bar_size": "1h",
+    "live_config": {
+        "client_id": 26,
+        "entry_mode": "marketable_limit",
+        "exit_mode": "marketable_limit"
+    },
+    "models": {
+        "long": {
+            "experiment_id": "E2E_HourSet_08_long_logloss",
+            "predictions_path": "/home/bwang/project/canary_output/oos_predictions_long_logloss.csv",
+            "threshold": 0.7
+        },
+        "short": {
+            "experiment_id": "E2E_HourSet_08_short_logloss",
+            "predictions_path": "/home/bwang/project/canary_output/oos_predictions_short_logloss.csv",
+            "threshold": 0.7
+        }
+    },
+    "long": {
+        "tp_atr_mult": 8.5,
+        "sl_atr_mult": 3.5,
+        "tiered_exits": [
+            {
+                "qty_pct": 1.0,
+                "tp_atr_mult": 8.5
+            }
+        ],
+        "tiers": [
+            {
+                "min_prob": 0.55,
+                "lots": 1,
+                "tp_atr_mult": 8.5,
+                "sl_atr_mult": 3.5,
+                "trailing_atr_mult": 2.5,
+                "max_hold_bars": 216
+            }
+        ],
+        "trailing_atr_mult": 2.5,
+        "max_hold_bars": 216,
+        "cooldown_bars": 5,
+        "consecutive_signal_threshold": 0
+    },
+    "short": {
+        "tp_atr_mult": 6.0,
+        "sl_atr_mult": 1.5,
+        "tiered_exits": [
+            {
+                "qty_pct": 1.0,
+                "tp_atr_mult": 6.0
+            }
+        ],
+        "tiers": [
+            {
+                "min_prob": 0.7,
+                "lots": 1,
+                "tp_atr_mult": 6.0,
+                "sl_atr_mult": 1.5,
+                "trailing_atr_mult": 2.0,
+                "max_hold_bars": 72
+            }
+        ],
+        "trailing_atr_mult": 2.0,
+        "max_hold_bars": 72,
+        "cooldown_bars": 9,
+        "consecutive_signal_threshold": 2
+    },
+    "features": [
+        "ICHIMOKU_*",
+        "TREND_DMA_*",
+        "ATR_14",
+        "VOL_ROC_24",
+        "log_ret"
+    ],
+    "cooldown_bars": 9,
+    "consecutive_signal_threshold": 2,
+    "entry_threshold": 0.7,
+    "optuna_info": {
+        "trial_number": 381,
+        "timestamp": "2026-05-12T20:55:32",
+        "optimizer": "strategy_optimizer",
+        "n_trials": 1000,
+        "consistency_score": 1.448406185925418,
+        "params": {
+            "tp_atr_mult_long": 8.5,
+            "sl_atr_mult_long": 3.5,
+            "trailing_atr_mult_long": 2.5,
+            "cooldown_bars_long": 5,
+            "max_hold_bars_long": 216,
+            "consecutive_signal_threshold_long": 0,
+            "entry_threshold_long": 0.55,
+            "tp_atr_mult_short": 6.0,
+            "sl_atr_mult_short": 1.5,
+            "trailing_atr_mult_short": 2.0,
+            "cooldown_bars_short": 9,
+            "max_hold_bars_short": 72,
+            "consecutive_signal_threshold_short": 2,
+            "entry_threshold_short": 0.7
+        },
+        "combined_metrics": {
+            "total_pnl": 77516.42,
+            "profit_factor": 1.5131,
+            "win_rate": 0.6305,
+            "trade_count": 341,
+            "max_drawdown": -13908.63,
+            "sharpe_ratio": 2.347,
+            "sortino_ratio": 0.9711,
+            "calmar_ratio": 0.3302,
+            "avg_trade_pnl": 227.32,
+            "avg_win": 1063.25,
+            "avg_loss": -1199.07,
+            "largest_win": 9111.29,
+            "largest_loss": -3571.55,
+            "avg_duration_bars": 30.1,
+            "pct_tp": 18.77,
+            "pct_sl": 34.31,
+            "pct_time_barrier": 0.29,
+            "pct_trailing_be": 46.63,
+            "profit_per_drawdown": 5.5733,
+            "expectancy": 227.32
+        },
+        "long_metrics": {
+            "total_pnl": 77516.42,
+            "profit_factor": 1.5131,
+            "win_rate": 0.6305,
+            "trade_count": 341,
+            "max_drawdown": -13908.63,
+            "sharpe_ratio": 2.347,
+            "sortino_ratio": 0.9711,
+            "calmar_ratio": 0.3302,
+            "avg_trade_pnl": 227.32,
+            "avg_win": 1063.25,
+            "avg_loss": -1199.07,
+            "largest_win": 9111.29,
+            "largest_loss": -3571.55,
+            "avg_duration_bars": 30.1,
+            "pct_tp": 18.77,
+            "pct_sl": 34.31,
+            "pct_time_barrier": 0.29,
+            "pct_trailing_be": 46.63,
+            "profit_per_drawdown": 5.5733,
+            "expectancy": 227.32
+        },
+        "short_metrics": {
+            "total_pnl": 0,
+            "profit_factor": 0,
+            "win_rate": 0,
+            "trade_count": 0,
+            "max_drawdown": 0,
+            "sharpe_ratio": 0,
+            "sortino_ratio": 0,
+            "calmar_ratio": 0,
+            "avg_trade_pnl": 0,
+            "avg_win": 0,
+            "avg_loss": 0,
+            "largest_win": 0,
+            "largest_loss": 0,
+            "avg_duration_bars": 0,
+            "pct_tp": 0,
+            "pct_sl": 0,
+            "pct_time_barrier": 0,
+            "pct_trailing_be": 0,
+            "profit_per_drawdown": 0,
+            "expectancy": 0
+        },
+        "baseline_metrics": {
+            "total_pnl": -53494.02,
+            "profit_factor": 0.8088,
+            "win_rate": 0.4397,
+            "trade_count": 1451,
+            "max_drawdown": -69187.24,
+            "sharpe_ratio": -3.162,
+            "sortino_ratio": -0.9808,
+            "calmar_ratio": -0.0458,
+            "avg_trade_pnl": -36.87,
+            "avg_win": 354.62,
+            "avg_loss": -344.09,
+            "largest_win": 3446.54,
+            "largest_loss": -4262.04,
+            "avg_duration_bars": 2.8,
+            "pct_tp": 27.98,
+            "pct_sl": 47.21,
+            "pct_time_barrier": 0,
+            "pct_trailing_be": 24.81,
+            "profit_per_drawdown": 0.7732,
+            "expectancy": -36.87
+        },
+        "wall_time_seconds": 2322.4
+    }
+}

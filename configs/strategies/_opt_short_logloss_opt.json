@@ -1,0 +1,136 @@
+{
+    "nickname": "E2E_HourSet_08_logloss_ensemble",
+    "description": "HourSet_07 modern timeline (2023 train cutoff, 2025 holdout). TP 1.5x, SL 1.0x.",
+    "execution_class": "TieredEnsembleStrategy",
+    "exit_mode": "TIERED",
+    "tp_atr_mult": 3.0,
+    "sl_atr_mult": 2.0,
+    "trailing_atr_mult": 0.5,
+    "tp_cooldown_bars": 0,
+    "sl_cooldown_bars": 4,
+    "max_hold_bars": 360,
+    "allow_concurrent": false,
+    "max_concurrent": 1,
+    "max_position_size": 1,
+    "execution_symbol": "CL",
+    "bar_size": "1h",
+    "live_config": {
+        "client_id": 26,
+        "entry_mode": "marketable_limit",
+        "exit_mode": "marketable_limit"
+    },
+    "models": {
+        "long": {
+            "experiment_id": "E2E_HourSet_08_long_logloss",
+            "predictions_path": "/home/bwang/project/canary_output/oos_predictions_long_logloss.csv",
+            "threshold": 0.55
+        },
+        "short": {
+            "experiment_id": "E2E_HourSet_08_short_logloss",
+            "predictions_path": "C:/Users/bwang/Documents/GitHub/CL_Analyst_Development/reports/scout_hs08_3x1_6h_20260511_2116/registry/canary_output/oos_predictions_short_logloss.csv",
+            "threshold": 0.55
+        }
+    },
+    "long": {
+        "tp_atr_mult": 1.5,
+        "sl_atr_mult": 1.0,
+        "tiered_exits": [
+            {
+                "qty_pct": 1.0,
+                "tp_atr_mult": 1.5
+            }
+        ],
+        "tiers": [
+            {
+                "min_prob": 0.55,
+                "lots": 1
+            }
+        ]
+    },
+    "short": {
+        "tp_atr_mult": 1.5,
+        "sl_atr_mult": 1.0,
+        "tiered_exits": [
+            {
+                "qty_pct": 1.0,
+                "tp_atr_mult": 1.5
+            }
+        ],
+        "tiers": [
+            {
+                "min_prob": 0.55,
+                "lots": 1
+            }
+        ]
+    },
+    "features": [
+        "ICHIMOKU_*",
+        "TREND_DMA_*",
+        "ATR_14",
+        "VOL_ROC_24",
+        "log_ret"
+    ],
+    "cooldown_bars": 25,
+    "consecutive_signal_threshold": 4,
+    "entry_threshold": 0.55,
+    "optuna_info": {
+        "trial_number": 1,
+        "timestamp": "2026-05-11T23:56:05",
+        "optimizer": "strategy_optimizer",
+        "n_trials": 100,
+        "params": {
+            "tp_atr_mult": 3.0,
+            "sl_atr_mult": 2.0,
+            "trailing_atr_mult": 0.5,
+            "cooldown_bars": 25,
+            "max_hold_bars": 360,
+            "consecutive_signal_threshold": 4,
+            "entry_threshold": 0.55
+        },
+        "metrics": {
+            "total_pnl": 6148.96,
+            "profit_factor": 2.9069,
+            "win_rate": 0.6857,
+            "trade_count": 35,
+            "max_drawdown": -1399.25,
+            "sharpe_ratio": 2.4049,
+            "sortino_ratio": 0.1525,
+            "calmar_ratio": 0.2603,
+            "avg_trade_pnl": 175.68,
+            "avg_win": 390.57,
+            "avg_loss": -293.15,
+            "largest_win": 1028.15,
+            "largest_loss": -627.09,
+            "avg_duration_bars": 2.0,
+            "pct_tp": 45.71,
+            "pct_sl": 20.0,
+            "pct_time_barrier": 0,
+            "pct_trailing_be": 34.29,
+            "profit_per_drawdown": 4.3945,
+            "expectancy": 175.68
+        },
+        "baseline_metrics": {
+            "total_pnl": -36668.87,
+            "profit_factor": 0.7723,
+            "win_rate": 0.3638,
+            "trade_count": 679,
+            "max_drawdown": -37578.32,
+            "sharpe_ratio": -2.958,
+            "sortino_ratio": -0.7174,
+            "calmar_ratio": -0.0578,
+            "avg_trade_pnl": -54.0,
+            "avg_win": 503.42,
+            "avg_loss": -372.72,
+            "largest_win": 1991.18,
+            "largest_loss": -1545.83,
+            "avg_duration_bars": 3.6,
+            "pct_tp": 36.38,
+            "pct_sl": 63.62,
+            "pct_time_barrier": 0,
+            "pct_trailing_be": 0,
+            "profit_per_drawdown": 0.9758,
+            "expectancy": -54.0
+        },
+        "wall_time_seconds": 253.0
+    }
+}

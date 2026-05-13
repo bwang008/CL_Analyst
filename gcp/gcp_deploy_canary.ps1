@@ -20,7 +20,7 @@ param(
     [string]$Zone = "us-central1-a",
     [int]$DiskSizeGB = 50,
     [string]$Project = "cltrainer",
-    [string]$ProvisioningModel = "SPOT",
+    [string]$ProvisioningModel = "STANDARD",
     [string]$GcsDataPath = "gs://cltrainer-optuna-results/data/cl-5m_bk_set_10.parquet",
     [string]$StrategyConfig = "ensemble4.json",
     [string]$Metrics = "logloss,average_precision",
@@ -30,6 +30,7 @@ param(
     [switch]$SkipProvision,
     [switch]$UseBuckets,
     [string]$GcsPrefix = "canary",
+    [string]$HoldoutCutoffDate = "",
     [switch]$NoMonitor
 )
 
