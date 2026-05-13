@@ -1,0 +1,5 @@
+|    | Long Model                   | Short Model                           |   Trades | Win Rate   |   Profit Factor |   Net PnL | Max DD     | Tail PnL   |
+|---:|:-----------------------------|:--------------------------------------|---------:|:-----------|----------------:|----------:|:-----------|:-----------|
+|  0 | long_average_precision       | short_logloss                         |     1194 | 33.9%      |            0.89 |  -41053.2 | -56,330.30 | 5,024.69   |
+|  1 | long_average_precision       | E2E_HourSet_02_long_average_precision |        0 | 0%         |            0    |       0   | 0          | 0.00       |
+|  2 | E2E_HourSet_02_short_logloss | E2E_HourSet_02_long_average_precision |        0 | 0%         |            0    |       0   | 0          | 0.00       |

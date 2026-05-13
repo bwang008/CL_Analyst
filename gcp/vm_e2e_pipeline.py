@@ -649,11 +649,17 @@ def run_pipeline(
                 output_path=model_path,
             )
 
+            fmt_prefix = study_prefix if study_prefix else "baseline"
+            if fmt_prefix and fmt_prefix.startswith("scout_hs"):
+                parts = fmt_prefix.split("_", 2)
+                if len(parts) >= 3:
+                    fmt_prefix = f"{parts[1]}_{parts[0]}_{parts[2]}"
+
             # Step 4: Generate predictions
             # -- Validation predictions (only in 3-way split mode) --
             if df_val is not None:
                 print(f"\n[4a/5] Generating Validation predictions for {combo_name}...")
-                val_preds_path = os.path.join(output_dir, f"val_predictions_{combo_name}.csv")
+                val_preds_path = os.path.join(output_dir, f"val_predictions_{fmt_prefix}_{combo_name}.csv")
                 generate_oos_predictions(
                     model=model,
                     df_vault=df_val,
@@ -666,7 +672,7 @@ def run_pipeline(
             else:
                 print(f"\n[4a/5] Generating OOS predictions for {combo_name}...")
 
-            preds_path = os.path.join(output_dir, f"oos_predictions_{combo_name}.csv")
+            preds_path = os.path.join(output_dir, f"oos_predictions_{fmt_prefix}_{combo_name}.csv")
             preds_df = generate_oos_predictions(
                 model=model,
                 df_vault=df_vault,
@@ -733,8 +739,15 @@ def run_pipeline(
     for target_name, direction in targets:
         for metric_name in metrics:
             combo_name = f"{direction}_{metric_name}"
-            preds_path = os.path.join(output_dir, f"oos_predictions_{combo_name}.csv")
-            val_preds_path = os.path.join(output_dir, f"val_predictions_{combo_name}.csv")
+            
+            fmt_prefix = study_prefix if study_prefix else "baseline"
+            if fmt_prefix and fmt_prefix.startswith("scout_hs"):
+                parts = fmt_prefix.split("_", 2)
+                if len(parts) >= 3:
+                    fmt_prefix = f"{parts[1]}_{parts[0]}_{parts[2]}"
+                    
+            preds_path = os.path.join(output_dir, f"oos_predictions_{fmt_prefix}_{combo_name}.csv")
+            val_preds_path = os.path.join(output_dir, f"val_predictions_{fmt_prefix}_{combo_name}.csv")
             if os.path.exists(preds_path):
                 if metric_name not in preds_by_metric:
                     preds_by_metric[metric_name] = {}
@@ -804,7 +817,8 @@ def run_pipeline(
             )
 
         # Write temporary ensemble config
-        ensemble_cfg_path = os.path.join(output_dir, f"ensemble_config_{metric_name}.json")
+        cfg_filename = f"{fmt_prefix}_{metric_name}_opt.json" if opt_trials > 0 and val_preds_exist else f"{fmt_prefix}_{metric_name}.json"
+        ensemble_cfg_path = os.path.join(output_dir, cfg_filename)
         with open(ensemble_cfg_path, "w") as f:
             json.dump(ensemble_cfg, f, indent=2, default=str)
         print(f"  Ensemble config: {ensemble_cfg_path}")

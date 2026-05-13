@@ -1,0 +1,93 @@
+{
+    "nickname": "HourSet_08_Ensemble_2x1_6H",
+    "description": "Asymmetric ensemble: HS08 2x1 6H logloss.",
+    "execution_class": "TieredEnsembleStrategy",
+    "exit_mode": "TIERED",
+    "tp_atr_mult": 1.5,
+    "sl_atr_mult": 1.0,
+    "trailing_atr_mult": 1.0,
+    "tp_cooldown_bars": 0,
+    "sl_cooldown_bars": 4,
+    "max_hold_bars": 216,
+    "allow_concurrent": false,
+    "max_concurrent": 1,
+    "max_position_size": 1,
+    "execution_symbol": "CL",
+    "bar_size": "1h",
+    "cooldown_bars": 10,
+    "consecutive_signal_threshold": 1,
+    "live_config": {
+        "client_id": 26,
+        "entry_mode": "marketable_limit",
+        "exit_mode": "marketable_limit"
+    },
+    "models": {
+        "long": {
+            "experiment_id": "E2E_HourSet_08_long_2x1_6H_logloss",
+            "model_path": "reports/scout_hs08_2x1_6h_20260511_2116/registry/canary_output/final_long_model_logloss.pkl",
+            "predictions_path": "reports/scout_hs08_2x1_6h_20260511_2116/registry/canary_output/oos_predictions_long_logloss.csv",
+            "threshold": 0.55
+        },
+        "short": {
+            "experiment_id": "E2E_HourSet_08_short_2x1_6H_logloss",
+            "model_path": "reports/scout_hs08_2x1_6h_20260511_2116/registry/canary_output/final_short_model_logloss.pkl",
+            "predictions_path": "reports/scout_hs08_2x1_6h_20260511_2116/registry/canary_output/oos_predictions_short_logloss.csv",
+            "threshold": 0.55
+        }
+    },
+    "long": {
+        "tp_atr_mult": 1.5,
+        "sl_atr_mult": 1.0,
+        "trailing_atr_mult": 1.0,
+        "cooldown_bars": 10,
+        "max_hold_bars": 216,
+        "consecutive_signal_threshold": 1,
+        "tiered_exits": [
+            {
+                "qty_pct": 1.0,
+                "tp_atr_mult": 1.5
+            }
+        ],
+        "tiers": [
+            {
+                "min_prob": 0.55,
+                "lots": 1,
+                "tp_atr_mult": 1.5,
+                "sl_atr_mult": 1.0,
+                "trailing_atr_mult": 1.0,
+                "max_hold_bars": 216,
+                "label": "hs08_long_opt"
+            }
+        ]
+    },
+    "short": {
+        "tp_atr_mult": 1.5,
+        "sl_atr_mult": 1.0,
+        "trailing_atr_mult": 0.5,
+        "cooldown_bars": 25,
+        "max_hold_bars": 360,
+        "consecutive_signal_threshold": 4,
+        "tiered_exits": [
+            {
+                "qty_pct": 1.0,
+                "tp_atr_mult": 1.5
+            }
+        ],
+        "tiers": [
+            {
+                "min_prob": 0.55,
+                "lots": 1,
+                "tp_atr_mult": 1.5,
+                "sl_atr_mult": 1.0,
+                "trailing_atr_mult": 0.5,
+                "max_hold_bars": 360,
+                "label": "hs08_short_opt"
+            }
+        ]
+    },
+    "optuna_source": {
+        "long": "reports/scout_hs08_3x1_6h_20260511_2116/registry/canary_output/_opt_long_logloss_opt.json",
+        "short": "reports/scout_hs08_3x1_6h_20260511_2116/registry/canary_output/_opt_short_logloss_opt.json",
+        "note": "Optimizer tuned top-level params, but TieredEnsembleStrategy uses tier-level overrides. Only cooldown, trailing, max_hold, and consecutive_signal_threshold from the optimizer were effective. Tier TP/SL/threshold come from the base template (1.5/1.0/0.55)."
+    }
+}
