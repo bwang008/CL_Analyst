@@ -290,7 +290,7 @@ if [ $COMPLETED -gt 0 ]; then
         --metrics logloss average_precision
         --study-prefix "$CANARY_PREFIX"
         --targets "$TARGET_LONG" "$TARGET_SHORT"
-        --opt-trials 0
+        --opt-trials 1000
     )
 
     if [ -n "$HOLDOUT_CUTOFF" ]; then

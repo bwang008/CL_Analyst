@@ -140,6 +140,9 @@ def generate_optimized_report(
     progress: dict,
     all_results: dict,
     ohlcv_path: str,
+    wall_time_seconds: float = 0.0,
+    n_trials: int = 0,
+    n_workers: int = 1,
 ) -> str:
     """Generate batch_summary_optimized.md with pre/post comparison."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -148,6 +151,8 @@ def generate_optimized_report(
     lines.append(f"\nGenerated: {ts}")
     lines.append(f"Manifest: {progress.get('manifest', 'unknown')}")
     lines.append(f"Baseline Report: batch_summary.md")
+    lines.append(f"Total Wall Time: {wall_time_seconds:.0f}s ({wall_time_seconds/60:.1f} min)")
+    lines.append(f"Trials per target: {n_trials} | Workers: {n_workers}")
     lines.append("")
 
     # Build comparison tables per direction
@@ -483,7 +488,12 @@ def main():
     print(f"{'='*60}")
 
     # Generate report
-    report = generate_optimized_report(batch_dir, progress, all_results, ohlcv_path)
+    report = generate_optimized_report(
+        batch_dir, progress, all_results, ohlcv_path,
+        wall_time_seconds=elapsed,
+        n_trials=args.n_trials,
+        n_workers=args.workers,
+    )
     report_path = os.path.join(batch_dir, "batch_summary_optimized.md")
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(report)

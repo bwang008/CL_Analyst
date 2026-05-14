@@ -369,9 +369,8 @@ while (-not $allDone) {
                 "-GcsDataPath", $exp.GcsDataPath,
                 "-StrategyConfig", $exp.StrategyConf,
                 "-Metrics",     $exp.Metrics,
-                "-GcsPrefix",   $exp.GcsPrefix,
-                "-ProvisioningModel", $exp.Provisioning,
-                "-NoMonitor"
+                "-JobName",     $exp.GcsPrefix,
+                "-ProvisioningModel", $exp.Provisioning
             )
             if ($exp.TargetLong)  { $deployArgs += @("-TargetLong",  $exp.TargetLong)  }
             if ($exp.TargetShort) { $deployArgs += @("-TargetShort", $exp.TargetShort) }
