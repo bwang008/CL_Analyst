@@ -28,6 +28,7 @@ import copy
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -46,6 +47,50 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
 # ---------------------------------------------------------------------------
+# Telegram progress notifications
+# ---------------------------------------------------------------------------
+
+_tg_config: dict | None = None
+
+
+def _load_telegram_config() -> dict:
+    """Lazily load Telegram config from .env or environment variables."""
+    global _tg_config
+    if _tg_config is not None:
+        return _tg_config
+    env_vars = {}
+    env_path = os.path.join(PROJECT_ROOT, ".env")
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, val = line.split("=", 1)
+                    env_vars[key.strip()] = val.strip()
+    _tg_config = {
+        "token": env_vars.get("TELEGRAM_BOT_TOKEN", os.environ.get("TELEGRAM_BOT_TOKEN", "")),
+        "chat_id": env_vars.get("TELEGRAM_CHAT_ID", os.environ.get("TELEGRAM_CHAT_ID", "")),
+    }
+    return _tg_config
+
+
+def send_telegram(message: str) -> None:
+    """Send a Telegram notification. Silently skips if not configured."""
+    import urllib.request
+    import urllib.parse
+    cfg = _load_telegram_config()
+    if not cfg["token"] or not cfg["chat_id"]:
+        return
+    url = f"https://api.telegram.org/bot{cfg['token']}/sendMessage"
+    data = urllib.parse.urlencode({"chat_id": cfg["chat_id"], "text": message}).encode()
+    try:
+        req = urllib.request.Request(url, data=data, method="POST")
+        urllib.request.urlopen(req, timeout=8)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Metrics helpers
 # ---------------------------------------------------------------------------
 import heapq
@@ -56,15 +101,18 @@ class TopKTracker:
         self.k = k
         self.save_dir = save_dir
         self.top_configs = [] # Min-heap of (score, trial_number, config_dict, metrics)
+        self._lock = threading.Lock()
         os.makedirs(self.save_dir, exist_ok=True)
 
     def add(self, score, trial_number, config, metrics=None):
-        heapq.heappush(self.top_configs, (score, trial_number, config, metrics or {}))
-        if len(self.top_configs) > self.k:
-            heapq.heappop(self.top_configs)
+        with self._lock:
+            heapq.heappush(self.top_configs, (score, trial_number, config, metrics or {}))
+            if len(self.top_configs) > self.k:
+                heapq.heappop(self.top_configs)
 
     def save_best(self, min_sharpe=0.5):
-        sorted_configs = sorted(self.top_configs, key=lambda x: x[0], reverse=True)
+        with self._lock:
+            sorted_configs = sorted(self.top_configs, key=lambda x: x[0], reverse=True)
         
         md_lines = [
             "# Candidate Configurations Summary",
@@ -273,10 +321,10 @@ def make_objective(
         params = {
             "tp_atr_mult": trial.suggest_float(f"tp_atr_mult_{suffix}", 1.5, 10.0, step=0.25),
             "sl_atr_mult": trial.suggest_float(f"sl_atr_mult_{suffix}", 0.5, 4.5, step=0.25),
-            "trailing_atr_mult": trial.suggest_float(f"trailing_atr_mult_{suffix}", 0.5, 5.0, step=0.5),
+            "trailing_atr_mult": trial.suggest_float(f"trailing_atr_mult_{suffix}", 0.5, 5.0, step=0.25),
             "trailing_activation_mult": trial.suggest_float(f"trailing_activation_mult_{suffix}", 1.0, 5.0, step=0.5),
-            "cooldown_bars": trial.suggest_int(f"cooldown_bars_{suffix}", 0, 30, step=5),
-            "max_hold_bars": trial.suggest_int(f"max_hold_bars_{suffix}", 72, 576, step=72),
+            "cooldown_bars": trial.suggest_int(f"cooldown_bars_{suffix}", 1, 21, step=2),
+            "max_hold_bars": trial.suggest_int(f"max_hold_bars_{suffix}", 24, 240, step=24),
             "consecutive_signal_threshold": trial.suggest_int(f"consecutive_signal_threshold_{suffix}", 0, 4, step=1),
             "entry_threshold": trial.suggest_float(f"entry_threshold_{suffix}", 0.50, 0.80, step=0.01),
             "atr_period": trial.suggest_int(f"atr_period_{suffix}", 10, 40, step=2),
@@ -297,10 +345,10 @@ def make_objective(
             params = {
                 "tp_atr_mult": trial.suggest_float("tp_atr_mult", 1.5, 10.0, step=0.25),
                 "sl_atr_mult": trial.suggest_float("sl_atr_mult", 0.5, 4.5, step=0.25),
-                "trailing_atr_mult": trial.suggest_float("trailing_atr_mult", 0.5, 5.0, step=0.5),
+                "trailing_atr_mult": trial.suggest_float("trailing_atr_mult", 0.5, 5.0, step=0.25),
                 "trailing_activation_mult": trial.suggest_float("trailing_activation_mult", 1.0, 5.0, step=0.5),
-                "cooldown_bars": trial.suggest_int("cooldown_bars", 0, 30, step=5),
-                "max_hold_bars": trial.suggest_int("max_hold_bars", 72, 576, step=72),
+                "cooldown_bars": trial.suggest_int("cooldown_bars", 1, 21, step=2),
+                "max_hold_bars": trial.suggest_int("max_hold_bars", 24, 240, step=24),
                 "consecutive_signal_threshold": trial.suggest_int("consecutive_signal_threshold", 0, 4, step=1),
                 "entry_threshold": trial.suggest_float("entry_threshold", 0.50, 0.80, step=0.01),
                 "atr_period": trial.suggest_int("atr_period", 10, 40, step=2),
@@ -362,6 +410,8 @@ def run_optimization(
     predictions_path: str | None = None,
     ohlcv_path: str | None = None,
     holdout_months: int | None = None,
+    n_jobs: int = 1,
+    quiet: bool = False,
 ) -> tuple[dict, BacktestResult]:
     """Run strategy parameter optimization.
 
@@ -466,15 +516,23 @@ def run_optimization(
     def trial_callback(study_: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
         if trial.state != optuna.trial.TrialState.COMPLETE:
             return
-        score = trial.value
-        if (trial.number + 1) % 50 == 0:
+        completed = trial.number + 1
+        if completed % 50 == 0:
             elapsed = time.perf_counter() - start_time
-            print(f"  Trial {trial.number + 1}/{n_trials}  "
-                  f"Sharpe={score:.3f}  [{elapsed:.0f}s]")
+            print(f"  Trial {completed}/{n_trials}  "
+                  f"Sharpe={trial.value:.3f}  [{elapsed:.0f}s]")
 
-    print(f"\n--- OPTIMIZING ({n_trials} trials) ---")
+    print(f"\n--- OPTIMIZING ({n_trials} trials, n_jobs={n_jobs}) ---")
+    send_telegram(
+        f"[Strategy Optimizer] {model_name}\n"
+        f"Started: {n_trials} trials (n_jobs={n_jobs})"
+    )
     try:
-        study.optimize(objective, n_trials=n_trials, callbacks=[trial_callback], show_progress_bar=True)
+        study.optimize(
+            objective, n_trials=n_trials, n_jobs=n_jobs,
+            callbacks=[trial_callback],
+            show_progress_bar=(n_jobs == 1 and not quiet),
+        )
     except KeyboardInterrupt:
         print("\n  [!] Optimization interrupted by user.")
     finally:
@@ -486,6 +544,25 @@ def run_optimization(
     print(f"\n--- RESULTS ({elapsed:.0f}s) ---")
     print(f"Best trial #{best_trial.number}: Sharpe={best_trial.value:.4f}")
     print(f"  Params: {dict(best_trial.params)}")
+
+    # End notification with best performance
+    best_result = results_cache.get(best_trial.number)
+    if best_result:
+        best_m = extract_metrics(best_result)
+        send_telegram(
+            f"[Strategy Optimizer] {model_name}\n"
+            f"COMPLETE ({elapsed:.0f}s / {elapsed/60:.1f}m)\n"
+            f"Best Sharpe: {best_trial.value:.4f}\n"
+            f"PnL: ${best_m['total_pnl']:,.2f}  PF: {best_m['profit_factor']:.2f}\n"
+            f"Trades: {best_m['trade_count']}  WR: {best_m['win_rate']:.1%}\n"
+            f"DD: ${best_m['max_drawdown']:,.2f}"
+        )
+    else:
+        send_telegram(
+            f"[Strategy Optimizer] {model_name}\n"
+            f"COMPLETE ({elapsed:.0f}s / {elapsed/60:.1f}m)\n"
+            f"Best Sharpe: {best_trial.value:.4f}"
+        )
 
     # Reconstruct best config from best trial params
     best_cfg = copy.deepcopy(base_cfg)
@@ -626,6 +703,10 @@ def main() -> None:
         help="Reserve last N months of predictions as unseen holdout "
              "(overrides config holdout_months)"
     )
+    parser.add_argument(
+        "--jobs", type=int, default=1,
+        help="Number of parallel Optuna trial evaluations (default: 1)"
+    )
     args = parser.parse_args()
 
     run_optimization(
@@ -634,6 +715,7 @@ def main() -> None:
         predictions_path=args.predictions,
         ohlcv_path=args.data,
         holdout_months=args.holdout_months,
+        n_jobs=args.jobs,
     )
 
 

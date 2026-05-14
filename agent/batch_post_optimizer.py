@@ -9,6 +9,7 @@ After a batch scout/sweep run completes, this script:
 Usage:
     python agent/batch_post_optimizer.py --batch-dir reports/batch_runs/batch_20260511_2116
     python agent/batch_post_optimizer.py --batch-dir reports/batch_runs/batch_20260511_2116 --n-trials 500
+    python agent/batch_post_optimizer.py --batch-dir reports/batch_runs/batch_20260511_2116 --n-trials 500 --workers 4
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -74,6 +76,8 @@ def run_single_optimization(
     min_trades: int,
     label: str,
     holdout_months: int = 0,
+    n_jobs: int = 1,
+    quiet: bool = False,
 ) -> dict:
     """Run strategy_optimizer on a single config and return results."""
     print(f"\n{'='*60}")
@@ -87,6 +91,8 @@ def run_single_optimization(
             predictions_path=predictions_path,
             ohlcv_path=ohlcv_path,
             holdout_months=holdout_months,
+            n_jobs=n_jobs,
+            quiet=quiet,
         )
         best_metrics = extract_metrics(best_result)
         return {
@@ -287,6 +293,14 @@ def main():
         "--no-filter", action="store_true",
         help="Disable min_sharpe hurdle filter to keep best trial even if unprofitable"
     )
+    parser.add_argument(
+        "--jobs", type=int, default=1,
+        help="Number of parallel Optuna trial evaluations (default: 1)"
+    )
+    parser.add_argument(
+        "--workers", type=int, default=1,
+        help="Number of parallel experiment optimizations via multiprocessing (default: 1)"
+    )
     args = parser.parse_args()
 
     batch_dir = args.batch_dir
@@ -320,6 +334,8 @@ def main():
     all_results = {}
     total_start = time.perf_counter()
 
+    # Build list of optimization tasks
+    opt_tasks = []  # list of (ens_key, config_path, merged_path, label, metric, exp)
     for exp in progress.get("experiments", []):
         if exp.get("status") != "COMPLETED":
             continue
@@ -354,8 +370,21 @@ def main():
                 merged_path = os.path.join(canary_dir, f"_merged_ens_{metric}.csv")
                 merged_df = merge_predictions(long_pred, short_pred)
                 merged_df.to_csv(merged_path)
+                opt_tasks.append((ens_key, ens_config, merged_path, label, metric, exp))
 
-                result = run_single_optimization(
+    # Execute optimizations (parallel or sequential)
+    n_workers = min(args.workers, len(opt_tasks)) if opt_tasks else 1
+    print(f"\n{'='*60}")
+    print(f"RUNNING {len(opt_tasks)} OPTIMIZATIONS (workers={n_workers})")
+    print(f"{'='*60}")
+
+    if n_workers > 1:
+        # Process-level parallelism — bypasses GIL for true multi-core speedup
+        futures = {}
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            for ens_key, ens_config, merged_path, label, metric, exp in opt_tasks:
+                future = pool.submit(
+                    run_single_optimization,
                     config_path=ens_config,
                     predictions_path=merged_path,
                     ohlcv_path=ohlcv_path,
@@ -363,16 +392,23 @@ def main():
                     min_trades=args.min_trades,
                     label=f"{label} ENSEMBLE {metric}",
                     holdout_months=args.holdout_months,
+                    n_jobs=args.jobs,
+                    quiet=True,
                 )
+                futures[future] = (ens_key, merged_path, label, metric)
+
+            for future in as_completed(futures):
+                ens_key, merged_path, label, metric = futures[future]
+                try:
+                    result = future.result()
+                except Exception as e:
+                    print(f"  ERROR in {ens_key}: {e}")
+                    result = {"status": "FAILED", "error": str(e)}
                 all_results[ens_key] = result
                 if os.path.exists(merged_path):
                     os.remove(merged_path)
 
-                # Extract per-side params from the simultaneous ensemble run.
-                # In simultaneous mode, long_params/short_params are stored but
-                # there are no separate long_metrics/short_metrics (the ensemble
-                # was optimized as a whole).  We populate per-side entries with
-                # the ensemble metrics and per-side params for reporting.
+                # Extract per-side params
                 if result.get("status") == "OK":
                     opt_info = result.get("config", {}).get("optuna_info", {})
                     long_p = opt_info.get("long_params")
@@ -397,6 +433,49 @@ def main():
                                 "holdout_metrics": opt_info.get("holdout_metrics", {}),
                             }},
                         }
+    else:
+        # Sequential execution (default)
+        for ens_key, ens_config, merged_path, label, metric, exp in opt_tasks:
+            result = run_single_optimization(
+                config_path=ens_config,
+                predictions_path=merged_path,
+                ohlcv_path=ohlcv_path,
+                n_trials=args.n_trials,
+                min_trades=args.min_trades,
+                label=f"{label} ENSEMBLE {metric}",
+                holdout_months=args.holdout_months,
+                n_jobs=args.jobs,
+                quiet=(args.workers > 1),
+            )
+            all_results[ens_key] = result
+            if os.path.exists(merged_path):
+                os.remove(merged_path)
+
+            # Extract per-side params from the simultaneous ensemble run.
+            if result.get("status") == "OK":
+                opt_info = result.get("config", {}).get("optuna_info", {})
+                long_p = opt_info.get("long_params")
+                short_p = opt_info.get("short_params")
+                ens_metrics = opt_info.get("ensemble_metrics", result.get("metrics", {}))
+
+                if long_p:
+                    all_results[f"{label}|long|{metric}"] = {
+                        "status": "OK",
+                        "metrics": ens_metrics,
+                        "config": {"optuna_info": {
+                            "params": long_p,
+                            "holdout_metrics": opt_info.get("holdout_metrics", {}),
+                        }},
+                    }
+                if short_p:
+                    all_results[f"{label}|short|{metric}"] = {
+                        "status": "OK",
+                        "metrics": ens_metrics,
+                        "config": {"optuna_info": {
+                            "params": short_p,
+                            "holdout_metrics": opt_info.get("holdout_metrics", {}),
+                        }},
+                    }
 
     elapsed = time.perf_counter() - total_start
     print(f"\n{'='*60}")

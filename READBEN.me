@@ -24,6 +24,9 @@ Step 1: Train
 
 Step 2: Optimize
 python agent/batch_post_optimizer.py --batch-dir reports/batch_runs/batch_20260511_2116 --n-trials 1000
+# New update with parallel workers and holdout period to validate against overfitting. 
+python agent/batch_post_optimizer.py --batch-dir reports/batch_runs/batch_20260513_1941 --n-trials 500 --holdout-months 4 --workers 4
+
 
 Step 3: Backtest optimized config
 python agent/backtest_engine.py --config configs/strategies/HourSet_08_Ensemble_01_opt.json --data C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet --slippage-per-side 0.01
