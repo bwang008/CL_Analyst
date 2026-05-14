@@ -1632,6 +1632,16 @@ def main() -> None:
         "--report-file", default=None,
         help="Optional path to save the full report as a text file",
     )
+    parser.add_argument(
+        "--holdout-report", action="store_true", default=False,
+        help="Run a secondary backtest on the holdout period (last N months) "
+             "and print both reports.  N is read from config holdout_months "
+             "or --holdout-months.",
+    )
+    parser.add_argument(
+        "--holdout-months", type=int, default=None,
+        help="Override holdout_months from config (used with --holdout-report)",
+    )
     args = parser.parse_args()
 
     # Resolve paths via CL_DATA_ROOT fallback
@@ -1879,6 +1889,58 @@ def main() -> None:
                 with open(registry_report, "w", encoding="utf-8") as rf:
                     rf.write(report_text + "\n")
                 print(f"Report auto-saved to registry: {registry_report}")
+
+    # ── Holdout report (secondary backtest on unseen period) ──────────
+    holdout_months = args.holdout_months
+    if holdout_months is None and strategy_cfg is not None:
+        holdout_months = strategy_cfg.get("holdout_months", 0)
+    if holdout_months is None:
+        holdout_months = 0
+
+    if holdout_months > 0:
+        pred_end = preds.index.max()
+        holdout_cutoff = pred_end - pd.DateOffset(months=holdout_months)
+        holdout_preds = preds[preds.index >= holdout_cutoff]
+        optimizer_preds = preds[preds.index < holdout_cutoff]
+
+        if len(holdout_preds) == 0:
+            print(f"\nWARNING: Holdout period ({holdout_months} months) has 0 prediction rows.")
+        else:
+            print(f"\n{'='*90}")
+            print(f"HOLDOUT REPORT  ({holdout_months} months: "
+                  f"{holdout_cutoff.date()} -> {pred_end.date()}, "
+                  f"{len(holdout_preds):,} bars)")
+            print(f"{'='*90}")
+
+            # Re-run on optimizer window only
+            bt_opt = BacktestEngine.from_config(
+                strategy_cfg,
+                commission_per_side=args.commission_per_side,
+                slippage_per_side=args.slippage_per_side,
+                contract_multiplier=args.contract_multiplier,
+            ) if strategy_cfg else bt
+            result_opt = bt_opt.run(optimizer_preds, ohlcv_a, label="Optimizer Window")
+
+            # Run on holdout only
+            bt_ho = BacktestEngine.from_config(
+                strategy_cfg,
+                commission_per_side=args.commission_per_side,
+                slippage_per_side=args.slippage_per_side,
+                contract_multiplier=args.contract_multiplier,
+            ) if strategy_cfg else bt
+            result_ho = bt_ho.run(holdout_preds, ohlcv_a, label="Holdout (Unseen)")
+
+            ho_report = format_report(
+                result_ho,
+                config=strategy_cfg_for_report,
+                predictions_path=f"holdout: {holdout_cutoff.date()} -> {pred_end.date()}",
+                data_path=args.data,
+            )
+            print(ho_report)
+
+            # Side-by-side comparison
+            print()
+            print(compare_runs(result_opt, result_ho))
 
     # Run B: Live session data (optional)
     if args.live_data and os.path.exists(args.live_data):

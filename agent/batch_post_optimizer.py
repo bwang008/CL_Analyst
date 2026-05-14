@@ -73,6 +73,7 @@ def run_single_optimization(
     n_trials: int,
     min_trades: int,
     label: str,
+    holdout_months: int = 0,
 ) -> dict:
     """Run strategy_optimizer on a single config and return results."""
     print(f"\n{'='*60}")
@@ -85,6 +86,7 @@ def run_single_optimization(
             n_trials=n_trials,
             predictions_path=predictions_path,
             ohlcv_path=ohlcv_path,
+            holdout_months=holdout_months,
         )
         best_metrics = extract_metrics(best_result)
         return {
@@ -151,8 +153,8 @@ def generate_optimized_report(
         for metric in metric_keys:
             lines.append(f"### {section_name} ({metric.replace('_', ' ').title()})")
             lines.append("")
-            lines.append("| Experiment | Trades (pre) | Trades (opt) | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | Opt Thr | Opt TP | Opt SL | Opt Trail | Opt Cool | Opt Hold | Opt Consec |")
-            lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+            lines.append("| Experiment | Trades (pre) | Trades (opt) | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (opt h/o) | Opt Thr | Opt TP | Opt SL | Opt Trail | Opt Cool | Opt Hold | Opt Consec |")
+            lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 
             for exp in progress.get("experiments", []):
                 if exp.get("status") != "COMPLETED":
@@ -201,10 +203,14 @@ def generate_optimized_report(
                     opt_cool = params.get("cooldown_bars", "-")
                     opt_hold = params.get("max_hold_bars", "-")
                     opt_consec = params.get("consecutive_signal_threshold", "-")
+                    # Holdout PnL (unseen by optimizer)
+                    ho_metrics = opt_info.get("holdout_metrics", {})
+                    ho_pnl = f"${ho_metrics['total_pnl']:,.0f}" if ho_metrics else "-"
                     lines.append(
                         f"| {label} | {base_trades} | {opt_trades} | "
                         f"{base_pf:.2f} | {opt_pf:.2f} | "
                         f"${base_pnl:,.0f} | ${opt_pnl:,.0f} | "
+                        f"{ho_pnl} | "
                         f"{opt_thr} | {opt_tp} | {opt_sl} | {opt_trail} | {opt_cool} | {opt_hold} | {opt_consec} |"
                     )
                 else:
@@ -212,7 +218,7 @@ def generate_optimized_report(
                     lines.append(
                         f"| {label} | {base_trades} | - | "
                         f"{base_pf:.2f} | - | "
-                        f"${base_pnl:,.0f} | - | - | - | - | - | - | - | - |"
+                        f"${base_pnl:,.0f} | - | - | - | - | - | - | - | - | - |"
                     )
             lines.append("")
 
@@ -273,6 +279,14 @@ def main():
     parser.add_argument("--batch-dir", required=True, help="Path to batch directory")
     parser.add_argument("--n-trials", type=int, default=500, help="Optuna trials per optimization")
     parser.add_argument("--min-trades", type=int, default=10, help="Min trades for valid trial")
+    parser.add_argument(
+        "--holdout-months", type=int, default=4,
+        help="Reserve last N months of predictions as unseen holdout (default: 4)"
+    )
+    parser.add_argument(
+        "--no-filter", action="store_true",
+        help="Disable min_sharpe hurdle filter to keep best trial even if unprofitable"
+    )
     args = parser.parse_args()
 
     batch_dir = args.batch_dir
@@ -296,6 +310,12 @@ def main():
     # Patch strategy_optimizer min_trades threshold
     import agent.strategy_optimizer as so
     original_make_objective = so.make_objective
+
+    if args.no_filter:
+        original_save_best = so.TopKTracker.save_best
+        def patched_save_best(self, min_sharpe=-99999.0):
+            return original_save_best(self, min_sharpe=-99999.0)
+        so.TopKTracker.save_best = patched_save_best
 
     def patched_make_objective(base_cfg, predictions_df, ohlcv_df, results_cache=None, side=None):
         obj = original_make_objective(base_cfg, predictions_df, ohlcv_df, results_cache, side=side)
@@ -329,63 +349,26 @@ def main():
 
         prefix = exp.get("gcs_prefix", "")
         for metric in ["logloss", "average_precision"]:
-            long_pred = os.path.join(canary_dir, f"oos_predictions_{prefix}_long_{metric}.csv")
-            short_pred = os.path.join(canary_dir, f"oos_predictions_{prefix}_short_{metric}.csv")
-            ens_config = os.path.join(canary_dir, f"{prefix}_{metric}.json")
+            # Try new naming convention (with gcs_prefix), fall back to legacy
+            long_pred_new = os.path.join(canary_dir, f"oos_predictions_{prefix}_long_{metric}.csv")
+            long_pred_old = os.path.join(canary_dir, f"oos_predictions_long_{metric}.csv")
+            long_pred = long_pred_new if os.path.exists(long_pred_new) else long_pred_old
+
+            short_pred_new = os.path.join(canary_dir, f"oos_predictions_{prefix}_short_{metric}.csv")
+            short_pred_old = os.path.join(canary_dir, f"oos_predictions_short_{metric}.csv")
+            short_pred = short_pred_new if os.path.exists(short_pred_new) else short_pred_old
+
+            ens_config_new = os.path.join(canary_dir, f"{prefix}_{metric}.json")
+            ens_config_old = os.path.join(canary_dir, f"ensemble_config_{metric}.json")
+            ens_config = ens_config_new if os.path.exists(ens_config_new) else ens_config_old
 
             if not os.path.exists(ens_config):
                 print(f"  Skipping {label}/{metric}: no ensemble config")
                 continue
 
-            # --- LONG optimization ---
-            if os.path.exists(long_pred):
-                key = f"{label}|long|{metric}"
-                # Create a long-only config
-                long_cfg_path = os.path.join(canary_dir, f"_opt_long_{metric}.json")
-                with open(ens_config) as f:
-                    cfg = json.load(f)
-                # Point predictions to long only
-                cfg["models"]["long"]["predictions_path"] = long_pred.replace("\\", "/")
-                with open(long_cfg_path, "w") as f:
-                    json.dump(cfg, f, indent=2)
-
-                result = run_single_optimization(
-                    config_path=long_cfg_path,
-                    predictions_path=long_pred,
-                    ohlcv_path=ohlcv_path,
-                    n_trials=args.n_trials,
-                    min_trades=args.min_trades,
-                    label=f"{label} LONG {metric}",
-                )
-                all_results[key] = result
-                if os.path.exists(long_cfg_path):
-                    os.remove(long_cfg_path)
-
-            # --- SHORT optimization ---
-            if os.path.exists(short_pred):
-                key = f"{label}|short|{metric}"
-                short_cfg_path = os.path.join(canary_dir, f"_opt_short_{metric}.json")
-                with open(ens_config) as f:
-                    cfg = json.load(f)
-                cfg["models"]["short"]["predictions_path"] = short_pred.replace("\\", "/")
-                with open(short_cfg_path, "w") as f:
-                    json.dump(cfg, f, indent=2)
-
-                result = run_single_optimization(
-                    config_path=short_cfg_path,
-                    predictions_path=short_pred,
-                    ohlcv_path=ohlcv_path,
-                    n_trials=args.n_trials,
-                    min_trades=args.min_trades,
-                    label=f"{label} SHORT {metric}",
-                )
-                all_results[key] = result
-                if os.path.exists(short_cfg_path):
-                    os.remove(short_cfg_path)
-
-            # --- ENSEMBLE optimization ---
+            # --- ENSEMBLE optimization (handles per-side internally) ---
             if os.path.exists(long_pred) and os.path.exists(short_pred):
-                key = f"{label}|ensemble|{metric}"
+                ens_key = f"{label}|ensemble|{metric}"
                 # Create merged predictions
                 merged_path = os.path.join(canary_dir, f"_merged_ens_{metric}.csv")
                 merged_df = merge_predictions(long_pred, short_pred)
@@ -398,10 +381,40 @@ def main():
                     n_trials=args.n_trials,
                     min_trades=args.min_trades,
                     label=f"{label} ENSEMBLE {metric}",
+                    holdout_months=args.holdout_months,
                 )
-                all_results[key] = result
+                all_results[ens_key] = result
                 if os.path.exists(merged_path):
                     os.remove(merged_path)
+
+                # Extract per-side metrics from the single ensemble run
+                # strategy_optimizer stores long_metrics/short_metrics/long_params/short_params
+                # in optuna_info when running in PER-SIDE TIERED mode
+                if result.get("status") == "OK":
+                    opt_info = result.get("config", {}).get("optuna_info", {})
+                    long_m = opt_info.get("long_metrics")
+                    short_m = opt_info.get("short_metrics")
+                    long_p = opt_info.get("long_params")
+                    short_p = opt_info.get("short_params")
+
+                    if long_m:
+                        all_results[f"{label}|long|{metric}"] = {
+                            "status": "OK",
+                            "metrics": long_m,
+                            "config": {"optuna_info": {
+                                "params": long_p or {},
+                                "holdout_metrics": opt_info.get("holdout_metrics", {}),
+                            }},
+                        }
+                    if short_m:
+                        all_results[f"{label}|short|{metric}"] = {
+                            "status": "OK",
+                            "metrics": short_m,
+                            "config": {"optuna_info": {
+                                "params": short_p or {},
+                                "holdout_metrics": opt_info.get("holdout_metrics", {}),
+                            }},
+                        }
 
     elapsed = time.perf_counter() - total_start
     print(f"\n{'='*60}")

@@ -435,14 +435,21 @@ def run_optimization(
     n_trials: int = 1000,
     predictions_path: str | None = None,
     ohlcv_path: str | None = None,
+    holdout_months: int | None = None,
 ) -> tuple[dict, BacktestResult]:
     """Run strategy parameter optimization.
 
     For TieredEnsembleStrategy configs, optimizes each side independently
     then merges into a final ensemble config.
 
+    Args:
+        holdout_months: If set, reserve the last N months of predictions
+            as an unseen holdout.  Optuna only sees data before the cutoff.
+            Falls back to config key ``holdout_months`` when *None*.
+
     Returns:
-        Tuple of (best_config, best_result).
+        Tuple of (best_config, best_result).  Holdout metrics (if any)
+        are stored in ``best_config["optuna_info"]["holdout_metrics"]``.
     """
     start_time = time.perf_counter()
 
@@ -490,6 +497,22 @@ def run_optimization(
     print(f"  Predictions: {len(predictions_df):,} rows  cols={list(predictions_df.columns)}")
     print(f"  OHLCV: {len(ohlcv_df):,} rows")
     print(f"  Date range: {predictions_df.index.min()} to {predictions_df.index.max()}")
+
+    # ── Holdout split ─────────────────────────────────────────────────
+    _holdout_months = holdout_months if holdout_months is not None else base_cfg.get("holdout_months", 0)
+    holdout_preds = None
+    holdout_cutoff = None
+    if _holdout_months > 0:
+        pred_end = predictions_df.index.max()
+        holdout_cutoff = pred_end - pd.DateOffset(months=_holdout_months)
+        holdout_preds = predictions_df[predictions_df.index >= holdout_cutoff].copy()
+        predictions_df = predictions_df[predictions_df.index < holdout_cutoff].copy()
+        print(f"  Holdout:  {_holdout_months} months reserved "
+              f"({holdout_cutoff.date()} -> {pred_end.date()}, "
+              f"{len(holdout_preds):,} bars)")
+        print(f"  Optimizer window: "
+              f"{predictions_df.index.min().date()} -> {predictions_df.index.max().date()} "
+              f"({len(predictions_df):,} bars)")
 
     lab_dir = os.path.join("configs", "lab", "ensemble2")
     os.makedirs(lab_dir, exist_ok=True)
@@ -624,7 +647,26 @@ def run_optimization(
             csv_df.to_csv(csv_path, index=False)
             print(f"Saved trial report: {csv_path} ({len(csv_df)} rows)")
 
+    # ── Holdout backtest (unseen by Optuna) ────────────────────────────
+    if holdout_preds is not None and len(holdout_preds) > 0:
+        print(f"\n--- HOLDOUT BACKTEST ({_holdout_months} months, unseen by optimizer) ---")
+        holdout_engine = BacktestEngine.from_config(best_cfg)
+        holdout_result = holdout_engine.run(holdout_preds, ohlcv_df, label="Holdout")
+        holdout_metrics = extract_metrics(holdout_result)
+        best_cfg["optuna_info"]["holdout_metrics"] = holdout_metrics
+        best_cfg["optuna_info"]["holdout_months"] = _holdout_months
+        best_cfg["optuna_info"]["holdout_cutoff"] = holdout_cutoff.isoformat()
+        print(f"  HOLDOUT:   PnL=${holdout_metrics['total_pnl']:,.2f}  "
+              f"PF={holdout_metrics['profit_factor']:.2f}  "
+              f"WR={holdout_metrics['win_rate']:.1%}  "
+              f"Trades={holdout_metrics['trade_count']}  "
+              f"DD=${holdout_metrics['max_drawdown']:,.2f}")
+    elif _holdout_months > 0:
+        print("\n  WARNING: Holdout period has 0 prediction rows — skipping holdout backtest.")
+
     # Save optimized config
+    if _holdout_months > 0:
+        best_cfg["holdout_months"] = _holdout_months
     opt_config_name = Path(config_path).stem + "_opt.json"
     opt_config_path = os.path.join(os.path.dirname(config_path), opt_config_name)
     with open(opt_config_path, "w") as f:
@@ -682,6 +724,11 @@ def main() -> None:
         "--data", default=None,
         help="Override: path to OHLCV parquet"
     )
+    parser.add_argument(
+        "--holdout-months", type=int, default=None,
+        help="Reserve last N months of predictions as unseen holdout "
+             "(overrides config holdout_months)"
+    )
     args = parser.parse_args()
 
     run_optimization(
@@ -689,6 +736,7 @@ def main() -> None:
         n_trials=args.n_trials,
         predictions_path=args.predictions,
         ohlcv_path=args.data,
+        holdout_months=args.holdout_months,
     )
 
 
