@@ -2834,6 +2834,8 @@ class LiveTrader:
         if signal.action == "ENTER":
             self._virtual_ledger[stream] = signal.direction * signal.lots
         elif signal.action == "EXIT":
+            # Dead path: strategies no longer produce EXIT signals (bracket-only exits).
+            # Kept as a safety net to zero the ledger if an EXIT somehow arrives.
             self._virtual_ledger[stream] = 0
             
         net_target_position = sum(self._virtual_ledger.values())
@@ -2925,46 +2927,28 @@ class LiveTrader:
             )
             return
 
-        # 5. Active signal (BUY, SELL, or EXIT)
+        # 5. Active signal (BUY or SELL)
 
         decision_timestamp_utc = bar_time.isoformat()
         signal_id = uuid.uuid4().hex
         decision_id = uuid.uuid4().hex
 
-        # Handle explicit strategy EXIT signal
+        # Safety: strategy should never return EXIT (bracket-only exit rule).
+        # If it does, log a warning and treat as HOLD.
         if signal.action == "EXIT":
-            if self.dry_run:
-                log.info("DRY RUN — would execute EXIT signal (closing position)")
-                action_taken = "DRY_RUN_EXIT"
-            else:
-                log.info("Executing EXIT signal: closing open position.")
-                try:
-                    cancelled = self.manager.cancel_open_cl_orders(
-                        symbol=self._execution_symbol,
-                    )
-                    if cancelled > 0:
-                        log.info("Cancelled %d open order(s) for EXIT signal.", cancelled)
-                    trade = self.manager.close_cl_position(
-                        symbol=self._execution_symbol,
-                        exit_mode=self._exit_mode,
-                        current_price=current_price,
-                    )
-                    action_taken = "EXECUTE_EXIT"
-                except Exception as e:
-                    log.error("Failed to execute EXIT signal: %s", e)
-                    action_taken = "ERROR_EXIT"
-
+            log.warning(
+                "Strategy returned EXIT signal — this should not happen under "
+                "bracket-only exit rules. Treating as HOLD. "
+                "buy_prob=%.4f  sell_prob=%.4f",
+                signal.buy_prob or 0.0, signal.sell_prob or 0.0,
+            )
             self.telemetry.log_signal(
                 timestamp=bar_time,
-                signal=signal.signal_label,
+                signal="Hold",
                 confidence_pct=signal.confidence_pct,
-                action_taken=action_taken,
+                action_taken="EXIT_BLOCKED",
                 current_price=current_price,
                 atr_value=atr_value,
-                direction="EXIT",
-                signal_id=signal_id,
-                decision_id=decision_id,
-                decision_timestamp_utc=decision_timestamp_utc,
             )
             return
 

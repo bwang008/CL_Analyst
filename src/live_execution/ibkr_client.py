@@ -382,6 +382,10 @@ class IBKRConnectionManager:
                 continue
             if int(pos.position) == 0:
                 continue
+
+            # IBKR positions() returns contracts without exchange — inject it
+            pos.contract.exchange = "NYMEX"
+
             action = "SELL" if pos.position > 0 else "BUY"
             qty = abs(int(pos.position))
             order = MarketOrder(action, qty)
@@ -419,6 +423,9 @@ class IBKRConnectionManager:
                 continue
             if int(pos.position) == 0:
                 continue
+
+            # IBKR positions() returns contracts without exchange — inject it
+            pos.contract.exchange = "NYMEX"
 
             action = "SELL" if pos.position > 0 else "BUY"
             qty = abs(int(pos.position))

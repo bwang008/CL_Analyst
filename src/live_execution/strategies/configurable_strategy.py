@@ -412,15 +412,16 @@ class ConfigurableStrategy(Strategy):
         order = orders[0]
         
         # Determine actual probability used
-        if order.action == "BUY" or (order.action == "EXIT" and getattr(order, "reason", "") == "FLIP_EXIT_SHORT"):
+        if order.action == "BUY":
             probability = buy_prob
             active_label = "Buy"
-        elif order.action == "SELL" or (order.action == "EXIT" and getattr(order, "reason", "") == "FLIP_EXIT_LONG"):
+        elif order.action == "SELL":
             probability = sell_prob
             active_label = "Sell"
-        else: # Regular exit
+        else:
+            # Safety fallback — should not occur with bracket-only exits
             probability = max(buy_prob, sell_prob)
-            active_label = "Exit"
+            active_label = "Hold"
 
         # Apply per-trade overrides from Order object
         tier_overrides = {}

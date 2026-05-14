@@ -53,7 +53,7 @@ class Order:
     """Signal returned by a strategy for the engine to execute.
 
     Attributes:
-        action: "BUY", "SELL", or "HOLD".
+        action: "BUY", "SELL", or "HOLD".  (EXIT is deprecated and should not be produced.)
         side:   +1 for long entry, -1 for short entry.
         lots:   Number of contracts.
         reason: Human-readable reason for logging.
@@ -388,26 +388,8 @@ class AggressiveEnsembleStrategy(BaseExecutionStrategy):
         buy_ok = prob_buy >= self.long_threshold
         sell_ok = prob_sell >= self.short_threshold
 
-        # If already in a position, check for flip
+        # Bracket-only exit rule: once in a position, ignore new signals.
         if state.position != 0:
-            if state.side == 1 and sell_ok:
-                # LONG → SELL flip
-                lots = self._prob_to_lots(prob_sell)
-                return [
-                    Order(action="EXIT", side=0, lots=1,
-                          reason="FLIP_EXIT_LONG"),
-                    Order(action="SELL", side=-1, lots=lots,
-                          reason=f"FLIP_TO_SHORT prob_sell={prob_sell:.4f}"),
-                ]
-            elif state.side == -1 and buy_ok:
-                # SHORT → BUY flip
-                lots = self._prob_to_lots(prob_buy)
-                return [
-                    Order(action="EXIT", side=0, lots=1,
-                          reason="FLIP_EXIT_SHORT"),
-                    Order(action="BUY", side=1, lots=lots,
-                          reason=f"FLIP_TO_LONG prob_buy={prob_buy:.4f}"),
-                ]
             return HOLD
 
         # FLAT — same logic as ConservativeEnsembleStrategy
@@ -674,16 +656,9 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
             sell_ok = False
             sell_tier = None
 
-        # Virtual Ledger Netting: if already in a position, check for exact opposing signals
+        # Bracket-only exit rule: once in a position, ignore new signals.
+        # Exits are managed exclusively by TP/SL/Trailing/Time-Barrier.
         if state.position != 0:
-            if state.side == 1 and sell_ok:
-                # Long Ledger is +1, Short Ledger just activated -1 -> Net = 0
-                return [Order(action="EXIT", side=0, lots=1, reason="NET_TO_ZERO"),
-                        self._tier_to_order(sell_tier, "SELL", -1, prob_sell)]
-            elif state.side == -1 and buy_ok:
-                # Short Ledger is -1, Long Ledger just activated +1 -> Net = 0
-                return [Order(action="EXIT", side=0, lots=1, reason="NET_TO_ZERO"),
-                        self._tier_to_order(buy_tier, "BUY", 1, prob_buy)]
             return HOLD
             
         if state.open_positions >= self.max_concurrent:
