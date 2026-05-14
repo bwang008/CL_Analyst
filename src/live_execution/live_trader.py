@@ -1345,6 +1345,11 @@ class LiveTrader:
                 )
             except Exception:
                 log.debug("Failed to close ledger position", exc_info=True)
+        # Register the exit order ID so the async fill callback recognises it
+        # as a known exit rather than triggering PHANTOM FILL BLOCKED.
+        _exit_oid = getattr(getattr(trade, "order", None), "orderId", None)
+        if _exit_oid is not None:
+            self._processed_exit_order_ids.add(_exit_oid)
         self._reset_position_state()
         return True
 

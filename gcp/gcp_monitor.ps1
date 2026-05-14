@@ -261,11 +261,9 @@ function Save-Artifacts {
     # --- Auto-Routing ---
     Write-Host "  Routing artifacts to active directories..." -ForegroundColor Cyan
     
-    # 1. Route JSON configs to configs\strategies
-    $configsDir = Join-Path $ProjectDir "configs\strategies"
-    if (-not (Test-Path $configsDir)) { New-Item -ItemType Directory -Path $configsDir -Force | Out-Null }
-    Get-ChildItem -Path $registryDir -Filter "*_opt.json" -Recurse -ErrorAction SilentlyContinue |
-        Copy-Item -Destination $configsDir -Force -ErrorAction SilentlyContinue
+    # Note: *_opt.json configs are NOT auto-routed to configs\strategies.
+    # They remain in the experiment's registry/canary_output directory.
+    # Promote to configs\strategies manually when ready for production.
         
     # 2. Route CSV predictions to data\predictions
     $predsDir = Join-Path $ProjectDir "data\predictions"

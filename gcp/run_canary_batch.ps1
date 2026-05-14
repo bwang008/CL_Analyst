@@ -585,6 +585,22 @@ Write-Host "Generating the consolidated report..." -ForegroundColor Cyan
 $collectArgs = @("-ExecutionPolicy", "Bypass", "-File", ".\gcp\collect_batch_results.ps1", "-BatchId", $BatchId)
 if ($DisableTelegram) { $collectArgs += "-DisableTelegram" }
 & powershell @collectArgs
+
+# --- Post-Optimization: Deploy optimizer VM ---
+if ($batchState.completed -gt 0) {
+    Write-Host ""
+    Write-Host "Deploying cloud optimizer VM..." -ForegroundColor Cyan
+    $optArgs = @("-ExecutionPolicy", "Bypass", "-File", ".\gcp\gcp_deploy_optimizer.ps1",
+        "-BatchId", $BatchId,
+        "-NTrials", 1000,
+        "-HoldoutMonths", 4,
+        "-Workers", 24)
+    if ($DisableTelegram) { $optArgs += "-DisableTelegram" }
+    & powershell @optArgs
+    Write-Host "  Optimizer VM deployed. Results will be downloaded by monitor." -ForegroundColor Green
+} else {
+    Write-Host "  Skipping post-optimization — no completed experiments." -ForegroundColor Yellow
+}
 Write-Host ""
 
 exit $(if ($batchState.failed -eq 0) { 0 } else { 1 })
