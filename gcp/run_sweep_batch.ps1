@@ -578,6 +578,64 @@ Write-Host "Generating the consolidated report..." -ForegroundColor Cyan
 $collectArgs = @("-ExecutionPolicy", "Bypass", "-File", ".\gcp\collect_batch_results.ps1", "-BatchId", $BatchId)
 if ($DisableTelegram) { $collectArgs += "-DisableTelegram" }
 & powershell @collectArgs
+
+# --- Post-Optimization: Deploy optimizer VM ---
+if ($batchState.completed -gt 0) {
+    Write-Host ""
+    Write-Host "Deploying cloud optimizer VM..." -ForegroundColor Cyan
+    $optArgs = @("-ExecutionPolicy", "Bypass", "-File", ".\gcp\gcp_deploy_optimizer.ps1",
+        "-BatchId", $BatchId,
+        "-NTrials", 1000,
+        "-HoldoutMonths", 4,
+        "-Workers", 24)
+    if ($DisableTelegram) { $optArgs += "-DisableTelegram" }
+    & powershell @optArgs
+
+    # Wait for optimizer VM to finish (self-shutdown)
+    Write-Host ""
+    Write-Host "Waiting for optimizer VM to complete..." -ForegroundColor Cyan
+    $optVmName = "optuna-post-optimizer"
+    $optMaxWait = 180  # 3 hours max
+    $optElapsed = 0
+    $optZone = "us-east1-b"  # Default zone for optimizer
+
+    while ($optElapsed -lt $optMaxWait) {
+        Start-Sleep -Seconds 60
+        $optElapsed++
+        $optStatus = gcloud compute instances describe $optVmName --zone=$optZone --format="get(status)" 2>$null
+        if (-not $optStatus -or $optStatus.ToString().Trim() -in @("TERMINATED", "STOPPED")) {
+            Write-Host "  Optimizer VM finished after ~${optElapsed}min." -ForegroundColor Green
+            break
+        }
+        if ($optElapsed % 5 -eq 0) {
+            Write-Host "  [$(Get-Date -F 'HH:mm:ss')] Optimizer running... (${optElapsed}min)" -ForegroundColor Gray
+        }
+    }
+
+    if ($optElapsed -ge $optMaxWait) {
+        Write-Host "  WARNING: Optimizer exceeded ${optMaxWait}min timeout." -ForegroundColor Yellow
+    }
+
+    # Download results from GCS to local batch directory
+    Write-Host "  Downloading optimized results from GCS..." -ForegroundColor Cyan
+    $gcsBucket = "gs://cltrainer-optuna-results/batch_optimizer/$BatchId"
+    $localBatch = Join-Path $ProjectDir "reports\batch_runs\$BatchId"
+    gcloud storage cp "$gcsBucket/batch_summary_optimized.md" "$localBatch\batch_summary_optimized.md" 2>$null
+    gcloud storage cp "$gcsBucket/optimization_results.json" "$localBatch\optimization_results.json" 2>$null
+
+    if (Test-Path (Join-Path $localBatch "batch_summary_optimized.md")) {
+        Write-Host "  Optimized report downloaded to: $localBatch" -ForegroundColor Green
+        Send-BatchTelegram "[COMPLETE] Post-Optimization finished.`nResults downloaded to local batch directory.`nbatch_summary_optimized.md is ready."
+    } else {
+        Write-Host "  WARNING: Could not download optimized report." -ForegroundColor Yellow
+        Send-BatchTelegram "[WARNING] Post-Optimization may have failed.`nCould not download batch_summary_optimized.md from GCS."
+    }
+
+    # Clean up optimizer VM
+    gcloud compute instances delete $optVmName --zone=$optZone --quiet 2>$null
+} else {
+    Write-Host "  Skipping post-optimization — no completed experiments." -ForegroundColor Yellow
+}
 Write-Host ""
 
 exit $(if ($batchState.failed -eq 0) { 0 } else { 1 })

@@ -412,6 +412,7 @@ def run_optimization(
     holdout_months: int | None = None,
     n_jobs: int = 1,
     quiet: bool = False,
+    label: str = "",
 ) -> tuple[dict, BacktestResult]:
     """Run strategy parameter optimization.
 
@@ -434,6 +435,8 @@ def run_optimization(
         base_cfg = json.load(f)
 
     model_name = base_cfg.get("nickname", Path(config_path).stem)
+    if label:
+        model_name = f"{label} | {model_name}"
     is_tiered = (
         base_cfg.get("execution_class") == "TieredEnsembleStrategy"
         and base_cfg.get("long", {}).get("tiers")
@@ -552,6 +555,7 @@ def run_optimization(
         send_telegram(
             f"[Strategy Optimizer] {model_name}\n"
             f"COMPLETE ({elapsed:.0f}s / {elapsed/60:.1f}m)\n"
+            f"Best Trial: #{best_trial.number}/{n_trials}\n"
             f"Best Sharpe: {best_trial.value:.4f}\n"
             f"PnL: ${best_m['total_pnl']:,.2f}  PF: {best_m['profit_factor']:.2f}\n"
             f"Trades: {best_m['trade_count']}  WR: {best_m['win_rate']:.1%}\n"
@@ -561,6 +565,7 @@ def run_optimization(
         send_telegram(
             f"[Strategy Optimizer] {model_name}\n"
             f"COMPLETE ({elapsed:.0f}s / {elapsed/60:.1f}m)\n"
+            f"Best Trial: #{best_trial.number}/{n_trials}\n"
             f"Best Sharpe: {best_trial.value:.4f}"
         )
 
@@ -595,6 +600,7 @@ def run_optimization(
     # Build optuna_info with both per-side and ensemble details
     if is_tiered:
         best_cfg["optuna_info"] = {
+            "trial_number": best_trial.number,
             "timestamp": pd.Timestamp.now().isoformat(timespec="seconds"),
             "optimizer": "strategy_optimizer",
             "mode": "simultaneous_ensemble",

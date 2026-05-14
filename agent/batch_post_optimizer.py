@@ -93,6 +93,7 @@ def run_single_optimization(
             holdout_months=holdout_months,
             n_jobs=n_jobs,
             quiet=quiet,
+            label=label,
         )
         best_metrics = extract_metrics(best_result)
         return {
@@ -164,8 +165,8 @@ def generate_optimized_report(
         for metric in metric_keys:
             lines.append(f"### {section_name} ({metric.replace('_', ' ').title()})")
             lines.append("")
-            lines.append("| Experiment | Trades (pre) | Trades (opt) | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (opt h/o) | Opt Thr | Opt TP | Opt SL | Opt Trail | Opt Cool | Opt Hold | Opt Consec |")
-            lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+            lines.append("| Experiment | Trades (pre) | Trades (opt) | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (opt h/o) | Opt Thr | Opt TP | Opt SL | Opt Trail | Opt Cool | Opt Hold | Opt Consec | Best Trial |")
+            lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 
             for exp in progress.get("experiments", []):
                 if exp.get("status") != "COMPLETED":
@@ -217,19 +218,22 @@ def generate_optimized_report(
                     # Holdout PnL (unseen by optimizer)
                     ho_metrics = opt_info.get("holdout_metrics", {})
                     ho_pnl = f"${ho_metrics['total_pnl']:,.0f}" if ho_metrics else "-"
+                    trial_num = opt_info.get('trial_number', '-')
+                    n_t = opt_info.get('n_trials', '?')
+                    best_trial_str = f"#{trial_num}/{n_t}" if trial_num != '-' else "-"
                     lines.append(
                         f"| {label} | {base_trades} | {opt_trades} | "
                         f"{base_pf:.2f} | {opt_pf:.2f} | "
                         f"${base_pnl:,.0f} | ${opt_pnl:,.0f} | "
                         f"{ho_pnl} | "
-                        f"{opt_thr} | {opt_tp} | {opt_sl} | {opt_trail} | {opt_cool} | {opt_hold} | {opt_consec} |"
+                        f"{opt_thr} | {opt_tp} | {opt_sl} | {opt_trail} | {opt_cool} | {opt_hold} | {opt_consec} | {best_trial_str} |"
                     )
                 else:
                     reason = opt.get("error", "not run") if opt else "not run"
                     lines.append(
                         f"| {label} | {base_trades} | - | "
                         f"{base_pf:.2f} | - | "
-                        f"${base_pnl:,.0f} | - | - | - | - | - | - | - | - | - |"
+                        f"${base_pnl:,.0f} | - | - | - | - | - | - | - | - | - | - |"
                     )
             lines.append("")
 
@@ -266,7 +270,8 @@ def generate_optimized_report(
         lines.append(f"| Cooldown Bars | - | {params.get('cooldown_bars', '-')} |")
         lines.append(f"| Max Hold Bars | - | {params.get('max_hold_bars', '-')} |")
         lines.append(f"| Consec Signal | - | {params.get('consecutive_signal_threshold', '-')} |")
-        lines.append(f"| Trials | - | {opt_info.get('n_trials', '-')} |")
+        trial_num = opt_info.get('trial_number', '-')
+        lines.append(f"| Best Trial | - | #{trial_num}/{opt_info.get('n_trials', '-')} |")
         lines.append(f"| Wall Time | - | {opt_info.get('wall_time_seconds', '-')}s |")
         lines.append("")
 

@@ -2,7 +2,7 @@
 .SYNOPSIS
     Deploy a VM to run batch_post_optimizer.py on cloud with full parallelism.
 .DESCRIPTION
-    Provisions an n2-highcpu-48 VM, uploads code and batch_progress.json,
+    Provisions an n2-standard-32 VM (128GB RAM), uploads code and batch metadata,
     and launches vm_post_optimize.sh which downloads experiment artifacts
     from GCS and runs the optimizer with --workers 24.
 .EXAMPLE
@@ -14,7 +14,7 @@ param(
     [Parameter(Mandatory=$true)]
     [string]$BatchId,
     [string]$VmName = "optuna-post-optimizer",
-    [string]$MachineType = "n2-highcpu-48",
+    [string]$MachineType = "n2-standard-32",
     [string]$Zone = "us-central1-a",
     [int]$DiskSizeGB = 50,
     [string]$Project = "cltrainer",
@@ -245,21 +245,10 @@ if ($tmuxCheck -match "RUNNING") {
     Send-TelegramAlert "[WARNING] Post-Optimizer Deploy Failed`nBatch: $BatchId`nVM: $VmName`ntmux session may not have started."
 }
 
-# --- [7/7] Start monitor ---
-if (-not $NoMonitor) {
-    $monScript = Join-Path $ScriptDir "gcp_monitor.ps1"
-    $monArgs = @("-ExecutionPolicy", "Bypass", "-File", $monScript,
-        "-VmName", $VmName, "-GcsPrefix", $GcsOptPrefix,
-        "-ExperimentLabel", "Post-Optimizer ($BatchId)")
-    
-    $hasTelegram = ((Test-Path $envFile) -and (Select-String -Path $envFile -Pattern "TELEGRAM_BOT_TOKEN" -Quiet))
-    if (($hasTelegram -or $env:TELEGRAM_BOT_TOKEN) -and -not $DisableTelegram) { $monArgs += "-EnableTelegram" }
-    
-    Write-Host "  Starting detached monitor..." -ForegroundColor Yellow
-    Start-Process powershell -WindowStyle Hidden -ArgumentList $monArgs
-} else {
-    Write-Host "  Skipping monitor (-NoMonitor specified)." -ForegroundColor Yellow
-}
+# Note: The canary-style gcp_monitor.ps1 is NOT used for the optimizer VM.
+# The optimizer doesn't produce canary heartbeat files (STATUS.json/pipeline_summary.json),
+# so the monitor would send false failure alerts. The optimizer VM self-reports
+# progress via Telegram and auto-shuts down on completion.
 
 Write-Host ""
 Write-Host "=====================================================" -ForegroundColor Green
