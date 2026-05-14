@@ -237,12 +237,14 @@ if ($DryRun) {
         $vmName       = "optuna-canary-$($basePrefix -replace '_','-')"
         $tsPrefix     = "${basePrefix}_${BatchTimestamp}"
         $machineType  = if ($exp.machine_type)       { $exp.machine_type }       else { $defaults.machine_type }
+        $holdoutDate  = if ($exp.holdout_cutoff_date) { $exp.holdout_cutoff_date } elseif ($defaults.holdout_cutoff_date) { $defaults.holdout_cutoff_date } else { "" }
         $targetLong   = if ($exp.target_long)        { $exp.target_long }        else { "" }
         $targetShort  = if ($exp.target_short)       { $exp.target_short }       else { "" }
         Write-Host "  [$idx/$($expList.Count)] $label" -ForegroundColor Cyan
         Write-Host "    VM:          $vmName"
         Write-Host "    GCS prefix:  $tsPrefix"
         Write-Host "    Machine:     $machineType"
+        Write-Host "    Holdout:     $holdoutDate"
         Write-Host "    Target L:    $targetLong"
         Write-Host "    Target S:    $targetShort"
         Write-Host "    Local out:   reports\$tsPrefix"
@@ -293,6 +295,7 @@ foreach ($exp in $expList) {
     $vmName      = "optuna-canary-$($basePrefix -replace '_','-')"
     $localDir    = Join-Path $ProjectDir "reports\$tsPrefix"
     $label       = if ($exp.label) { $exp.label } else { "Exp-$expIndex" }
+    $holdoutDate = if ($exp.holdout_cutoff_date) { $exp.holdout_cutoff_date } elseif ($defaults.holdout_cutoff_date) { $defaults.holdout_cutoff_date } else { "" }
     $queue.Enqueue(@{
         Index        = $expIndex
         Label        = $label
@@ -300,6 +303,7 @@ foreach ($exp in $expList) {
         BasePrefix   = $basePrefix
         GcsPrefix    = $tsPrefix
         LocalDir     = $localDir
+        HoldoutDate  = $holdoutDate
         MachineType  = if ($exp.machine_type)       { $exp.machine_type }       else { $defaults.machine_type       }
         Provisioning = if ($exp.provisioning_model)  { $exp.provisioning_model  } else { $defaults.provisioning_model }
         GcsDataPath  = if ($exp.gcs_data_path)       { $exp.gcs_data_path       } else { $defaults.gcs_data_path      }
@@ -373,6 +377,7 @@ while (-not $allDone) {
                 "-ProvisioningModel", $exp.Provisioning,
                 "-NoMonitor"
             )
+            if ($exp.HoldoutDate) { $deployArgs += @("-HoldoutCutoffDate", $exp.HoldoutDate) }
             if ($exp.TargetLong)  { $deployArgs += @("-TargetLong",  $exp.TargetLong)  }
             if ($exp.TargetShort) { $deployArgs += @("-TargetShort", $exp.TargetShort) }
             if ($exp.UseBuckets)  { $deployArgs += @("-UseBuckets") }
@@ -422,7 +427,7 @@ while (-not $allDone) {
         $exitCodeFile_= Join-Path $env:TEMP "monitor_exit_$($exp.VmName)_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
 
         $job = Start-Job -ScriptBlock {
-            param($monScript, $vmName, $gcsPrefix, $label, $batchId, $expIdx, $expTotal, $tgEnabled, $pollSecs, $projDir, $gcpBin, $exitCodeFile)
+            param($monScript, $vmName, $actualZone, $gcsPrefix, $label, $batchId, $expIdx, $expTotal, $tgEnabled, $pollSecs, $projDir, $gcpBin, $exitCodeFile)
             $env:PATH = "$gcpBin;$env:PATH"
             Set-Location $projDir
             # Build args array - cannot pass [switch] through -ArgumentList, so conditionally add -DisableTelegram
@@ -430,6 +435,7 @@ while (-not $allDone) {
                 "-ExecutionPolicy", "Bypass",
                 "-File", $monScript,
                 "-VmName", $vmName,
+                "-Zone", $actualZone,
                 "-GcsPrefix", $gcsPrefix,
                 "-ExperimentLabel", $label,
                 "-BatchId", $batchId,
@@ -441,7 +447,7 @@ while (-not $allDone) {
             if (-not $tgEnabled) { $monArgs += "-DisableTelegram" }
             & powershell @monArgs
             return $LASTEXITCODE
-        } -ArgumentList $monScript, $vmName_, $gcsPrefix_, $label_, $batchId_, $expIdx_, $expTotal_, $tgEnabled_, $pollSecs_, $projDir_, $gcloudBin, $exitCodeFile_
+        } -ArgumentList $monScript, $vmName_, $actualZone, $gcsPrefix_, $label_, $batchId_, $expIdx_, $expTotal_, $tgEnabled_, $pollSecs_, $projDir_, $gcloudBin, $exitCodeFile_
 
         $exp.StartTime    = Get-Date
         $exp.Job          = $job
