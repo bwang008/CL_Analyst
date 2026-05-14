@@ -307,33 +307,14 @@ def main():
     ohlcv_path = find_ohlcv_path(manifest_path)
     print(f"OHLCV data: {ohlcv_path}")
 
-    # Patch strategy_optimizer min_trades threshold
+    # Patch strategy_optimizer min_sharpe threshold if --no-filter
     import agent.strategy_optimizer as so
-    original_make_objective = so.make_objective
 
     if args.no_filter:
         original_save_best = so.TopKTracker.save_best
         def patched_save_best(self, min_sharpe=-99999.0):
             return original_save_best(self, min_sharpe=-99999.0)
         so.TopKTracker.save_best = patched_save_best
-
-    def patched_make_objective(base_cfg, predictions_df, ohlcv_df, results_cache=None, side=None):
-        obj = original_make_objective(base_cfg, predictions_df, ohlcv_df, results_cache, side=side)
-
-        def patched_objective(trial):
-            result = obj(trial)
-            # The original returns (0.0, -999999.0) for < 50 trades
-            # We re-check with our lower threshold
-            if results_cache and trial.number in results_cache:
-                cached = results_cache[trial.number]
-                if cached.trade_count < args.min_trades:
-                    return 0.0, -999999.0
-                return cached.profit_factor, cached.max_drawdown
-            return result
-
-        return patched_objective
-
-    so.make_objective = patched_make_objective
 
     ohlcv_df = load_ohlcv(ohlcv_path)
     all_results = {}
@@ -387,31 +368,32 @@ def main():
                 if os.path.exists(merged_path):
                     os.remove(merged_path)
 
-                # Extract per-side metrics from the single ensemble run
-                # strategy_optimizer stores long_metrics/short_metrics/long_params/short_params
-                # in optuna_info when running in PER-SIDE TIERED mode
+                # Extract per-side params from the simultaneous ensemble run.
+                # In simultaneous mode, long_params/short_params are stored but
+                # there are no separate long_metrics/short_metrics (the ensemble
+                # was optimized as a whole).  We populate per-side entries with
+                # the ensemble metrics and per-side params for reporting.
                 if result.get("status") == "OK":
                     opt_info = result.get("config", {}).get("optuna_info", {})
-                    long_m = opt_info.get("long_metrics")
-                    short_m = opt_info.get("short_metrics")
                     long_p = opt_info.get("long_params")
                     short_p = opt_info.get("short_params")
+                    ens_metrics = opt_info.get("ensemble_metrics", result.get("metrics", {}))
 
-                    if long_m:
+                    if long_p:
                         all_results[f"{label}|long|{metric}"] = {
                             "status": "OK",
-                            "metrics": long_m,
+                            "metrics": ens_metrics,
                             "config": {"optuna_info": {
-                                "params": long_p or {},
+                                "params": long_p,
                                 "holdout_metrics": opt_info.get("holdout_metrics", {}),
                             }},
                         }
-                    if short_m:
+                    if short_p:
                         all_results[f"{label}|short|{metric}"] = {
                             "status": "OK",
-                            "metrics": short_m,
+                            "metrics": ens_metrics,
                             "config": {"optuna_info": {
-                                "params": short_p or {},
+                                "params": short_p,
                                 "holdout_metrics": opt_info.get("holdout_metrics", {}),
                             }},
                         }

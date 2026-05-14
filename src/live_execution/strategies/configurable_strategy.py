@@ -398,12 +398,23 @@ class ConfigurableStrategy(Strategy):
         # 3. Handle HOLD
         if not orders or orders[0].action == "HOLD":
             probability = max(buy_prob, sell_prob)
+            skip_reason = "ENGINE_HOLD"
+            signal_label = "Hold"
+            if orders and orders[0].reason and orders[0].reason != "no_signal":
+                skip_reason = orders[0].reason
+                if orders[0].side == 1:
+                    probability = buy_prob
+                    signal_label = "Buy"
+                elif orders[0].side == -1:
+                    probability = sell_prob
+                    signal_label = "Sell"
+
             return TradeSignal(
                 action="HOLD",
                 probability=probability,
                 confidence_pct=probability * 100.0,
-                signal_label="Hold",
-                skip_reason="ENGINE_HOLD",
+                signal_label=signal_label,
+                skip_reason=skip_reason,
                 buy_prob=buy_prob,
                 sell_prob=sell_prob,
             )

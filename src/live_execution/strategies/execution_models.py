@@ -251,8 +251,15 @@ class SingleModelStrategy(BaseExecutionStrategy):
         if np.isnan(prob_sell):
             prob_sell = 0.0
 
+        buy_ok = self.direction == "LONG" and prob_buy >= self.threshold
+        sell_ok = self.direction == "SHORT" and prob_sell >= self.threshold
+
         # Position guard
         if state.position != 0 and state.open_positions >= self.max_concurrent:
+            if buy_ok:
+                return [Order(action="HOLD", side=1, reason="POSITION_OPEN")]
+            elif sell_ok:
+                return [Order(action="HOLD", side=-1, reason="POSITION_OPEN")]
             return HOLD
 
         if self.direction == "LONG":
@@ -313,10 +320,18 @@ class ConservativeEnsembleStrategy(BaseExecutionStrategy):
         if np.isnan(prob_sell):
             prob_sell = 0.0
 
+        buy_ok = prob_buy >= self.long_threshold
+        sell_ok = prob_sell >= self.short_threshold
+
         # If already in a position, ignore new signals
-        if state.position != 0:
-            return HOLD
-        if state.open_positions >= self.max_concurrent:
+        if state.position != 0 or state.open_positions >= self.max_concurrent:
+            if buy_ok and sell_ok:
+                side = 1 if prob_buy >= prob_sell else -1
+                return [Order(action="HOLD", side=side, reason="POSITION_OPEN")]
+            elif buy_ok:
+                return [Order(action="HOLD", side=1, reason="POSITION_OPEN")]
+            elif sell_ok:
+                return [Order(action="HOLD", side=-1, reason="POSITION_OPEN")]
             return HOLD
 
         buy_ok = prob_buy >= self.long_threshold
@@ -390,6 +405,13 @@ class AggressiveEnsembleStrategy(BaseExecutionStrategy):
 
         # Bracket-only exit rule: once in a position, ignore new signals.
         if state.position != 0:
+            if buy_ok and sell_ok:
+                side = 1 if prob_buy >= prob_sell else -1
+                return [Order(action="HOLD", side=side, reason="POSITION_OPEN")]
+            elif buy_ok:
+                return [Order(action="HOLD", side=1, reason="POSITION_OPEN")]
+            elif sell_ok:
+                return [Order(action="HOLD", side=-1, reason="POSITION_OPEN")]
             return HOLD
 
         # FLAT — same logic as ConservativeEnsembleStrategy
@@ -658,10 +680,14 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
 
         # Bracket-only exit rule: once in a position, ignore new signals.
         # Exits are managed exclusively by TP/SL/Trailing/Time-Barrier.
-        if state.position != 0:
-            return HOLD
-            
-        if state.open_positions >= self.max_concurrent:
+        if state.position != 0 or state.open_positions >= self.max_concurrent:
+            if buy_ok and sell_ok:
+                side = 1 if prob_buy >= prob_sell else -1
+                return [Order(action="HOLD", side=side, reason="POSITION_OPEN")]
+            elif buy_ok:
+                return [Order(action="HOLD", side=1, reason="POSITION_OPEN")]
+            elif sell_ok:
+                return [Order(action="HOLD", side=-1, reason="POSITION_OPEN")]
             return HOLD
 
         if buy_ok and sell_ok:
