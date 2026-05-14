@@ -327,10 +327,11 @@ def main():
         local_dir = exp["local_dir"]
         canary_dir = os.path.join(local_dir, "registry", "canary_output")
 
+        prefix = exp.get("gcs_prefix", "")
         for metric in ["logloss", "average_precision"]:
-            long_pred = os.path.join(canary_dir, f"oos_predictions_long_{metric}.csv")
-            short_pred = os.path.join(canary_dir, f"oos_predictions_short_{metric}.csv")
-            ens_config = os.path.join(canary_dir, f"ensemble_config_{metric}.json")
+            long_pred = os.path.join(canary_dir, f"oos_predictions_{prefix}_long_{metric}.csv")
+            short_pred = os.path.join(canary_dir, f"oos_predictions_{prefix}_short_{metric}.csv")
+            ens_config = os.path.join(canary_dir, f"{prefix}_{metric}.json")
 
             if not os.path.exists(ens_config):
                 print(f"  Skipping {label}/{metric}: no ensemble config")

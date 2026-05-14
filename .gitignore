@@ -30,6 +30,7 @@ models/registry/**/backtest_report*.txt
 !.cursor/worktrees.json
 # Strategy configs (JSON definitions for config-driven strategies)
 !configs/strategies/**
+configs/strategies/candidates/**
 
 # Runtime artifacts (live execution)
 .env
