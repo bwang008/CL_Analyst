@@ -169,6 +169,54 @@ function Test-ArtifactsDownloaded {
 }
 
 
+function Save-CrashDiagnostics {
+    <# Preserve serial console + startup logs before VM deletion so crash evidence survives. #>
+    param(
+        [string]$VmName,
+        [string]$VmZone,
+        [string]$GcsPrefix,
+        [string]$LocalDir
+    )
+
+    $diagDir = Join-Path $LocalDir "crash_diagnostics"
+    if (-not (Test-Path $diagDir)) { New-Item -ItemType Directory -Path $diagDir -Force | Out-Null }
+
+    Write-Host "  [CrashDiag] Capturing pre-deletion diagnostics..." -ForegroundColor Yellow
+
+    # 1. Serial console output (survives VM crash, lost after VM deletion)
+    $serialFile = Join-Path $diagDir "serial_console.log"
+    try {
+        $serialOut = gcloud compute instances get-serial-port-output $VmName --zone=$VmZone 2>$null
+        if ($serialOut) { $serialOut | Out-File -FilePath $serialFile -Encoding utf8 }
+    } catch {}
+
+    # 2. If VM is still accessible, grab startup script logs and dmesg
+    $vmStatus = gcloud compute instances describe $VmName --zone=$VmZone --format="get(status)" 2>$null
+    if ($vmStatus -and $vmStatus.ToString().Trim() -in @("RUNNING", "STOPPED")) {
+        try {
+            $startupFile = Join-Path $diagDir "startup_script.log"
+            $startupOut = gcloud compute ssh $VmName --zone=$VmZone `
+                --command="sudo journalctl -u google-startup-scripts.service --no-pager 2>/dev/null || cat /var/log/syslog 2>/dev/null | grep startup-script | tail -100" `
+                --quiet 2>$null
+            if ($startupOut) { $startupOut | Out-File -FilePath $startupFile -Encoding utf8 }
+        } catch {}
+
+        try {
+            $dmesgFile = Join-Path $diagDir "dmesg.log"
+            $dmesgOut = gcloud compute ssh $VmName --zone=$VmZone `
+                --command="dmesg | tail -100" --quiet 2>$null
+            if ($dmesgOut) { $dmesgOut | Out-File -FilePath $dmesgFile -Encoding utf8 }
+        } catch {}
+    }
+
+    # 3. Upload to GCS for permanent record
+    $gcsDiag = "gs://cltrainer-optuna-results/$GcsPrefix/crash_diagnostics/"
+    gcloud storage cp -r "$diagDir/*" $gcsDiag 2>$null
+
+    Write-Host "  [CrashDiag] Saved to $diagDir and $gcsDiag" -ForegroundColor Yellow
+}
+
+
 function Remove-ExperimentVm {
     param(
         [string]$VmName,
@@ -505,6 +553,12 @@ while (-not $allDone) {
                     "VM will be deleted to free quota.")
             }
             $slot.ArtifactOk = $artOk
+
+            # --- CRASH DIAGNOSTICS (before deletion, only on failure) ---
+            if ($exitCode -ne 0 -or -not $artOk) {
+                Save-CrashDiagnostics -VmName $slot.VmName -VmZone $slot.ActualZone `
+                    -GcsPrefix $slot.GcsPrefix -LocalDir $slot.LocalDir
+            }
 
             # --- DELETE VM (quota freed here) ---
             Remove-ExperimentVm -VmName $slot.VmName -VmZone $slot.ActualZone

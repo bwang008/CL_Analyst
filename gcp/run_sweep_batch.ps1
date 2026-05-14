@@ -169,6 +169,54 @@ function Test-ArtifactsDownloaded {
 }
 
 
+function Save-CrashDiagnostics {
+    <# Preserve serial console + startup logs before VM deletion so crash evidence survives. #>
+    param(
+        [string]$VmName,
+        [string]$VmZone,
+        [string]$GcsPrefix,
+        [string]$LocalDir
+    )
+
+    $diagDir = Join-Path $LocalDir "crash_diagnostics"
+    if (-not (Test-Path $diagDir)) { New-Item -ItemType Directory -Path $diagDir -Force | Out-Null }
+
+    Write-Host "  [CrashDiag] Capturing pre-deletion diagnostics..." -ForegroundColor Yellow
+
+    # 1. Serial console output (survives VM crash, lost after VM deletion)
+    $serialFile = Join-Path $diagDir "serial_console.log"
+    try {
+        $serialOut = gcloud compute instances get-serial-port-output $VmName --zone=$VmZone 2>$null
+        if ($serialOut) { $serialOut | Out-File -FilePath $serialFile -Encoding utf8 }
+    } catch {}
+
+    # 2. If VM is still accessible, grab startup script logs and dmesg
+    $vmStatus = gcloud compute instances describe $VmName --zone=$VmZone --format="get(status)" 2>$null
+    if ($vmStatus -and $vmStatus.ToString().Trim() -in @("RUNNING", "STOPPED")) {
+        try {
+            $startupFile = Join-Path $diagDir "startup_script.log"
+            $startupOut = gcloud compute ssh $VmName --zone=$VmZone `
+                --command="sudo journalctl -u google-startup-scripts.service --no-pager 2>/dev/null || cat /var/log/syslog 2>/dev/null | grep startup-script | tail -100" `
+                --quiet 2>$null
+            if ($startupOut) { $startupOut | Out-File -FilePath $startupFile -Encoding utf8 }
+        } catch {}
+
+        try {
+            $dmesgFile = Join-Path $diagDir "dmesg.log"
+            $dmesgOut = gcloud compute ssh $VmName --zone=$VmZone `
+                --command="dmesg | tail -100" --quiet 2>$null
+            if ($dmesgOut) { $dmesgOut | Out-File -FilePath $dmesgFile -Encoding utf8 }
+        } catch {}
+    }
+
+    # 3. Upload to GCS for permanent record
+    $gcsDiag = "gs://cltrainer-optuna-results/$GcsPrefix/crash_diagnostics/"
+    gcloud storage cp -r "$diagDir/*" $gcsDiag 2>$null
+
+    Write-Host "  [CrashDiag] Saved to $diagDir and $gcsDiag" -ForegroundColor Yellow
+}
+
+
 function Remove-ExperimentVm {
     param(
         [string]$VmName,
@@ -208,6 +256,8 @@ $maxVcpus    = if ($MaxConcurrentVcpus -gt 0) { $MaxConcurrentVcpus } `
                else { 100 }
 $vcpusPerVm  = if ($defaults.vcpus_per_vm) { [int]$defaults.vcpus_per_vm } else { 48 }
 $timeoutMins = if ($defaults.timeout_minutes) { [int]$defaults.timeout_minutes } else { 90 }
+$postOptTrials  = if ($defaults.post_optimizer_trials) { [int]$defaults.post_optimizer_trials } else { 1000 }
+$postOptHoldout = if ($defaults.post_optimizer_holdout_months) { [int]$defaults.post_optimizer_holdout_months } else { 4 }
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Magenta
@@ -419,9 +469,10 @@ while (-not $allDone) {
         $projDir_     = $ProjectDir
         $gcpBin_      = $gcloudBin
         $exitCodeFile_= Join-Path $env:TEMP "monitor_exit_$($exp.VmName)_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+        $actualZone_  = $actualZone
 
         $job = Start-Job -ScriptBlock {
-            param($monScript, $vmName, $gcsPrefix, $label, $batchId, $expIdx, $expTotal, $tgEnabled, $pollSecs, $projDir, $gcpBin, $exitCodeFile)
+            param($monScript, $vmName, $gcsPrefix, $label, $batchId, $expIdx, $expTotal, $tgEnabled, $pollSecs, $projDir, $gcpBin, $exitCodeFile, $vmZone)
             $env:PATH = "$gcpBin;$env:PATH"
             Set-Location $projDir
             # Build args array - cannot pass [switch] through -ArgumentList, so conditionally add -DisableTelegram
@@ -429,6 +480,7 @@ while (-not $allDone) {
                 "-ExecutionPolicy", "Bypass",
                 "-File", $monScript,
                 "-VmName", $vmName,
+                "-Zone", $vmZone,
                 "-GcsPrefix", $gcsPrefix,
                 "-ExperimentLabel", $label,
                 "-BatchId", $batchId,
@@ -440,7 +492,7 @@ while (-not $allDone) {
             if (-not $tgEnabled) { $monArgs += "-DisableTelegram" }
             & powershell @monArgs
             return $LASTEXITCODE
-        } -ArgumentList $monScript, $vmName_, $gcsPrefix_, $label_, $batchId_, $expIdx_, $expTotal_, $tgEnabled_, $pollSecs_, $projDir_, $gcloudBin, $exitCodeFile_
+        } -ArgumentList $monScript, $vmName_, $gcsPrefix_, $label_, $batchId_, $expIdx_, $expTotal_, $tgEnabled_, $pollSecs_, $projDir_, $gcloudBin, $exitCodeFile_, $actualZone_
 
         $exp.StartTime    = Get-Date
         $exp.Job          = $job
@@ -498,6 +550,12 @@ while (-not $allDone) {
                     "VM will be deleted to free quota.")
             }
             $slot.ArtifactOk = $artOk
+
+            # --- CRASH DIAGNOSTICS (before deletion, only on failure) ---
+            if ($exitCode -ne 0 -or -not $artOk) {
+                Save-CrashDiagnostics -VmName $slot.VmName -VmZone $slot.ActualZone `
+                    -GcsPrefix $slot.GcsPrefix -LocalDir $slot.LocalDir
+            }
 
             # --- DELETE VM (quota freed here) ---
             Remove-ExperimentVm -VmName $slot.VmName -VmZone $slot.ActualZone
@@ -591,8 +649,8 @@ if ($batchState.completed -gt 0) {
     foreach ($oz in $optZoneList) {
         $optArgs = @("-ExecutionPolicy", "Bypass", "-File", ".\gcp\gcp_deploy_optimizer.ps1",
             "-BatchId", $BatchId,
-            "-NTrials", 1000,
-            "-HoldoutMonths", 4,
+            "-NTrials", $postOptTrials,
+            "-HoldoutMonths", $postOptHoldout,
             "-Workers", 24,
             "-Zone", $oz)
         if ($DisableTelegram) { $optArgs += "-DisableTelegram" }
