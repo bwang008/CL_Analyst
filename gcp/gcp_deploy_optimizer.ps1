@@ -220,6 +220,13 @@ foreach ($file in $codeFiles) {
 }
 Write-Host "  Code uploaded!" -ForegroundColor Green
 
+# Fix CRLF line endings on shell scripts (Windows git checkout produces CRLF which breaks bash)
+Write-Host "  Fixing line endings on shell scripts..."
+try {
+    gcloud compute ssh $VmName --zone=$Zone --command="find $RemoteProject -name '*.sh' -exec sed -i 's/\r$//' {} + && chmod +x $RemoteProject/gcp/*.sh" --quiet 2>$null
+} catch {}
+Write-Host "  Line endings fixed." -ForegroundColor Green
+
 # --- [5/7] Launch optimizer ---
 Write-Host "`n[5/7] Launching post-optimizer in tmux..."
 
