@@ -866,6 +866,9 @@ class LiveTrader:
             # Step 7b: Recover any inherited position from the ledger
             self._recover_inherited_position()
 
+            # Step 7c: Cancel any orphaned CL orders if we booted FLAT
+            self._cancel_orphaned_orders_on_startup()
+
             # Step 8: Subscribe to live bars (Brain stream)
             self._subscribe()
 
@@ -1411,6 +1414,23 @@ class LiveTrader:
                 reason="CLOSED_OOB",
                 close_time=self._utc_iso_now(),
             )
+            # Clean up any orphaned TP/SL orders still resting on IBKR
+            # (e.g. TP filled offline → software OCA never cancelled the SL)
+            try:
+                cancelled = self.manager.cancel_open_cl_orders(
+                    symbol=self._execution_symbol,
+                )
+                if cancelled > 0:
+                    log.info(
+                        "[RECOVERY] Cancelled %d orphaned CL order(s) "
+                        "after OOB close",
+                        cancelled,
+                    )
+            except Exception:
+                log.debug(
+                    "[RECOVERY] cancel_open_cl_orders failed",
+                    exc_info=True,
+                )
             return
 
         # 3. IBKR confirms position exists — restore in-memory state
@@ -1580,6 +1600,66 @@ class LiveTrader:
             log.exception(
                 "[RECOVERY] Failed to re-place TP/SL orders"
             )
+
+    def _cancel_orphaned_orders_on_startup(self) -> None:
+        """Cancel any orphaned CL orders on IBKR if the bot considers itself FLAT.
+
+        Runs once at startup, *after* _recover_inherited_position().
+        Catches stale entry or exit orders left over from a prior session
+        that the bot no longer tracks (e.g. an unfilled BUY limit from
+        before a restart).  Without this, such orders could fill after
+        startup and trigger PHANTOM FILL BLOCKED — leaving an unprotected
+        position.
+        """
+        # Only sweep if the bot has no position and no tracked pending entry
+        if self._active_trade_id is not None:
+            return  # Position is being tracked — don't touch orders
+        if self._pending_entry_order_id is not None:
+            return  # Entry order is being tracked — don't touch orders
+
+        ibkr_pos = self.manager.get_cl_position(
+            symbol=self._execution_symbol,
+        )
+        if ibkr_pos != 0:
+            return  # IBKR has a position — don't cancel its protective orders
+
+        # Bot is FLAT with no tracked orders — any CL orders on IBKR are orphans
+        try:
+            open_cl_orders = []
+            for t in self.manager.ib.openTrades():
+                c = getattr(t, "contract", None)
+                if c is not None and getattr(c, "symbol", None) == self._execution_symbol:
+                    o = getattr(t, "order", None)
+                    if o is not None:
+                        open_cl_orders.append(o)
+
+            if not open_cl_orders:
+                return
+
+            log.warning(
+                "[STARTUP SWEEP] Bot is FLAT but found %d orphaned CL order(s) "
+                "on IBKR — cancelling to prevent phantom fills",
+                len(open_cl_orders),
+            )
+            for order in open_cl_orders:
+                try:
+                    self.manager.ib.cancelOrder(order)
+                    log.info(
+                        "[STARTUP SWEEP] Cancelled orphaned order: "
+                        "orderId=%s action=%s type=%s lmt=%.2f aux=%.2f",
+                        getattr(order, "orderId", "?"),
+                        getattr(order, "action", "?"),
+                        getattr(order, "orderType", "?"),
+                        float(getattr(order, "lmtPrice", 0) or 0),
+                        float(getattr(order, "auxPrice", 0) or 0),
+                    )
+                except Exception:
+                    log.exception(
+                        "[STARTUP SWEEP] Failed to cancel orderId=%s",
+                        getattr(order, "orderId", "?"),
+                    )
+        except Exception:
+            log.exception("[STARTUP SWEEP] Failed to scan for orphaned orders")
 
     def _place_bracket_children_on_fill(
         self,

@@ -33,6 +33,51 @@ from agent.backtest_engine import BacktestEngine, load_ohlcv, load_predictions
 from agent.strategy_optimizer import run_optimization, extract_metrics
 
 
+def _extract_per_side_params(
+    result: dict,
+    label: str,
+    metric: str,
+    all_results: dict,
+) -> None:
+    """Extract per-side parameter details from an ensemble optimization result.
+
+    The optimizer runs a single ensemble optimization (both sides
+    simultaneously).  There are no separate long-only or short-only
+    optimizations, so we do NOT create per-side metric entries —
+    the report will show dashes for the Long/Short Model opt columns.
+
+    We only store per-side entries for the Detailed Parameters section
+    so it's clear which params apply to which side.
+    """
+    if result.get("status") != "OK":
+        return
+
+    opt_info = result.get("config", {}).get("optuna_info", {})
+    long_p = opt_info.get("long_params")
+    short_p = opt_info.get("short_params")
+
+    # Store per-side params for the detailed section, but with NO metrics
+    # (metrics=None signals that no per-side optimization was run)
+    if long_p:
+        all_results[f"{label}|long|{metric}"] = {
+            "status": "ENSEMBLE_ONLY",
+            "config": {"optuna_info": {
+                "params": long_p,
+                "trial_number": opt_info.get("trial_number"),
+                "n_trials": opt_info.get("n_trials"),
+            }},
+        }
+    if short_p:
+        all_results[f"{label}|short|{metric}"] = {
+            "status": "ENSEMBLE_ONLY",
+            "config": {"optuna_info": {
+                "params": short_p,
+                "trial_number": opt_info.get("trial_number"),
+                "n_trials": opt_info.get("n_trials"),
+            }},
+        }
+
+
 def find_ohlcv_path(manifest_path: str) -> str:
     """Resolve the local OHLCV parquet from the batch manifest."""
     with open(manifest_path) as f:
@@ -228,6 +273,26 @@ def generate_optimized_report(
                         f"{ho_pnl} | "
                         f"{opt_thr} | {opt_tp} | {opt_sl} | {opt_trail} | {opt_cool} | {opt_hold} | {opt_consec} | {best_trial_str} |"
                     )
+                elif opt.get("status") == "ENSEMBLE_ONLY":
+                    # No per-side optimization was run — show params but blank metrics
+                    if "optuna_info" in opt:
+                        opt_info = opt["optuna_info"]
+                    else:
+                        opt_info = opt.get("config", {}).get("optuna_info", {})
+                    params = opt_info.get("params", {})
+                    opt_thr = params.get("entry_threshold", "-")
+                    opt_tp = params.get("tp_atr_mult", "-")
+                    opt_sl = params.get("sl_atr_mult", "-")
+                    opt_trail = params.get("trailing_atr_mult", "-")
+                    opt_cool = params.get("cooldown_bars", "-")
+                    opt_hold = params.get("max_hold_bars", "-")
+                    opt_consec = params.get("consecutive_signal_threshold", "-")
+                    lines.append(
+                        f"| {label} | {base_trades} | - | "
+                        f"{base_pf:.2f} | - | "
+                        f"${base_pnl:,.0f} | - | - | "
+                        f"{opt_thr} | {opt_tp} | {opt_sl} | {opt_trail} | {opt_cool} | {opt_hold} | {opt_consec} | - |"
+                    )
                 else:
                     reason = opt.get("error", "not run") if opt else "not run"
                     lines.append(
@@ -418,31 +483,8 @@ def main():
                 if os.path.exists(merged_path):
                     os.remove(merged_path)
 
-                # Extract per-side params
-                if result.get("status") == "OK":
-                    opt_info = result.get("config", {}).get("optuna_info", {})
-                    long_p = opt_info.get("long_params")
-                    short_p = opt_info.get("short_params")
-                    ens_metrics = opt_info.get("ensemble_metrics", result.get("metrics", {}))
-
-                    if long_p:
-                        all_results[f"{label}|long|{metric}"] = {
-                            "status": "OK",
-                            "metrics": ens_metrics,
-                            "config": {"optuna_info": {
-                                "params": long_p,
-                                "holdout_metrics": opt_info.get("holdout_metrics", {}),
-                            }},
-                        }
-                    if short_p:
-                        all_results[f"{label}|short|{metric}"] = {
-                            "status": "OK",
-                            "metrics": ens_metrics,
-                            "config": {"optuna_info": {
-                                "params": short_p,
-                                "holdout_metrics": opt_info.get("holdout_metrics", {}),
-                            }},
-                        }
+                # Extract per-side params (no per-side metrics — ensemble only)
+                _extract_per_side_params(result, label, metric, all_results)
     else:
         # Sequential execution (default)
         for ens_key, ens_config, merged_path, label, metric, exp in opt_tasks:
@@ -461,31 +503,8 @@ def main():
             if os.path.exists(merged_path):
                 os.remove(merged_path)
 
-            # Extract per-side params from the simultaneous ensemble run.
-            if result.get("status") == "OK":
-                opt_info = result.get("config", {}).get("optuna_info", {})
-                long_p = opt_info.get("long_params")
-                short_p = opt_info.get("short_params")
-                ens_metrics = opt_info.get("ensemble_metrics", result.get("metrics", {}))
-
-                if long_p:
-                    all_results[f"{label}|long|{metric}"] = {
-                        "status": "OK",
-                        "metrics": ens_metrics,
-                        "config": {"optuna_info": {
-                            "params": long_p,
-                            "holdout_metrics": opt_info.get("holdout_metrics", {}),
-                        }},
-                    }
-                if short_p:
-                    all_results[f"{label}|short|{metric}"] = {
-                        "status": "OK",
-                        "metrics": ens_metrics,
-                        "config": {"optuna_info": {
-                            "params": short_p,
-                            "holdout_metrics": opt_info.get("holdout_metrics", {}),
-                        }},
-                    }
+            # Extract per-side params (no per-side metrics — ensemble only)
+            _extract_per_side_params(result, label, metric, all_results)
 
     elapsed = time.perf_counter() - total_start
     print(f"\n{'='*60}")

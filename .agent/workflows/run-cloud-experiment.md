@@ -9,96 +9,148 @@ description: How to run an Optuna hyperparameter search on GCP using the canary 
 ## Prerequisites
 - Google Cloud SDK installed and authenticated (`gcloud auth login`)
 - Project set: `gcloud config set project cltrainer`
-- Data uploaded to GCS: `gs://cltrainer-optuna-results/data/cl-5m_bk_set_10.parquet`
+- Data uploaded to GCS: `gs://cltrainer-optuna-results/data/<dataset>.parquet`
 - Working directory: `c:\Users\bwang\Documents\GitHub\CL_Analyst_Development`
 
-## Canary Run (20 trials, ~30 min)
+---
 
-1. Delete any existing canary VM to free CPU quota:
+## Batch Sweep Run (Recommended — Fully Automated)
+
+The batch orchestrator manages N experiments end-to-end: deploy → monitor → collect → post-optimize.
+
+### 1. Verify no VMs are running (avoid quota conflicts):
+```powershell
+gcloud compute instances list
+```
+
+### 2. Dry run to validate manifest:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\gcp\run_sweep_batch.ps1 `
+    -ManifestPath "configs\sweep_batch_hourset08_canary.json" `
+    -Zone "us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f" `
+    -DryRun
+```
+
+### 3. Launch the batch:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\gcp\run_sweep_batch.ps1 `
+    -ManifestPath "configs\sweep_batch_hourset08_canary.json" `
+    -Zone "us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f"
+```
+
+### 4. The orchestrator automatically:
+   - Deploys VMs across fallback zones (quota-aware, up to 2 concurrent)
+   - Monitors via background PS jobs polling every 90s
+   - Sends Telegram notifications at key milestones
+   - Runs artifact verification gate before VM deletion
+   - Captures crash diagnostics on failure
+   - Generates consolidated batch summary
+   - Deploys a post-optimizer VM, waits for completion, downloads results
+   - Produces final `batch_summary_optimized.md`
+
+### 5. Review results:
+```
+reports/batch_runs/batch_<timestamp>/
+├── batch_progress.json              ← live progress tracker
+├── batch_summary.md                 ← unoptimized results
+├── batch_summary_optimized.md       ← MAIN DELIVERABLE
+├── optimization_results.json        ← raw optimization data
+└── manifest.json                    ← frozen config
+```
+
+### Manifest Format
+```json
+{
+  "defaults": {
+    "machine_type": "n2-highcpu-48",
+    "provisioning_model": "STANDARD",
+    "gcs_data_path": "gs://cltrainer-optuna-results/data/<dataset>.parquet",
+    "strategy_config": "hourly_ensemble_008.json",
+    "metrics": "logloss,average_precision",
+    "timeout_minutes": 240,
+    "max_concurrent_vcpus": 96,
+    "vcpus_per_vm": 48,
+    "post_optimizer_trials": 200,
+    "post_optimizer_holdout_months": 6
+  },
+  "experiments": [
+    {
+      "label": "HS08 3x1 12H",
+      "target_long": "TARGET_TRIPLE_3x1_12H_LONG",
+      "target_short": "TARGET_TRIPLE_3x1_12H_SHORT",
+      "gcs_prefix": "sweep_hs08_3x1_12h"
+    }
+  ]
+}
+```
+
+---
+
+## Single Experiment Run (Manual — Legacy)
+
+### 1. Delete any existing canary VM:
 ```powershell
 gcloud compute instances delete optuna-runner-canary --zone=us-central1-a --quiet
 ```
 
-2. Deploy the canary VM with STANDARD pricing (no preemption):
+### 2. Deploy:
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\gcp\gcp_deploy_canary.ps1 -ProvisioningModel STANDARD
+powershell -ExecutionPolicy Bypass -File .\gcp\gcp_deploy_sweep.ps1 `
+    -TargetLong TARGET_TRIPLE_3x1_12H_LONG `
+    -TargetShort TARGET_TRIPLE_3x1_12H_SHORT `
+    -ProvisioningModel STANDARD
 ```
 
-3. Start the local monitor wrapper to auto-track progress and download results:
+### 3. Monitor:
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\gcp\gcp_monitor.ps1 -VmName optuna-runner-canary -GcsPrefix canary -PollIntervalSeconds 120
+powershell -ExecutionPolicy Bypass -File .\gcp\gcp_monitor.ps1 `
+    -VmName optuna-runner-canary `
+    -GcsPrefix canary `
+    -ExperimentLabel "Single Sweep" `
+    -PollIntervalSeconds 120
 ```
 
-4. Wait for the monitor to complete. It will:
-   - Poll VM status + STATUS.json heartbeat every 2 minutes
-   - Auto-download all artifacts when VM terminates
-   - Generate `reports/canary/run_report.md`
-
-5. Review the run report:
-   - Report: `reports/canary/run_report.md`
-   - Logs: `reports/canary/logs/`
-   - Models: `reports/canary/registry/`
-
-6. If the run had OOM failures (exit 139), consider:
-   - Reducing `N_JOBS` in `gcp/vm_canary_run.sh` (fewer workers = less memory)
-   - Switching to a higher-memory machine type in `gcp/gcp_deploy_canary.ps1`
-
-7. Clean up the VM when done:
+### 4. Clean up:
 ```powershell
 gcloud compute instances delete optuna-runner-canary --zone=us-central1-a --quiet
 ```
 
-## Production Run (200 trials, ~3-4 hours)
+---
 
-1. Delete any existing production VM to free CPU quota:
+## Quick Status Check
 ```powershell
-gcloud compute instances delete optuna-runner --zone=us-central1-a --quiet
-```
-
-2. Deploy the production VM (use SPOT for cost savings on long runs, STANDARD if budget allows):
-```powershell
-powershell -ExecutionPolicy Bypass -File .\gcp\gcp_deploy_run.ps1 -DataPath "C:\CL_Analyst_Data\data\processed\cl-5m_bk_set_10.parquet" -E2E -Shutdown
-```
-
-3. Start the local monitor wrapper (longer poll interval for production):
-```powershell
-powershell -ExecutionPolicy Bypass -File .\gcp\gcp_monitor.ps1 -VmName optuna-runner -GcsPrefix production -PollIntervalSeconds 300
-```
-
-4. Wait for the monitor to complete. Same behavior as canary:
-   - Auto-downloads artifacts on VM termination
-   - Generates `reports/production/run_report.md`
-
-5. Review production results:
-   - Report: `reports/production/run_report.md`
-   - Logs: `reports/production/logs/`
-   - Models: `reports/production/registry/`
-
-6. Clean up:
-```powershell
-gcloud compute instances delete optuna-runner --zone=us-central1-a --quiet
-```
-
-## Quick Status Check (without monitor)
-```powershell
-# Canary
-.\gcp\gcp_check_status.ps1 -VmName optuna-runner-canary
-# Production
-.\gcp\gcp_check_status.ps1 -VmName optuna-runner
+.\gcp\gcp_check_status.ps1 -VmName <vm-name>
 ```
 
 ## View Live Output (SSH)
 ```powershell
-# Canary
-gcloud compute ssh optuna-runner-canary --zone=us-central1-a --command="tmux attach -t canary"
-# Production
-gcloud compute ssh optuna-runner --zone=us-central1-a --command="tmux attach -t optuna"
+gcloud compute ssh <vm-name> --zone=<zone> --command="tmux attach -t sweep"
 # Ctrl+B then D to detach without stopping
 ```
 
+---
+
+## Code Upload Reference
+
+Both deploy scripts (`gcp_deploy_sweep.ps1` and `gcp_deploy_optimizer.ps1`) upload these `src/` files to the VM:
+
+| File | Required By |
+|------|-------------|
+| `src/__init__.py` | Package init |
+| `src/util.py` | `backtest_engine.py` (get_X_y) |
+| `src/LGBMLearner.py` | `backtest_engine.py` (model loading) |
+| `src/data_paths.py` | `backtest_engine.py` (lazy import for fallback data loading) |
+| `src/data_processor.py` | `experiment_runner.py` (data processing) |
+| `src/live_execution/strategies/execution_models.py` | `backtest_engine.py` (strategy factory) |
+| `src/live_execution/strategies/configurable_strategy.py` | Strategy execution |
+| `src/features/feature_buckets.py` | `optuna_lgbm_search_v2.py` (bucket toggling) |
+
+> **IMPORTANT**: When adding new `from src.*` imports to any `agent/` file that runs on a VM, you MUST also add the file to the `$codeFiles` array in both `gcp_deploy_sweep.ps1` and `gcp_deploy_optimizer.ps1`. Failure to do so will cause `ModuleNotFoundError` on the VM.
+
 ## Important Notes
-- Machine: `n2-standard-64` (64 vCPUs, 256 GB RAM, ~32 GB per worker)
-- Current config: `N_JOBS=8`, `NUM_THREADS=8` (8 × 8 = 64 cores)
+- Machine: `n2-highcpu-48` (48 vCPUs, ~48 GB RAM)
+- Default config: `N_WORKERS=4`, `THREADS_PER_WORKER=12` (4 × 12 = 48 cores)
 - CPU validation will FATAL error if cores don't match the config
-- If changing machine type, update N_JOBS/NUM_THREADS in the shell scripts
 - SPOT VMs can be preempted — use STANDARD for runs that must complete
+- Preferred region: **us-west1** (us-central1 can be saturated)
+- Zone fallback: pass comma-separated zones to `-Zone` parameter
