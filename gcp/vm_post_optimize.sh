@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # =============================================================================
 # Post-Optimizer VM Run Script
 #
@@ -32,7 +32,7 @@ cd "$PROJECT_DIR"
 BATCH_ID=""
 N_TRIALS=1000
 HOLDOUT_MONTHS=4
-WORKERS=24
+WORKERS=$(nproc)
 SHUTDOWN=false
 BUCKET="gs://cltrainer-optuna-results"
 LOG="post_optimize_$(date +%Y%m%d_%H%M%S).log"

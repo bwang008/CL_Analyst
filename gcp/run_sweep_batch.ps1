@@ -681,7 +681,6 @@ if ($batchState.completed -gt 0) {
             "-BatchId", $BatchId,
             "-NTrials", $postOptTrials,
             "-HoldoutMonths", $postOptHoldout,
-            "-Workers", 24,
             "-Zone", $oz)
         if ($DisableTelegram) { $optArgs += "-DisableTelegram" }
         Write-Host "  Trying optimizer deploy in zone $oz..." -ForegroundColor Yellow

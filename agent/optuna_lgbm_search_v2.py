@@ -8,7 +8,7 @@ E2E Alpha Factory Edition:
     average_precision — PR-AUC – rewards ranking highly confident positives
 - Also supports sharpe (requires --strategy-config).
 - Binary classification with focal loss (consistent with production).
-- Hardcoded LGB num_threads=8 for optimal per-model performance.
+- Configurable LGB num_threads via --num-threads (default: 8, auto-set by shell script).
 - Wider search ranges with boosting_type (gbdt/goss) and path_smooth.
 - Persists study to SQLite for visualization and resume.
 - Does NOT touch the final OOS holdout (2022-2026). That set is reserved
@@ -717,7 +717,7 @@ def run_search(
     print(f"  Objective:       {objective_type}")
     print(f"  Buckets:         {'ON (feature group toggles)' if use_buckets else 'OFF (all features)'}")
     print(f"  Trials:          {n_trials}")
-    print(f"  Workers:         {n_jobs}  (LGB threads/worker: 8 hardcoded)")
+    print(f"  Workers:         {n_jobs}  (LGB threads/worker: {num_threads})")
     print(f"  Balance:         {balance_mode}")
     if train_cutoff_date:
         print(f"  Cutoff:          {train_cutoff_date} (date-based gym)")
