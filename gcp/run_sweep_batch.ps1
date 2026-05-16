@@ -359,6 +359,21 @@ foreach ($exp in $expList) {
         TargetShort  = if ($exp.target_short)        { $exp.target_short        } else { ""                           }
         UseBuckets   = if ($exp.use_buckets -ne $null) { $exp.use_buckets       } else { $defaults.use_buckets        }
         TimeoutMins  = if ($exp.timeout_minutes)     { [int]$exp.timeout_minutes } else { $timeoutMins                }
+        # Search space params (0 = use shell script defaults)
+        NTrials              = if ($exp.n_trials)              { [int]$exp.n_trials              } elseif ($defaults.n_trials)              { [int]$defaults.n_trials              } else { 0 }
+        MaxDepthMin          = if ($exp.max_depth_min)          { [int]$exp.max_depth_min          } elseif ($defaults.max_depth_min)          { [int]$defaults.max_depth_min          } else { 0 }
+        MaxDepthMax          = if ($exp.max_depth_max)          { [int]$exp.max_depth_max          } elseif ($defaults.max_depth_max)          { [int]$defaults.max_depth_max          } else { 0 }
+        NumLeavesMin         = if ($exp.num_leaves_min)         { [int]$exp.num_leaves_min         } elseif ($defaults.num_leaves_min)         { [int]$defaults.num_leaves_min         } else { 0 }
+        NumLeavesMax         = if ($exp.num_leaves_max)         { [int]$exp.num_leaves_max         } elseif ($defaults.num_leaves_max)         { [int]$defaults.num_leaves_max         } else { 0 }
+        MaxNEstimators       = if ($exp.max_n_estimators)       { [int]$exp.max_n_estimators       } elseif ($defaults.max_n_estimators)       { [int]$defaults.max_n_estimators       } else { 0 }
+        EarlyStoppingRounds  = if ($exp.early_stopping_rounds)  { [int]$exp.early_stopping_rounds  } elseif ($defaults.early_stopping_rounds)  { [int]$defaults.early_stopping_rounds  } else { 0 }
+        MaxFolds             = if ($exp.max_folds)              { [int]$exp.max_folds              } elseif ($defaults.max_folds)              { [int]$defaults.max_folds              } else { 0 }
+        LearningRateMin      = if ($exp.learning_rate_min)      { [double]$exp.learning_rate_min      } elseif ($defaults.learning_rate_min)      { [double]$defaults.learning_rate_min      } else { 0 }
+        LearningRateMax      = if ($exp.learning_rate_max)      { [double]$exp.learning_rate_max      } elseif ($defaults.learning_rate_max)      { [double]$defaults.learning_rate_max      } else { 0 }
+        MinChildSamplesMin   = if ($exp.min_child_samples_min)  { [int]$exp.min_child_samples_min  } elseif ($defaults.min_child_samples_min)  { [int]$defaults.min_child_samples_min  } else { 0 }
+        MinChildSamplesMax   = if ($exp.min_child_samples_max)  { [int]$exp.min_child_samples_max  } elseif ($defaults.min_child_samples_max)  { [int]$defaults.min_child_samples_max  } else { 0 }
+        FeatureFractionMin   = if ($exp.feature_fraction_min)   { [double]$exp.feature_fraction_min   } elseif ($defaults.feature_fraction_min)   { [double]$defaults.feature_fraction_min   } else { 0 }
+        FeatureFractionMax   = if ($exp.feature_fraction_max)   { [double]$exp.feature_fraction_max   } elseif ($defaults.feature_fraction_max)   { [double]$defaults.feature_fraction_max   } else { 0 }
         StartTime    = $null
         Job          = $null
         Status       = "QUEUED"
@@ -425,6 +440,21 @@ while (-not $allDone) {
             if ($exp.TargetLong)  { $deployArgs += @("-TargetLong",  $exp.TargetLong)  }
             if ($exp.TargetShort) { $deployArgs += @("-TargetShort", $exp.TargetShort) }
             if ($exp.UseBuckets)  { $deployArgs += @("-UseBuckets") }
+            # Search space overrides from manifest
+            if ($exp.NTrials -gt 0)             { $deployArgs += @("-NTrials",             $exp.NTrials) }
+            if ($exp.MaxDepthMin -gt 0)         { $deployArgs += @("-MaxDepthMin",         $exp.MaxDepthMin) }
+            if ($exp.MaxDepthMax -gt 0)         { $deployArgs += @("-MaxDepthMax",         $exp.MaxDepthMax) }
+            if ($exp.NumLeavesMin -gt 0)        { $deployArgs += @("-NumLeavesMin",        $exp.NumLeavesMin) }
+            if ($exp.NumLeavesMax -gt 0)        { $deployArgs += @("-NumLeavesMax",        $exp.NumLeavesMax) }
+            if ($exp.MaxNEstimators -gt 0)      { $deployArgs += @("-MaxNEstimators",      $exp.MaxNEstimators) }
+            if ($exp.EarlyStoppingRounds -gt 0) { $deployArgs += @("-EarlyStoppingRounds", $exp.EarlyStoppingRounds) }
+            if ($exp.MaxFolds -gt 0)            { $deployArgs += @("-MaxFolds",            $exp.MaxFolds) }
+            if ($exp.LearningRateMin -gt 0)     { $deployArgs += @("-LearningRateMin",     $exp.LearningRateMin) }
+            if ($exp.LearningRateMax -gt 0)     { $deployArgs += @("-LearningRateMax",     $exp.LearningRateMax) }
+            if ($exp.MinChildSamplesMin -gt 0)  { $deployArgs += @("-MinChildSamplesMin",  $exp.MinChildSamplesMin) }
+            if ($exp.MinChildSamplesMax -gt 0)  { $deployArgs += @("-MinChildSamplesMax",  $exp.MinChildSamplesMax) }
+            if ($exp.FeatureFractionMin -gt 0)  { $deployArgs += @("-FeatureFractionMin",  $exp.FeatureFractionMin) }
+            if ($exp.FeatureFractionMax -gt 0)  { $deployArgs += @("-FeatureFractionMax",  $exp.FeatureFractionMax) }
 
             Write-Host "  Deploying VM in zone $z..." -ForegroundColor Yellow
             $deployOutput = & powershell @deployArgs 2>&1

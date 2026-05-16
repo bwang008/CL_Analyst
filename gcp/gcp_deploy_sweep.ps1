@@ -1,17 +1,17 @@
 <#
 .SYNOPSIS
-    Provisions a canary VM, uploads code + downloads data from GCS, and launches the light canary pipeline.
+    Provisions a sweep VM, uploads code + downloads data from GCS, and launches the sweep pipeline.
 .DESCRIPTION
-    One-command deployment for the "canary" smoke test:
-    - Provisions optuna-runner-canary (96-core SPOT by default)
+    Unified deployment for batch sweep experiments:
+    - Provisions an n2-highcpu-48 VM (STANDARD by default)
     - Uploads all code files needed for Optuna search + E2E pipeline
-    - Downloads set_10 data from GCS (already uploaded) to the VM
-    - Launches vm_canary_run.sh in a detached tmux session
+    - Downloads dataset from GCS to the VM
+    - Launches vm_sweep_run.sh in a detached tmux session with search params
     - Auto-shutdown after completion (unless -NoShutdown)
 .EXAMPLE
-    .\gcp_deploy_canary.ps1
-    .\gcp_deploy_canary.ps1 -ProvisioningModel STANDARD
-    .\gcp_deploy_canary.ps1 -NoShutdown
+    .\gcp_deploy_sweep.ps1
+    .\gcp_deploy_sweep.ps1 -ProvisioningModel STANDARD
+    .\gcp_deploy_sweep.ps1 -NoShutdown
 #>
 
 param(
@@ -27,6 +27,20 @@ param(
     [string]$TargetLong = "",
     [string]$TargetShort = "",
     [string]$JobName = "",
+    [int]$NTrials = 0,
+    [int]$MaxDepthMin = 0,
+    [int]$MaxDepthMax = 0,
+    [int]$NumLeavesMin = 0,
+    [int]$NumLeavesMax = 0,
+    [int]$MaxNEstimators = 0,
+    [int]$EarlyStoppingRounds = 0,
+    [int]$MaxFolds = 0,
+    [double]$LearningRateMin = 0,
+    [double]$LearningRateMax = 0,
+    [int]$MinChildSamplesMin = 0,
+    [int]$MinChildSamplesMax = 0,
+    [double]$FeatureFractionMin = 0,
+    [double]$FeatureFractionMax = 0,
     [switch]$NoShutdown,
     [switch]$SkipProvision,
     [switch]$UseBuckets
@@ -221,7 +235,23 @@ if ($JobName) {
     $cleanName = $datasetName -replace '^cl-[0-9]+[mh]_bk_', ''
     $jobName = "sweep_$cleanName"
 }
-$launchCmd = "tmux kill-session -t sweep 2>/dev/null; tmux new-session -d -s sweep 'bash $RemoteProject/gcp/vm_sweep_run.sh $shutdownFlag --dataset=$datasetName --strategy=$StrategyConfig --metrics=$Metrics --job-name=$jobName$targetFlags$bucketFlag'"
+# Build search space flags (only pass if non-zero / manifest-provided)
+$searchFlags = ""
+if ($NTrials -gt 0)            { $searchFlags += " --n-trials=$NTrials" }
+if ($MaxDepthMin -gt 0)        { $searchFlags += " --max-depth-min=$MaxDepthMin" }
+if ($MaxDepthMax -gt 0)        { $searchFlags += " --max-depth-max=$MaxDepthMax" }
+if ($NumLeavesMin -gt 0)       { $searchFlags += " --num-leaves-min=$NumLeavesMin" }
+if ($NumLeavesMax -gt 0)       { $searchFlags += " --num-leaves-max=$NumLeavesMax" }
+if ($MaxNEstimators -gt 0)     { $searchFlags += " --max-n-estimators=$MaxNEstimators" }
+if ($EarlyStoppingRounds -gt 0){ $searchFlags += " --early-stopping=$EarlyStoppingRounds" }
+if ($MaxFolds -gt 0)           { $searchFlags += " --max-folds=$MaxFolds" }
+if ($LearningRateMin -gt 0)    { $searchFlags += " --learning-rate-min=$LearningRateMin" }
+if ($LearningRateMax -gt 0)    { $searchFlags += " --learning-rate-max=$LearningRateMax" }
+if ($MinChildSamplesMin -gt 0) { $searchFlags += " --min-child-samples-min=$MinChildSamplesMin" }
+if ($MinChildSamplesMax -gt 0) { $searchFlags += " --min-child-samples-max=$MinChildSamplesMax" }
+if ($FeatureFractionMin -gt 0) { $searchFlags += " --feature-fraction-min=$FeatureFractionMin" }
+if ($FeatureFractionMax -gt 0) { $searchFlags += " --feature-fraction-max=$FeatureFractionMax" }
+$launchCmd = "tmux kill-session -t sweep 2>/dev/null; tmux new-session -d -s sweep 'bash $RemoteProject/gcp/vm_sweep_run.sh $shutdownFlag --dataset=$datasetName --strategy=$StrategyConfig --metrics=$Metrics --job-name=$jobName$targetFlags$bucketFlag$searchFlags'"
 try { gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd --quiet 2>$null } catch { }
 
 Write-Host "  Canary pipeline launched!" -ForegroundColor Green

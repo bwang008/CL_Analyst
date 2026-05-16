@@ -44,7 +44,7 @@ SHUTDOWN=false
 USE_BUCKETS=false
 AGENT_ID="${AGENT_ID:-sweep_bot}"
 
-# Search space constraints (production sweep)
+# Search space constraints (defaults — overridden by manifest via CLI)
 MAX_DEPTH_MIN=3
 MAX_DEPTH_MAX=10
 NUM_LEAVES_MIN=15
@@ -52,6 +52,12 @@ NUM_LEAVES_MAX=100
 MAX_N_ESTIMATORS=2000
 EARLY_STOPPING=25
 MAX_FOLDS=5
+LEARNING_RATE_MIN=0.005
+LEARNING_RATE_MAX=0.02
+MIN_CHILD_SAMPLES_MIN=150
+MIN_CHILD_SAMPLES_MAX=400
+FEATURE_FRACTION_MIN=0.3
+FEATURE_FRACTION_MAX=1.0
 
 # Parse args
 for arg in "$@"; do
@@ -66,6 +72,19 @@ for arg in "$@"; do
         --job-name=*) JOB_NAME="${arg#*=}" ;;
         --n-trials=*) N_TRIALS="${arg#*=}" ;;
         --use-buckets) USE_BUCKETS=true ;;
+        --max-depth-min=*) MAX_DEPTH_MIN="${arg#*=}" ;;
+        --max-depth-max=*) MAX_DEPTH_MAX="${arg#*=}" ;;
+        --num-leaves-min=*) NUM_LEAVES_MIN="${arg#*=}" ;;
+        --num-leaves-max=*) NUM_LEAVES_MAX="${arg#*=}" ;;
+        --max-n-estimators=*) MAX_N_ESTIMATORS="${arg#*=}" ;;
+        --early-stopping=*) EARLY_STOPPING="${arg#*=}" ;;
+        --max-folds=*) MAX_FOLDS="${arg#*=}" ;;
+        --learning-rate-min=*) LEARNING_RATE_MIN="${arg#*=}" ;;
+        --learning-rate-max=*) LEARNING_RATE_MAX="${arg#*=}" ;;
+        --min-child-samples-min=*) MIN_CHILD_SAMPLES_MIN="${arg#*=}" ;;
+        --min-child-samples-max=*) MIN_CHILD_SAMPLES_MAX="${arg#*=}" ;;
+        --feature-fraction-min=*) FEATURE_FRACTION_MIN="${arg#*=}" ;;
+        --feature-fraction-max=*) FEATURE_FRACTION_MAX="${arg#*=}" ;;
     esac
 done
 
@@ -127,10 +146,14 @@ echo "  GCS dest:   $BUCKET/$JOB_NAME/" | tee -a "$LOG"
 echo "  Buckets:    $USE_BUCKETS" | tee -a "$LOG"
 echo "" | tee -a "$LOG"
 echo "  SEARCH SPACE CONSTRAINTS:" | tee -a "$LOG"
-echo "    max_depth:       [$MAX_DEPTH_MIN, $MAX_DEPTH_MAX]" | tee -a "$LOG"
-echo "    num_leaves:      [$NUM_LEAVES_MIN, $NUM_LEAVES_MAX]" | tee -a "$LOG"
-echo "    n_estimators:    max $MAX_N_ESTIMATORS" | tee -a "$LOG"
-echo "    early_stopping:  $EARLY_STOPPING rounds" | tee -a "$LOG"
+echo "    max_depth:          [$MAX_DEPTH_MIN, $MAX_DEPTH_MAX]" | tee -a "$LOG"
+echo "    num_leaves:         [$NUM_LEAVES_MIN, $NUM_LEAVES_MAX]" | tee -a "$LOG"
+echo "    n_estimators:       max $MAX_N_ESTIMATORS" | tee -a "$LOG"
+echo "    early_stopping:     $EARLY_STOPPING rounds" | tee -a "$LOG"
+echo "    learning_rate:      [$LEARNING_RATE_MIN, $LEARNING_RATE_MAX]" | tee -a "$LOG"
+echo "    min_child_samples:  [$MIN_CHILD_SAMPLES_MIN, $MIN_CHILD_SAMPLES_MAX]" | tee -a "$LOG"
+echo "    feature_fraction:   [$FEATURE_FRACTION_MIN, $FEATURE_FRACTION_MAX]" | tee -a "$LOG"
+echo "    max_folds:          $MAX_FOLDS" | tee -a "$LOG"
 echo "============================================================" | tee -a "$LOG"
 echo "" | tee -a "$LOG"
 
@@ -182,6 +205,9 @@ for i in "${!COMBOS[@]}"; do
         --num-leaves-range $NUM_LEAVES_MIN $NUM_LEAVES_MAX \
         --max-n-estimators $MAX_N_ESTIMATORS \
         --early-stopping-rounds $EARLY_STOPPING \
+        --learning-rate-range $LEARNING_RATE_MIN $LEARNING_RATE_MAX \
+        --min-child-samples-range $MIN_CHILD_SAMPLES_MIN $MIN_CHILD_SAMPLES_MAX \
+        --feature-fraction-range $FEATURE_FRACTION_MIN $FEATURE_FRACTION_MAX \
         --num-threads $THREADS_PER_WORKER \
         --max-folds $MAX_FOLDS \
         --worker-id $WORKER_ID \

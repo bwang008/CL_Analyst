@@ -408,6 +408,9 @@ def make_objective(
     early_stopping_rounds: int = 100,
     objective_type: str = "focal",
     use_buckets: bool = False,
+    learning_rate_range: tuple[float, float] = (0.005, 0.02),
+    min_child_samples_range: tuple[int, int] = (150, 400),
+    feature_fraction_range: tuple[float, float] = (0.3, 1.0),
 ):
     """Create the Optuna objective closure.
 
@@ -450,9 +453,9 @@ def make_objective(
             "verbose": -1,
             "num_threads": num_threads,
             "num_leaves": trial.suggest_int("num_leaves", num_leaves_range[0], num_leaves_range[1]),
-            "min_child_samples": trial.suggest_int("min_child_samples", 150, 400),
-            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.02, log=True),
-            "feature_fraction": trial.suggest_float("feature_fraction", 0.3, 1.0),
+            "min_child_samples": trial.suggest_int("min_child_samples", min_child_samples_range[0], min_child_samples_range[1]),
+            "learning_rate": trial.suggest_float("learning_rate", learning_rate_range[0], learning_rate_range[1], log=True),
+            "feature_fraction": trial.suggest_float("feature_fraction", feature_fraction_range[0], feature_fraction_range[1]),
             "reg_alpha": trial.suggest_float("reg_alpha", 0.01, 1.0, log=True),
             "reg_lambda": trial.suggest_float("reg_lambda", 0.01, 10.0, log=True),
             "max_depth": trial.suggest_int("max_depth", max_depth_range[0], max_depth_range[1]),
@@ -662,6 +665,9 @@ def run_search(
     max_folds: int = 10,
     objective_type: str = "focal",
     use_buckets: bool = False,
+    learning_rate_range: tuple[float, float] = (0.005, 0.02),
+    min_child_samples_range: tuple[int, int] = (150, 400),
+    feature_fraction_range: tuple[float, float] = (0.3, 1.0),
 ):
     """Run the Walk-Forward Optuna search (Phase 1: Brain Optimization).
 
@@ -845,6 +851,9 @@ def run_search(
         early_stopping_rounds=early_stopping_rounds,
         objective_type=objective_type,
         use_buckets=use_buckets,
+        learning_rate_range=learning_rate_range,
+        min_child_samples_range=min_child_samples_range,
+        feature_fraction_range=feature_fraction_range,
     )
 
     # Progress callback
@@ -1119,6 +1128,21 @@ def main():
         help="Early stopping rounds (default: 100)",
     )
     parser.add_argument(
+        "--learning-rate-range", type=float, nargs=2, default=[0.005, 0.02],
+        metavar=("MIN", "MAX"),
+        help="Search range for learning_rate (default: 0.005 0.02)",
+    )
+    parser.add_argument(
+        "--min-child-samples-range", type=int, nargs=2, default=[150, 400],
+        metavar=("MIN", "MAX"),
+        help="Search range for min_child_samples (default: 150 400)",
+    )
+    parser.add_argument(
+        "--feature-fraction-range", type=float, nargs=2, default=[0.4, 0.8],
+        metavar=("MIN", "MAX"),
+        help="Search range for feature_fraction (default: 0.4 0.8)",
+    )
+    parser.add_argument(
         "--num-threads", type=int, default=8,
         help="LightGBM num_threads per worker (default: 8). "
              "Total cores used = n_jobs × num_threads.",
@@ -1172,6 +1196,9 @@ def main():
         max_folds=args.max_folds,
         objective_type=args.objective,
         use_buckets=args.use_buckets,
+        learning_rate_range=tuple(args.learning_rate_range),
+        min_child_samples_range=tuple(args.min_child_samples_range),
+        feature_fraction_range=tuple(args.feature_fraction_range),
     )
 
 
