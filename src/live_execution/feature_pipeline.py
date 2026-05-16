@@ -1,0 +1,256 @@
+"""
+Live Feature Pipeline for CL Futures Inference.
+
+Extracted from live_trader.py (Phase 1 modularization).
+Replicates the training pipeline (process_set_05/set_06/set_07)
+for real-time feature generation.
+
+This module is the single source of truth for live feature engineering.
+Both the live trader and parity validation scripts consume it.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+
+from src.features.alpha_factory import AlphaFactory
+from src.features.macro_features import MacroFeatureEngine
+
+log = logging.getLogger("LiveTrader")
+
+# ---------------------------------------------------------------------------
+# Feature Pipeline Constants
+# ---------------------------------------------------------------------------
+
+# AlphaFactory windows used during training (set_05/set_06)
+_ALPHA_WINDOWS = [864, 2016, 4032, 10080]  # 3d, 7d, 14d, 35d in 5-min bars
+
+# Extended windows for set_07 models
+_ALPHA_WINDOWS_SET_07 = [288, 864, 2016, 4032, 10080]  # 1d, 3d, 7d, 14d, 35d
+_MACRO_WINDOWS_SET_07 = {
+    "1D": 24, "3D": 72, "1W": 168, "2W": 336,
+    "1M": 840, "3M": 2160,
+}
+
+# Sentinel feature names that indicate set_07 model
+_SET_07_SENTINEL_FEATURES = frozenset([
+    "DIST_SKEW_288", "Time_DayOfWeek_Sin", "MOM_STOCH_K_864",
+])
+
+
+# ---------------------------------------------------------------------------
+# Feature Pipeline (replicates process_set_05/set_06 for live data)
+# ---------------------------------------------------------------------------
+
+def build_live_features(
+    df: pd.DataFrame,
+    feature_names: list[str],
+    *,
+    lean: bool = False,
+    bar_size: str = "5m",
+) -> Optional[pd.DataFrame]:
+    """
+    Generate features from a rolling OHLCV DataFrame for live inference.
+
+    Replicates the training pipeline (process_set_05/set_06 or set_07):
+    1. Add Time_Sin, Time_Cos from the DateTime index
+    2. Run AlphaFactory.add_all_features(windows=_ALPHA_WINDOWS)
+    3. Add Volume_Log
+    4. Select the exact columns the model expects
+
+    Automatically detects set_07 models by checking for sentinel feature
+    names and switches to the extended pipeline with 288-bar window,
+    expanded macro windows, and additional feature clusters.
+
+    Args:
+        df: Rolling OHLCV DataFrame with DateTime index and columns
+            [Open, High, Low, Close, Volume].
+        feature_names: The exact list of feature column names the model expects.
+        lean: Whether to generate only momentum + time features (faster).
+        bar_size: The timeframe of the input df ("5m" or "1h").
+
+    Returns:
+        Single-row DataFrame with the model's expected features,
+        or None if features cannot be computed (e.g. NaN in required columns).
+    """
+    if bar_size == "4h":
+        # 4h bars: windows are in 4h-bar units (6=1d, 18=3d, 42=7d, 84=14d, 210=35d)
+        is_set_07 = True
+        alpha_windows = [6, 18, 42, 84, 210]
+        macro_windows = {"1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320}
+    elif bar_size == "2h":
+        # 2h bars: windows are in 2h-bar units (12=1d, 36=3d, 84=7d, 168=14d, 420=35d)
+        is_set_07 = True
+        alpha_windows = [12, 36, 84, 168, 420]
+        macro_windows = {"1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320}
+    elif bar_size == "1h":
+        is_set_07 = True
+        alpha_windows = [24, 72, 168, 336, 840]
+        macro_windows = {"1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320}
+    else:
+        # Auto-detect set_07 pipeline (ignored if lean=True)
+        is_set_07 = not lean and bool(_SET_07_SENTINEL_FEATURES & set(feature_names))
+        alpha_windows = _ALPHA_WINDOWS_SET_07 if is_set_07 or lean else _ALPHA_WINDOWS
+        macro_windows = _MACRO_WINDOWS_SET_07
+
+    if len(df) < alpha_windows[-1]:
+        log.warning(
+            "Not enough bars for feature generation: %d < %d",
+            len(df), alpha_windows[-1],
+        )
+        return None
+
+    # Warn if cache depth is below recommended minimum for long-window
+    # features (MACRO_3M needs 2160h of data).
+    # Convert the 5m threshold to the current bar size:
+    #   5m  → divisor 1   → 26,000 bars
+    #   1h  → divisor 12  → ~2,167 bars
+    #   2h  → divisor 24  → ~1,083 bars
+    #   4h  → divisor 48  → ~542 bars
+    _MIN_RECOMMENDED_BARS_5M = 26_000
+    _bar_divisor = {"5m": 1, "1h": 12, "2h": 24, "4h": 48}.get(bar_size, 1)
+    _min_recommended = _MIN_RECOMMENDED_BARS_5M // _bar_divisor
+    if len(df) < _min_recommended:
+        log.warning(
+            "Cache depth %d below recommended %d — "
+            "long-window features (MACRO_3M, VOL_ROC_10080) may be "
+            "unreliable due to insufficient warmup history",
+            len(df), _min_recommended,
+        )
+
+    # Work on a copy to avoid mutating the rolling window
+    work = df.copy()
+
+    # 1. Add cyclical time features
+    minutes = work.index.hour * 60 + work.index.minute
+    work["Time_Sin"] = np.sin(2 * np.pi * minutes / 1440)
+    work["Time_Cos"] = np.cos(2 * np.pi * minutes / 1440)
+
+    # 1b. Day-of-week encoding
+    if is_set_07 or "Time_DayOfWeek_Sin" in feature_names:
+        day_of_week = work.index.dayofweek
+        work["Time_DayOfWeek_Sin"] = np.sin(2 * np.pi * day_of_week / 5)
+        work["Time_DayOfWeek_Cos"] = np.cos(2 * np.pi * day_of_week / 5)
+
+    # 2. Run AlphaFactory
+    # bars_per_hour determines the bar-count equivalent of rolling windows in
+    # add_macro_context (e.g. MACRO_3M = 2160 hours × bars_per_hour bars).
+    # Default of 12 is for 5m bars; must be 1 for 1h/2h/4h to avoid
+    # 12× over-sized macro windows that silently underestimate context range.
+    _bars_per_hour = {"5m": 12, "1h": 1, "2h": 0.5, "4h": 0.25}.get(bar_size, 12)
+    _has_ichimoku = any(f.startswith("ICHIMOKU_") for f in feature_names)
+    _has_dma = any(f.startswith("TREND_DMA_") for f in feature_names)
+    _has_exh_div = any(f.startswith("EXHDIV_") for f in feature_names)
+
+    factory = AlphaFactory(work, bars_per_hour=_bars_per_hour)
+    if lean:
+        # Lean path: momentum + time features only (no macro, no extended)
+        # This is 6-7x faster than the full pipeline
+        work = factory.add_all_features(
+            windows=alpha_windows,
+            include_momentum=True,
+            include_macro=False,
+            include_extended=False,
+            include_ichimoku=_has_ichimoku,
+            include_dma=_has_dma,
+            include_exhaustion_divergence=_has_exh_div,
+        )
+    elif is_set_07:
+        work = factory.add_all_features(
+            windows=alpha_windows,
+            include_momentum=True,
+            include_macro=True,
+            include_extended=True,
+            macro_windows=macro_windows,
+            include_ichimoku=_has_ichimoku,
+            include_dma=_has_dma,
+            include_exhaustion_divergence=_has_exh_div,
+        )
+    else:
+        work = factory.add_all_features(
+            windows=alpha_windows,
+            include_momentum=True,
+            include_macro=True,
+            include_ichimoku=_has_ichimoku,
+            include_dma=_has_dma,
+            include_exhaustion_divergence=_has_exh_div,
+        )
+
+    # 2b. Add STOCH specifically if lean but the strategy requests it
+    # (STOCH is usually part of include_extended=True, but lean turns extended off)
+    if lean and any(f.startswith("MOM_STOCH_") for f in feature_names):
+        for window in alpha_windows:
+            factory.add_stochastic_cluster(window=window)
+        work = factory.df
+
+    # 2c. Merge external macro data (FRED + COT) if model expects it
+    _has_external_macro = any(
+        f.startswith(("MACRO_VIX", "MACRO_OVX", "MACRO_DXY",
+                      "MACRO_YIELD_CURVE", "MACRO_FED_FUNDS", "COT_"))
+        for f in feature_names
+    )
+    if _has_external_macro:
+        try:
+            work = MacroFeatureEngine().merge_all(work)
+        except Exception as exc:
+            log.error("CRITICAL: Error merging macro features: %s", exc, exc_info=True)
+            raise RuntimeError(f"CRITICAL: Macro Feature Engine failed. Cannot generate live features. Reason: {exc}") from exc
+
+    # 3. Add ATR_14 (in training, this was created by add_triple_barrier_target
+    #    in data_processor.py, but we skip target generation for live inference)
+    if "ATR_14" not in work.columns:
+        import pandas_ta as ta  # noqa: F811
+        atr_series = work.ta.atr(length=14)
+        if atr_series is not None:
+            work["ATR_14"] = atr_series
+
+    # 4. Add Volume_Log (from normalize_features in training pipeline)
+    work["Volume_Log"] = np.log1p(work["Volume"])
+
+    # 5. Replace inf with NaN, then forward-fill (covers normal timeseries NaN)
+    #    and backfill (covers warm-up NaN from large-window features like
+    #    VOL_ROC_10080 or MACRO_3M that need more history than available).
+    #    Final fillna(0) catches features that are all-NaN during cold start
+    #    (e.g., VOL_VOLVOL_10080 needs 2×10080 bars, MACRO_3M needs ~25K bars).
+    work.replace([np.inf, -np.inf], np.nan, inplace=True)
+    # Snapshot which cells in the last row are NaN BEFORE fill — these are
+    # the features that lack sufficient warmup history.
+    _pre_fill_nan = work[feature_names].iloc[-1].isna() if set(feature_names).issubset(work.columns) else None
+    work.ffill(inplace=True)
+    work.bfill(inplace=True)
+    work.fillna(0, inplace=True)
+
+    # Detect which features were zero-filled from NaN (cold-start warning)
+    if _pre_fill_nan is not None:
+        _post_fill_zero = work[feature_names].iloc[-1] == 0
+        _zero_filled = _pre_fill_nan & _post_fill_zero
+        if _zero_filled.any():
+            _zero_cols = _zero_filled[_zero_filled].index.tolist()
+            log.warning(
+                "COLD START: %d features zero-filled from NaN "
+                "(model never saw 0 during training): %s",
+                len(_zero_cols), _zero_cols,
+            )
+
+    # 6. Extract the last complete row with the model's expected columns
+    missing_cols = set(feature_names) - set(work.columns)
+    if missing_cols:
+        log.error("Missing feature columns: %s", missing_cols)
+        return None
+
+    last_row = work[feature_names].iloc[[-1]]
+
+    nan_count = last_row.isna().sum(axis=1).iloc[0]
+    if nan_count > 0:
+        nan_cols = last_row.columns[last_row.isna().iloc[0]].tolist()
+        log.warning(
+            "%d features still NaN after fill (cold start): %s",
+            nan_count, nan_cols,
+        )
+        last_row = last_row.fillna(0)
+
+    return last_row

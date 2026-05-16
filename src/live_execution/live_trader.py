@@ -71,37 +71,22 @@ from src.live_execution.ibkr_client import (
 )
 from src.live_execution.telemetry import TelemetryDB
 from src.live_execution.utils.telegram_alert import TelegramAlerter
-
-
-# ---------------------------------------------------------------------------
-# Background log capture for heartbeat diagnostics
-# ---------------------------------------------------------------------------
-
-class _TelegramLogCapture(_logging.Handler):
-    """Thread-safe ring buffer that retains the last N WARNING/ERROR log records."""
-
-    def __init__(self, maxlen: int = 8) -> None:
-        super().__init__(level=_logging.WARNING)
-        self._records: collections.deque = collections.deque(maxlen=maxlen)
-        self._lock = threading.Lock()
-
-    def emit(self, record: _logging.LogRecord) -> None:
-        try:
-            msg = self.format(record)
-            ts_utc = datetime.fromtimestamp(record.created, timezone.utc).strftime(
-                "%Y-%m-%d %H:%M:%S UTC"
-            )
-            with self._lock:
-                self._records.append((record.levelname, msg, ts_utc))
-        except Exception:
-            pass
-
-    def drain(self) -> list:
-        """Return and clear all buffered records."""
-        with self._lock:
-            items = list(self._records)
-            self._records.clear()
-        return items
+# Phase 1 modularization: extracted modules
+from src.live_execution.feature_pipeline import (  # noqa: F401
+    build_live_features,
+    _ALPHA_WINDOWS,
+    _ALPHA_WINDOWS_SET_07,
+    _MACRO_WINDOWS_SET_07,
+    _SET_07_SENTINEL_FEATURES,
+)
+from src.live_execution.log_config import (  # noqa: F401
+    _TelegramLogCapture,
+    CLOnlyLogFilter,
+    _setup_file_logging,
+    _LOG_DIR,
+    _LOG_FORMAT,
+    _LOG_DATE_FORMAT,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -113,20 +98,6 @@ from src.data_paths import get_data_path as _dp_data_path, get_data_root as _dp_
 
 _DEFAULT_DB_PATH = str(_dp_data_path("live_telemetry.db"))
 
-# AlphaFactory windows used during training (set_05/set_06)
-_ALPHA_WINDOWS = [864, 2016, 4032, 10080]  # 3d, 7d, 14d, 35d in 5-min bars
-
-# Extended windows for set_07 models
-_ALPHA_WINDOWS_SET_07 = [288, 864, 2016, 4032, 10080]  # 1d, 3d, 7d, 14d, 35d
-_MACRO_WINDOWS_SET_07 = {
-    "1D": 24, "3D": 72, "1W": 168, "2W": 336,
-    "1M": 840, "3M": 2160,
-}
-
-# Sentinel feature names that indicate set_07 model
-_SET_07_SENTINEL_FEATURES = frozenset([
-    "DIST_SKEW_288", "Time_DayOfWeek_Sin", "MOM_STOCH_K_864",
-])
 
 # Rolling window size — must be >= largest seed lookback (150 days × 288 bars/day)
 # plus margin for IBKR backfill and live bars.
@@ -161,79 +132,8 @@ _DEFAULT_CACHE_PATH = str(
 )
 
 # ---------------------------------------------------------------------------
-# Logging
+# Logging (CLOnlyLogFilter, _setup_file_logging moved to log_config.py)
 # ---------------------------------------------------------------------------
-
-_LOG_DIR = _PROJECT_ROOT / "reports"
-_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
-_LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
-
-
-class CLOnlyLogFilter(logging.Filter):
-    """Suppress ib_insync log messages about non-CL positions/trades
-    and verbose callback dumps that are redundant with our [TRADE] lines.
-
-    IBKR reports historical positions, portfolio updates, executions,
-    and commission reports for ALL symbols in the account, even those
-    with 0 position (closed-out stocks like XOM, MSFT, V, COP).
-    ib_insync logs every one of these at INFO level, cluttering the
-    live trader output.  This filter drops:
-      1. Non-CL messages (Stock(), wrong symbol)
-      2. Verbose callback dumps (placeOrder, orderStatus, execDetails,
-         commissionReport, updatePortfolio, position) — these log
-         entire Trade/Fill/PortfolioItem repr strings (500+ chars each)
-         and are redundant with our concise [TRADE] ENTRY/FILL/EXIT lines.
-    """
-
-    _NON_CL_RE = re.compile(
-        r"(?:"
-        r"Stock\("
-        r"|symbol='(?!CL\b)\w+"
-        r")",
-    )
-
-    # Verbose ib_insync callback messages — redundant with our [TRADE] lines
-    _VERBOSE_IBKR_RE = re.compile(
-        r"^(?:"
-        r"placeOrder:"
-        r"|orderStatus:"
-        r"|execDetails[ :]"
-        r"|commissionReport:"
-        r"|updatePortfolio:"
-        r"|position:"
-        r")",
-    )
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        msg = record.getMessage()
-        if self._NON_CL_RE.search(msg):
-            return False  # suppress non-CL message
-        if self._VERBOSE_IBKR_RE.match(msg):
-            return False  # suppress verbose callback dump
-        return True
-
-
-def _setup_file_logging(client_id: int) -> None:
-    """Add a file handler so logs are persisted to disk.
-
-    Writes to reports/livetrader_{N}.log in append mode.
-    Logs accumulate across restarts for the same client_id.
-    """
-    _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log_file = _LOG_DIR / f"livetrader_{client_id}.log"
-    file_handler = logging.FileHandler(
-        log_file,
-        mode="a",
-        encoding="utf-8",
-    )
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(
-        logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT)
-    )
-    # Add to both our logger and the root logger
-    logging.getLogger().addHandler(file_handler)
-    log.info("File logging enabled: %s", log_file)
-
 
 logging.basicConfig(
     level=logging.INFO,
@@ -246,223 +146,11 @@ log = logging.getLogger("LiveTrader")
 logging.getLogger("ib_insync.wrapper").addFilter(CLOnlyLogFilter())
 
 
-def _sigmoid(x: float) -> float:
-    """Apply sigmoid to convert logit to probability."""
-    return 1.0 / (1.0 + np.exp(-x))
-
 
 # ---------------------------------------------------------------------------
-# Feature Pipeline (replicates process_set_05/set_06 for live data)
+# Feature Pipeline — moved to src.live_execution.feature_pipeline (Phase 1)
+# build_live_features() is imported and re-exported above.
 # ---------------------------------------------------------------------------
-
-def build_live_features(
-    df: pd.DataFrame,
-    feature_names: list[str],
-    *,
-    lean: bool = False,
-    bar_size: str = "5m",
-) -> Optional[pd.DataFrame]:
-    """
-    Generate features from a rolling OHLCV DataFrame for live inference.
-
-    Replicates the training pipeline (process_set_05/set_06 or set_07):
-    1. Add Time_Sin, Time_Cos from the DateTime index
-    2. Run AlphaFactory.add_all_features(windows=_ALPHA_WINDOWS)
-    3. Add Volume_Log
-    4. Select the exact columns the model expects
-
-    Automatically detects set_07 models by checking for sentinel feature
-    names and switches to the extended pipeline with 288-bar window,
-    expanded macro windows, and additional feature clusters.
-
-    Args:
-        df: Rolling OHLCV DataFrame with DateTime index and columns
-            [Open, High, Low, Close, Volume].
-        feature_names: The exact list of feature column names the model expects.
-        lean: Whether to generate only momentum + time features (faster).
-        bar_size: The timeframe of the input df ("5m" or "1h").
-
-    Returns:
-        Single-row DataFrame with the model's expected features,
-        or None if features cannot be computed (e.g. NaN in required columns).
-    """
-    if bar_size == "4h":
-        # 4h bars: windows are in 4h-bar units (6=1d, 18=3d, 42=7d, 84=14d, 210=35d)
-        is_set_07 = True
-        alpha_windows = [6, 18, 42, 84, 210]
-        macro_windows = {"1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320}
-    elif bar_size == "2h":
-        # 2h bars: windows are in 2h-bar units (12=1d, 36=3d, 84=7d, 168=14d, 420=35d)
-        is_set_07 = True
-        alpha_windows = [12, 36, 84, 168, 420]
-        macro_windows = {"1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320}
-    elif bar_size == "1h":
-        is_set_07 = True
-        alpha_windows = [24, 72, 168, 336, 840]
-        macro_windows = {"1W": 168, "2W": 336, "1M": 840, "3M": 2160, "6M": 4320}
-    else:
-        # Auto-detect set_07 pipeline (ignored if lean=True)
-        is_set_07 = not lean and bool(_SET_07_SENTINEL_FEATURES & set(feature_names))
-        alpha_windows = _ALPHA_WINDOWS_SET_07 if is_set_07 or lean else _ALPHA_WINDOWS
-        macro_windows = _MACRO_WINDOWS_SET_07
-
-    if len(df) < alpha_windows[-1]:
-        log.warning(
-            "Not enough bars for feature generation: %d < %d",
-            len(df), alpha_windows[-1],
-        )
-        return None
-
-    # Warn if cache depth is below recommended minimum for long-window
-    # features (MACRO_3M needs 2160h of data).
-    # Convert the 5m threshold to the current bar size:
-    #   5m  → divisor 1   → 26,000 bars
-    #   1h  → divisor 12  → ~2,167 bars
-    #   2h  → divisor 24  → ~1,083 bars
-    #   4h  → divisor 48  → ~542 bars
-    _MIN_RECOMMENDED_BARS_5M = 26_000
-    _bar_divisor = {"5m": 1, "1h": 12, "2h": 24, "4h": 48}.get(bar_size, 1)
-    _min_recommended = _MIN_RECOMMENDED_BARS_5M // _bar_divisor
-    if len(df) < _min_recommended:
-        log.warning(
-            "Cache depth %d below recommended %d — "
-            "long-window features (MACRO_3M, VOL_ROC_10080) may be "
-            "unreliable due to insufficient warmup history",
-            len(df), _min_recommended,
-        )
-
-    # Work on a copy to avoid mutating the rolling window
-    work = df.copy()
-
-    # 1. Add cyclical time features
-    minutes = work.index.hour * 60 + work.index.minute
-    work["Time_Sin"] = np.sin(2 * np.pi * minutes / 1440)
-    work["Time_Cos"] = np.cos(2 * np.pi * minutes / 1440)
-
-    # 1b. Day-of-week encoding
-    if is_set_07 or "Time_DayOfWeek_Sin" in feature_names:
-        day_of_week = work.index.dayofweek
-        work["Time_DayOfWeek_Sin"] = np.sin(2 * np.pi * day_of_week / 5)
-        work["Time_DayOfWeek_Cos"] = np.cos(2 * np.pi * day_of_week / 5)
-
-    # 2. Run AlphaFactory
-    # bars_per_hour determines the bar-count equivalent of rolling windows in
-    # add_macro_context (e.g. MACRO_3M = 2160 hours × bars_per_hour bars).
-    # Default of 12 is for 5m bars; must be 1 for 1h/2h/4h to avoid
-    # 12× over-sized macro windows that silently underestimate context range.
-    _bars_per_hour = {"5m": 12, "1h": 1, "2h": 0.5, "4h": 0.25}.get(bar_size, 12)
-    _has_ichimoku = any(f.startswith("ICHIMOKU_") for f in feature_names)
-    _has_dma = any(f.startswith("TREND_DMA_") for f in feature_names)
-    _has_exh_div = any(f.startswith("EXHDIV_") for f in feature_names)
-
-    factory = AlphaFactory(work, bars_per_hour=_bars_per_hour)
-    if lean:
-        # Lean path: momentum + time features only (no macro, no extended)
-        # This is 6-7x faster than the full pipeline
-        work = factory.add_all_features(
-            windows=alpha_windows,
-            include_momentum=True,
-            include_macro=False,
-            include_extended=False,
-            include_ichimoku=_has_ichimoku,
-            include_dma=_has_dma,
-            include_exhaustion_divergence=_has_exh_div,
-        )
-    elif is_set_07:
-        work = factory.add_all_features(
-            windows=alpha_windows,
-            include_momentum=True,
-            include_macro=True,
-            include_extended=True,
-            macro_windows=macro_windows,
-            include_ichimoku=_has_ichimoku,
-            include_dma=_has_dma,
-            include_exhaustion_divergence=_has_exh_div,
-        )
-    else:
-        work = factory.add_all_features(
-            windows=alpha_windows,
-            include_momentum=True,
-            include_macro=True,
-            include_ichimoku=_has_ichimoku,
-            include_dma=_has_dma,
-            include_exhaustion_divergence=_has_exh_div,
-        )
-
-    # 2b. Add STOCH specifically if lean but the strategy requests it
-    # (STOCH is usually part of include_extended=True, but lean turns extended off)
-    if lean and any(f.startswith("MOM_STOCH_") for f in feature_names):
-        for window in alpha_windows:
-            factory.add_stochastic_cluster(window=window)
-        work = factory.df
-
-    # 2c. Merge external macro data (FRED + COT) if model expects it
-    _has_external_macro = any(
-        f.startswith(("MACRO_VIX", "MACRO_OVX", "MACRO_DXY",
-                      "MACRO_YIELD_CURVE", "MACRO_FED_FUNDS", "COT_"))
-        for f in feature_names
-    )
-    if _has_external_macro:
-        try:
-            work = MacroFeatureEngine().merge_all(work)
-        except Exception as exc:
-            log.error("CRITICAL: Error merging macro features: %s", exc, exc_info=True)
-            raise RuntimeError(f"CRITICAL: Macro Feature Engine failed. Cannot generate live features. Reason: {exc}") from exc
-
-    # 3. Add ATR_14 (in training, this was created by add_triple_barrier_target
-    #    in data_processor.py, but we skip target generation for live inference)
-    if "ATR_14" not in work.columns:
-        import pandas_ta as ta  # noqa: F811
-        atr_series = work.ta.atr(length=14)
-        if atr_series is not None:
-            work["ATR_14"] = atr_series
-
-    # 4. Add Volume_Log (from normalize_features in training pipeline)
-    work["Volume_Log"] = np.log1p(work["Volume"])
-
-    # 5. Replace inf with NaN, then forward-fill (covers normal timeseries NaN)
-    #    and backfill (covers warm-up NaN from large-window features like
-    #    VOL_ROC_10080 or MACRO_3M that need more history than available).
-    #    Final fillna(0) catches features that are all-NaN during cold start
-    #    (e.g., VOL_VOLVOL_10080 needs 2×10080 bars, MACRO_3M needs ~25K bars).
-    work.replace([np.inf, -np.inf], np.nan, inplace=True)
-    # Snapshot which cells in the last row are NaN BEFORE fill — these are
-    # the features that lack sufficient warmup history.
-    _pre_fill_nan = work[feature_names].iloc[-1].isna() if set(feature_names).issubset(work.columns) else None
-    work.ffill(inplace=True)
-    work.bfill(inplace=True)
-    work.fillna(0, inplace=True)
-
-    # Detect which features were zero-filled from NaN (cold-start warning)
-    if _pre_fill_nan is not None:
-        _post_fill_zero = work[feature_names].iloc[-1] == 0
-        _zero_filled = _pre_fill_nan & _post_fill_zero
-        if _zero_filled.any():
-            _zero_cols = _zero_filled[_zero_filled].index.tolist()
-            log.warning(
-                "COLD START: %d features zero-filled from NaN "
-                "(model never saw 0 during training): %s",
-                len(_zero_cols), _zero_cols,
-            )
-
-    # 6. Extract the last complete row with the model's expected columns
-    missing_cols = set(feature_names) - set(work.columns)
-    if missing_cols:
-        log.error("Missing feature columns: %s", missing_cols)
-        return None
-
-    last_row = work[feature_names].iloc[[-1]]
-
-    nan_count = last_row.isna().sum(axis=1).iloc[0]
-    if nan_count > 0:
-        nan_cols = last_row.columns[last_row.isna().iloc[0]].tolist()
-        log.warning(
-            "%d features still NaN after fill (cold start): %s",
-            nan_count, nan_cols,
-        )
-        last_row = last_row.fillna(0)
-
-    return last_row
 
 
 # ---------------------------------------------------------------------------
@@ -3407,253 +3095,12 @@ class LiveTrader:
         return "OPEN"
 
 
-# ---------------------------------------------------------------------------
-# Legacy cache migration
-# ---------------------------------------------------------------------------
-
-def _merge_legacy_cid_caches(shared_cache_path: str) -> None:
-    """Merge any per-client_id warm-start caches into the shared cache.
-
-    Prior versions created separate caches per client_id
-    (warm_start_cache_cid18.parquet, etc.). This function detects those
-    files, merges new bars into the shared cache, and renames the old
-    files so they aren't re-processed.
-    """
-    import glob as _glob
-
-    shared = Path(shared_cache_path)
-    cache_dir = shared.parent
-    pattern = str(cache_dir / "warm_start_cache_cid*.parquet")
-    legacy_files = sorted(_glob.glob(pattern))
-
-    if not legacy_files:
-        return
-
-    log.info(
-        "Found %d legacy per-client cache(s) — merging into shared cache",
-        len(legacy_files),
-    )
-
-    # Load the shared cache if it exists
-    if shared.exists():
-        shared_df = pd.read_parquet(shared, engine="pyarrow")
-        if "DateTime" in shared_df.columns:
-            shared_df["DateTime"] = pd.to_datetime(shared_df["DateTime"])
-    else:
-        shared_df = pd.DataFrame(
-            columns=["DateTime", "Open", "High", "Low", "Close", "Volume"]
-        )
-
-    # Merge bars from each legacy file
-    merged_count = 0
-    for legacy_path in legacy_files:
-        try:
-            ldf = pd.read_parquet(legacy_path, engine="pyarrow")
-            if "DateTime" in ldf.columns:
-                ldf["DateTime"] = pd.to_datetime(ldf["DateTime"])
-            before = len(shared_df)
-            shared_df = pd.concat([shared_df, ldf], ignore_index=True)
-            shared_df = shared_df.drop_duplicates(subset="DateTime", keep="last")
-            new_bars = len(shared_df) - before
-            merged_count += new_bars
-            log.info(
-                "  Merged %s: %d bars (%d new)",
-                Path(legacy_path).name, len(ldf), new_bars,
-            )
-            # Rename legacy file so it isn't re-processed
-            backup = Path(legacy_path).with_suffix(".parquet.migrated")
-            Path(legacy_path).rename(backup)
-            log.info("  Renamed -> %s", backup.name)
-        except Exception as e:
-            log.warning("  Failed to merge %s: %s", legacy_path, e)
-
-    if merged_count > 0:
-        shared_df = shared_df.sort_values("DateTime").reset_index(drop=True)
-        shared.parent.mkdir(parents=True, exist_ok=True)
-        shared_df.to_parquet(shared, engine="pyarrow", index=False)
-        log.info(
-            "Shared cache updated: %d total bars (%d new from migration)",
-            len(shared_df), merged_count,
-        )
-
 
 # ---------------------------------------------------------------------------
-# CLI entry point
+# CLI entry point — moved to src.live_execution.cli (Phase 1)
 # ---------------------------------------------------------------------------
-
-def main() -> None:
-    available = ", ".join(sorted(_STRATEGY_REGISTRY.keys()))
-    default_host = os.environ.get("IBKR_HOST", "127.0.0.1")
-    default_port = int(os.environ.get("IBKR_PORT", "4002"))
-    parser = argparse.ArgumentParser(
-        description="CL Analyst — Live Execution Engine"
-    )
-    parser.add_argument(
-        "--host", default=default_host,
-        help="IBKR TWS/Gateway host (default: IBKR_HOST or 127.0.0.1)",
-    )
-    parser.add_argument(
-        "--port", type=int, default=default_port,
-        help=(
-            "IBKR primary port (default: IBKR_PORT or 4002 for IB Gateway; "
-            "falls back to 7497 TWS)"
-        ),
-    )
-    parser.add_argument(
-        "--client-id", type=int, default=1,
-        help="IBKR client ID (default: 1; overridden by config live_config.client_id)",
-    )
-    parser.add_argument(
-        "--strategy", default=_DEFAULT_STRATEGY,
-        help=f"Strategy to use (available: {available}; default: {_DEFAULT_STRATEGY})",
-    )
-    parser.add_argument(
-        "--config", default=None,
-        help="Path to a strategy JSON config file (overrides --strategy)",
-    )
-    parser.add_argument(
-        "--db-path", default=_DEFAULT_DB_PATH,
-        help="Path to the telemetry SQLite database",
-    )
-    parser.add_argument(
-        "--quantity", type=int, default=_DEFAULT_QUANTITY,
-        help="Number of CL contracts per trade (default: 1)",
-    )
-    parser.add_argument(
-        "--dry-run", action="store_true",
-        help="Run without placing real orders (log signals only)",
-    )
-    parser.add_argument(
-        "--seed-path", default=_DEFAULT_SEED_PATH,
-        help="Path to the immutable seed CSV (cl-5m_bk.csv)",
-    )
-    parser.add_argument(
-        "--cache-path", default=_DEFAULT_CACHE_PATH,
-        help="Path to the warm-start Parquet cache",
-    )
-    parser.add_argument(
-        "--entry-mode", default=None,
-        choices=["adaptive", "marketable_limit", "market"],
-        help=(
-            "Entry order type: 'adaptive' (IBKR algo, default), "
-            "'marketable_limit' (limit 2 ticks through NBBO), "
-            "'market' (plain MKT). Overrides live_config.entry_mode in JSON."
-        ),
-    )
-    parser.add_argument(
-        "--adaptive-priority", default=None,
-        choices=["Normal", "Urgent", "Patient"],
-        help="Adaptive algo urgency (default: Normal). Only used with --entry-mode adaptive.",
-    )
-
-    args = parser.parse_args()
-
-    # Resolve strategy: --config takes priority over --strategy
-    config_client_id: int | None = None
-    config_entry_mode: str | None = None
-    config_adaptive_priority: str | None = None
-    config_exit_mode: str | None = None
-    if args.config is not None:
-        strategy = ConfigurableStrategy(
-            config_path=args.config,
-            base_quantity=args.quantity,
-        )
-        # Read live_config overrides from the strategy JSON
-        live_cfg = strategy.config.get("live_config", {})
-        config_client_id = live_cfg.get("client_id")
-        config_entry_mode = live_cfg.get("entry_mode")
-        config_adaptive_priority = live_cfg.get("adaptive_priority")
-        config_exit_mode = live_cfg.get("exit_mode")
-    else:
-        if args.strategy is None:
-            parser.error("You must provide a --config path. Legacy strategies have been removed.")
-        strategy_key = args.strategy.upper()
-        if strategy_key not in _STRATEGY_REGISTRY:
-            parser.error(
-                f"Unknown strategy '{args.strategy}'. "
-                f"Available: {available}"
-            )
-        strategy_cls = _STRATEGY_REGISTRY[strategy_key]
-        strategy = strategy_cls(base_quantity=args.quantity)
-
-    # CLI --client-id takes priority; if not explicitly set (== 1 default),
-    # fall back to config's live_config.client_id
-    resolved_client_id = args.client_id
-    if resolved_client_id == 1 and config_client_id is not None:
-        resolved_client_id = config_client_id
-
-    # ── Per-strategy isolation ────────────────────────────────────
-    # Telemetry DB is per-client (contains strategy-specific signals,
-    # predictions, trades). OHLCV warm-start cache is SHARED — all
-    # strategies receive the same CL continuous bars.
-    resolved_db_path = args.db_path
-    resolved_cache_path = args.cache_path  # always shared (no cid suffix)
-
-    if resolved_client_id != 1:
-        cid_suffix = f"_cid{resolved_client_id}"
-
-        # Only override DB path if user hasn't explicitly set a custom path
-        if resolved_db_path == _DEFAULT_DB_PATH:
-            resolved_db_path = str(
-                _dp_data_root() / f"live_telemetry{cid_suffix}.db"
-            )
-
-        # Merge any existing per-client caches into the shared cache
-        # so no historical bars are lost from prior per-cid runs.
-        _merge_legacy_cid_caches(resolved_cache_path)
-
-        log.info(
-            "Multi-instance isolation: client_id=%d  "
-            "db=%s  cache=%s (shared)",
-            resolved_client_id,
-            Path(resolved_db_path).name,
-            Path(resolved_cache_path).name,
-        )
-
-    # ── IBKR subscription advisory ───────────────────────────────
-    # Each LiveTrader instance creates 2 IBKR real-time data lines
-    # (continuous + front-month). IBKR's default limit is ~100 lines.
-    # With N strategies, that's 2*N lines. This is wasteful but safe
-    # for < ~50 concurrent strategies.
-    if resolved_client_id != 1:
-        log.info(
-            "NOTE: This instance (client_id=%d) creates its own IBKR "
-            "data subscriptions. With many concurrent strategies, "
-            "consider a shared data broadcaster.",
-            resolved_client_id,
-        )
-
-    # ── Resolve entry_mode: CLI > config > default ────────────────
-    resolved_entry_mode = args.entry_mode
-    if resolved_entry_mode is None:
-        resolved_entry_mode = config_entry_mode or "adaptive"
-
-    resolved_adaptive_priority = args.adaptive_priority
-    if resolved_adaptive_priority is None:
-        resolved_adaptive_priority = config_adaptive_priority or "Normal"
-
-    # ── Resolve exit_mode: config > default ────────────────────────
-    resolved_exit_mode = config_exit_mode or "market"
-
-    trader = LiveTrader(
-        host=args.host,
-        port=args.port,
-        client_id=resolved_client_id,
-        strategy=strategy,
-        db_path=resolved_db_path,
-        seed_path=args.seed_path,
-        cache_path=resolved_cache_path,
-        quantity=args.quantity,
-        dry_run=args.dry_run,
-        entry_mode=resolved_entry_mode,
-        adaptive_priority=resolved_adaptive_priority,
-        exit_mode=resolved_exit_mode,
-    )
-    # Enable persistent file logging now that client_id is resolved
-    _setup_file_logging(resolved_client_id)
-
-    trader.start()
 
 
 if __name__ == "__main__":
+    from src.live_execution.cli import main
     main()
