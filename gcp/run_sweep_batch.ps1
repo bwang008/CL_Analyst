@@ -114,6 +114,108 @@ function Get-UsedVcpus {
 }
 
 
+function Write-WallClockSummary {
+    <# Generate a wall_clock_summary.md in the batch directory with per-phase timing. #>
+    param(
+        [hashtable]$BatchState,
+        [string]$BatchDir,
+        [string]$SweepMachineType,
+        [int]$SweepVcpus,
+        [string]$OptMachineType,
+        [int]$OptElapsedMin,
+        [int]$OptTrials,
+        [int]$OptWorkers
+    )
+
+    $summaryPath = Join-Path $BatchDir "wall_clock_summary.md"
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+    # Calculate total sweep phase duration from batch state timestamps
+    $batchStart = $BatchState["started_at"]
+    $batchEnd   = $BatchState["completed_at"]
+    $sweepDurationMin = 0
+    if ($batchStart -and $batchEnd) {
+        try {
+            $startDt = [datetime]::ParseExact($batchStart, "yyyy-MM-dd HH:mm:ss", $null)
+            $endDt   = [datetime]::ParseExact($batchEnd, "yyyy-MM-dd HH:mm:ss", $null)
+            $sweepDurationMin = [math]::Round(($endDt - $startDt).TotalMinutes, 1)
+        } catch {}
+    }
+
+    # E2E total = sweep phase + optimizer elapsed
+    $e2eTotalMin = [math]::Round($sweepDurationMin + $OptElapsedMin, 1)
+
+    # Pre-compute detail strings
+    $sweepDetail = "$($BatchState.total) experiments ($($BatchState.completed) completed, $($BatchState.failed) failed)"
+    $optDetail   = "${OptTrials} trials/target, ${OptWorkers} workers"
+    $optVcpus    = if ($OptMachineType -match '-(\d+)$') { $Matches[1] } else { 'N/A' }
+
+    # Pre-pad cell values for aligned columns
+    $sweepDurPad   = ('{0,-16}' -f "${sweepDurationMin} min")
+    $optDurPad     = ('{0,-16}' -f "~${OptElapsedMin} min")
+    $e2eDurPad     = ('{0,-16}' -f "**~${e2eTotalMin} min**")
+    $sweepDetPad   = ('{0,-72}' -f $sweepDetail)
+    $optDetPad     = ('{0,-72}' -f $optDetail)
+    $e2eDetPad     = ('{0,-72}' -f 'Start to final report downloaded')
+    $startPad      = ('{0,-19}' -f $batchStart)
+    $endPad        = ('{0,-19}' -f $batchEnd)
+    $tsPad         = ('{0,-19}' -f $ts)
+    $sweepMtPad    = ('{0,-18}' -f "``${SweepMachineType}``")
+    $optMtPad      = ('{0,-18}' -f "``${OptMachineType}``")
+    $sweepVcPad    = ('{0,-5}' -f $SweepVcpus)
+    $optVcPad      = ('{0,-5}' -f $optVcpus)
+
+    # --- Build markdown with aligned columns ---
+    $lines = @()
+    $lines += "# Wall Clock Summary - $($BatchState.batch_id)"
+    $lines += ''
+    $lines += "Generated: $ts"
+    $lines += "Batch ID: ``$($BatchState.batch_id)``"
+    $lines += ''
+    $lines += '---'
+    $lines += ''
+    $lines += '## End-to-End Timing'
+    $lines += ''
+    $lines += '| Phase              | Duration         | Details                                                                  |'
+    $lines += '| ------------------ | ---------------- | ------------------------------------------------------------------------ |'
+    $lines += "| **Sweep Phase**    | $sweepDurPad | $sweepDetPad |"
+    $lines += "| **Post-Optimizer** | $optDurPad | $optDetPad |"
+    $lines += "| **E2E Total**      | $e2eDurPad | $e2eDetPad |"
+    $lines += ''
+    $lines += '## Batch Timeline'
+    $lines += ''
+    $lines += '| Event              | Timestamp           |'
+    $lines += '| ------------------ | ------------------- |'
+    $lines += "| Batch Started      | $startPad |"
+    $lines += "| Sweeps Completed   | $endPad |"
+    $lines += "| E2E Completed      | $tsPad |"
+    $lines += ''
+    $lines += '## Per-Experiment Sweep Times'
+    $lines += ''
+    $lines += '| Experiment         | Status       | Wall (min) |'
+    $lines += '| ------------------ | ------------ | ---------- |'
+    foreach ($exp in $BatchState.experiments) {
+        $wt = if ($exp.wall_time_min) { '{0:N1}' -f $exp.wall_time_min } else { 'N/A' }
+        $labelPad  = ('{0,-18}' -f $exp.label)
+        $statusPad = ('{0,-12}' -f $exp.status)
+        $wtPad     = ('{0,-10}' -f $wt)
+        $lines += "| $labelPad | $statusPad | $wtPad |"
+    }
+    $lines += ''
+    $lines += '## Infrastructure'
+    $lines += ''
+    $lines += '| Component          | Machine Type       | vCPUs |'
+    $lines += '| ------------------ | ------------------ | ----- |'
+    $lines += "| Sweep VMs          | $sweepMtPad | $sweepVcPad |"
+    $lines += "| Post-Optimizer VM  | $optMtPad | $optVcPad |"
+    $lines += ''
+
+    $md = $lines -join "`r`n"
+    $md | Out-File -FilePath $summaryPath -Encoding utf8 -Force
+    Write-Host "  Wall clock summary: $summaryPath" -ForegroundColor Green
+}
+
+
 function Save-Progress {
     param([hashtable]$BatchState)
     if (-not (Test-Path $BatchDir)) { New-Item -ItemType Directory -Path $BatchDir -Force | Out-Null }
@@ -255,6 +357,7 @@ $maxVcpus    = if ($MaxConcurrentVcpus -gt 0) { $MaxConcurrentVcpus } `
                elseif ($defaults.max_concurrent_vcpus) { [int]$defaults.max_concurrent_vcpus } `
                else { 100 }
 $vcpusPerVm  = if ($defaults.vcpus_per_vm) { [int]$defaults.vcpus_per_vm } else { 48 }
+$maxVms      = if ($defaults.max_concurrent_vms) { [int]$defaults.max_concurrent_vms } else { 0 }  # 0 = no VM count cap, use vCPU cap only
 $timeoutMins = if ($defaults.timeout_minutes) { [int]$defaults.timeout_minutes } else { 90 }
 $postOptTrials  = if ($defaults.post_optimizer_trials) { [int]$defaults.post_optimizer_trials } else { 1000 }
 $postOptHoldout = if ($defaults.post_optimizer_holdout_months) { [int]$defaults.post_optimizer_holdout_months } else { 4 }
@@ -266,7 +369,9 @@ Write-Host "============================================================" -Foreg
 Write-Host "  Batch ID:      $BatchId"
 Write-Host "  Manifest:      $manifestFull"
 Write-Host "  Experiments:   $($expList.Count)"
-Write-Host "  Max vCPUs:     $maxVcpus  (allows $(  [math]::Floor($maxVcpus / $vcpusPerVm)) concurrent VMs)"
+Write-Host "  Max vCPUs:     $maxVcpus  (allows $([math]::Floor($maxVcpus / $vcpusPerVm)) concurrent VMs)"
+$maxVmsDisplay = if ($maxVms -gt 0) { "$maxVms (IP/VM cap)" } else { 'uncapped (vCPU-only gating)' }
+Write-Host "  Max VMs:       $maxVmsDisplay"
 Write-Host "  vCPU/VM:       $vcpusPerVm"
 Write-Host "  Timeout/exp:   ${timeoutMins}m"
 $tgStr = if ($DisableTelegram) { $false } else { $true }
@@ -396,8 +501,13 @@ while (-not $allDone) {
     while ($queue.Count -gt 0) {
         $usedCpus = Get-UsedVcpus
         if ($usedCpus + $vcpusPerVm -gt $maxVcpus) {
-            $quotaMsg = "[$(Get-Date -F 'HH:mm:ss')] Quota cap reached `($usedCpus/$maxVcpus vCPU in use`). Waiting for a slot..."
+            $quotaMsg = "[$(Get-Date -F 'HH:mm:ss')] vCPU cap reached ($usedCpus/$maxVcpus vCPU in use). Waiting for a slot..."
             Write-Host $quotaMsg -ForegroundColor Gray
+            break
+        }
+        # Check VM count cap (IP address quota protection)
+        if ($maxVms -gt 0 -and $activeSlots.Count -ge $maxVms) {
+            Write-Host "[$(Get-Date -F 'HH:mm:ss')] VM cap reached ($($activeSlots.Count)/$maxVms VMs). Waiting for a slot..." -ForegroundColor Gray
             break
         }
 
@@ -668,6 +778,9 @@ if ($DisableTelegram) { $collectArgs += "-DisableTelegram" }
 & powershell @collectArgs
 
 # --- Post-Optimization: Deploy optimizer VM ---
+$optElapsedTotal = 0  # Track optimizer wall clock for summary
+$optMachineType  = "N/A"
+$optWorkerCount  = 0
 if ($batchState.completed -gt 0) {
     Write-Host ""
     Write-Host "Deploying cloud optimizer VM..." -ForegroundColor Cyan
@@ -683,7 +796,9 @@ if ($batchState.completed -gt 0) {
                       elseif ($optTaskCount -le 16) { "n2-standard-16" }
                       elseif ($optTaskCount -le 32) { "n2-standard-32" }
                       else { "n2-standard-48" }
-    Write-Host "  Optimizer sizing: $($batchState.completed) experiments × 2 metrics = $optTaskCount tasks → $optMachineType" -ForegroundColor Cyan
+    # Derive worker count from the dynamically-sized machine (match nproc on VM)
+    $optWorkerCount = if ($optMachineType -match '-(\d+)$') { [int]$Matches[1] } else { 8 }
+    Write-Host "  Optimizer sizing: $($batchState.completed) experiments × 2 metrics = $optTaskCount tasks → $optMachineType ($optWorkerCount workers)" -ForegroundColor Cyan
 
     foreach ($oz in $optZoneList) {
         $optArgs = @("-ExecutionPolicy", "Bypass", "-File", ".\gcp\gcp_deploy_optimizer.ps1",
@@ -691,6 +806,7 @@ if ($batchState.completed -gt 0) {
             "-NTrials", $postOptTrials,
             "-HoldoutMonths", $postOptHoldout,
             "-MachineType", $optMachineType,
+            "-Workers", $optWorkerCount,
             "-Zone", $oz)
         if ($DisableTelegram) { $optArgs += "-DisableTelegram" }
         Write-Host "  Trying optimizer deploy in zone $oz..." -ForegroundColor Yellow
@@ -720,6 +836,7 @@ if ($batchState.completed -gt 0) {
             $optElapsed++
             $optStatus = gcloud compute instances describe $optVmName --zone=$optActualZone --format="get(status)" 2>$null
             if (-not $optStatus -or $optStatus.ToString().Trim() -in @("TERMINATED", "STOPPED")) {
+                $optElapsedTotal = $optElapsed
                 Write-Host "  Optimizer VM finished after ~${optElapsed}min." -ForegroundColor Green
                 break
             }
@@ -753,6 +870,14 @@ if ($batchState.completed -gt 0) {
 } else {
     Write-Host "  Skipping post-optimization -- no completed experiments." -ForegroundColor Yellow
 }
+
+# --- Generate Wall Clock Summary ---
+$sweepMachine = if ($defaults.machine_type) { $defaults.machine_type } else { "unknown" }
+Write-WallClockSummary -BatchState $batchState -BatchDir $BatchDir `
+    -SweepMachineType $sweepMachine -SweepVcpus $vcpusPerVm `
+    -OptMachineType $optMachineType -OptElapsedMin $optElapsedTotal `
+    -OptTrials $postOptTrials -OptWorkers $optWorkerCount
+
 Write-Host ""
 
 exit $(if ($batchState.failed -eq 0) { 0 } else { 1 })

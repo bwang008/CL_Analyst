@@ -254,13 +254,14 @@ class LiveTrader:
             "Entry mode: %s  adaptive_priority=%s  max_hold_bars=%d  "
             "trailing_atr_mult=%.2f  "
             "trailing_sl_offset=%.2f  exit_mode=%s  max_position=%d  "
-            "execution_symbol=%s  lean_features=%s  atr_period=%d",
+            "execution_symbol=%s  lean_features=%s  atr_period=%d  "
+            "atr_period_long=%d  atr_period_short=%d",
             entry_mode, adaptive_priority, self._max_hold_bars,
             self._trailing_atr_mult,
             self._trailing_sl_atr_offset, self._exit_mode,
             self._max_position_size,
             self._execution_symbol, self._lean_features,
-            self._atr_period,
+            self._atr_period, self._atr_period_long, self._atr_period_short,
         )
 
         # Extract designated primary stream from config (e.g. "1h" or "5m")
@@ -271,6 +272,15 @@ class LiveTrader:
         # (TP/SL/trailing) can use a different ATR period found by optimizer.
         self._atr_period: int = int(
             strategy_config.get("atr_period", 14)
+        )
+        # Per-side ATR periods (parity with BacktestEngine)
+        # The optimizer may find different optimal ATR periods for long vs short.
+        # Both must be pre-computed as rolling columns on the DataFrame.
+        self._atr_period_long: int = int(
+            strategy_config.get("long", {}).get("atr_period", self._atr_period)
+        )
+        self._atr_period_short: int = int(
+            strategy_config.get("short", {}).get("atr_period", self._atr_period)
         )
 
         # Telemetry
@@ -2457,33 +2467,45 @@ class LiveTrader:
 
         current_price = float(rolling_df["Close"].iloc[-1])
 
-        # Get ATR for bracket sizing.
+        # Get per-side ATR for bracket sizing (parity with BacktestEngine).
         # ATR_14 is always computed inside build_live_features() as a MODEL
         # FEATURE (LightGBM was trained with it).  For bracket placement
-        # (TP/SL/trailing), we use the config's atr_period which may differ
-        # (e.g. optimizer found atr_period=26).  This keeps model parity
-        # while allowing independent bracket ATR tuning.
-        atr_value = None
-        if self._atr_period == 14 and "ATR_14" in features.columns:
-            # Fast path: config uses the same period as the feature
-            atr_value = float(features["ATR_14"].iloc[0])
-        elif len(rolling_df) >= self._atr_period + 1:
-            # Compute bracket ATR from rolling OHLCV with config period
-            import pandas_ta as _ta  # noqa: F811
-            _bracket_atr = rolling_df.ta.atr(length=self._atr_period)
-            if _bracket_atr is not None and not _bracket_atr.empty:
-                _last_atr = _bracket_atr.iloc[-1]
-                if not np.isnan(_last_atr):
-                    atr_value = float(_last_atr)
-            if atr_value is None and "ATR_14" in features.columns:
-                # Fallback: use ATR_14 if custom computation fails
-                atr_value = float(features["ATR_14"].iloc[0])
+        # (TP/SL/trailing), we use the config's per-side atr_period which may
+        # differ (e.g. optimizer found atr_period_long=18, atr_period_short=26).
+        # This keeps model parity while allowing independent bracket ATR tuning.
+
+        def _compute_bracket_atr(period: int) -> float | None:
+            """Compute a single rolling ATR value for a given period."""
+            if period == 14 and "ATR_14" in features.columns:
+                return float(features["ATR_14"].iloc[0])
+            if len(rolling_df) >= period + 1:
+                import pandas_ta as _ta  # noqa: F811
+                _series = rolling_df.ta.atr(length=period)
+                if _series is not None and not _series.empty:
+                    _last = _series.iloc[-1]
+                    if not np.isnan(_last):
+                        return float(_last)
+            # Fallback: use ATR_14 if available
+            if "ATR_14" in features.columns:
                 log.warning(
                     "Bracket ATR(%d) computation failed — falling back to ATR_14",
-                    self._atr_period,
+                    period,
                 )
-        elif "ATR_14" in features.columns:
-            atr_value = float(features["ATR_14"].iloc[0])
+                return float(features["ATR_14"].iloc[0])
+            return None
+
+        if self._atr_period_long == self._atr_period_short:
+            # Same period for both sides — compute once, share
+            atr_value_long = _compute_bracket_atr(self._atr_period_long)
+            atr_value_short = atr_value_long
+        else:
+            atr_value_long = _compute_bracket_atr(self._atr_period_long)
+            atr_value_short = _compute_bracket_atr(self._atr_period_short)
+
+        # Legacy single atr_value: use global period for trailing stop checks
+        # on existing positions (side already known at that point).
+        # For new entries, the side-specific value is used.
+        atr_value = _compute_bracket_atr(self._atr_period)
 
         # Enforce 24-hour time barrier on any open position (engine safety rail)
         if self._check_time_barrier(
@@ -2622,6 +2644,8 @@ class LiveTrader:
             current_price=current_price,
             atr_value=atr_value,
             current_position=effective_position,
+            atr_value_long=atr_value_long,
+            atr_value_short=atr_value_short,
         )
         self._last_inference_time_sec = time.perf_counter() - t0
         self._last_inference_bar_time = bar_time  # track last successful inference
@@ -2820,7 +2844,8 @@ class LiveTrader:
             self._pending_entry_bar_time = bar_time
             # Capture trailing stop context at entry (will be updated on fill)
             self._entry_price = current_price
-            self._atr_at_entry = atr_value
+            # Use the side-specific ATR from evaluate() for trailing stop parity
+            self._atr_at_entry = signal.atr_at_entry if signal.atr_at_entry is not None else atr_value
             self._position_side = 1 if signal.action == "BUY" else -1
             self._trailing_activated = False
             self._highest_high = float(rolling_df["High"].iloc[-1])

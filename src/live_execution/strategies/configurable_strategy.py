@@ -356,6 +356,9 @@ class ConfigurableStrategy(Strategy):
         current_price: float,
         atr_value: Optional[float],
         current_position: int,
+        *,
+        atr_value_long: Optional[float] = None,
+        atr_value_short: Optional[float] = None,
     ) -> TradeSignal:
         """Run inference and return a TradeSignal."""
         # 1. Run inference on available models
@@ -446,33 +449,42 @@ class ConfigurableStrategy(Strategy):
         tier_overrides["tp_atr_mult"] = tp_mult
         tier_overrides["sl_atr_mult"] = sl_mult
 
+        # Select the correct per-side ATR for bracket sizing
+        # BUY → use long ATR, SELL → use short ATR
+        if order.action == "BUY" or order.side == 1:
+            side_atr = atr_value_long if atr_value_long is not None else atr_value
+        elif order.action == "SELL" or order.side == -1:
+            side_atr = atr_value_short if atr_value_short is not None else atr_value
+        else:
+            side_atr = atr_value
+
         tiered_tp_offsets = None
         if self.exit_mode == "TIERED":
             exits_cfg = self._long_tiered_exits if order.action == "BUY" else self._short_tiered_exits
-            if exits_cfg and atr_value is not None and atr_value > 0:
+            if exits_cfg and side_atr is not None and side_atr > 0:
                 tiered_tp_offsets = []
                 avg_mult = 0.0
                 total_pct = 0.0
                 for ex in exits_cfg:
                     pct = float(ex["qty_pct"])
                     mult = float(ex["tp_atr_mult"])
-                    offset_amount = round(mult * atr_value, 4)
+                    offset_amount = round(mult * side_atr, 4)
                     tiered_tp_offsets.append((pct, offset_amount))
                     avg_mult += pct * mult
                     total_pct += pct
                 if total_pct > 0:
                     tp_mult = avg_mult / total_pct
 
-        # Compute bracket prices
+        # Compute bracket prices using side-specific ATR
         tp_price = 0.0
         sl_price = 0.0
-        if atr_value is not None and atr_value > 0:
+        if side_atr is not None and side_atr > 0:
             if order.side == -1 or (order.action == "SELL"):
-                tp_price = round(current_price - tp_mult * atr_value, 2)
-                sl_price = round(current_price + sl_mult * atr_value, 2)
+                tp_price = round(current_price - tp_mult * side_atr, 2)
+                sl_price = round(current_price + sl_mult * side_atr, 2)
             elif order.side == 1 or (order.action == "BUY"):
-                tp_price = round(current_price + tp_mult * atr_value, 2)
-                sl_price = round(current_price - sl_mult * atr_value, 2)
+                tp_price = round(current_price + tp_mult * side_atr, 2)
+                sl_price = round(current_price - sl_mult * side_atr, 2)
 
         return TradeSignal(
             action=order.action,
@@ -485,6 +497,7 @@ class ConfigurableStrategy(Strategy):
             buy_prob=buy_prob,
             sell_prob=sell_prob,
             tiered_tp_offsets=tiered_tp_offsets,
+            atr_at_entry=side_atr,
             **tier_overrides,
         )
 

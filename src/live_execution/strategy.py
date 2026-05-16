@@ -35,6 +35,8 @@ class TradeSignal:
         sl_atr_mult:    Per-trade SL override (None = use engine/config global).
         trailing_atr_mult: Per-trade trailing override (None = use engine/config global).
         max_hold_bars:  Per-trade time-barrier override (None = use engine/config global).
+        atr_at_entry:   The side-specific ATR value used for this trade's bracket
+                        sizing (for parity with BacktestEngine per-side ATR).
     """
 
     action: str  # "BUY" | "SELL" | "HOLD"
@@ -55,6 +57,8 @@ class TradeSignal:
     # Fractional Take-Profit offsets list of (qty_pct, tp_offset amount).
     # None implies SINGLE exit_mode, delegating behavior back to tp_price float.
     tiered_tp_offsets: Optional[list[tuple[float, float]]] = None
+    # Side-specific ATR value used for bracket sizing (parity with BacktestEngine)
+    atr_at_entry: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -90,15 +94,20 @@ class Strategy(ABC):
         current_price: float,
         atr_value: Optional[float],
         current_position: int,
+        *,
+        atr_value_long: Optional[float] = None,
+        atr_value_short: Optional[float] = None,
     ) -> TradeSignal:
         """Given features and market state, return a TradeSignal.
 
         Args:
             features:         Single-row DataFrame of model features.
             current_price:    Latest bar close price.
-            atr_value:        ATR_14 value (may be None if unavailable).
+            atr_value:        Global ATR value (may be None if unavailable).
             current_position: Current CL position in contracts (signed).
                               0 = flat, >0 = long, <0 = short.
+            atr_value_long:   Per-side ATR for long brackets (None = use atr_value).
+            atr_value_short:  Per-side ATR for short brackets (None = use atr_value).
 
         Returns:
             TradeSignal with action, bracket levels, sizing, etc.

@@ -54,6 +54,7 @@ reports/batch_runs/batch_<timestamp>/
 ├── batch_progress.json              ← live progress tracker
 ├── batch_summary.md                 ← unoptimized results
 ├── batch_summary_optimized.md       ← MAIN DELIVERABLE
+├── wall_clock_summary.md            ← auto-generated timing report
 ├── optimization_results.json        ← raw optimization data
 └── manifest.json                    ← frozen config
 ```
@@ -62,14 +63,14 @@ reports/batch_runs/batch_<timestamp>/
 ```json
 {
   "defaults": {
-    "machine_type": "n2-highcpu-48",
+    "machine_type": "c2-standard-16",
     "provisioning_model": "STANDARD",
     "gcs_data_path": "gs://cltrainer-optuna-results/data/<dataset>.parquet",
     "strategy_config": "hourly_ensemble_008.json",
     "metrics": "logloss,average_precision",
     "timeout_minutes": 240,
-    "max_concurrent_vcpus": 96,
-    "vcpus_per_vm": 48,
+    "max_concurrent_vcpus": 288,
+    "vcpus_per_vm": 16,
     "post_optimizer_trials": 200,
     "post_optimizer_holdout_months": 6
   },
@@ -148,9 +149,13 @@ Both deploy scripts (`gcp_deploy_sweep.ps1` and `gcp_deploy_optimizer.ps1`) uplo
 > **IMPORTANT**: When adding new `from src.*` imports to any `agent/` file that runs on a VM, you MUST also add the file to the `$codeFiles` array in both `gcp_deploy_sweep.ps1` and `gcp_deploy_optimizer.ps1`. Failure to do so will cause `ModuleNotFoundError` on the VM.
 
 ## Important Notes
-- Machine: `n2-highcpu-48` (48 vCPUs, ~48 GB RAM)
-- Default config: `N_WORKERS=4`, `THREADS_PER_WORKER=12` (4 × 12 = 48 cores)
-- CPU validation will FATAL error if cores don't match the config
+- **Sweep machine**: `c2-standard-16` (16 vCPUs, ~64 GB RAM) — migrated from `n2-highcpu-48` as of 2026-05-16
+- **Threading**: Auto-detected via `nproc` — `N_WORKERS=4`, `THREADS_PER_WORKER=4` on C2-16 (4×4 = 16 cores)
+- **CPU validation**: `vm_sweep_run.sh` will FATAL error if cores don't match the config
+- **Post-optimizer**: Dynamically sized `n2-standard-{8,16,32,48}` based on experiment count. Workers auto-matched to vCPUs.
 - SPOT VMs can be preempted — use STANDARD for runs that must complete
+- **IP address limit**: 8 external IPs per region (pending increase to 30). Post-optimizer runs **after** all sweep VMs are deleted, so it doesn't compete for IPs. When IPs are the bottleneck, add `"max_concurrent_vms": 8` to the manifest `defaults` to cap concurrent VMs directly. GCP Console quota name: **"In-use regional external IPv4 addresses"**.
 - Preferred region: **us-west1** (us-central1 can be saturated)
 - Zone fallback: pass comma-separated zones to `-Zone` parameter
+- **Wall clock summary**: `wall_clock_summary.md` is auto-generated at the end of every batch run
+- **Old manifests**: Frozen manifests in `reports/batch_runs/*/manifest.json` may still reference `n2-highcpu-48`. Update `machine_type`, `vcpus_per_vm`, and `max_concurrent_vcpus` before re-running.

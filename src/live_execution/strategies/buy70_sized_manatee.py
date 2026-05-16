@@ -126,6 +126,9 @@ class Buy70SizedManatee(Strategy):
         current_price: float,
         atr_value: Optional[float],
         current_position: int,
+        *,
+        atr_value_long: Optional[float] = None,
+        atr_value_short: Optional[float] = None,
     ) -> TradeSignal:
         """Run inference and return a TradeSignal."""
         # 1. Inference
