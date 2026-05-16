@@ -185,6 +185,7 @@ Write-Host "`n[4/7] Uploading code..."
 
 $codeFiles = @(
     @{ Local = "agent\batch_post_optimizer.py";  Remote = "agent/" },
+    @{ Local = "agent\generate_batch_configs.py"; Remote = "agent/" },
     @{ Local = "agent\strategy_optimizer.py";    Remote = "agent/" },
     @{ Local = "agent\backtest_engine.py";       Remote = "agent/" },
     @{ Local = "agent\__init__.py";              Remote = "agent/" },

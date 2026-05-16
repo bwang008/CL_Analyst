@@ -178,18 +178,33 @@ python agent/batch_post_optimizer.py \
 
 OPT_EXIT=$?
 
-# --- [5/5] Upload results to GCS ---
+# --- [4b/6] Generate correctly-formatted strategy configs ---
 echo "" | tee -a "$LOG"
-echo "[5/5] Uploading results to GCS..." | tee -a "$LOG"
+echo "[4b/6] Generating strategy configs from optimization results..." | tee -a "$LOG"
+
+python agent/generate_batch_configs.py \
+    --batch-dir "$BATCH_DIR" \
+    --min-trades 10 \
+    2>&1 | tee -a "$LOG" || echo "  WARNING: Config generation failed (non-fatal)" | tee -a "$LOG"
+
+# --- [5/6] Upload results to GCS ---
+echo "" | tee -a "$LOG"
+echo "[5/6] Uploading results to GCS..." | tee -a "$LOG"
 
 # Upload optimized report and results JSON
 gsutil cp "$BATCH_DIR/batch_summary_optimized.md" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
 gsutil cp "$BATCH_DIR/optimization_results.json" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
 
-# Upload all optimized config JSONs
+# Upload all optimized config JSONs (legacy per-experiment configs)
 find reports/ -name "*_opt.json" -path "*/canary_output/*" -exec gsutil cp {} "$BUCKET/$GCS_OPT_PREFIX/configs/" \; 2>&1 | tee -a "$LOG" || true
 find reports/ -name "*_opt_long.json" -path "*/canary_output/*" -exec gsutil cp {} "$BUCKET/$GCS_OPT_PREFIX/configs/" \; 2>&1 | tee -a "$LOG" || true
 find reports/ -name "*_opt_short.json" -path "*/canary_output/*" -exec gsutil cp {} "$BUCKET/$GCS_OPT_PREFIX/configs/" \; 2>&1 | tee -a "$LOG" || true
+
+# Upload generated batch configs (correctly-formatted with all top-level keys)
+if [ -d "$BATCH_DIR/configs" ]; then
+    gsutil -m cp "$BATCH_DIR/configs/*.json" "$BUCKET/$GCS_OPT_PREFIX/batch_configs/" 2>&1 | tee -a "$LOG" || true
+    echo "  Uploaded batch configs" | tee -a "$LOG"
+fi
 
 # Upload log
 gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
@@ -201,6 +216,7 @@ echo " POST-OPTIMIZER COMPLETE" | tee -a "$LOG"
 echo "  Exit code:     $OPT_EXIT" | tee -a "$LOG"
 echo "  Wall time:     $((TOTAL_ELAPSED / 3600))h $((TOTAL_ELAPSED % 3600 / 60))m" | tee -a "$LOG"
 echo "  GCS results:   $BUCKET/$GCS_OPT_PREFIX/" | tee -a "$LOG"
+echo "  Batch configs: $BATCH_DIR/configs/" | tee -a "$LOG"
 echo "============================================================" | tee -a "$LOG"
 
 # Final log upload

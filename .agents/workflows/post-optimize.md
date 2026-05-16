@@ -34,15 +34,20 @@ powershell -ExecutionPolicy Bypass -File .\gcp\gcp_deploy_optimizer.ps1 `
 The VM will:
 1. Download all experiment artifacts from GCS
 2. Run 24 optimizations in parallel (12 targets × 2 metrics)
-3. Upload results to `gs://cltrainer-optuna-results/batch_optimizer/<batch_id>/`
-4. Send Telegram notifications per-task with convergence info (best trial #)
-5. Self-shutdown on completion
+3. **Generate correctly-formatted strategy configs** from optimization results
+4. Upload results + configs to `gs://cltrainer-optuna-results/batch_optimizer/<batch_id>/`
+5. Send Telegram notifications per-task with convergence info (best trial #)
+6. Self-shutdown on completion
 
 **Download results after VM terminates:**
 ```powershell
 $batchId = "batch_XXXXXXXX_XXXX"
+# Download optimization report + results
 gcloud storage cp "gs://cltrainer-optuna-results/batch_optimizer/$batchId/batch_summary_optimized.md" "reports\batch_runs\$batchId\"
 gcloud storage cp "gs://cltrainer-optuna-results/batch_optimizer/$batchId/optimization_results.json" "reports\batch_runs\$batchId\"
+# Download correctly-formatted strategy configs
+New-Item -ItemType Directory -Force -Path "reports\batch_runs\$batchId\configs"
+gcloud storage cp -r "gs://cltrainer-optuna-results/batch_optimizer/$batchId/batch_configs/*" "reports\batch_runs\$batchId\configs\"
 ```
 
 > [!IMPORTANT]
@@ -58,6 +63,10 @@ python agent/batch_post_optimizer.py `
     --n-trials 1000 `
     --holdout-months 4 `
     --workers 4
+
+# Generate correctly-formatted strategy configs
+python agent/generate_batch_configs.py `
+    --batch-dir reports/batch_runs/batch_XXXXXXXX_XXXX
 ```
 
 > [!NOTE]
@@ -70,7 +79,8 @@ python agent/batch_post_optimizer.py `
 Once complete, review the optimized results:
 - `reports/batch_runs/<batch_id>/batch_summary_optimized.md` — comparison table with baseline vs optimized metrics, holdout PnL, and best trial convergence info
 - `reports/batch_runs/<batch_id>/optimization_results.json` — raw results with full parameter details
-- Per-experiment `*_opt.json` configs in each experiment's `registry/canary_output/` directory
+- **`reports/batch_runs/<batch_id>/configs/`** — correctly-formatted strategy configs (with all top-level keys) ready for `backtest_engine.py` and `live_trader.py`
+- Per-experiment `*_opt.json` configs in each experiment's `registry/canary_output/` directory (legacy, may be missing top-level keys)
 
 ## Interpreting Results
 
