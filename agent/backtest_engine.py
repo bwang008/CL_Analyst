@@ -212,6 +212,7 @@ class _OpenPosition:
     # Per-trade overrides (None = use engine global)
     pos_max_horizon: Optional[int] = None
     pos_trailing_atr_mult: Optional[float] = None
+    pos_trailing_sl_atr_offset: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +263,10 @@ class BacktestEngine:
         trailing_atr_mult: float = 1.0,
         trailing_sl_atr_offset: float = 0.25,
         atr_period: int = 14,
+        atr_period_long: Optional[int] = None,
+        atr_period_short: Optional[int] = None,
+        trailing_sl_atr_offset_long: Optional[float] = None,
+        trailing_sl_atr_offset_short: Optional[float] = None,
         commission_per_side: float = 2.50,
         slippage_per_side: float = 0.01,
         contract_multiplier: float = 1000.0,
@@ -277,6 +282,12 @@ class BacktestEngine:
         self.trailing_atr_mult = trailing_atr_mult
         self.trailing_sl_atr_offset = trailing_sl_atr_offset
         self.atr_period = atr_period
+        # Per-side ATR periods (fall back to global atr_period)
+        self.atr_period_long: int = atr_period_long if atr_period_long is not None else atr_period
+        self.atr_period_short: int = atr_period_short if atr_period_short is not None else atr_period
+        # Per-side trailing SL offset (fall back to global trailing_sl_atr_offset)
+        self.trailing_sl_atr_offset_long: float = trailing_sl_atr_offset_long if trailing_sl_atr_offset_long is not None else trailing_sl_atr_offset
+        self.trailing_sl_atr_offset_short: float = trailing_sl_atr_offset_short if trailing_sl_atr_offset_short is not None else trailing_sl_atr_offset
         self.commission_per_side = commission_per_side
         self.slippage_per_side = slippage_per_side
         self.contract_multiplier = contract_multiplier
@@ -309,6 +320,7 @@ class BacktestEngine:
         # Per-trade overrides (set at entry from Order, reset on close)
         self._trade_max_horizon: int = max_horizon
         self._trade_trailing_atr_mult: float = trailing_atr_mult
+        self._trade_trailing_sl_atr_offset: float = trailing_sl_atr_offset
 
         # Concurrent mode state
         self._open_positions: list[_OpenPosition] = []
@@ -327,6 +339,8 @@ class BacktestEngine:
         # Safety check: warn if top-level params are shadowed by tier overrides
         cls._check_parameter_shadowing(cfg, strategy)
 
+        global_atr = cfg.get("atr_period", 14)
+        global_trailing_offset = cfg.get("trailing_activation_mult", 0.25)
         kwargs = {
             "tp_atr_mult": cfg.get("tp_atr_mult", 2.0),
             "sl_atr_mult": cfg.get("sl_atr_mult", 1.0),
@@ -334,9 +348,13 @@ class BacktestEngine:
             "allow_concurrent": cfg.get("allow_concurrent", False),
             "max_concurrent": cfg.get("max_concurrent", 1),
             "max_horizon": cfg.get("max_hold_bars", 288),
-            "atr_period": cfg.get("atr_period", 14),
+            "atr_period": global_atr,
+            "atr_period_long": cfg.get("long", {}).get("atr_period", global_atr),
+            "atr_period_short": cfg.get("short", {}).get("atr_period", global_atr),
             "trailing_atr_mult": cfg.get("trailing_atr_mult", 1.0),
-            "trailing_sl_atr_offset": cfg.get("trailing_activation_mult", 0.25),
+            "trailing_sl_atr_offset": global_trailing_offset,
+            "trailing_sl_atr_offset_long": cfg.get("long", {}).get("trailing_activation_mult", global_trailing_offset),
+            "trailing_sl_atr_offset_short": cfg.get("short", {}).get("trailing_activation_mult", global_trailing_offset),
             "execution_strategy": strategy,
         }
         kwargs.update(overrides)
@@ -411,6 +429,7 @@ class BacktestEngine:
         self._open_positions = []
         self._trade_max_horizon = self.max_horizon
         self._trade_trailing_atr_mult = self.trailing_atr_mult
+        self._trade_trailing_sl_atr_offset = self.trailing_sl_atr_offset
 
         # Reset mutable engine state
         self._engine_state.position = 0
@@ -532,7 +551,7 @@ class BacktestEngine:
             dt: Bar timestamp.
             bar: OHLCV bar data.
             signal_side: +1 for buy, -1 for sell, None for no signal.
-            atr: Current ATR value.
+            atr: Current ATR value (should already be side-appropriate).
             lots: Number of contracts for this position.
             order: Optional Order carrying per-trade overrides.
         """
@@ -558,6 +577,12 @@ class BacktestEngine:
         else:
             self._trade_max_horizon = self.max_horizon
             self._trade_trailing_atr_mult = self.trailing_atr_mult
+
+        # Per-side trailing SL offset
+        self._trade_trailing_sl_atr_offset = (
+            self.trailing_sl_atr_offset_long if signal_side == 1
+            else self.trailing_sl_atr_offset_short
+        )
 
         self._state = TradeState.IN_POSITION
         self._entry_dt = dt
@@ -638,6 +663,7 @@ class BacktestEngine:
 
         # 3. Trailing stop upgrade: move SL after +N×ATR in favor
         #    SL target = entry ± offset×ATR (0 = breakeven, >0 = lock profit)
+        #    Uses per-side trailing_sl_atr_offset set at entry in _on_flat()
         if not self._trailing_activated:
             if self._side == 1:
                 if self._highest_high >= (
@@ -645,7 +671,7 @@ class BacktestEngine:
                 ):
                     self._sl_price = (
                         self._entry_price
-                        + self.trailing_sl_atr_offset * self._atr_at_entry
+                        + self._trade_trailing_sl_atr_offset * self._atr_at_entry
                     )
                     self._trailing_activated = True
             else:
@@ -654,7 +680,7 @@ class BacktestEngine:
                 ):
                     self._sl_price = (
                         self._entry_price
-                        - self.trailing_sl_atr_offset * self._atr_at_entry
+                        - self._trade_trailing_sl_atr_offset * self._atr_at_entry
                     )
                     self._trailing_activated = True
 
@@ -714,6 +740,10 @@ class BacktestEngine:
             lots=lots,
             pos_max_horizon=pos_max_horizon,
             pos_trailing_atr_mult=pos_trailing_atr_mult,
+            pos_trailing_sl_atr_offset=(
+                self.trailing_sl_atr_offset_long if signal_side == 1
+                else self.trailing_sl_atr_offset_short
+            ),
         )
         self._open_positions.append(pos)
 
@@ -775,8 +805,9 @@ class BacktestEngine:
                 )
                 exit_reason = ExitReason.TP
 
-        # 3. Trailing stop upgrade (use per-position override if set)
+        # 3. Trailing stop upgrade (use per-position overrides if set)
         eff_trailing = pos.pos_trailing_atr_mult if pos.pos_trailing_atr_mult is not None else self.trailing_atr_mult
+        eff_offset = pos.pos_trailing_sl_atr_offset if pos.pos_trailing_sl_atr_offset is not None else self.trailing_sl_atr_offset
         if exit_reason is None and not pos.trailing_activated:
             if pos.side == 1:
                 if pos.highest_high >= (
@@ -784,7 +815,7 @@ class BacktestEngine:
                 ):
                     pos.sl_price = (
                         pos.entry_price
-                        + self.trailing_sl_atr_offset * pos.atr_at_entry
+                        + eff_offset * pos.atr_at_entry
                     )
                     pos.trailing_activated = True
             else:
@@ -793,7 +824,7 @@ class BacktestEngine:
                 ):
                     pos.sl_price = (
                         pos.entry_price
-                        - self.trailing_sl_atr_offset * pos.atr_at_entry
+                        - eff_offset * pos.atr_at_entry
                     )
                     pos.trailing_activated = True
 
@@ -853,7 +884,7 @@ class BacktestEngine:
         """
         self._reset_state()
 
-        # Compute ATR on the OHLCV data
+        # Compute per-side ATR on the OHLCV data
         ohlcv = ohlcv_df.copy()
         tr = np.maximum(
             ohlcv["High"] - ohlcv["Low"],
@@ -862,7 +893,16 @@ class BacktestEngine:
                 (ohlcv["Low"] - ohlcv["Close"].shift(1)).abs(),
             ),
         )
-        ohlcv["atr_"] = tr.rolling(self.atr_period).mean()
+        if self.atr_period_long == self.atr_period_short:
+            # Same period for both sides — compute once, share reference
+            shared_atr = tr.rolling(self.atr_period_long).mean()
+            ohlcv["atr_long_"] = shared_atr
+            ohlcv["atr_short_"] = shared_atr
+        else:
+            ohlcv["atr_long_"] = tr.rolling(self.atr_period_long).mean()
+            ohlcv["atr_short_"] = tr.rolling(self.atr_period_short).mean()
+        # Legacy column: used by legacy loop methods and as default
+        ohlcv["atr_"] = ohlcv["atr_short_"]
 
         # Build signal lookup — which bars have a trade signal
         #
@@ -968,7 +1008,14 @@ class BacktestEngine:
 
             if self._state == TradeState.FLAT:
                 sig = signal_sides.get(ts)
-                self._on_flat(ts, row, sig, atr)
+                # Legacy path: select ATR by signal side
+                if sig == 1:
+                    side_atr = row.atr_long_
+                elif sig == -1:
+                    side_atr = row.atr_short_
+                else:
+                    side_atr = atr
+                self._on_flat(ts, row, sig, side_atr)
 
             elif self._state == TradeState.IN_POSITION:
                 self._on_in_position(ts, row.Open, row.High, row.Low)
@@ -1013,11 +1060,12 @@ class BacktestEngine:
             sig = signal_sides.get(ts)
             if (
                 sig is not None
-                and not (np.isnan(atr) if isinstance(atr, float) else False)
-                and atr > 0
                 and len(self._open_positions) < self.max_concurrent
             ):
-                self._open_new_position(ts, row, sig, atr)
+                # Select ATR by signal side
+                side_atr = row.atr_long_ if sig == 1 else row.atr_short_
+                if not (np.isnan(side_atr) if isinstance(side_atr, float) else False) and side_atr > 0:
+                    self._open_new_position(ts, row, sig, side_atr)
 
             # 3. Record equity: realized + floating
             self._equity_curve.append(
@@ -1054,6 +1102,8 @@ class BacktestEngine:
         for row in ohlcv.itertuples():
             ts = pd.Timestamp(row.Index)
             atr = row.atr_
+            atr_long = row.atr_long_
+            atr_short = row.atr_short_
 
             self._engine_state.last_exit_bars_ago_long += 1
             self._engine_state.last_exit_bars_ago_short += 1
@@ -1079,7 +1129,9 @@ class BacktestEngine:
                 for order in orders:
                     if order.action in ("BUY", "SELL"):
                         sig = order.side
-                        self._on_flat(ts, row, sig, atr, lots=order.lots, order=order)
+                        # Select ATR by trade side
+                        side_atr = atr_long if sig == 1 else atr_short
+                        self._on_flat(ts, row, sig, side_atr, lots=order.lots, order=order)
                         break  # single-position: only one entry per bar
 
             # Record equity: realized + floating
@@ -1100,6 +1152,8 @@ class BacktestEngine:
         for row in ohlcv.itertuples():
             ts = pd.Timestamp(row.Index)
             atr = row.atr_
+            atr_long = row.atr_long_
+            atr_short = row.atr_short_
 
             # 1. Check existing positions for exits
             surviving: list[_OpenPosition] = []
@@ -1132,12 +1186,14 @@ class BacktestEngine:
             # 4. Dispatch orders
             for order in orders:
                 if order.action in ("BUY", "SELL"):
+                    # Select ATR by trade side
+                    side_atr = atr_long if order.side == 1 else atr_short
                     if (
-                        not (np.isnan(atr) if isinstance(atr, float) else False)
-                        and atr > 0
+                        not (np.isnan(side_atr) if isinstance(side_atr, float) else False)
+                        and side_atr > 0
                         and len(self._open_positions) < self.max_concurrent
                     ):
-                        self._open_new_position(ts, row, order.side, atr, lots=order.lots, order=order)
+                        self._open_new_position(ts, row, order.side, side_atr, lots=order.lots, order=order)
 
             # 5. Record equity: realized + floating
             self._equity_curve.append(
