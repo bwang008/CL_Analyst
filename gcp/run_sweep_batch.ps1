@@ -676,11 +676,21 @@ if ($batchState.completed -gt 0) {
     $optDeployExit = 1
     $optActualZone = $optZoneList[0]  # fallback default
 
+    # Dynamically size the optimizer VM based on completed experiment count
+    # Each experiment has 2 metrics (logloss, average_precision) = 2 optimization tasks
+    $optTaskCount = $batchState.completed * 2
+    $optMachineType = if ($optTaskCount -le 8) { "n2-standard-8" }
+                      elseif ($optTaskCount -le 16) { "n2-standard-16" }
+                      elseif ($optTaskCount -le 32) { "n2-standard-32" }
+                      else { "n2-standard-48" }
+    Write-Host "  Optimizer sizing: $($batchState.completed) experiments × 2 metrics = $optTaskCount tasks → $optMachineType" -ForegroundColor Cyan
+
     foreach ($oz in $optZoneList) {
         $optArgs = @("-ExecutionPolicy", "Bypass", "-File", ".\gcp\gcp_deploy_optimizer.ps1",
             "-BatchId", $BatchId,
             "-NTrials", $postOptTrials,
             "-HoldoutMonths", $postOptHoldout,
+            "-MachineType", $optMachineType,
             "-Zone", $oz)
         if ($DisableTelegram) { $optArgs += "-DisableTelegram" }
         Write-Host "  Trying optimizer deploy in zone $oz..." -ForegroundColor Yellow
