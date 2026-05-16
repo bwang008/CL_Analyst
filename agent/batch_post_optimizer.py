@@ -30,7 +30,7 @@ os.chdir(PROJECT_ROOT)
 
 import pandas as pd
 from agent.backtest_engine import BacktestEngine, load_ohlcv, load_predictions
-from agent.strategy_optimizer import run_optimization, extract_metrics
+from agent.strategy_optimizer import run_optimization, extract_metrics, send_telegram
 
 
 def _extract_per_side_params(
@@ -453,6 +453,42 @@ def main():
     print(f"RUNNING {len(opt_tasks)} OPTIMIZATIONS (workers={n_workers})")
     print(f"{'='*60}")
 
+    # Telegram batch-level progress tracking
+    _total_tasks = len(opt_tasks)
+    _completed_count = 0
+    _last_tg_time = time.perf_counter()
+    _TG_INTERVAL_SECS = 30 * 60  # 30-minute progress updates
+    _milestone_pcts = {25, 50, 75, 100}
+    _milestones_sent = set()
+
+    def _maybe_send_progress(completed: int, total: int, label: str, status: str):
+        """Send Telegram if milestone hit or 30 min elapsed since last update."""
+        nonlocal _last_tg_time, _milestones_sent
+        now = time.perf_counter()
+        pct = int(100 * completed / total) if total > 0 else 0
+        elapsed_min = (now - total_start) / 60
+
+        is_milestone = pct in _milestone_pcts and pct not in _milestones_sent
+        is_time_update = (now - _last_tg_time) >= _TG_INTERVAL_SECS
+
+        if is_milestone or is_time_update:
+            if is_milestone:
+                _milestones_sent.add(pct)
+            _last_tg_time = now
+            send_telegram(
+                f"[Batch Post-Optimizer] Progress\n"
+                f"{completed}/{total} optimizations done ({pct}%)\n"
+                f"Latest: {label} -> {status}\n"
+                f"Elapsed: {elapsed_min:.0f} min"
+            )
+
+    send_telegram(
+        f"[Batch Post-Optimizer] STARTING\n"
+        f"Batch: {os.path.basename(batch_dir)}\n"
+        f"{_total_tasks} optimizations, {n_workers} workers\n"
+        f"{args.n_trials} trials/optimization, {args.holdout_months}mo holdout"
+    )
+
     if n_workers > 1:
         # Process-level parallelism — bypasses GIL for true multi-core speedup
         futures = {}
@@ -485,6 +521,10 @@ def main():
 
                 # Extract per-side params (no per-side metrics — ensemble only)
                 _extract_per_side_params(result, label, metric, all_results)
+
+                # Batch-level Telegram progress
+                _completed_count += 1
+                _maybe_send_progress(_completed_count, _total_tasks, f"{label} {metric}", result.get('status', '?'))
     else:
         # Sequential execution (default)
         for ens_key, ens_config, merged_path, label, metric, exp in opt_tasks:
@@ -506,10 +546,25 @@ def main():
             # Extract per-side params (no per-side metrics — ensemble only)
             _extract_per_side_params(result, label, metric, all_results)
 
+            # Batch-level Telegram progress
+            _completed_count += 1
+            _maybe_send_progress(_completed_count, _total_tasks, f"{label} {metric}", result.get('status', '?'))
+
     elapsed = time.perf_counter() - total_start
     print(f"\n{'='*60}")
     print(f"ALL OPTIMIZATIONS COMPLETE - {elapsed:.0f}s ({elapsed/60:.1f} min)")
     print(f"{'='*60}")
+
+    # Final batch-level summary
+    ok_count = sum(1 for v in all_results.values() if v.get('status') == 'OK')
+    fail_count = sum(1 for v in all_results.values() if v.get('status') == 'FAILED')
+    send_telegram(
+        f"[Batch Post-Optimizer] COMPLETE\n"
+        f"Batch: {os.path.basename(batch_dir)}\n"
+        f"Results: {ok_count} OK, {fail_count} failed\n"
+        f"Wall time: {elapsed/60:.1f} min\n"
+        f"Report: batch_summary_optimized.md"
+    )
 
     # Generate report
     report = generate_optimized_report(
