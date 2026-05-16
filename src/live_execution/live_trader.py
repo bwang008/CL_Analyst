@@ -521,8 +521,12 @@ class LiveTrader:
         self._trailing_atr_mult: float = float(
             strategy_config.get("trailing_atr_mult", 100.0)
         )
+        # PARITY FIX: Read 'trailing_activation_mult' (the canonical config
+        # key written by the optimizer) instead of 'trailing_sl_atr_offset'
+        # which never existed in any config.  This controls where the SL
+        # moves to after the trailing stop activates (entry ± mult×ATR).
         self._trailing_sl_atr_offset: float = float(
-            strategy_config.get("trailing_sl_atr_offset", 0.25)
+            strategy_config.get("trailing_activation_mult", 0.25)
         )
         # Exit mode for time-barrier exits (separate from entry_mode)
         self._exit_mode: str = exit_mode
@@ -562,16 +566,24 @@ class LiveTrader:
             "Entry mode: %s  adaptive_priority=%s  max_hold_bars=%d  "
             "trailing_atr_mult=%.2f  "
             "trailing_sl_offset=%.2f  exit_mode=%s  max_position=%d  "
-            "execution_symbol=%s  lean_features=%s",
+            "execution_symbol=%s  lean_features=%s  atr_period=%d",
             entry_mode, adaptive_priority, self._max_hold_bars,
             self._trailing_atr_mult,
             self._trailing_sl_atr_offset, self._exit_mode,
             self._max_position_size,
             self._execution_symbol, self._lean_features,
+            self._atr_period,
         )
 
         # Extract designated primary stream from config (e.g. "1h" or "5m")
         self._bar_size: str = strategy_config.get("bar_size", "5m").lower()
+
+        # ATR period for bracket sizing (separate from ATR_14 model feature).
+        # The model always uses ATR_14 as a feature, but bracket placement
+        # (TP/SL/trailing) can use a different ATR period found by optimizer.
+        self._atr_period: int = int(
+            strategy_config.get("atr_period", 14)
+        )
 
         # Telemetry
         self.telemetry = TelemetryDB(db_path)
@@ -2757,9 +2769,32 @@ class LiveTrader:
 
         current_price = float(rolling_df["Close"].iloc[-1])
 
-        # Get ATR from the features
+        # Get ATR for bracket sizing.
+        # ATR_14 is always computed inside build_live_features() as a MODEL
+        # FEATURE (LightGBM was trained with it).  For bracket placement
+        # (TP/SL/trailing), we use the config's atr_period which may differ
+        # (e.g. optimizer found atr_period=26).  This keeps model parity
+        # while allowing independent bracket ATR tuning.
         atr_value = None
-        if "ATR_14" in features.columns:
+        if self._atr_period == 14 and "ATR_14" in features.columns:
+            # Fast path: config uses the same period as the feature
+            atr_value = float(features["ATR_14"].iloc[0])
+        elif len(rolling_df) >= self._atr_period + 1:
+            # Compute bracket ATR from rolling OHLCV with config period
+            import pandas_ta as _ta  # noqa: F811
+            _bracket_atr = rolling_df.ta.atr(length=self._atr_period)
+            if _bracket_atr is not None and not _bracket_atr.empty:
+                _last_atr = _bracket_atr.iloc[-1]
+                if not np.isnan(_last_atr):
+                    atr_value = float(_last_atr)
+            if atr_value is None and "ATR_14" in features.columns:
+                # Fallback: use ATR_14 if custom computation fails
+                atr_value = float(features["ATR_14"].iloc[0])
+                log.warning(
+                    "Bracket ATR(%d) computation failed — falling back to ATR_14",
+                    self._atr_period,
+                )
+        elif "ATR_14" in features.columns:
             atr_value = float(features["ATR_14"].iloc[0])
 
         # Enforce 24-hour time barrier on any open position (engine safety rail)
