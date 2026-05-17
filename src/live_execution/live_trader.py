@@ -830,6 +830,42 @@ class LiveTrader:
         self._pending_entry_bar_time = None
         self._reset_position_state()
 
+    def _snapshot_decision_state(self, event_type: str) -> None:
+        """Capture and persist the current FSM state for parity auditing.
+
+        Call at three points:
+        1. ENTRY — after entry order is placed
+        2. BRACKET_PLACED — after TP/SL children are attached
+        3. TRAILING_ACTIVATED — when trailing SL modifies the bracket
+        """
+        trade_id = self._active_trade_id
+        if trade_id is None:
+            return
+        try:
+            self.telemetry.log_decision_state(
+                trade_id=trade_id,
+                event_type=event_type,
+                event_timestamp_utc=self._utc_iso_now(),
+                entry_price=self._entry_price,
+                position_side=self._position_side,
+                atr_at_entry=self._atr_at_entry,
+                bracket_atr=self._atr_at_entry,
+                tp_price=None,  # filled at BRACKET_PLACED
+                sl_price=None,  # filled at BRACKET_PLACED
+                trailing_atr_mult=(
+                    self._trade_trailing_atr_mult
+                    if self._trade_trailing_atr_mult is not None
+                    else self._trailing_atr_mult
+                ),
+                trailing_sl_atr_offset=self._trailing_sl_atr_offset,
+                trailing_activated=self._trailing_activated,
+                highest_high=self._highest_high,
+                lowest_low=self._lowest_low,
+                bars_held=self._position_bars_held,
+            )
+        except Exception:
+            log.debug("Failed to snapshot decision state", exc_info=True)
+
     def _check_trailing_stop(self) -> None:
         """Check if trailing stop should activate and modify IBKR SL order.
 
@@ -929,6 +965,26 @@ class LiveTrader:
                         )
                     except Exception:
                         log.debug("Failed to update ledger SL", exc_info=True)
+                # Snapshot decision state at trailing activation
+                try:
+                    self.telemetry.log_decision_state(
+                        trade_id=self._active_trade_id,
+                        event_type="TRAILING_ACTIVATED",
+                        event_timestamp_utc=self._utc_iso_now(),
+                        entry_price=self._entry_price,
+                        position_side=self._position_side,
+                        atr_at_entry=self._atr_at_entry,
+                        bracket_atr=self._atr_at_entry,
+                        sl_price=new_sl,
+                        trailing_atr_mult=effective_trailing,
+                        trailing_sl_atr_offset=self._trailing_sl_atr_offset,
+                        trailing_activated=True,
+                        highest_high=self._highest_high,
+                        lowest_low=self._lowest_low,
+                        bars_held=self._position_bars_held,
+                    )
+                except Exception:
+                    log.debug("Failed to snapshot TRAILING_ACTIVATED state", exc_info=True)
                 return
             log.warning(
                 "TRAILING STOP: triggered but SL order %d not found in "
@@ -963,6 +1019,7 @@ class LiveTrader:
                         reason="CLOSED_OOB",
                         close_time=self._utc_iso_now(),
                         bars_held=self._position_bars_held,
+                        exit_price=current_price,
                     )
                 except Exception:
                     log.debug(
@@ -1055,6 +1112,7 @@ class LiveTrader:
                     reason="TIME_BARRIER",
                     close_time=self._utc_iso_now(),
                     bars_held=self._position_bars_held,
+                    exit_price=current_price,
                 )
             except Exception:
                 log.debug("Failed to close ledger position", exc_info=True)
@@ -1491,6 +1549,33 @@ class LiveTrader:
                         log.debug(
                             "Failed to update ledger brackets", exc_info=True
                         )
+                    # Snapshot decision state after bracket placement
+                    try:
+                        # Overwrite tp/sl in the snapshot with actual bracket prices
+                        _effective_tp = tp_price if not isinstance(tp_price, list) else tp_price[0][1]
+                        self.telemetry.log_decision_state(
+                            trade_id=self._active_trade_id,
+                            event_type="BRACKET_PLACED",
+                            event_timestamp_utc=self._utc_iso_now(),
+                            entry_price=fill_price,
+                            position_side=self._position_side,
+                            atr_at_entry=self._atr_at_entry,
+                            bracket_atr=self._atr_at_entry,
+                            tp_price=_effective_tp,
+                            sl_price=sl_price,
+                            trailing_atr_mult=(
+                                self._trade_trailing_atr_mult
+                                if self._trade_trailing_atr_mult is not None
+                                else self._trailing_atr_mult
+                            ),
+                            trailing_sl_atr_offset=self._trailing_sl_atr_offset,
+                            trailing_activated=False,
+                            highest_high=self._highest_high,
+                            lowest_low=self._lowest_low,
+                            bars_held=self._position_bars_held,
+                        )
+                    except Exception:
+                        log.debug("Failed to snapshot BRACKET_PLACED state", exc_info=True)
 
             # Log tradebook events for the children
             decision_ctx = ctx
@@ -1680,13 +1765,19 @@ class LiveTrader:
                     if is_final_exit:
                         # Close position in ledger
                         if self._active_trade_id is not None:
-                            close_reason = "TP_HIT" if is_tp_fill else "SL_HIT"
+                            if is_sl_fill and getattr(self, "_trailing_activated", False):
+                                close_reason = "TRAILING_SL"
+                            elif is_sl_fill:
+                                close_reason = "SL_HIT"
+                            else:
+                                close_reason = "TP_HIT"
                             try:
                                 self.telemetry.close_position(
                                     self._active_trade_id,
                                     reason=close_reason,
                                     close_time=self._utc_iso_now(),
                                     bars_held=self._position_bars_held,
+                                    exit_price=avg_price,
                                 )
                             except Exception:
                                 log.debug(
@@ -1783,6 +1874,8 @@ class LiveTrader:
                             )
                         except Exception:
                             log.exception("Failed to write OPEN to position ledger")
+                        # Snapshot decision state at entry
+                        self._snapshot_decision_state("ENTRY")
                         # Phase 2: place TP/SL as standalone orders from actual fill price
                         if order_id is not None:
                             self._place_bracket_children_on_fill(

@@ -113,6 +113,8 @@ class TradeRecord:
     commission_dollars: float
     net_pnl_dollars: float
     lots: int = 1
+    initial_tp_price: float = 0.0
+    initial_sl_price: float = 0.0
 
 
 @dataclass
@@ -185,6 +187,42 @@ class BacktestResult:
             reason: {"count": count, "pct": count / total * 100}
             for reason, count in counts.items()
         }
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Export trades as a DataFrame with the unified trade ledger schema.
+
+        Column schema matches the reconciliation pipeline so that
+        backtest and live ledgers can be programmatically diffed.
+        """
+        if not self.trades:
+            return pd.DataFrame()
+        rows = []
+        for t in self.trades:
+            rows.append({
+                "entry_time": t.entry_dt,
+                "signal_side": "LONG" if t.side == 1 else "SHORT",
+                "entry_price": t.entry_price,
+                "entry_fill": t.entry_fill,
+                "initial_tp_price": t.initial_tp_price,
+                "initial_sl_price": t.initial_sl_price,
+                "exit_time": t.exit_dt,
+                "exit_price": t.exit_price,
+                "exit_fill": t.exit_fill,
+                "exit_reason": t.exit_reason.value,
+                "atr_at_entry": t.atr_at_entry,
+                "duration_bars": t.duration_bars,
+                "lots": t.lots,
+                "gross_pnl_dollars": t.gross_pnl_dollars,
+                "commission_dollars": t.commission_dollars,
+                "net_pnl_dollars": t.net_pnl_dollars,
+            })
+        return pd.DataFrame(rows)
+
+    def to_csv(self, path: str) -> None:
+        """Export trades to CSV using the unified trade ledger schema."""
+        df = self.to_dataframe()
+        df.to_csv(path, index=False)
+        print(f"Exported {len(df)} trades to {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -523,6 +561,8 @@ class BacktestEngine:
             commission_dollars=commission,
             net_pnl_dollars=net_pnl,
             lots=self._lots,
+            initial_tp_price=self._tp_price,
+            initial_sl_price=self._original_sl_price,
         )
         self._trades.append(record)
         self._realized_pnl += net_pnl
@@ -851,6 +891,8 @@ class BacktestEngine:
                 commission_dollars=commission,
                 net_pnl_dollars=net_pnl,
                 lots=pos.lots,
+                initial_tp_price=pos.tp_price,
+                initial_sl_price=pos.original_sl_price,
             )
 
         return None

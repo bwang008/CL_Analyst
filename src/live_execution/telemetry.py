@@ -153,6 +153,34 @@ _CREATE_SHADOW_LOG_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_shadow_ts ON shadow_log(timestamp);
 """
 
+_CREATE_DECISION_STATE_LOG = """
+CREATE TABLE IF NOT EXISTS decision_state_log (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id                TEXT    NOT NULL,
+    event_type              TEXT    NOT NULL,   -- ENTRY / BRACKET_PLACED / TRAILING_ACTIVATED
+    event_timestamp_utc     TEXT    NOT NULL,
+    entry_price             REAL,
+    position_side           INTEGER,           -- +1 long, -1 short
+    atr_at_entry            REAL,
+    bracket_atr             REAL,
+    tp_price                REAL,
+    sl_price                REAL,
+    trailing_atr_mult       REAL,
+    trailing_sl_atr_offset  REAL,
+    trailing_activated      INTEGER DEFAULT 0,
+    highest_high            REAL,
+    lowest_low              REAL,
+    bars_held               INTEGER,
+    state_json              TEXT,              -- full state dict as JSON fallback
+    created_at              TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+_CREATE_DECISION_STATE_LOG_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_dsl_trade_id ON decision_state_log(trade_id);
+CREATE INDEX IF NOT EXISTS idx_dsl_event_ts ON decision_state_log(event_timestamp_utc);
+"""
+
 _CREATE_ACTIVE_POSITIONS = """
 CREATE TABLE IF NOT EXISTS active_positions (
     trade_id            TEXT    PRIMARY KEY,
@@ -170,6 +198,7 @@ CREATE TABLE IF NOT EXISTS active_positions (
     entry_bar_time      TEXT,
     close_time          TEXT,
     close_reason        TEXT,
+    exit_price          REAL,
     bars_held           INTEGER,
     trailing_atr_mult   REAL,
     max_hold_bars       INTEGER,
@@ -204,14 +233,17 @@ class TelemetryDB:
             + _CREATE_RAW_FRONT_MONTH_BARS
             + _CREATE_TRADEBOOK_EVENTS
             + _CREATE_SHADOW_LOG
+            + _CREATE_DECISION_STATE_LOG
             + _CREATE_ACTIVE_POSITIONS
             + _CREATE_INDEXES
             + _CREATE_TRADEBOOK_INDEXES
             + _CREATE_SHADOW_LOG_INDEXES
+            + _CREATE_DECISION_STATE_LOG_INDEXES
             + _CREATE_ACTIVE_POSITIONS_INDEXES
         )
         self._migrate_trade_ledger_columns(conn)
         self._migrate_unique_constraints(conn)
+        self._migrate_active_positions_columns(conn)
         conn.commit()
 
     def _migrate_trade_ledger_columns(self, conn: sqlite3.Connection) -> None:
@@ -268,6 +300,14 @@ class TelemetryDB:
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_raw_bars_ts_month "
                 "ON raw_front_month_bars(timestamp, contract_month)"
             )
+
+    def _migrate_active_positions_columns(self, conn: sqlite3.Connection) -> None:
+        """Add newer nullable columns to active_positions for older DB files."""
+        cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(active_positions)").fetchall()
+        }
+        if "exit_price" not in cols:
+            conn.execute("ALTER TABLE active_positions ADD COLUMN exit_price REAL")
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -550,6 +590,58 @@ class TelemetryDB:
         return cur.fetchone()[0]
 
     # ------------------------------------------------------------------
+    # Decision state log (execution parity snapshots)
+    # ------------------------------------------------------------------
+
+    def log_decision_state(
+        self,
+        *,
+        trade_id: str,
+        event_type: str,
+        event_timestamp_utc: str,
+        entry_price: Optional[float] = None,
+        position_side: Optional[int] = None,
+        atr_at_entry: Optional[float] = None,
+        bracket_atr: Optional[float] = None,
+        tp_price: Optional[float] = None,
+        sl_price: Optional[float] = None,
+        trailing_atr_mult: Optional[float] = None,
+        trailing_sl_atr_offset: Optional[float] = None,
+        trailing_activated: bool = False,
+        highest_high: Optional[float] = None,
+        lowest_low: Optional[float] = None,
+        bars_held: Optional[int] = None,
+        state_json: Optional[str] = None,
+    ) -> None:
+        """Record a decision-state snapshot for execution parity auditing."""
+        conn = self._get_conn()
+        conn.execute(
+            "INSERT INTO decision_state_log ("
+            " trade_id, event_type, event_timestamp_utc, entry_price,"
+            " position_side, atr_at_entry, bracket_atr, tp_price, sl_price,"
+            " trailing_atr_mult, trailing_sl_atr_offset, trailing_activated,"
+            " highest_high, lowest_low, bars_held, state_json"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                trade_id, event_type, event_timestamp_utc,
+                self._sanitize_float(entry_price),
+                position_side,
+                self._sanitize_float(atr_at_entry),
+                self._sanitize_float(bracket_atr),
+                self._sanitize_float(tp_price),
+                self._sanitize_float(sl_price),
+                self._sanitize_float(trailing_atr_mult),
+                self._sanitize_float(trailing_sl_atr_offset),
+                1 if trailing_activated else 0,
+                self._sanitize_float(highest_high),
+                self._sanitize_float(lowest_low),
+                bars_held,
+                state_json,
+            ),
+        )
+        conn.commit()
+
+    # ------------------------------------------------------------------
     # Tradebook events (execution lifecycle)
     # ------------------------------------------------------------------
 
@@ -754,14 +846,17 @@ class TelemetryDB:
         reason: str,
         close_time: str,
         bars_held: Optional[int] = None,
+        exit_price: Optional[float] = None,
     ) -> None:
         """Mark a position as closed in the ledger."""
         conn = self._get_conn()
         conn.execute(
             "UPDATE active_positions "
-            "SET status = 'CLOSED', close_reason = ?, close_time = ?, bars_held = ? "
+            "SET status = 'CLOSED', close_reason = ?, close_time = ?, "
+            "    bars_held = ?, exit_price = ? "
             "WHERE trade_id = ? AND status = 'OPEN'",
-            (reason, close_time, bars_held, trade_id),
+            (reason, close_time, bars_held,
+             self._sanitize_float(exit_price), trade_id),
         )
         conn.commit()
 
@@ -780,3 +875,40 @@ class TelemetryDB:
         ).fetchone()
         conn.row_factory = None
         return dict(row) if row else None
+
+    def export_trade_ledger(self) -> pd.DataFrame:
+        """Export closed positions as a DataFrame with the unified schema.
+
+        Returns a DataFrame with columns matching BacktestResult.to_dataframe()
+        so the reconciliation script can diff backtest vs live trades.
+        """
+        conn = self._get_conn()
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM active_positions "
+            "WHERE status = 'CLOSED' "
+            "ORDER BY entry_time ASC"
+        ).fetchall()
+        conn.row_factory = None
+
+        if not rows:
+            return pd.DataFrame()
+
+        records = []
+        for row in rows:
+            d = dict(row)
+            records.append({
+                "entry_time": pd.Timestamp(d.get("entry_bar_time") or d["entry_time"]),
+                "signal_side": d["side"],
+                "entry_price": d["entry_price"],
+                "initial_tp_price": d.get("tp_price"),
+                "initial_sl_price": d.get("sl_price"),
+                "exit_time": pd.Timestamp(d["close_time"]) if d.get("close_time") else None,
+                "exit_price": d.get("exit_price"),
+                "exit_reason": d.get("close_reason"),
+                "atr_at_entry": d.get("atr_at_entry"),
+                "duration_bars": d.get("bars_held"),
+                "lots": d.get("quantity", 1),
+                "trade_id": d["trade_id"],
+            })
+        return pd.DataFrame(records)
