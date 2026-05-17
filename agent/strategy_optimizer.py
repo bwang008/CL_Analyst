@@ -91,6 +91,38 @@ def send_telegram(message: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Trade floor penalty — prevents Optuna from gaming the Consistency Score
+# with hyper-selective configs that produce only 2-6 trades.
+# ---------------------------------------------------------------------------
+import math
+
+TRADES_PER_YEAR_FLOOR = 36  # Minimum ~3 trades/month combined (long+short)
+
+
+def _trade_floor_weight(trade_count: int, trade_floor: float,
+                        steepness: float = 6.0) -> float:
+    """Smooth penalty multiplier in [0, 1] for the trade floor constraint.
+
+    Provides a TPE-friendly gradient that teaches the sampler to move toward
+    higher-activity parameter regions, rather than the uninformative -9999.0
+    cliff used for zero-trade trials.
+
+    - trade_count >= trade_floor  →  1.0  (ceiling: no churn reward)
+    - trade_count << trade_floor  →  ~0.0 (kills hyper-selective configs)
+    - transition zone             →  smooth sigmoid ramp
+    """
+    if trade_count >= trade_floor:
+        return 1.0
+
+    ratio = trade_count / trade_floor
+    # Sigmoid centered at 50% of the floor
+    raw = 1.0 / (1.0 + math.exp(-steepness * (ratio - 0.5)))
+    # Normalize so that ratio=1.0 maps exactly to weight=1.0
+    at_floor = 1.0 / (1.0 + math.exp(-steepness * 0.5))
+    return raw / at_floor
+
+
+# ---------------------------------------------------------------------------
 # Metrics helpers
 # ---------------------------------------------------------------------------
 import heapq
@@ -316,6 +348,10 @@ def make_objective(
         and base_cfg.get("short", {}).get("tiers")
     )
 
+    # Compute trade floor from prediction data span (once, not per trial)
+    _backtest_years = (predictions_df.index.max() - predictions_df.index.min()).days / 365.25
+    _trade_floor = max(1.0, TRADES_PER_YEAR_FLOOR * _backtest_years)
+
     def _suggest_side_params(trial: optuna.Trial, suffix: str) -> dict:
         """Suggest params for one side with the given suffix."""
         params = {
@@ -386,12 +422,21 @@ def make_objective(
             (np.mean(monthly_pnl_vals) / std_pnl) * np.sqrt(12)
         )
 
-        # Track top configs
+        # --- Trade Floor Penalty ---
+        # Negative Sharpe returned as-is (multiplying by weight < 1 would
+        # *improve* a negative score — the opposite of the intended effect).
+        if annualized_sharpe > 0:
+            weight = _trade_floor_weight(result.trade_count, _trade_floor)
+            final_score = annualized_sharpe * weight
+        else:
+            final_score = annualized_sharpe
+
+        # Track top configs (penalized score so ranking matches Optuna)
         if tracker is not None:
             metrics = extract_metrics(result)
-            tracker.add(annualized_sharpe, trial.number, cfg, metrics=metrics)
+            tracker.add(final_score, trial.number, cfg, metrics=metrics)
 
-        return annualized_sharpe
+        return final_score
 
     return objective
 
