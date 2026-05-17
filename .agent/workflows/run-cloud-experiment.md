@@ -17,36 +17,56 @@ description: How to run an Optuna hyperparameter search on GCP using the canary 
 ## Batch Sweep Run (Recommended — Fully Automated)
 
 The batch orchestrator manages N experiments end-to-end: deploy → monitor → collect → post-optimize.
+Three tiers are available, each with its own manifest:
+
+| Tier | Manifest | Experiments | LGBM Trials | Post-Opt Trials | Use Case |
+| ---------- | --------------------------------------------- | ----------- | ----------- | --------------- | ------------------------------------------- |
+| **Canary** | `sweep_batch_hourset08_canary.json` | 2 | 50 | 20 | Pipeline validation (~20-30 min) |
+| **Scout** | `sweep_batch_hourset08_scout.json` | 8 | 200 | 500 | Moderate exploration, ballpark performance |
+| **Production** | `sweep_batch_hourset08_production.json` | 8 | 500 | 1500 | Deep optimization, final model selection |
 
 ### 1. Verify no VMs are running (avoid quota conflicts):
 ```powershell
 gcloud compute instances list
 ```
 
-### 2. Dry run to validate manifest:
+### 2. Dry run to validate manifest (replace manifest path for your tier):
 ```powershell
+# Canary (fast pipeline test):
 powershell -ExecutionPolicy Bypass -File .\gcp\run_sweep_batch.ps1 `
     -ManifestPath "configs\sweep_batch_hourset08_canary.json" `
     -Zone "us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f" `
     -DryRun
+
+# Scout (moderate exploration):
+powershell -ExecutionPolicy Bypass -File .\gcp\run_sweep_batch.ps1 `
+    -ManifestPath "configs\sweep_batch_hourset08_scout.json" `
+    -Zone "us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f" `
+    -DryRun
+
+# Production (deep optimization):
+powershell -ExecutionPolicy Bypass -File .\gcp\run_sweep_batch.ps1 `
+    -ManifestPath "configs\sweep_batch_hourset08_production.json" `
+    -Zone "us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f" `
+    -DryRun
 ```
 
-### 3. Launch the batch:
+### 3. Launch the batch (replace manifest for your tier):
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\gcp\run_sweep_batch.ps1 `
-    -ManifestPath "configs\sweep_batch_hourset08_canary.json" `
+    -ManifestPath "configs\sweep_batch_hourset08_scout.json" `
     -Zone "us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f"
 ```
 
 ### 4. The orchestrator automatically:
-   - Deploys VMs across fallback zones (quota-aware, up to 2 concurrent)
+   - Deploys VMs across fallback zones (quota-aware concurrency gating by vCPUs and VM count)
    - Monitors via background PS jobs polling every 90s
    - Sends Telegram notifications at key milestones
    - Runs artifact verification gate before VM deletion
    - Captures crash diagnostics on failure
    - Generates consolidated batch summary
    - Deploys a post-optimizer VM, waits for completion, downloads results
-   - Produces final `batch_summary_optimized.md`
+   - Produces final `batch_summary_optimized.md` and `wall_clock_summary.md`
 
 ### 5. Review results:
 ```
