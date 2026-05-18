@@ -2258,6 +2258,12 @@ class LiveTrader:
             log.warning("SUBSCRIPTIONS LOST (Error 10182) — will resubscribe on reconnect")
             self._subscriptions_lost = True
 
+        # Error 1100: Connectivity between IBKR and TWS has been lost
+        # Error 1101: Connectivity restored, data lost
+        if errorCode in (1100, 1101):
+            log.warning("CONNECTIVITY LOST (code %d) — marking subscriptions as lost", errorCode)
+            self._subscriptions_lost = True
+
         # Error 1102: connectivity restored, data maintained
         # Error 1101: connectivity restored, data lost
         # Warning 2104: Market data farm connection is OK
@@ -2384,7 +2390,7 @@ class LiveTrader:
         self._resubscribe_pending = False
         log.info("Resubscription complete — live bars restored")
 
-    def _on_front_month_bar_update(self, bars, has_new_bar) -> None:
+    def _on_front_month_bar_update(self, bars, has_new_bar=False) -> None:
         """Callback for front-month bars — log raw data to telemetry."""
         if not has_new_bar or not bars:
             return
@@ -2411,7 +2417,7 @@ class LiveTrader:
             new_bar.close, float(new_bar.volume),
         )
 
-    def _on_bar_update_5m(self, bars, has_new_bar) -> None:
+    def _on_bar_update_5m(self, bars, has_new_bar=False) -> None:
         """Callback fired by ib_insync when continuous 5m bars are updated."""
         if not has_new_bar or not bars:
             return
@@ -2460,7 +2466,7 @@ class LiveTrader:
             with self._ledger_lock:
                 self._on_new_bar(bar_time, self.rolling_df_5m, "5m")
 
-    def _on_bar_update_1h(self, bars, has_new_bar) -> None:
+    def _on_bar_update_1h(self, bars, has_new_bar=False) -> None:
         """Callback fired by ib_insync when continuous 1h bars are updated."""
         if not has_new_bar or not bars:
             return
