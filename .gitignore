@@ -19,11 +19,14 @@ backtest_report*.txt
 reports/
 
 # ----- Keep these in git -----
-# Model registry (configs + trained models, ~5 MB total)
-!models/registry/**
-!models/production/**
-# ...but still ignore backtest reports inside registry
-models/registry/**/backtest_report*.txt
+# Model registry — keep ONLY lightweight configs/metadata (JSON + MD)
+!models/registry/**/*.json
+!models/registry/**/*.md
+# Production — keep config + active model weights only
+!models/production/config.json
+!models/production/experiment_config.json
+!models/production/final_model*.pkl
+!models/production/feature_importance.csv
 # Project config files
 !experiments.json
 !data/DATASETS.json
@@ -40,3 +43,5 @@ configs/strategies/candidates/**
 *.db-wal
 data/processed/warm_start_cache.parquet
 reports/livetrader_13.log
+# Temp files
+%TEMP%/
