@@ -250,19 +250,6 @@ class LiveTrader:
         self._lean_features: bool = bool(
             strategy_config.get("lean_features", False)
         )
-        log.info(
-            "Entry mode: %s  adaptive_priority=%s  max_hold_bars=%d  "
-            "trailing_atr_mult=%.2f  "
-            "trailing_sl_offset=%.2f  exit_mode=%s  max_position=%d  "
-            "execution_symbol=%s  lean_features=%s  atr_period=%d  "
-            "atr_period_long=%d  atr_period_short=%d",
-            entry_mode, adaptive_priority, self._max_hold_bars,
-            self._trailing_atr_mult,
-            self._trailing_sl_atr_offset, self._exit_mode,
-            self._max_position_size,
-            self._execution_symbol, self._lean_features,
-            self._atr_period, self._atr_period_long, self._atr_period_short,
-        )
 
         # Extract designated primary stream from config (e.g. "1h" or "5m")
         self._bar_size: str = strategy_config.get("bar_size", "5m").lower()
@@ -281,6 +268,20 @@ class LiveTrader:
         )
         self._atr_period_short: int = int(
             strategy_config.get("short", {}).get("atr_period", self._atr_period)
+        )
+
+        log.info(
+            "Entry mode: %s  adaptive_priority=%s  max_hold_bars=%d  "
+            "trailing_atr_mult=%.2f  "
+            "trailing_sl_offset=%.2f  exit_mode=%s  max_position=%d  "
+            "execution_symbol=%s  lean_features=%s  atr_period=%d  "
+            "atr_period_long=%d  atr_period_short=%d",
+            entry_mode, adaptive_priority, self._max_hold_bars,
+            self._trailing_atr_mult,
+            self._trailing_sl_atr_offset, self._exit_mode,
+            self._max_position_size,
+            self._execution_symbol, self._lean_features,
+            self._atr_period, self._atr_period_long, self._atr_period_short,
         )
 
         # Telemetry
@@ -1226,13 +1227,21 @@ class LiveTrader:
                     delta_minutes = (
                         last_bar - self._position_entry_bar_time
                     ).total_seconds() / 60.0
+                    # Use bar_size to compute correct bar duration
+                    _bar_minutes = {
+                        "5m": 5, "1h": 60, "2h": 120, "4h": 240,
+                    }
+                    bar_dur = _bar_minutes.get(self._bar_size, 5)
                     self._position_bars_held = max(
-                        0, int(delta_minutes / 5)
+                        0, int(delta_minutes / bar_dur)
                     )
                     log.info(
-                        "[RECOVERY] Estimated %d bars held since entry at %s",
+                        "[RECOVERY] Estimated %d bars held since entry at %s "
+                        "(bar_size=%s, delta=%.0f min)",
                         self._position_bars_held,
                         self._position_entry_bar_time,
+                        self._bar_size,
+                        delta_minutes,
                     )
             except Exception:
                 log.debug("Failed to parse entry_bar_time", exc_info=True)

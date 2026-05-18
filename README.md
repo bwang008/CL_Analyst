@@ -303,6 +303,35 @@ The trader will broadcast messages to your chat for:
 - **Trade Execution:** When a new trade entry or exit (Take Profit, Stop Loss) occurs, with execution price details.
 - **Fatal Error:** Broadcasting stack traces immediately upon severe unhandled exceptions before graceful exit.
 
+### Execution Parity Suite (`/validate-parity`)
+
+A multi-layer validation framework that confirms the BacktestEngine and LiveTrader produce identical behavior from the same strategy config and data inputs. Run before deploying new strategy configs or after modifying execution logic.
+
+```bash
+# Full parity suite (43+ tests across 4 test files)
+python -m pytest tests/test_config_parity.py tests/test_pipeline_parity.py tests/test_per_side_atr.py tests/test_execution_parity.py -v
+
+# Prediction parity (shadow log replay — requires model + telemetry data)
+python scripts/validate_parity.py
+
+# Side-by-side config parameter comparison (manual review)
+python tests/test_config_parity.py --compare configs/strategies/hs08_scout_3x1_12h_logloss_opt.json
+```
+
+**Validation layers:**
+
+| Layer | Test File | What It Catches |
+|-------|-----------|-----------------|
+| Config Parity | `tests/test_config_parity.py` | Parameter naming mismatches, missing config keys, default value divergence between BacktestEngine and LiveTrader |
+| Feature Parity | `tests/test_pipeline_parity.py` | Training vs live feature computation drift (AlphaFactory batch vs incremental) |
+| ATR Parity | `tests/test_per_side_atr.py` | Per-side bracket sizing, trailing offset routing, backward-compatible fallback |
+| Execution Parity | `tests/test_execution_parity.py` | Recovery `bars_held` time dilation (bar_size-aware), `initial_sl_price` schema integrity |
+| Prediction Parity | `scripts/validate_parity.py` | End-to-end model inference divergence via shadow log replay |
+
+**Key bugs caught by this suite:**
+- **Time Dilation** — Recovery `bars_held` estimation used hardcoded `/5` (5-minute assumption), causing premature `TIME_BARRIER` exits for hourly strategies after reboots. Fixed to use `bar_size` from strategy config.
+- **Initial SL Tracking** — `active_positions.sl_price` was overwritten by trailing stop modifications, making bracket reconciliation impossible. `initial_sl_price` column preserves the original SL for auditing.
+
 ## Project Structure
 
 ```
@@ -353,6 +382,12 @@ CL_Analyst/
 |   +-- check_optuna_db.py         # Check Optuna study progress
 +-- scripts/                       # Utility scripts
 |   +-- plot_prediction_distributions.py  # Distribution visualizer (histogram+KDE per model)
-+-- tests/                         # Pytest test suite (350+ tests)
+|   +-- validate_parity.py               # Shadow log prediction parity validation
+|   +-- trade_reconciler.py              # Live-to-backtest trade reconciliation
++-- tests/                         # Pytest test suite (440+ tests)
+|   +-- test_config_parity.py            # Config parameter parity (BT vs LT)
+|   +-- test_pipeline_parity.py          # Feature pipeline parity (batch vs live)
+|   +-- test_per_side_atr.py             # Per-side ATR bracket sizing
+|   +-- test_execution_parity.py         # Recovery bars_held + initial_sl_price schema
 +-- reports/                       # Evaluation outputs
 ```

@@ -193,6 +193,7 @@ CREATE TABLE IF NOT EXISTS active_positions (
     sl_order_id         INTEGER,
     tp_price            REAL,
     sl_price            REAL,
+    initial_sl_price    REAL,              -- original SL before trailing modifications
     atr_at_entry        REAL,
     entry_time          TEXT    NOT NULL,
     entry_bar_time      TEXT,
@@ -308,6 +309,8 @@ class TelemetryDB:
         }
         if "exit_price" not in cols:
             conn.execute("ALTER TABLE active_positions ADD COLUMN exit_price REAL")
+        if "initial_sl_price" not in cols:
+            conn.execute("ALTER TABLE active_positions ADD COLUMN initial_sl_price REAL")
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -805,13 +808,18 @@ class TelemetryDB:
         tp_price: Optional[float] = None,
         sl_price: Optional[float] = None,
     ) -> None:
-        """Update TP/SL order IDs and prices after bracket children are placed."""
+        """Update TP/SL order IDs and prices after bracket children are placed.
+
+        Also stores the initial SL price (before trailing stop modifications)
+        if initial_sl_price has not been set yet.
+        """
         conn = self._get_conn()
         conn.execute(
             "UPDATE active_positions "
-            "SET tp_order_id = ?, sl_order_id = ?, tp_price = ?, sl_price = ? "
+            "SET tp_order_id = ?, sl_order_id = ?, tp_price = ?, sl_price = ?, "
+            "    initial_sl_price = COALESCE(initial_sl_price, ?) "
             "WHERE trade_id = ? AND status = 'OPEN'",
-            (tp_order_id, sl_order_id, tp_price, sl_price, trade_id),
+            (tp_order_id, sl_order_id, tp_price, sl_price, sl_price, trade_id),
         )
         conn.commit()
 
@@ -902,7 +910,7 @@ class TelemetryDB:
                 "signal_side": d["side"],
                 "entry_price": d["entry_price"],
                 "initial_tp_price": d.get("tp_price"),
-                "initial_sl_price": d.get("sl_price"),
+                "initial_sl_price": d.get("initial_sl_price") or d.get("sl_price"),
                 "exit_time": pd.Timestamp(d["close_time"]) if d.get("close_time") else None,
                 "exit_price": d.get("exit_price"),
                 "exit_reason": d.get("close_reason"),
