@@ -45,3 +45,10 @@ data/processed/warm_start_cache.parquet
 reports/livetrader_13.log
 # Temp files
 %TEMP%/
+tmp/
+
+# Purged heavy artifacts
+*.pdf
+models/optuna_studies/
+*final_model_pure.txt
+pytest_out.txt
