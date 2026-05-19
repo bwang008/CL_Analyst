@@ -30,7 +30,9 @@ import os
 import sys
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional, Any
 
 import numpy as np
 import pandas as pd
@@ -44,6 +46,32 @@ from agent.backtest_engine import BacktestEngine, BacktestResult, load_ohlcv, lo
 from src.live_execution.strategies.execution_models import create_execution_strategy
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+
+# ---------------------------------------------------------------------------
+# Best result tracking — O(1) memory replacement for unbounded results_cache
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BestResultTracker:
+    """Tracks the single best trial result during optimization.
+
+    Replaces the previous ``dict[int, BacktestResult]`` cache which stored
+    every trial's full result (equity curves, trade lists) and grew
+    linearly with trial count, causing OOM at ~1500 trials × 14 workers.
+    """
+    score: float = float("-inf")
+    trial_number: int = -1
+    result: Optional[Any] = field(default=None, repr=False)  # BacktestResult
+
+    def update_if_better(self, new_score: float, trial_number: int, result: Any) -> bool:
+        """Update the tracked best if ``new_score`` exceeds the current best."""
+        if new_score > self.score:
+            self.score = new_score
+            self.trial_number = trial_number
+            self.result = result
+            return True
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +352,7 @@ def make_objective(
     base_cfg: dict,
     predictions_df: pd.DataFrame,
     ohlcv_df: pd.DataFrame,
-    results_cache: dict | None = None,
+    best_tracker: BestResultTracker | None = None,
     tracker: "TopKTracker | None" = None,
 ):
     """Create a closure that Optuna can call with trial params.
@@ -337,7 +365,8 @@ def make_objective(
         base_cfg: Base strategy config dict.
         predictions_df: OOS predictions DataFrame.
         ohlcv_df: OHLCV DataFrame.
-        results_cache: Optional dict to store BacktestResult per trial.
+        best_tracker: Optional BestResultTracker — O(1) memory, replaces
+            the old unbounded dict that stored all trial results.
         tracker: Optional TopKTracker to collect top configs.
     """
     # Pre-create a strategy instance for parameter routing
@@ -396,8 +425,7 @@ def make_objective(
         engine = BacktestEngine.from_config(cfg)
         result = engine.run(predictions_df, ohlcv_df)
 
-        if results_cache is not None:
-            results_cache[trial.number] = result
+        # NOTE: final_score is computed below — defer update to after scoring
 
         # --- Consistency Score: Annualized Monthly Sharpe ---
         if result.trade_count == 0 or not result.trades:
@@ -435,6 +463,10 @@ def make_objective(
         if tracker is not None:
             metrics = extract_metrics(result)
             tracker.add(final_score, trial.number, cfg, metrics=metrics)
+
+        # Update best result tracker — O(1) memory, only keeps the single best
+        if best_tracker is not None:
+            best_tracker.update_if_better(final_score, trial.number, result)
 
         return final_score
 
@@ -552,9 +584,9 @@ def run_optimization(
           f"DD: ${baseline_metrics['max_drawdown']:,.2f}")
 
     # ── Unified optimization (simultaneous for tiered, single for others) ─
-    results_cache: dict[int, BacktestResult] = {}
+    best_result_tracker = BestResultTracker()
     tracker = TopKTracker(k=5, save_dir="configs/strategies/candidates")
-    objective = make_objective(base_cfg, predictions_df, ohlcv_df, results_cache, tracker=tracker)
+    objective = make_objective(base_cfg, predictions_df, ohlcv_df, best_result_tracker, tracker=tracker)
 
     study = optuna.create_study(
         direction="maximize",
@@ -594,9 +626,9 @@ def run_optimization(
     print(f"  Params: {dict(best_trial.params)}")
 
     # End notification with best performance
-    best_result = results_cache.get(best_trial.number)
-    if best_result:
-        best_m = extract_metrics(best_result)
+    # Use the O(1) best tracker; fall back gracefully if trial mismatch
+    if best_result_tracker.result is not None and best_result_tracker.trial_number == best_trial.number:
+        best_m = extract_metrics(best_result_tracker.result)
         send_telegram(
             f"[Strategy Optimizer] {model_name}\n"
             f"COMPLETE ({elapsed:.0f}s / {elapsed/60:.1f}m)\n"

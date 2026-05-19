@@ -652,12 +652,41 @@ while (-not $allDone) {
         # Check timeout
         if ($elapsed -gt $slot.TimeoutMins) {
             Write-Host ""
-            Write-Host "  TIMEOUT: $($slot.Label) exceeded ${elapsed:N0}min (limit: $($slot.TimeoutMins)min)" -ForegroundColor Red
+            Write-Host "  TIMEOUT: $($slot.Label) exceeded ${elapsed:N0}min (limit: $($slot.TimeoutMins)min). Initiating teardown." -ForegroundColor Red
             Stop-Job $job -ErrorAction SilentlyContinue
             Remove-Job $job -Force -ErrorAction SilentlyContinue
-            gcloud compute instances stop $slot.VmName --zone=$slot.ActualZone --quiet 2>$null
+
+            try {
+                # CRITICAL: Do not let salvage operations hang the orchestrator.
+                # Wrap in a background job with a strict temporal bound.
+                $salvageJob = Start-Job -ScriptBlock {
+                    param($LocalDir, $GcsPrefix, $VmName, $VmZone)
+                    if (-not (Test-Path $LocalDir)) { New-Item -ItemType Directory -Path $LocalDir -Force | Out-Null }
+                    $gcsBase = "gs://cltrainer-optuna-results/$GcsPrefix"
+                    gcloud storage cp "$gcsBase/pipeline_summary.json" "$LocalDir\pipeline_summary.json" 2>$null
+                    $canaryDir = Join-Path $LocalDir "registry\canary_output"
+                    if (-not (Test-Path $canaryDir)) { New-Item -ItemType Directory -Path $canaryDir -Force | Out-Null }
+                    gcloud storage cp -r "$gcsBase/production/*" "$canaryDir\" 2>$null
+                    # Capture serial console (survives VM crash, lost after deletion)
+                    $diagDir = Join-Path $LocalDir "crash_diagnostics"
+                    if (-not (Test-Path $diagDir)) { New-Item -ItemType Directory -Path $diagDir -Force | Out-Null }
+                    $serialOut = gcloud compute instances get-serial-port-output $VmName --zone=$VmZone 2>$null
+                    if ($serialOut) { $serialOut | Out-File -FilePath (Join-Path $diagDir "serial_console.log") -Encoding utf8 }
+                } -ArgumentList $slot.LocalDir, $slot.GcsPrefix, $slot.VmName, $slot.ActualZone
+
+                # Wait maximum 2 minutes for salvage — then forcibly stop it
+                Wait-Job $salvageJob -Timeout 120 | Out-Null
+                Stop-Job $salvageJob -ErrorAction SilentlyContinue
+                Remove-Job $salvageJob -Force -ErrorAction SilentlyContinue
+            } catch {
+                Write-Host "  WARNING: Artifact salvage failed during timeout handling." -ForegroundColor Yellow
+            } finally {
+                # GUARANTEED EXECUTION: Destroy the VM to free quota and stop billing
+                Remove-ExperimentVm -VmName $slot.VmName -VmZone $slot.ActualZone
+            }
+
             Send-BatchTelegram ("[TIMEOUT] *Timeout: $($slot.Label)*`n" +
-                "Exceeded $($slot.TimeoutMins)min limit`nVM stopped.")
+                "Exceeded $($slot.TimeoutMins)min limit`nVM deleted. Salvage attempted.")
             $slot.Status       = "TIMEOUT"
             $slot.FailureReason = "Exceeded timeout ($($slot.TimeoutMins)min)"
             $batchState.failed++

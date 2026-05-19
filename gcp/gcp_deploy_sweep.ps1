@@ -253,9 +253,15 @@ if ($MinChildSamplesMax -gt 0) { $searchFlags += " --min-child-samples-max=$MinC
 if ($FeatureFractionMin -gt 0) { $searchFlags += " --feature-fraction-min=$FeatureFractionMin" }
 if ($FeatureFractionMax -gt 0) { $searchFlags += " --feature-fraction-max=$FeatureFractionMax" }
 $launchCmd = "tmux kill-session -t sweep 2>/dev/null; tmux new-session -d -s sweep 'bash $RemoteProject/gcp/vm_sweep_run.sh $shutdownFlag --dataset=$datasetName --strategy=$StrategyConfig --metrics=$Metrics --job-name=$jobName$targetFlags$bucketFlag$searchFlags'"
-try { gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd --quiet 2>$null } catch { }
 
-Write-Host "  Canary pipeline launched!" -ForegroundColor Green
+# Execute and capture both streams with explicit exit code handling
+$launchOutput = gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd 2>&1
+$sshExitCode = $LASTEXITCODE
+
+if ($sshExitCode -ne 0) {
+    Write-Host "  WARNING: SSH launch returned exit code $sshExitCode" -ForegroundColor Yellow
+    Write-Host "  Output: $($launchOutput | Out-String)" -ForegroundColor DarkGray
+}
 
 # --- [6/6] Verify ---
 Write-Host "`n[6/6] Verifying tmux session..."
@@ -264,11 +270,14 @@ $tmuxCheck = gcloud compute ssh $VmName --zone=$Zone `
     --command="tmux has-session -t sweep 2>/dev/null && echo RUNNING" `
     --quiet 2>$null
 
-if ($tmuxCheck -match "RUNNING") {
+if ($sshExitCode -eq 0 -and $tmuxCheck -match "RUNNING") {
     Write-Host "  tmux session 'sweep' is active!" -ForegroundColor Green
 } else {
-    Write-Host "  WARNING: tmux session may not have started." -ForegroundColor Yellow
+    Write-Host "  FATAL: Failed to initialize remote execution environment." -ForegroundColor Red
+    Write-Host "  SSH Exit Code: $sshExitCode" -ForegroundColor Red
+    Write-Host "  Output: $($launchOutput | Out-String)" -ForegroundColor DarkGray
     Write-Host "  Debug with: gcloud compute ssh $VmName --command='tmux attach -t sweep'"
+    exit 1
 }
 
 Write-Host ""

@@ -376,6 +376,10 @@ def main():
         "--workers", type=int, default=1,
         help="Number of parallel experiment optimizations via multiprocessing (default: 1)"
     )
+    parser.add_argument(
+        "--mem-per-worker-gb", type=float, default=6.0,
+        help="Estimated memory per worker in GB for auto-capping (default: 6.0)"
+    )
     args = parser.parse_args()
 
     batch_dir = args.batch_dir
@@ -449,6 +453,20 @@ def main():
 
     # Execute optimizations (parallel or sequential)
     n_workers = min(args.workers, len(opt_tasks)) if opt_tasks else 1
+
+    # Memory-based worker cap: prevent OOM by limiting concurrent workers
+    # based on detected system RAM and configurable per-worker budget.
+    try:
+        import os as _os
+        mem_gb = _os.sysconf('SC_PAGE_SIZE') * _os.sysconf('SC_PHYS_PAGES') / (1024**3)
+        mem_safe_workers = max(1, int(mem_gb / args.mem_per_worker_gb))
+        if n_workers > mem_safe_workers:
+            print(f"  Memory cap: {n_workers} workers -> {mem_safe_workers} "
+                  f"(detected {mem_gb:.0f} GB RAM, {args.mem_per_worker_gb:.1f} GB/worker budget)")
+            n_workers = mem_safe_workers
+    except (ValueError, AttributeError, OSError):
+        pass  # Windows or unavailable — skip memory check
+
     print(f"\n{'='*60}")
     print(f"RUNNING {len(opt_tasks)} OPTIMIZATIONS (workers={n_workers})")
     print(f"{'='*60}")
