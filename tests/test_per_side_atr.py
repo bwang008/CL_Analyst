@@ -69,7 +69,7 @@ TIERED_CONFIG = {
     "allow_concurrent": False,
     "max_concurrent": 1,
     "atr_period": 14,
-    "trailing_activation_mult": 0.25,
+    "trailing_sl_atr_offset": 0.25,
     "models": {
         "long": {"threshold": 0.40},
         "short": {"threshold": 0.40},
@@ -78,7 +78,7 @@ TIERED_CONFIG = {
         "tp_atr_mult": 3.0,
         "sl_atr_mult": 1.5,
         "atr_period": 10,
-        "trailing_activation_mult": 0.5,
+        "trailing_sl_atr_offset": 0.5,
         "tiered_exits": [{"qty_pct": 1.0, "tp_atr_mult": 3.0}],
         "tiers": [{"min_prob": 0.40, "lots": 1, "tp_atr_mult": 3.0, "sl_atr_mult": 1.5}],
     },
@@ -86,7 +86,7 @@ TIERED_CONFIG = {
         "tp_atr_mult": 3.0,
         "sl_atr_mult": 1.5,
         "atr_period": 30,
-        "trailing_activation_mult": 1.0,
+        "trailing_sl_atr_offset": 1.0,
         "tiered_exits": [{"qty_pct": 1.0, "tp_atr_mult": 3.0}],
         "tiers": [{"min_prob": 0.40, "lots": 1, "tp_atr_mult": 3.0, "sl_atr_mult": 1.5}],
     },
@@ -121,12 +121,12 @@ class TestFromConfigPerSide:
         # Remove per-side atr_period
         del cfg["long"]["atr_period"]
         del cfg["short"]["atr_period"]
-        del cfg["long"]["trailing_activation_mult"]
-        del cfg["short"]["trailing_activation_mult"]
+        del cfg["long"]["trailing_sl_atr_offset"]
+        del cfg["short"]["trailing_sl_atr_offset"]
         engine = BacktestEngine.from_config(cfg)
         assert engine.atr_period_long == 14  # global fallback
         assert engine.atr_period_short == 14
-        assert engine.trailing_sl_atr_offset_long == 0.25
+        assert engine.trailing_sl_atr_offset_long == 0.25  # global from fixture
         assert engine.trailing_sl_atr_offset_short == 0.25
 
 
@@ -264,7 +264,7 @@ class TestBackwardCompatibility:
             "allow_concurrent": False,
             "max_concurrent": 1,
             "atr_period": 14,
-            "trailing_activation_mult": 0.25,
+            "trailing_sl_atr_offset": 0.25,
             "models": {
                 "long": {"threshold": 0.40},
                 "short": {"threshold": 0.40},

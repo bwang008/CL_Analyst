@@ -6,7 +6,7 @@ and the LiveTrader's __init__() resolve IDENTICAL values for all execution
 parameters.  This catches naming mismatches and missing config key lookups.
 
 Tests cover:
-  1. trailing_activation_mult parity (the fix for silent 0.25 fallback)
+  1. trailing_sl_atr_offset parity (new canonical key + legacy fallback)
   2. atr_period propagation (bracket ATR != model feature ATR)
   3. trailing_atr_mult default alignment (100.0 in both systems)
   4. max_hold_bars routing
@@ -31,6 +31,7 @@ from src.live_execution.strategies.execution_models import (
     TieredEnsembleStrategy,
     create_execution_strategy,
 )
+from src.live_execution.strategy_config import StrategyConfig
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +46,7 @@ PRODUCTION_LIKE_CONFIG = {
     "tp_atr_mult": 7.0,
     "sl_atr_mult": 3.25,
     "trailing_atr_mult": 3.25,
-    "trailing_activation_mult": 3.5,
+    "trailing_sl_atr_offset": 3.5,
     "atr_period": 26,
     "max_hold_bars": 192,
     "cooldown_bars": 3,
@@ -61,7 +62,7 @@ PRODUCTION_LIKE_CONFIG = {
         "tp_atr_mult": 7.0,
         "sl_atr_mult": 3.25,
         "trailing_atr_mult": 3.25,
-        "trailing_activation_mult": 3.0,
+        "trailing_sl_atr_offset": 3.0,
         "max_hold_bars": 192,
         "cooldown_bars": 15,
         "atr_period": 18,
@@ -76,7 +77,7 @@ PRODUCTION_LIKE_CONFIG = {
         "tp_atr_mult": 5.0,
         "sl_atr_mult": 1.75,
         "trailing_atr_mult": 4.25,
-        "trailing_activation_mult": 3.5,
+        "trailing_sl_atr_offset": 3.5,
         "max_hold_bars": 216,
         "cooldown_bars": 3,
         "atr_period": 26,
@@ -109,16 +110,17 @@ MINIMAL_CONFIG = {
 def _mock_live_trader_config(strategy_config: dict) -> dict:
     """Simulate the LiveTrader.__init__ parameter resolution.
 
-    Extracts the exact same logic as live_trader.py __init__ lines 514-585
-    to resolve config values WITHOUT needing IBKR connection or model loading.
+    Uses StrategyConfig.from_dict() — the same path as the actual LiveTrader.
     Returns a dict of resolved parameter names and values.
     """
+    sc = StrategyConfig.from_dict(strategy_config)
     return {
-        "max_hold_bars": int(strategy_config.get("max_hold_bars", 288)),
-        "trailing_atr_mult": float(strategy_config.get("trailing_atr_mult", 100.0)),
-        # This is the FIXED line — now reads trailing_activation_mult
-        "trailing_sl_atr_offset": float(strategy_config.get("trailing_activation_mult", 0.25)),
-        "atr_period": int(strategy_config.get("atr_period", 14)),
+        "max_hold_bars": sc.max_hold_bars,
+        "trailing_atr_mult": sc.trailing_atr_mult,
+        "trailing_sl_atr_offset": sc.trailing_sl_atr_offset,
+        "trailing_sl_atr_offset_long": sc.long.trailing_sl_atr_offset,
+        "trailing_sl_atr_offset_short": sc.short.trailing_sl_atr_offset,
+        "atr_period": sc.atr_period,
     }
 
 
@@ -132,6 +134,8 @@ def _backtest_engine_config(cfg: dict) -> dict:
         "max_hold_bars": engine.max_horizon,
         "trailing_atr_mult": engine.trailing_atr_mult,
         "trailing_sl_atr_offset": engine.trailing_sl_atr_offset,
+        "trailing_sl_atr_offset_long": engine.trailing_sl_atr_offset_long,
+        "trailing_sl_atr_offset_short": engine.trailing_sl_atr_offset_short,
         "atr_period": engine.atr_period,
         "atr_period_long": engine.atr_period_long,
         "atr_period_short": engine.atr_period_short,
@@ -141,12 +145,12 @@ def _backtest_engine_config(cfg: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Tests: trailing_activation_mult parity
+# Tests: trailing_sl_atr_offset parity
 # ---------------------------------------------------------------------------
 
 
-class TestTrailingActivationMultParity:
-    """Verify both systems read the same 'trailing_activation_mult' config key."""
+class TestTrailingSLAtrOffsetParity:
+    """Verify both systems read the trailing_sl_atr_offset config key."""
 
     def test_production_config_trailing_offset_matches(self):
         """Both systems should resolve trailing_sl_atr_offset=3.5 from config."""
@@ -161,28 +165,55 @@ class TestTrailingActivationMultParity:
             f"LiveTrader trailing_sl_atr_offset={lt['trailing_sl_atr_offset']}, expected 3.5"
         assert bt["trailing_sl_atr_offset"] == lt["trailing_sl_atr_offset"]
 
-    def test_missing_trailing_activation_mult_uses_default(self):
-        """If trailing_activation_mult is absent, both should default to 0.25."""
+    def test_missing_trailing_offset_uses_default(self):
+        """If trailing_sl_atr_offset is absent, both should default to 0.25."""
         cfg = copy.deepcopy(MINIMAL_CONFIG)
+        assert "trailing_sl_atr_offset" not in cfg
         assert "trailing_activation_mult" not in cfg
 
         bt = _backtest_engine_config(cfg)
         lt = _mock_live_trader_config(cfg)
 
-        assert bt["trailing_sl_atr_offset"] == 0.25
-        assert lt["trailing_sl_atr_offset"] == 0.25
+        assert bt["trailing_sl_atr_offset"] == 1.0
+        assert lt["trailing_sl_atr_offset"] == 1.0
 
-    def test_old_config_with_trailing_sl_atr_offset_key(self):
-        """If an old config uses 'trailing_sl_atr_offset' instead of
-        'trailing_activation_mult', it should NOT be picked up (we use
-        trailing_activation_mult as canonical)."""
+    def test_legacy_key_trailing_activation_mult_is_accepted(self):
+        """If a config uses 'trailing_activation_mult' (legacy key),
+        it should be parsed as trailing_sl_atr_offset."""
         cfg = copy.deepcopy(MINIMAL_CONFIG)
-        cfg["trailing_sl_atr_offset"] = 99.0  # Old key — should be ignored
-        cfg.pop("trailing_activation_mult", None)
+        cfg["trailing_activation_mult"] = 4.0  # Legacy key
 
+        bt = _backtest_engine_config(cfg)
         lt = _mock_live_trader_config(cfg)
-        # LiveTrader should NOT read the old key
-        assert lt["trailing_sl_atr_offset"] == 0.25  # default, not 99.0
+
+        assert bt["trailing_sl_atr_offset"] == 4.0
+        assert lt["trailing_sl_atr_offset"] == 4.0
+
+    def test_new_key_takes_priority_over_legacy(self):
+        """If both trailing_sl_atr_offset and trailing_activation_mult exist,
+        trailing_sl_atr_offset takes priority."""
+        cfg = copy.deepcopy(MINIMAL_CONFIG)
+        cfg["trailing_sl_atr_offset"] = 5.0  # New canonical key
+        cfg["trailing_activation_mult"] = 2.0  # Legacy key (should be ignored)
+
+        bt = _backtest_engine_config(cfg)
+        lt = _mock_live_trader_config(cfg)
+
+        assert bt["trailing_sl_atr_offset"] == 5.0  # new key wins
+        assert lt["trailing_sl_atr_offset"] == 5.0
+
+    def test_per_side_trailing_offset_parity(self):
+        """Both systems should resolve asymmetric per-side trailing offsets."""
+        cfg = copy.deepcopy(PRODUCTION_LIKE_CONFIG)
+
+        bt = _backtest_engine_config(cfg)
+        lt = _mock_live_trader_config(cfg)
+
+        # long = 3.0, short = 3.5
+        assert bt["trailing_sl_atr_offset_long"] == 3.0
+        assert bt["trailing_sl_atr_offset_short"] == 3.5
+        assert lt["trailing_sl_atr_offset_long"] == 3.0
+        assert lt["trailing_sl_atr_offset_short"] == 3.5
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +328,8 @@ class TestFullParityComparison:
         "max_hold_bars",
         "trailing_atr_mult",
         "trailing_sl_atr_offset",
+        "trailing_sl_atr_offset_long",
+        "trailing_sl_atr_offset_short",
         "atr_period",
     ]
 
@@ -344,49 +377,63 @@ class TestFullParityComparison:
 
 
 # ---------------------------------------------------------------------------
-# Tests: apply_trial_params routing for trailing_activation_mult
+# Tests: apply_trial_params routing for trailing_sl_atr_offset
 # ---------------------------------------------------------------------------
 
 
-class TestApplyTrialParamsTrailingActivation:
-    """Verify apply_trial_params routes trailing_activation_mult correctly."""
+class TestApplyTrialParamsTrailingOffset:
+    """Verify apply_trial_params routes trailing_sl_atr_offset correctly."""
 
-    def test_trailing_activation_mult_reaches_side_config(self):
-        """trailing_activation_mult should be written to side config."""
+    def test_trailing_sl_atr_offset_reaches_side_config(self):
+        """trailing_sl_atr_offset should be written to side config."""
         cfg = copy.deepcopy(PRODUCTION_LIKE_CONFIG)
         strategy = create_execution_strategy(cfg)
 
         strategy.apply_trial_params(
             cfg,
-            {"trailing_activation_mult": 2.0},
+            {"trailing_sl_atr_offset": 2.0},
             side="long",
         )
 
-        assert cfg["long"]["trailing_activation_mult"] == 2.0
-        assert cfg["trailing_activation_mult"] == 2.0  # top-level too
+        assert cfg["long"]["trailing_sl_atr_offset"] == 2.0
+        assert cfg["trailing_sl_atr_offset"] == 2.0  # top-level too
 
-    def test_trailing_activation_mult_per_side_independence(self):
-        """Each side should get its own trailing_activation_mult."""
+    def test_trailing_sl_atr_offset_per_side_independence(self):
+        """Each side should get its own trailing_sl_atr_offset."""
         cfg = copy.deepcopy(PRODUCTION_LIKE_CONFIG)
         strategy = create_execution_strategy(cfg)
 
-        strategy.apply_trial_params(cfg, {"trailing_activation_mult": 1.5}, side="long")
-        strategy.apply_trial_params(cfg, {"trailing_activation_mult": 4.0}, side="short")
+        strategy.apply_trial_params(cfg, {"trailing_sl_atr_offset": 1.5}, side="long")
+        strategy.apply_trial_params(cfg, {"trailing_sl_atr_offset": 4.0}, side="short")
 
-        assert cfg["long"]["trailing_activation_mult"] == 1.5
-        assert cfg["short"]["trailing_activation_mult"] == 4.0
+        assert cfg["long"]["trailing_sl_atr_offset"] == 1.5
+        assert cfg["short"]["trailing_sl_atr_offset"] == 4.0
         # Top-level gets short's value (last write wins)
-        assert cfg["trailing_activation_mult"] == 4.0
+        assert cfg["trailing_sl_atr_offset"] == 4.0
 
-    def test_backtest_engine_reads_applied_trailing_activation(self):
+    def test_backtest_engine_reads_applied_trailing_offset(self):
         """After apply_trial_params, BacktestEngine.from_config should use the value."""
         cfg = copy.deepcopy(PRODUCTION_LIKE_CONFIG)
         strategy = create_execution_strategy(cfg)
 
-        strategy.apply_trial_params(cfg, {"trailing_activation_mult": 5.0})
+        strategy.apply_trial_params(cfg, {"trailing_sl_atr_offset": 5.0})
 
         engine = BacktestEngine.from_config(cfg)
         assert engine.trailing_sl_atr_offset == 5.0
+
+    def test_legacy_key_in_apply_trial_params(self):
+        """apply_trial_params should still accept trailing_activation_mult."""
+        cfg = copy.deepcopy(PRODUCTION_LIKE_CONFIG)
+        strategy = create_execution_strategy(cfg)
+
+        strategy.apply_trial_params(
+            cfg,
+            {"trailing_activation_mult": 2.5},
+            side="long",
+        )
+
+        # Should be written under the new canonical key
+        assert cfg["long"]["trailing_sl_atr_offset"] == 2.5
 
 
 # ---------------------------------------------------------------------------

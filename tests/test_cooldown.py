@@ -121,6 +121,8 @@ def _make_trader_stub(
     trader._trade_max_hold_bars = None
     trader._trailing_atr_mult = 100.0
     trader._trailing_sl_atr_offset = 0.25
+    trader._trailing_sl_atr_offset_long = 0.25
+    trader._trailing_sl_atr_offset_short = 0.25
 
     # TP/SL order tracking (software-side OCA)
     trader._tp_order_ids = []

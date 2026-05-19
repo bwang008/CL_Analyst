@@ -371,28 +371,29 @@ class BacktestEngine:
         taking precedence.  Also instantiates the appropriate execution
         strategy via the registry/factory pattern.
         """
+        from src.live_execution.strategy_config import StrategyConfig
+
         # Instantiate the execution strategy from config
         strategy = create_execution_strategy(cfg)
 
         # Safety check: warn if top-level params are shadowed by tier overrides
         cls._check_parameter_shadowing(cfg, strategy)
 
-        global_atr = cfg.get("atr_period", 14)
-        global_trailing_offset = cfg.get("trailing_activation_mult", 0.25)
+        sc = StrategyConfig.from_dict(cfg)
         kwargs = {
-            "tp_atr_mult": cfg.get("tp_atr_mult", 2.0),
-            "sl_atr_mult": cfg.get("sl_atr_mult", 1.0),
-            "prob_threshold": cfg.get("entry_threshold", 0.45),
-            "allow_concurrent": cfg.get("allow_concurrent", False),
-            "max_concurrent": cfg.get("max_concurrent", 1),
-            "max_horizon": cfg.get("max_hold_bars", 288),
-            "atr_period": global_atr,
-            "atr_period_long": cfg.get("long", {}).get("atr_period", global_atr),
-            "atr_period_short": cfg.get("short", {}).get("atr_period", global_atr),
-            "trailing_atr_mult": cfg.get("trailing_atr_mult", 100.0),
-            "trailing_sl_atr_offset": global_trailing_offset,
-            "trailing_sl_atr_offset_long": cfg.get("long", {}).get("trailing_activation_mult", global_trailing_offset),
-            "trailing_sl_atr_offset_short": cfg.get("short", {}).get("trailing_activation_mult", global_trailing_offset),
+            "tp_atr_mult": sc.tp_atr_mult,
+            "sl_atr_mult": sc.sl_atr_mult,
+            "prob_threshold": sc.entry_threshold,
+            "allow_concurrent": sc.allow_concurrent,
+            "max_concurrent": sc.max_concurrent,
+            "max_horizon": sc.max_hold_bars,
+            "atr_period": sc.atr_period,
+            "atr_period_long": sc.long.atr_period,
+            "atr_period_short": sc.short.atr_period,
+            "trailing_atr_mult": sc.trailing_atr_mult,
+            "trailing_sl_atr_offset": sc.trailing_sl_atr_offset,
+            "trailing_sl_atr_offset_long": sc.long.trailing_sl_atr_offset,
+            "trailing_sl_atr_offset_short": sc.short.trailing_sl_atr_offset,
             "execution_strategy": strategy,
         }
         kwargs.update(overrides)

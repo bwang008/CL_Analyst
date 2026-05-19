@@ -6,7 +6,7 @@ experiment's canary_output directory and produces correctly-formatted
 strategy JSON configs with ALL top-level keys properly set.
 
 This solves the "missing top-level keys" problem where apply_trial_params()
-wrote atr_period, trailing_activation_mult, etc. to the top level during
+wrote atr_period, trailing_sl_atr_offset, etc. to the top level during
 optimization but those values were lost when configs were manually extracted.
 
 Output: <batch_dir>/configs/<label>_<metric>_opt.json for each ensemble
@@ -64,8 +64,11 @@ def _apply_side_params(cfg: dict, params: dict, side: str) -> None:
         side_cfg["consecutive_signal_threshold"] = params["consecutive_signal_threshold"]
     if "atr_period" in params:
         side_cfg["atr_period"] = params["atr_period"]
-    if "trailing_activation_mult" in params:
-        side_cfg["trailing_activation_mult"] = params["trailing_activation_mult"]
+    # Support both new canonical key and legacy key from optimization results
+    for _tso_key in ("trailing_sl_atr_offset", "trailing_activation_mult"):
+        if _tso_key in params:
+            side_cfg["trailing_sl_atr_offset"] = params[_tso_key]
+            break
 
     # 2. Tier overrides
     for tier in side_cfg.get("tiers", []):
@@ -99,7 +102,7 @@ def _apply_side_params(cfg: dict, params: dict, side: str) -> None:
     TOP_LEVEL_KEYS = (
         "tp_atr_mult", "sl_atr_mult", "trailing_atr_mult",
         "cooldown_bars", "max_hold_bars", "consecutive_signal_threshold",
-        "atr_period", "trailing_activation_mult",
+        "atr_period", "trailing_sl_atr_offset",
     )
     for key in TOP_LEVEL_KEYS:
         if key in params:

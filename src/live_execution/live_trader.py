@@ -201,21 +201,22 @@ class LiveTrader:
 
         # Read max_hold_bars from strategy config (keeps backtest & live in sync)
         strategy_config = getattr(strategy, "config", {})
-        self._max_hold_bars: int = int(
-            strategy_config.get("max_hold_bars", _MAX_HOLD_BARS)
-        )
+
+        # Parse config through centralized StrategyConfig dataclass
+        # to ensure parity with BacktestEngine.from_config()
+        from src.live_execution.strategy_config import StrategyConfig
+        _sc = StrategyConfig.from_dict(strategy_config)
+
+        self._max_hold_bars: int = _sc.max_hold_bars
 
         # Trailing stop config (parity with backtest engine)
-        self._trailing_atr_mult: float = float(
-            strategy_config.get("trailing_atr_mult", 100.0)
-        )
-        # PARITY FIX: Read 'trailing_activation_mult' (the canonical config
-        # key written by the optimizer) instead of 'trailing_sl_atr_offset'
-        # which never existed in any config.  This controls where the SL
-        # moves to after the trailing stop activates (entry ± mult×ATR).
-        self._trailing_sl_atr_offset: float = float(
-            strategy_config.get("trailing_activation_mult", 0.25)
-        )
+        self._trailing_atr_mult: float = _sc.trailing_atr_mult
+        # SL placement offset after trailing stop activation.
+        # Supports both new key (trailing_sl_atr_offset) and legacy key
+        # (trailing_activation_mult) via StrategyConfig.from_dict().
+        self._trailing_sl_atr_offset: float = _sc.trailing_sl_atr_offset
+        self._trailing_sl_atr_offset_long: float = _sc.long.trailing_sl_atr_offset
+        self._trailing_sl_atr_offset_short: float = _sc.short.trailing_sl_atr_offset
         # Exit mode for time-barrier exits (separate from entry_mode)
         self._exit_mode: str = exit_mode
         # Engine-level hard position cap (defense-in-depth)
@@ -257,18 +258,12 @@ class LiveTrader:
         # ATR period for bracket sizing (separate from ATR_14 model feature).
         # The model always uses ATR_14 as a feature, but bracket placement
         # (TP/SL/trailing) can use a different ATR period found by optimizer.
-        self._atr_period: int = int(
-            strategy_config.get("atr_period", 14)
-        )
+        self._atr_period: int = _sc.atr_period
         # Per-side ATR periods (parity with BacktestEngine)
         # The optimizer may find different optimal ATR periods for long vs short.
         # Both must be pre-computed as rolling columns on the DataFrame.
-        self._atr_period_long: int = int(
-            strategy_config.get("long", {}).get("atr_period", self._atr_period)
-        )
-        self._atr_period_short: int = int(
-            strategy_config.get("short", {}).get("atr_period", self._atr_period)
-        )
+        self._atr_period_long: int = _sc.long.atr_period
+        self._atr_period_short: int = _sc.short.atr_period
 
         log.info(
             "Entry mode: %s  adaptive_priority=%s  max_hold_bars=%d  "
@@ -858,7 +853,10 @@ class LiveTrader:
                     if self._trade_trailing_atr_mult is not None
                     else self._trailing_atr_mult
                 ),
-                trailing_sl_atr_offset=self._trailing_sl_atr_offset,
+                trailing_sl_atr_offset=(
+                    self._trailing_sl_atr_offset_long if self._position_side == 1
+                    else self._trailing_sl_atr_offset_short
+                ),
                 trailing_activated=self._trailing_activated,
                 highest_high=self._highest_high,
                 lowest_low=self._lowest_low,
@@ -914,8 +912,12 @@ class LiveTrader:
         if not triggered:
             return
 
-        # Calculate new SL price
-        offset = self._trailing_sl_atr_offset * self._atr_at_entry
+        # Calculate new SL price — route to the correct per-side offset
+        effective_offset = (
+            self._trailing_sl_atr_offset_long if self._position_side == 1
+            else self._trailing_sl_atr_offset_short
+        )
+        offset = effective_offset * self._atr_at_entry
         if self._position_side == 1:
             new_sl = self._entry_price + offset
         else:
@@ -926,7 +928,7 @@ class LiveTrader:
             "TRAILING STOP: activated — entry=%.2f  ATR=%.4f  "
             "trigger=%.2f×ATR  offset=%.2f×ATR  new_SL=%.2f",
             self._entry_price, self._atr_at_entry,
-            self._trailing_atr_mult, self._trailing_sl_atr_offset,
+            effective_trailing, effective_offset,
             new_sl,
         )
 
@@ -978,7 +980,7 @@ class LiveTrader:
                         bracket_atr=self._atr_at_entry,
                         sl_price=new_sl,
                         trailing_atr_mult=effective_trailing,
-                        trailing_sl_atr_offset=self._trailing_sl_atr_offset,
+                        trailing_sl_atr_offset=effective_offset,
                         trailing_activated=True,
                         highest_high=self._highest_high,
                         lowest_low=self._lowest_low,
@@ -1577,7 +1579,10 @@ class LiveTrader:
                                 if self._trade_trailing_atr_mult is not None
                                 else self._trailing_atr_mult
                             ),
-                            trailing_sl_atr_offset=self._trailing_sl_atr_offset,
+                            trailing_sl_atr_offset=(
+                                self._trailing_sl_atr_offset_long if self._position_side == 1
+                                else self._trailing_sl_atr_offset_short
+                            ),
                             trailing_activated=False,
                             highest_high=self._highest_high,
                             lowest_low=self._lowest_low,
