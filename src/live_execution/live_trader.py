@@ -121,6 +121,9 @@ _RECONNECT_BASE_DELAY = 5.0      # Initial delay before reconnect attempt (secon
 _RECONNECT_MAX_DELAY = 300.0     # Max backoff delay (5 minutes)
 _RECONNECT_MAX_ATTEMPTS = 50     # Max retry attempts (~2+ hours of retries)
 
+# Stale bar watchdog: force reconnect when bars stop arriving
+_STALE_BAR_THRESHOLD_MINUTES = 15  # Minutes without a bar before forcing reconnect
+
 # Auto-restart parameters (process-level recovery)
 _RESTART_MAX_ATTEMPTS = 5        # Max full restart attempts
 _RESTART_DELAY = 300.0           # Delay between restart attempts (5 minutes)
@@ -3138,6 +3141,7 @@ class LiveTrader:
                 # Periodic heartbeat (only when idle — no bars arriving)
                 if poll_count % _HEARTBEAT_CYCLES == 0:
                     self._log_heartbeat()
+                    self._check_stale_bars()
             except KeyboardInterrupt:
                 self._running = False
             except (ConnectionError, OSError) as exc:
@@ -3190,14 +3194,56 @@ class LiveTrader:
             pos_str = "unknown"
             pnl_str = ""
 
+        subs_status = " | subs_lost=True ⚠️" if self._subscriptions_lost else ""
         log.info(
-            "HEARTBEAT: alive | last_bar=%s | market=%s | position=%s%s | connected=%s",
+            "HEARTBEAT: alive | last_bar=%s | market=%s | position=%s%s | connected=%s%s",
             last_bar_str,
             market_status,
             pos_str,
             pnl_str,
             self.manager.ib.isConnected() if getattr(self.manager, "ib", None) else False,
+            subs_status,
         )
+
+    def _check_stale_bars(self) -> None:
+        """Proactive watchdog — force reconnect if bars are stale during market hours.
+
+        Closes the gap between reactive resubscription (waits for IBKR
+        restore event) and socket-level reconnect (waits for socket to
+        die).  Without this, the system can sit in a zombie state for
+        30-90 minutes with the socket alive but all data farms severed.
+        """
+        # Only act when we KNOW subscriptions are broken
+        if not self._subscriptions_lost:
+            return
+
+        # Don't force reconnect outside market hours (no bars expected)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        market_status = self._get_market_status(now)
+        if market_status != "OPEN":
+            return
+
+        # Check how long since the last bar
+        last_bar_time = getattr(self, "_last_bar_time_5m", None)
+        if last_bar_time is None:
+            return  # No bars received yet — warm start still in progress
+
+        minutes_stale = (now - last_bar_time).total_seconds() / 60
+        if minutes_stale < _STALE_BAR_THRESHOLD_MINUTES:
+            return  # Not stale enough yet
+
+        log.warning(
+            "STALE BAR WATCHDOG: no bars for %.0f min with "
+            "_subscriptions_lost=True — forcing disconnect to trigger reconnect",
+            minutes_stale,
+        )
+        # Force the socket closed.  The next ib.sleep() in _event_loop()
+        # will raise ConnectionError/OSError, which is caught and routed
+        # to _reconnect() — the existing, battle-tested recovery path.
+        try:
+            self.manager.ib.disconnect()
+        except Exception:
+            pass  # disconnect() can fail if already broken — that's fine
 
     @staticmethod
     def _get_market_status(utc_now: datetime) -> str:
