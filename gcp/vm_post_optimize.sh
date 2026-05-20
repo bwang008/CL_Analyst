@@ -32,7 +32,7 @@ cd "$PROJECT_DIR"
 BATCH_ID=""
 N_TRIALS=500
 HOLDOUT_MONTHS=4
-WORKERS=$(nproc)
+WORKERS=0
 SHUTDOWN=false
 OBJECTIVE="both"
 BUCKET="gs://cltrainer-optuna-results"

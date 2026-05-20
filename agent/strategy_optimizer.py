@@ -186,9 +186,9 @@ def _trade_floor_weight(trade_count: int, trade_floor: float,
     higher-activity parameter regions, rather than the uninformative -9999.0
     cliff used for zero-trade trials.
 
-    - trade_count >= trade_floor  →  1.0  (ceiling: no churn reward)
-    - trade_count << trade_floor  →  ~0.0 (kills hyper-selective configs)
-    - transition zone             →  smooth sigmoid ramp
+    - trade_count >= trade_floor  ->  1.0  (ceiling: no churn reward)
+    - trade_count << trade_floor  ->  ~0.0 (kills hyper-selective configs)
+    - transition zone             ->  smooth sigmoid ramp
     """
     if trade_count >= trade_floor:
         return 1.0

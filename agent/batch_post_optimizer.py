@@ -463,12 +463,12 @@ def main():
         help="Number of parallel Optuna trial evaluations (default: 1)"
     )
     parser.add_argument(
-        "--workers", type=int, default=1,
-        help="Number of parallel experiment optimizations via multiprocessing (default: 1)"
+        "--workers", type=int, default=0,
+        help="Number of parallel experiment optimizations (default: 0 = auto, matches task count)"
     )
     parser.add_argument(
-        "--mem-per-worker-gb", type=float, default=6.0,
-        help="Estimated memory per worker in GB for auto-capping (default: 6.0)"
+        "--mem-per-worker-gb", type=float, default=1.5,
+        help="Estimated memory per worker in GB for auto-capping (default: 1.5)"
     )
     parser.add_argument(
         "--objective", choices=["sharpe", "sortino", "both"], default="sharpe",
@@ -551,8 +551,14 @@ def main():
                 task_key = f"{label}|{side}|{metric}"
                 opt_tasks.append((task_key, ens_config, merged_path, label, metric, side))
 
-    # Memory-based worker cap
-    n_workers = min(args.workers, len(opt_tasks)) if opt_tasks else 1
+    # Auto-detect worker count: 0 = match task count (max parallelism)
+    if args.workers <= 0:
+        n_workers = len(opt_tasks) if opt_tasks else 1
+        print(f"  Auto workers: {n_workers} (one per task)")
+    else:
+        n_workers = min(args.workers, len(opt_tasks)) if opt_tasks else 1
+
+    # Memory-based safety cap — prevents OOM regardless of requested workers
     try:
         import os as _os
         mem_gb = _os.sysconf('SC_PAGE_SIZE') * _os.sysconf('SC_PHYS_PAGES') / (1024**3)
