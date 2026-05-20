@@ -83,6 +83,16 @@ class BestResultTracker:
 # ---------------------------------------------------------------------------
 
 _tg_config: dict | None = None
+_tg_last_send: float = 0.0  # monotonic timestamp of last successful send
+_tg_lock = threading.Lock()  # serialize sends within a process
+_tg_suppress = False  # when True, send_telegram is a no-op (batch mode)
+_TG_MIN_GAP = 0.5  # minimum seconds between sends (Telegram limit: 1/sec)
+
+
+def suppress_telegram(suppress: bool = True) -> None:
+    """Toggle per-worker Telegram suppression for batch mode."""
+    global _tg_suppress
+    _tg_suppress = suppress
 
 
 def _load_telegram_config() -> dict:
@@ -107,7 +117,18 @@ def _load_telegram_config() -> dict:
 
 
 def send_telegram(message: str) -> None:
-    """Send a Telegram notification. Silently skips if not configured."""
+    """Send a Telegram notification with rate-limiting and retry.
+
+    Enforces a minimum 0.5s gap between sends to stay under Telegram's
+    1 msg/sec/chat limit.  On 429 (Too Many Requests), retries after the
+    server-specified delay (up to 2 retries).
+
+    Silently skips if not configured or if ``suppress_telegram(True)``
+    has been called (used by batch_post_optimizer to silence per-worker
+    start/complete spam).
+    """
+    if _tg_suppress:
+        return
     import urllib.request
     import urllib.parse
     cfg = _load_telegram_config()
@@ -115,11 +136,36 @@ def send_telegram(message: str) -> None:
         return
     url = f"https://api.telegram.org/bot{cfg['token']}/sendMessage"
     data = urllib.parse.urlencode({"chat_id": cfg["chat_id"], "text": message}).encode()
-    try:
-        req = urllib.request.Request(url, data=data, method="POST")
-        urllib.request.urlopen(req, timeout=8)
-    except Exception:
-        pass
+
+    global _tg_last_send
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        with _tg_lock:
+            # Enforce minimum gap between sends
+            now = time.monotonic()
+            gap = _TG_MIN_GAP - (now - _tg_last_send)
+            if gap > 0:
+                time.sleep(gap)
+            try:
+                req = urllib.request.Request(url, data=data, method="POST")
+                urllib.request.urlopen(req, timeout=8)
+                _tg_last_send = time.monotonic()
+                return  # success
+            except urllib.error.HTTPError as e:
+                if e.code == 429 and attempt < max_retries:
+                    # Parse retry_after from response
+                    try:
+                        import json as _json
+                        body = _json.loads(e.read().decode())
+                        retry_after = body.get("parameters", {}).get("retry_after", 1)
+                    except Exception:
+                        retry_after = 1
+                    _tg_last_send = time.monotonic()
+                    time.sleep(retry_after)
+                    continue
+                return  # give up silently
+            except Exception:
+                return  # network error, give up silently
 
 
 # ---------------------------------------------------------------------------

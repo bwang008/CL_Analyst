@@ -30,7 +30,7 @@ os.chdir(PROJECT_ROOT)
 
 import pandas as pd
 from agent.backtest_engine import BacktestEngine, load_ohlcv, load_predictions
-from agent.strategy_optimizer import run_optimization, extract_metrics, send_telegram
+from agent.strategy_optimizer import run_optimization, extract_metrics, send_telegram, suppress_telegram
 
 
 def find_ohlcv_path(manifest_path: str) -> str:
@@ -82,6 +82,12 @@ def run_single_optimization(
     optimize_side: str | None = None,
 ) -> dict:
     """Run strategy_optimizer on a single config and return results."""
+    # Suppress per-worker Telegram notifications — the batch orchestrator
+    # sends its own milestone progress messages.  Without this, 32 workers
+    # each sending start+complete messages (64 total) overwhelm Telegram's
+    # 1 msg/sec/chat rate limit and most messages get silently dropped.
+    suppress_telegram(True)
+
     print(f"\n{'='*60}")
     print(f"OPTIMIZING: {label}")
     print(f"{'='*60}")

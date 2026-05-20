@@ -21,7 +21,7 @@ param(
     [string]$ProvisioningModel = "STANDARD",
     [int]$NTrials = 500,
     [int]$HoldoutMonths = 4,
-    [int]$Workers = 24,
+    [int]$Workers = 32,
     [switch]$NoShutdown,
     [switch]$NoMonitor,
     [switch]$DisableTelegram,
