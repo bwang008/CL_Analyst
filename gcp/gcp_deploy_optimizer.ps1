@@ -19,12 +19,13 @@ param(
     [int]$DiskSizeGB = 50,
     [string]$Project = "cltrainer",
     [string]$ProvisioningModel = "STANDARD",
-    [int]$NTrials = 1000,
+    [int]$NTrials = 500,
     [int]$HoldoutMonths = 4,
     [int]$Workers = 24,
     [switch]$NoShutdown,
     [switch]$NoMonitor,
-    [switch]$DisableTelegram
+    [switch]$DisableTelegram,
+    [string]$Objective = "both"
 )
 
 # Add gcloud to PATH if not already there
@@ -234,7 +235,7 @@ Write-Host "  Line endings fixed." -ForegroundColor Green
 Write-Host "`n[5/7] Launching post-optimizer in tmux..."
 
 $shutdownFlag = if ($NoShutdown) { "" } else { "--shutdown" }
-$launchCmd = "tmux kill-session -t optimizer 2>/dev/null; tmux new-session -d -s optimizer 'bash $RemoteProject/gcp/vm_post_optimize.sh --batch-id=$BatchId --n-trials=$NTrials --holdout-months=$HoldoutMonths --workers=$Workers $shutdownFlag'"
+$launchCmd = "tmux kill-session -t optimizer 2>/dev/null; tmux new-session -d -s optimizer 'bash $RemoteProject/gcp/vm_post_optimize.sh --batch-id=$BatchId --n-trials=$NTrials --holdout-months=$HoldoutMonths --workers=$Workers --objective=$Objective $shutdownFlag'"
 gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd --quiet 2>$null
 
 Write-Host "  Optimizer launched!" -ForegroundColor Green
@@ -248,7 +249,7 @@ $tmuxCheck = gcloud compute ssh $VmName --zone=$Zone `
 
 if ($tmuxCheck -match "RUNNING") {
     Write-Host "  tmux session 'optimizer' is active!" -ForegroundColor Green
-    Send-TelegramAlert "[STARTING] Post-Optimizer Deploy`nBatch: $BatchId`nTrials: $NTrials | Workers: $Workers`nVM: $VmName"
+    Send-TelegramAlert "[STARTING] Post-Optimizer Deploy`nBatch: $BatchId`nTrials: $NTrials | Workers: $Workers | Objective: $Objective`nVM: $VmName"
 } else {
     Write-Host "  WARNING: tmux session may not have started." -ForegroundColor Yellow
     Write-Host "  Debug with: gcloud compute ssh $VmName --command='tmux attach -t optimizer'"

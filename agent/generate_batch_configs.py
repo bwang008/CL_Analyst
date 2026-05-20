@@ -176,13 +176,20 @@ def main():
         "--min-pf", type=float, default=1.0,
         help="Skip configs with profit factor below this (default: 1.0)"
     )
+    parser.add_argument(
+        "--objective", default="sharpe",
+        help="Objective label for filename namespacing (default: sharpe)"
+    )
     args = parser.parse_args()
 
     batch_dir = args.batch_dir
     batch_id = os.path.basename(batch_dir)
 
     # Load optimization results
-    results_path = os.path.join(batch_dir, "optimization_results.json")
+    results_path = os.path.join(batch_dir, f"optimization_results_{args.objective}.json")
+    # Fallback to legacy filename if objective-specific one doesn't exist
+    if not os.path.exists(results_path):
+        results_path = os.path.join(batch_dir, "optimization_results.json")
     if not os.path.exists(results_path):
         print(f"ERROR: {results_path} not found")
         sys.exit(1)
@@ -214,12 +221,15 @@ def main():
         if result.get("status") != "OK":
             continue
 
-        # Parse key: "HS08 5x1 24H|ensemble|logloss"
+        # Parse key: "{label}|{side}|{metric}" (per-side) or "{label}|ensemble|{metric}" (legacy)
         parts = key.split("|")
-        if len(parts) != 3 or parts[1] != "ensemble":
+        if len(parts) != 3:
             continue
 
         label, direction, metric = parts
+        # Accept both per-side (long/short) and legacy (ensemble) keys
+        if direction not in ("long", "short", "ensemble"):
+            continue
         exp = exp_lookup.get(label)
         if exp is None:
             print(f"  SKIP {key}: experiment not found in progress")
@@ -248,10 +258,20 @@ def main():
         long_params = optuna_info.get("long_params", {})
         short_params = optuna_info.get("short_params", {})
 
-        if not long_params or not short_params:
-            print(f"  SKIP {key}: missing long_params or short_params")
-            skipped += 1
-            continue
+        if not long_params and not short_params:
+            # For per-side results, params are in the top-level "params" key
+            side_params = optuna_info.get("params", {})
+            optimize_side = optuna_info.get("optimize_side", direction)
+            if direction == "long" or optimize_side == "long":
+                long_params = side_params
+                short_params = {}
+            elif direction == "short" or optimize_side == "short":
+                short_params = side_params
+                long_params = {}
+            else:
+                print(f"  SKIP {key}: cannot determine side params")
+                skipped += 1
+                continue
 
         # Load base ensemble config from canary_output
         local_dir = exp["local_dir"]
@@ -272,6 +292,7 @@ def main():
             base_cfg = json.load(f)
 
         # Build the complete optimized config
+        # For per-side results, only apply the optimized side's params
         opt_cfg = build_config(
             base_cfg=base_cfg,
             long_params=long_params,
@@ -283,9 +304,9 @@ def main():
             batch_id=batch_id,
         )
 
-        # Save to configs directory
+        # Save to configs directory — include side and objective in filename
         safe_label = label.lower().replace(" ", "_")
-        filename = f"{safe_label}_{metric}_opt.json"
+        filename = f"{safe_label}_{metric}_{direction}_{args.objective}_opt.json"
         filepath = os.path.join(configs_dir, filename)
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(opt_cfg, f, indent=4)

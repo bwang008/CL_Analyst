@@ -408,28 +408,34 @@ class LiveTrader:
         broker_status = "🟢 Connected" if self.manager.ib.isConnected() else "🔴 Disconnected"
 
         current_position = 0
-        try:
-            current_position = self.manager.get_cl_position(symbol=self._execution_symbol)
-        except Exception:
-            pass
-
         unrealized_pnl = 0.0
         realized_pnl = 0.0
-        try:
-            for item in self.manager.ib.portfolio():
-                if item.contract.symbol == "CL":
-                    unrealized_pnl = float(item.unrealizedPNL)
-                    realized_pnl = float(item.realizedPNL)
-                    break
-            
-            # If position is flat, IBKR drops the contract from portfolio().
-            # Fall back to the daily account-level Realized PnL to prevent resetting to $0.
-            if current_position == 0:
-                for av in self.manager.ib.accountValues():
-                    if av.tag == "RealizedPnL" and av.currency == "USD":
-                        realized_pnl = float(av.value)
-        except Exception:
-            pass
+
+        # Guard: only query IBKR if connected.  This method may be called
+        # from the TelegramHeartbeat daemon thread, which has no asyncio
+        # event loop.  Calling ensure_connected() / connect() from that
+        # thread crashes with "There is no current event loop in thread".
+        if self.manager.ib.isConnected():
+            try:
+                current_position = self.manager.get_cl_position(symbol=self._execution_symbol)
+            except Exception:
+                pass
+
+            try:
+                for item in self.manager.ib.portfolio():
+                    if item.contract.symbol == "CL":
+                        unrealized_pnl = float(item.unrealizedPNL)
+                        realized_pnl = float(item.realizedPNL)
+                        break
+
+                # If position is flat, IBKR drops the contract from portfolio().
+                # Fall back to the daily account-level Realized PnL to prevent resetting to $0.
+                if current_position == 0:
+                    for av in self.manager.ib.accountValues():
+                        if av.tag == "RealizedPnL" and av.currency == "USD":
+                            realized_pnl = float(av.value)
+            except Exception:
+                pass
 
         try:
             cpu_pct = psutil.cpu_percent(interval=None)
@@ -3135,13 +3141,53 @@ class LiveTrader:
 
         while self._running:
             try:
+                # Proactive disconnect detection:
+                # ib.sleep() on a disconnected client does NOT raise —
+                # it silently calls asyncio.sleep().  So we must check
+                # the connection state explicitly and route to _reconnect()
+                # ourselves.  Without this, a disconnect leaves the bot
+                # in a zombie state (loop running but no data flowing).
+                if not self.manager.ib.isConnected():
+                    log.warning(
+                        "DISCONNECT DETECTED in event loop — "
+                        "attempting reconnect..."
+                    )
+                    if not self._reconnect():
+                        log.error(
+                            "Reconnection failed after %d attempts — "
+                            "attempting full restart...",
+                            _RECONNECT_MAX_ATTEMPTS,
+                        )
+                        self._running = False
+                        self._needs_restart = True
+                        break
+                    # Reconnect succeeded — resume normal polling
+                    poll_count = 0
+                    continue
+
                 self.manager.ib.sleep(_POLL_INTERVAL)
                 poll_count += 1
 
                 # Periodic heartbeat (only when idle — no bars arriving)
                 if poll_count % _HEARTBEAT_CYCLES == 0:
                     self._log_heartbeat()
-                    self._check_stale_bars()
+                    # Stale bar watchdog: if bars stopped arriving while
+                    # subscriptions are marked lost, force a reconnect.
+                    if self._check_stale_bars():
+                        log.info(
+                            "Stale bar watchdog triggered reconnect — "
+                            "entering recovery path..."
+                        )
+                        if not self._reconnect():
+                            log.error(
+                                "Reconnection failed after %d attempts — "
+                                "attempting full restart...",
+                                _RECONNECT_MAX_ATTEMPTS,
+                            )
+                            self._running = False
+                            self._needs_restart = True
+                            break
+                        poll_count = 0
             except KeyboardInterrupt:
                 self._running = False
             except (ConnectionError, OSError) as exc:
@@ -3205,8 +3251,10 @@ class LiveTrader:
             subs_status,
         )
 
-    def _check_stale_bars(self) -> None:
-        """Proactive watchdog — force reconnect if bars are stale during market hours.
+    def _check_stale_bars(self) -> bool:
+        """Proactive watchdog — signal reconnect if bars are stale during market hours.
+
+        Returns True if the caller should trigger a reconnect.
 
         Closes the gap between reactive resubscription (waits for IBKR
         restore event) and socket-level reconnect (waits for socket to
@@ -3215,35 +3263,34 @@ class LiveTrader:
         """
         # Only act when we KNOW subscriptions are broken
         if not self._subscriptions_lost:
-            return
+            return False
 
         # Don't force reconnect outside market hours (no bars expected)
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         market_status = self._get_market_status(now)
         if market_status != "OPEN":
-            return
+            return False
 
         # Check how long since the last bar
         last_bar_time = getattr(self, "_last_bar_time_5m", None)
         if last_bar_time is None:
-            return  # No bars received yet — warm start still in progress
+            return False  # No bars received yet — warm start still in progress
 
         minutes_stale = (now - last_bar_time).total_seconds() / 60
         if minutes_stale < _STALE_BAR_THRESHOLD_MINUTES:
-            return  # Not stale enough yet
+            return False  # Not stale enough yet
 
         log.warning(
             "STALE BAR WATCHDOG: no bars for %.0f min with "
-            "_subscriptions_lost=True — forcing disconnect to trigger reconnect",
+            "_subscriptions_lost=True — forcing disconnect + reconnect",
             minutes_stale,
         )
-        # Force the socket closed.  The next ib.sleep() in _event_loop()
-        # will raise ConnectionError/OSError, which is caught and routed
-        # to _reconnect() — the existing, battle-tested recovery path.
+        # Disconnect first so _reconnect() starts with a clean state.
         try:
             self.manager.ib.disconnect()
         except Exception:
             pass  # disconnect() can fail if already broken — that's fine
+        return True  # Caller should invoke _reconnect()
 
     @staticmethod
     def _get_market_status(utc_now: datetime) -> str:

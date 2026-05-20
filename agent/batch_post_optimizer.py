@@ -33,51 +33,6 @@ from agent.backtest_engine import BacktestEngine, load_ohlcv, load_predictions
 from agent.strategy_optimizer import run_optimization, extract_metrics, send_telegram
 
 
-def _extract_per_side_params(
-    result: dict,
-    label: str,
-    metric: str,
-    all_results: dict,
-) -> None:
-    """Extract per-side parameter details from an ensemble optimization result.
-
-    The optimizer runs a single ensemble optimization (both sides
-    simultaneously).  There are no separate long-only or short-only
-    optimizations, so we do NOT create per-side metric entries —
-    the report will show dashes for the Long/Short Model opt columns.
-
-    We only store per-side entries for the Detailed Parameters section
-    so it's clear which params apply to which side.
-    """
-    if result.get("status") != "OK":
-        return
-
-    opt_info = result.get("config", {}).get("optuna_info", {})
-    long_p = opt_info.get("long_params")
-    short_p = opt_info.get("short_params")
-
-    # Store per-side params for the detailed section, but with NO metrics
-    # (metrics=None signals that no per-side optimization was run)
-    if long_p:
-        all_results[f"{label}|long|{metric}"] = {
-            "status": "ENSEMBLE_ONLY",
-            "config": {"optuna_info": {
-                "params": long_p,
-                "trial_number": opt_info.get("trial_number"),
-                "n_trials": opt_info.get("n_trials"),
-            }},
-        }
-    if short_p:
-        all_results[f"{label}|short|{metric}"] = {
-            "status": "ENSEMBLE_ONLY",
-            "config": {"optuna_info": {
-                "params": short_p,
-                "trial_number": opt_info.get("trial_number"),
-                "n_trials": opt_info.get("n_trials"),
-            }},
-        }
-
-
 def find_ohlcv_path(manifest_path: str) -> str:
     """Resolve the local OHLCV parquet from the batch manifest."""
     with open(manifest_path) as f:
@@ -123,6 +78,8 @@ def run_single_optimization(
     holdout_months: int = 0,
     n_jobs: int = 1,
     quiet: bool = False,
+    objective_metric: str = "sharpe",
+    optimize_side: str | None = None,
 ) -> dict:
     """Run strategy_optimizer on a single config and return results."""
     print(f"\n{'='*60}")
@@ -139,6 +96,8 @@ def run_single_optimization(
             n_jobs=n_jobs,
             quiet=quiet,
             label=label,
+            objective_metric=objective_metric,
+            optimize_side=optimize_side,
         )
         best_metrics = extract_metrics(best_result)
         return {
@@ -189,28 +148,30 @@ def generate_optimized_report(
     wall_time_seconds: float = 0.0,
     n_trials: int = 0,
     n_workers: int = 1,
+    objective_metric: str = "sharpe",
 ) -> str:
-    """Generate batch_summary_optimized.md with pre/post comparison."""
+    """Generate batch_summary_optimized_{objective}.md with pre/post comparison."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    obj_title = objective_metric.capitalize()
     lines = []
-    lines.append(f"# Batch Experiment Summary (Optimized) - {os.path.basename(batch_dir)}")
+    lines.append(f"# Batch Experiment Summary (Optimized - {obj_title}) - {os.path.basename(batch_dir)}")
     lines.append(f"\nGenerated: {ts}")
     lines.append(f"Manifest: {progress.get('manifest', 'unknown')}")
     lines.append(f"Baseline Report: batch_summary.md")
+    lines.append(f"Objective: {obj_title}")
     lines.append(f"Total Wall Time: {wall_time_seconds:.0f}s ({wall_time_seconds/60:.1f} min)")
     lines.append(f"Trials per target: {n_trials} | Workers: {n_workers}")
     lines.append("")
 
-    # Build comparison tables per direction
-    for section_name, direction_key, metric_keys in [
-        ("Long Model", "long", ["logloss", "average_precision"]),
-        ("Short Model", "short", ["logloss", "average_precision"]),
-        ("Ensemble", "ensemble", ["logloss", "average_precision"]),
+    # Build comparison tables — Long and Short only (no Ensemble)
+    for section_name, direction_key in [
+        ("Long Model", "long"),
+        ("Short Model", "short"),
     ]:
-        for metric in metric_keys:
+        for metric in ["logloss", "average_precision"]:
             lines.append(f"### {section_name} ({metric.replace('_', ' ').title()})")
             lines.append("")
-            lines.append("| Experiment | Trades (pre) | Trades (opt) | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (opt h/o) | Opt Thr | Opt TP | Opt SL | Opt Trail | Opt Cool | Opt Hold | Opt Consec | Best Trial |")
+            lines.append("| Experiment | Trades (pre) | Trades (opt) | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (holdout) | Opt Thr | Opt TP | Opt SL | Opt Trail | Opt Cool | Opt Hold | Opt Consec | Best Trial |")
             lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 
             for exp in progress.get("experiments", []):
@@ -227,11 +188,7 @@ def generate_optimized_report(
                     summary = json.load(f)
                 bt = summary.get("backtest_results", {})
 
-                if direction_key == "ensemble":
-                    base_key = f"ensemble_{metric}"
-                else:
-                    base_key = f"{direction_key}_{metric}"
-
+                base_key = f"{direction_key}_{metric}"
                 base = bt.get(base_key, {})
                 base_trades = base.get("trade_count", 0)
                 base_pf = base.get("profit_factor", 0.0)
@@ -243,12 +200,11 @@ def generate_optimized_report(
 
                 if opt.get("status") == "OK":
                     om = opt.get("metrics", {})
-                    # Handle both in-memory (with full config) and JSON-loaded (stripped) structures
                     if "optuna_info" in opt:
                         opt_info = opt["optuna_info"]
                     else:
                         opt_info = opt.get("config", {}).get("optuna_info", {})
-                    
+
                     params = opt_info.get("params", {})
                     opt_trades = om.get("trade_count", 0)
                     opt_pf = om.get("profit_factor", 0.0)
@@ -260,7 +216,6 @@ def generate_optimized_report(
                     opt_cool = params.get("cooldown_bars", "-")
                     opt_hold = params.get("max_hold_bars", "-")
                     opt_consec = params.get("consecutive_signal_threshold", "-")
-                    # Holdout PnL (unseen by optimizer)
                     ho_metrics = opt_info.get("holdout_metrics", {})
                     ho_pnl = f"${ho_metrics['total_pnl']:,.0f}" if ho_metrics else "-"
                     trial_num = opt_info.get('trial_number', '-')
@@ -272,26 +227,6 @@ def generate_optimized_report(
                         f"${base_pnl:,.0f} | ${opt_pnl:,.0f} | "
                         f"{ho_pnl} | "
                         f"{opt_thr} | {opt_tp} | {opt_sl} | {opt_trail} | {opt_cool} | {opt_hold} | {opt_consec} | {best_trial_str} |"
-                    )
-                elif opt.get("status") == "ENSEMBLE_ONLY":
-                    # No per-side optimization was run — show params but blank metrics
-                    if "optuna_info" in opt:
-                        opt_info = opt["optuna_info"]
-                    else:
-                        opt_info = opt.get("config", {}).get("optuna_info", {})
-                    params = opt_info.get("params", {})
-                    opt_thr = params.get("entry_threshold", "-")
-                    opt_tp = params.get("tp_atr_mult", "-")
-                    opt_sl = params.get("sl_atr_mult", "-")
-                    opt_trail = params.get("trailing_atr_mult", "-")
-                    opt_cool = params.get("cooldown_bars", "-")
-                    opt_hold = params.get("max_hold_bars", "-")
-                    opt_consec = params.get("consecutive_signal_threshold", "-")
-                    lines.append(
-                        f"| {label} | {base_trades} | - | "
-                        f"{base_pf:.2f} | - | "
-                        f"${base_pnl:,.0f} | - | - | "
-                        f"{opt_thr} | {opt_tp} | {opt_sl} | {opt_trail} | {opt_cool} | {opt_hold} | {opt_consec} | - |"
                     )
                 else:
                     reason = opt.get("error", "not run") if opt else "not run"
@@ -314,7 +249,7 @@ def generate_optimized_report(
             opt_info = result["optuna_info"]
         else:
             opt_info = result.get("config", {}).get("optuna_info", {})
-            
+
         params = opt_info.get("params", {})
         metrics = result.get("metrics", {})
         baseline = opt_info.get("baseline_metrics", {})
@@ -355,6 +290,155 @@ def generate_optimized_report(
     return "\n".join(out_lines)
 
 
+def _run_for_objective(
+    objective_metric: str,
+    opt_tasks: list,
+    args,
+    ohlcv_path: str,
+    batch_dir: str,
+    progress: dict,
+    n_workers: int,
+    total_start: float,
+):
+    """Run all optimization tasks for a single objective (sharpe or sortino).
+
+    Returns the wall time for this objective's run.
+    """
+    obj_start = time.perf_counter()
+    all_results = {}
+
+    print(f"\n{'='*60}")
+    print(f"RUNNING {len(opt_tasks)} OPTIMIZATIONS — {objective_metric.upper()} (workers={n_workers})")
+    print(f"{'='*60}")
+
+    # Telegram batch-level progress tracking
+    _total_tasks = len(opt_tasks)
+    _completed_count = 0
+    _last_tg_time = time.perf_counter()
+    _TG_INTERVAL_SECS = 30 * 60
+    _milestone_pcts = {25, 50, 75, 100}
+    _milestones_sent = set()
+
+    def _maybe_send_progress(completed, total, label, status):
+        nonlocal _last_tg_time, _milestones_sent
+        now = time.perf_counter()
+        pct = int(100 * completed / total) if total > 0 else 0
+        elapsed_min = (now - total_start) / 60
+        is_milestone = pct in _milestone_pcts and pct not in _milestones_sent
+        is_time_update = (now - _last_tg_time) >= _TG_INTERVAL_SECS
+        if is_milestone or is_time_update:
+            if is_milestone:
+                _milestones_sent.add(pct)
+            _last_tg_time = now
+            send_telegram(
+                f"[Batch Post-Optimizer] Progress ({objective_metric})\n"
+                f"{completed}/{total} optimizations done ({pct}%)\n"
+                f"Latest: {label} -> {status}\n"
+                f"Elapsed: {elapsed_min:.0f} min"
+            )
+
+    send_telegram(
+        f"[Batch Post-Optimizer] STARTING ({objective_metric})\n"
+        f"Batch: {os.path.basename(batch_dir)}\n"
+        f"{_total_tasks} optimizations, {n_workers} workers\n"
+        f"{args.n_trials} trials/optimization, {args.holdout_months}mo holdout"
+    )
+
+    if n_workers > 1:
+        futures = {}
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            for task_key, ens_config, merged_path, label, metric, side in opt_tasks:
+                future = pool.submit(
+                    run_single_optimization,
+                    config_path=ens_config,
+                    predictions_path=merged_path,
+                    ohlcv_path=ohlcv_path,
+                    n_trials=args.n_trials,
+                    min_trades=args.min_trades,
+                    label=f"{label} {side.upper()} {metric}",
+                    holdout_months=args.holdout_months,
+                    n_jobs=args.jobs,
+                    quiet=True,
+                    objective_metric=objective_metric,
+                    optimize_side=side,
+                )
+                futures[future] = (task_key, merged_path, label, metric, side)
+
+            for future in as_completed(futures):
+                task_key, merged_path, label, metric, side = futures[future]
+                try:
+                    result = future.result()
+                except Exception as e:
+                    print(f"  ERROR in {task_key}: {e}")
+                    result = {"status": "FAILED", "error": str(e)}
+                all_results[task_key] = result
+                _completed_count += 1
+                _maybe_send_progress(_completed_count, _total_tasks, f"{label} {side} {metric}", result.get('status', '?'))
+    else:
+        for task_key, ens_config, merged_path, label, metric, side in opt_tasks:
+            result = run_single_optimization(
+                config_path=ens_config,
+                predictions_path=merged_path,
+                ohlcv_path=ohlcv_path,
+                n_trials=args.n_trials,
+                min_trades=args.min_trades,
+                label=f"{label} {side.upper()} {metric}",
+                holdout_months=args.holdout_months,
+                n_jobs=args.jobs,
+                quiet=(args.workers > 1),
+                objective_metric=objective_metric,
+                optimize_side=side,
+            )
+            all_results[task_key] = result
+            _completed_count += 1
+            _maybe_send_progress(_completed_count, _total_tasks, f"{label} {side} {metric}", result.get('status', '?'))
+
+    obj_elapsed = time.perf_counter() - obj_start
+
+    # Final batch-level summary
+    ok_count = sum(1 for v in all_results.values() if v.get('status') == 'OK')
+    fail_count = sum(1 for v in all_results.values() if v.get('status') == 'FAILED')
+    report_name = f"batch_summary_optimized_{objective_metric}.md"
+    send_telegram(
+        f"[Batch Post-Optimizer] COMPLETE ({objective_metric})\n"
+        f"Batch: {os.path.basename(batch_dir)}\n"
+        f"Results: {ok_count} OK, {fail_count} failed\n"
+        f"Wall time: {obj_elapsed/60:.1f} min\n"
+        f"Report: {report_name}"
+    )
+
+    # Generate report
+    report = generate_optimized_report(
+        batch_dir, progress, all_results, ohlcv_path,
+        wall_time_seconds=obj_elapsed,
+        n_trials=args.n_trials,
+        n_workers=args.workers,
+        objective_metric=objective_metric,
+    )
+    report_path = os.path.join(batch_dir, report_name)
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(report)
+    print(f"\nOptimized report saved: {report_path}")
+
+    # Save raw results JSON
+    results_json_path = os.path.join(batch_dir, f"optimization_results_{objective_metric}.json")
+    serializable = {}
+    for k, v in all_results.items():
+        sv = {"status": v["status"]}
+        if v.get("metrics"):
+            sv["metrics"] = v["metrics"]
+        if v.get("config", {}).get("optuna_info"):
+            sv["optuna_info"] = v["config"]["optuna_info"]
+        if v.get("error"):
+            sv["error"] = v["error"]
+        serializable[k] = sv
+    with open(results_json_path, "w") as f:
+        json.dump(serializable, f, indent=2, default=str)
+    print(f"Raw results: {results_json_path}")
+
+    return obj_elapsed
+
+
 def main():
     parser = argparse.ArgumentParser(description="Batch Post-Optimizer")
     parser.add_argument("--batch-dir", required=True, help="Path to batch directory")
@@ -379,6 +463,10 @@ def main():
     parser.add_argument(
         "--mem-per-worker-gb", type=float, default=6.0,
         help="Estimated memory per worker in GB for auto-capping (default: 6.0)"
+    )
+    parser.add_argument(
+        "--objective", choices=["sharpe", "sortino", "both"], default="sharpe",
+        help="Objective function: sharpe (default), sortino, or both (runs sequentially)"
     )
     args = parser.parse_args()
 
@@ -410,11 +498,11 @@ def main():
         so.TopKTracker.save_best = patched_save_best
 
     ohlcv_df = load_ohlcv(ohlcv_path)
-    all_results = {}
     total_start = time.perf_counter()
 
-    # Build list of optimization tasks
-    opt_tasks = []  # list of (ens_key, config_path, merged_path, label, metric, exp)
+    # Build list of PER-SIDE optimization tasks
+    # Each task: (task_key, config_path, merged_path, label, metric, side)
+    opt_tasks = []
     for exp in progress.get("experiments", []):
         if exp.get("status") != "COMPLETED":
             continue
@@ -442,20 +530,23 @@ def main():
                 print(f"  Skipping {label}/{metric}: no ensemble config")
                 continue
 
-            # --- ENSEMBLE optimization (handles per-side internally) ---
-            if os.path.exists(long_pred) and os.path.exists(short_pred):
-                ens_key = f"{label}|ensemble|{metric}"
-                # Create merged predictions
-                merged_path = os.path.join(canary_dir, f"_merged_ens_{metric}.csv")
+            if not os.path.exists(long_pred) or not os.path.exists(short_pred):
+                print(f"  Skipping {label}/{metric}: missing prediction files")
+                continue
+
+            # Create merged predictions (both sides need columns present for backtest engine)
+            merged_path = os.path.join(canary_dir, f"_merged_ens_{metric}.csv")
+            if not os.path.exists(merged_path):
                 merged_df = merge_predictions(long_pred, short_pred)
                 merged_df.to_csv(merged_path)
-                opt_tasks.append((ens_key, ens_config, merged_path, label, metric, exp))
 
-    # Execute optimizations (parallel or sequential)
+            # Per-side tasks — long and short independently
+            for side in ["long", "short"]:
+                task_key = f"{label}|{side}|{metric}"
+                opt_tasks.append((task_key, ens_config, merged_path, label, metric, side))
+
+    # Memory-based worker cap
     n_workers = min(args.workers, len(opt_tasks)) if opt_tasks else 1
-
-    # Memory-based worker cap: prevent OOM by limiting concurrent workers
-    # based on detected system RAM and configurable per-worker budget.
     try:
         import os as _os
         mem_gb = _os.sysconf('SC_PAGE_SIZE') * _os.sysconf('SC_PHYS_PAGES') / (1024**3)
@@ -467,151 +558,28 @@ def main():
     except (ValueError, AttributeError, OSError):
         pass  # Windows or unavailable — skip memory check
 
+    # Determine which objectives to run
+    objectives = ["sharpe", "sortino"] if args.objective == "both" else [args.objective]
+
+    for obj in objectives:
+        _run_for_objective(
+            objective_metric=obj,
+            opt_tasks=opt_tasks,
+            args=args,
+            ohlcv_path=ohlcv_path,
+            batch_dir=batch_dir,
+            progress=progress,
+            n_workers=n_workers,
+            total_start=total_start,
+        )
+
+    total_elapsed = time.perf_counter() - total_start
     print(f"\n{'='*60}")
-    print(f"RUNNING {len(opt_tasks)} OPTIMIZATIONS (workers={n_workers})")
+    print(f"ALL OPTIMIZATIONS COMPLETE - {total_elapsed:.0f}s ({total_elapsed/60:.1f} min)")
+    print(f"Objectives: {', '.join(objectives)}")
     print(f"{'='*60}")
-
-    # Telegram batch-level progress tracking
-    _total_tasks = len(opt_tasks)
-    _completed_count = 0
-    _last_tg_time = time.perf_counter()
-    _TG_INTERVAL_SECS = 30 * 60  # 30-minute progress updates
-    _milestone_pcts = {25, 50, 75, 100}
-    _milestones_sent = set()
-
-    def _maybe_send_progress(completed: int, total: int, label: str, status: str):
-        """Send Telegram if milestone hit or 30 min elapsed since last update."""
-        nonlocal _last_tg_time, _milestones_sent
-        now = time.perf_counter()
-        pct = int(100 * completed / total) if total > 0 else 0
-        elapsed_min = (now - total_start) / 60
-
-        is_milestone = pct in _milestone_pcts and pct not in _milestones_sent
-        is_time_update = (now - _last_tg_time) >= _TG_INTERVAL_SECS
-
-        if is_milestone or is_time_update:
-            if is_milestone:
-                _milestones_sent.add(pct)
-            _last_tg_time = now
-            send_telegram(
-                f"[Batch Post-Optimizer] Progress\n"
-                f"{completed}/{total} optimizations done ({pct}%)\n"
-                f"Latest: {label} -> {status}\n"
-                f"Elapsed: {elapsed_min:.0f} min"
-            )
-
-    send_telegram(
-        f"[Batch Post-Optimizer] STARTING\n"
-        f"Batch: {os.path.basename(batch_dir)}\n"
-        f"{_total_tasks} optimizations, {n_workers} workers\n"
-        f"{args.n_trials} trials/optimization, {args.holdout_months}mo holdout"
-    )
-
-    if n_workers > 1:
-        # Process-level parallelism — bypasses GIL for true multi-core speedup
-        futures = {}
-        with ProcessPoolExecutor(max_workers=n_workers) as pool:
-            for ens_key, ens_config, merged_path, label, metric, exp in opt_tasks:
-                future = pool.submit(
-                    run_single_optimization,
-                    config_path=ens_config,
-                    predictions_path=merged_path,
-                    ohlcv_path=ohlcv_path,
-                    n_trials=args.n_trials,
-                    min_trades=args.min_trades,
-                    label=f"{label} ENSEMBLE {metric}",
-                    holdout_months=args.holdout_months,
-                    n_jobs=args.jobs,
-                    quiet=True,
-                )
-                futures[future] = (ens_key, merged_path, label, metric)
-
-            for future in as_completed(futures):
-                ens_key, merged_path, label, metric = futures[future]
-                try:
-                    result = future.result()
-                except Exception as e:
-                    print(f"  ERROR in {ens_key}: {e}")
-                    result = {"status": "FAILED", "error": str(e)}
-                all_results[ens_key] = result
-                if os.path.exists(merged_path):
-                    os.remove(merged_path)
-
-                # Extract per-side params (no per-side metrics — ensemble only)
-                _extract_per_side_params(result, label, metric, all_results)
-
-                # Batch-level Telegram progress
-                _completed_count += 1
-                _maybe_send_progress(_completed_count, _total_tasks, f"{label} {metric}", result.get('status', '?'))
-    else:
-        # Sequential execution (default)
-        for ens_key, ens_config, merged_path, label, metric, exp in opt_tasks:
-            result = run_single_optimization(
-                config_path=ens_config,
-                predictions_path=merged_path,
-                ohlcv_path=ohlcv_path,
-                n_trials=args.n_trials,
-                min_trades=args.min_trades,
-                label=f"{label} ENSEMBLE {metric}",
-                holdout_months=args.holdout_months,
-                n_jobs=args.jobs,
-                quiet=(args.workers > 1),
-            )
-            all_results[ens_key] = result
-            if os.path.exists(merged_path):
-                os.remove(merged_path)
-
-            # Extract per-side params (no per-side metrics — ensemble only)
-            _extract_per_side_params(result, label, metric, all_results)
-
-            # Batch-level Telegram progress
-            _completed_count += 1
-            _maybe_send_progress(_completed_count, _total_tasks, f"{label} {metric}", result.get('status', '?'))
-
-    elapsed = time.perf_counter() - total_start
-    print(f"\n{'='*60}")
-    print(f"ALL OPTIMIZATIONS COMPLETE - {elapsed:.0f}s ({elapsed/60:.1f} min)")
-    print(f"{'='*60}")
-
-    # Final batch-level summary
-    ok_count = sum(1 for v in all_results.values() if v.get('status') == 'OK')
-    fail_count = sum(1 for v in all_results.values() if v.get('status') == 'FAILED')
-    send_telegram(
-        f"[Batch Post-Optimizer] COMPLETE\n"
-        f"Batch: {os.path.basename(batch_dir)}\n"
-        f"Results: {ok_count} OK, {fail_count} failed\n"
-        f"Wall time: {elapsed/60:.1f} min\n"
-        f"Report: batch_summary_optimized.md"
-    )
-
-    # Generate report
-    report = generate_optimized_report(
-        batch_dir, progress, all_results, ohlcv_path,
-        wall_time_seconds=elapsed,
-        n_trials=args.n_trials,
-        n_workers=args.workers,
-    )
-    report_path = os.path.join(batch_dir, "batch_summary_optimized.md")
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write(report)
-    print(f"\nOptimized report saved: {report_path}")
-
-    # Save raw results JSON
-    results_json_path = os.path.join(batch_dir, "optimization_results.json")
-    serializable = {}
-    for k, v in all_results.items():
-        sv = {"status": v["status"]}
-        if v.get("metrics"):
-            sv["metrics"] = v["metrics"]
-        if v.get("config", {}).get("optuna_info"):
-            sv["optuna_info"] = v["config"]["optuna_info"]
-        if v.get("error"):
-            sv["error"] = v["error"]
-        serializable[k] = sv
-    with open(results_json_path, "w") as f:
-        json.dump(serializable, f, indent=2, default=str)
-    print(f"Raw results: {results_json_path}")
 
 
 if __name__ == "__main__":
     main()
+

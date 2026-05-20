@@ -30,10 +30,11 @@ cd "$PROJECT_DIR"
 
 # Defaults
 BATCH_ID=""
-N_TRIALS=1000
+N_TRIALS=500
 HOLDOUT_MONTHS=4
 WORKERS=$(nproc)
 SHUTDOWN=false
+OBJECTIVE="both"
 BUCKET="gs://cltrainer-optuna-results"
 LOG="post_optimize_$(date +%Y%m%d_%H%M%S).log"
 
@@ -44,6 +45,7 @@ for arg in "$@"; do
         --n-trials=*) N_TRIALS="${arg#*=}" ;;
         --holdout-months=*) HOLDOUT_MONTHS="${arg#*=}" ;;
         --workers=*) WORKERS="${arg#*=}" ;;
+        --objective=*) OBJECTIVE="${arg#*=}" ;;
         --shutdown) SHUTDOWN=true ;;
     esac
 done
@@ -64,6 +66,7 @@ echo "  Batch ID:      $BATCH_ID" | tee -a "$LOG"
 echo "  N Trials:      $N_TRIALS" | tee -a "$LOG"
 echo "  Holdout:       $HOLDOUT_MONTHS months" | tee -a "$LOG"
 echo "  Workers:       $WORKERS" | tee -a "$LOG"
+echo "  Objective:     $OBJECTIVE" | tee -a "$LOG"
 echo "  Bucket:        $BUCKET" | tee -a "$LOG"
 echo "  CPUs:          $(nproc)" | tee -a "$LOG"
 echo "============================================================" | tee -a "$LOG"
@@ -166,13 +169,14 @@ fi
 # --- [4/5] Run batch_post_optimizer ---
 echo "" | tee -a "$LOG"
 echo "[4/5] Running batch post-optimizer..." | tee -a "$LOG"
-echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --no-filter" | tee -a "$LOG"
+echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter" | tee -a "$LOG"
 
 python agent/batch_post_optimizer.py \
     --batch-dir "$BATCH_DIR" \
     --n-trials "$N_TRIALS" \
     --holdout-months "$HOLDOUT_MONTHS" \
     --workers "$WORKERS" \
+    --objective "$OBJECTIVE" \
     --no-filter \
     2>&1 | tee -a "$LOG"
 
@@ -185,15 +189,23 @@ echo "[4b/6] Generating strategy configs from optimization results..." | tee -a 
 python agent/generate_batch_configs.py \
     --batch-dir "$BATCH_DIR" \
     --min-trades 10 \
+    --objective "$OBJECTIVE" \
     2>&1 | tee -a "$LOG" || echo "  WARNING: Config generation failed (non-fatal)" | tee -a "$LOG"
 
 # --- [5/6] Upload results to GCS ---
 echo "" | tee -a "$LOG"
 echo "[5/6] Uploading results to GCS..." | tee -a "$LOG"
 
-# Upload optimized report and results JSON
-gsutil cp "$BATCH_DIR/batch_summary_optimized.md" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
-gsutil cp "$BATCH_DIR/optimization_results.json" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+# Upload optimized reports and results JSONs (glob for all objectives)
+for f in "$BATCH_DIR"/batch_summary_optimized_*.md; do
+    [ -f "$f" ] && gsutil cp "$f" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+done
+for f in "$BATCH_DIR"/optimization_results_*.json; do
+    [ -f "$f" ] && gsutil cp "$f" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+done
+# Legacy fallback uploads
+[ -f "$BATCH_DIR/batch_summary_optimized.md" ] && gsutil cp "$BATCH_DIR/batch_summary_optimized.md" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+[ -f "$BATCH_DIR/optimization_results.json" ] && gsutil cp "$BATCH_DIR/optimization_results.json" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
 
 # Upload all optimized config JSONs (legacy per-experiment configs)
 find reports/ -name "*_opt.json" -path "*/canary_output/*" -exec gsutil cp {} "$BUCKET/$GCS_OPT_PREFIX/configs/" \; 2>&1 | tee -a "$LOG" || true

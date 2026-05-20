@@ -6,10 +6,14 @@ cooldown, max hold bars, trailing stop) using BacktestEngine against OOS
 predictions.  This is distinct from ``optuna_lgbm_search.py`` which tunes
 LightGBM *model* hyperparameters.
 
-For TieredEnsembleStrategy configs, BOTH sides (long/short) are optimized
-**simultaneously** in a single Optuna trial with asymmetric parameters.
-The objective is the Annualized Monthly Sharpe Ratio (Consistency Score)
-of the combined portfolio.
+Supports three optimization modes:
+  - **simultaneous ensemble**: optimizes BOTH sides in a single trial
+  - **single-side (long/short)**: optimizes one side only, disabling the other
+  - **single config**: for non-tiered strategies
+
+Supports two objective functions:
+  - **sharpe**: Annualized Monthly Sharpe Ratio (default)
+  - **sortino**: Annualized Monthly Sortino Ratio (downside deviation only)
 
 Usage:
     python agent/strategy_optimizer.py \\
@@ -18,7 +22,7 @@ Usage:
 
     python agent/strategy_optimizer.py \\
         --config configs/strategies/hourly_ensemble_008.json \\
-        --n-trials 500
+        --n-trials 500 --objective sortino --side long
 """
 
 from __future__ import annotations
@@ -125,6 +129,7 @@ def send_telegram(message: str) -> None:
 import math
 
 TRADES_PER_YEAR_FLOOR = 36  # Minimum ~3 trades/month combined (long+short)
+TRADES_PER_YEAR_FLOOR_SINGLE = 18  # Minimum ~1.5 trades/month for single-side optimization
 
 
 def _trade_floor_weight(trade_count: int, trade_floor: float,
@@ -258,6 +263,7 @@ def extract_metrics(result: BacktestResult) -> dict:
             "avg_duration_bars": 0,
             "pct_tp": 0, "pct_sl": 0, "pct_time_barrier": 0, "pct_trailing_be": 0,
             "profit_per_drawdown": 0, "expectancy": 0,
+            "buy_trades": 0, "sell_trades": 0,
         }
 
     wins = [t.net_pnl_dollars for t in trades if t.net_pnl_dollars > 0]
@@ -281,6 +287,8 @@ def extract_metrics(result: BacktestResult) -> dict:
         "profit_factor": round(result.profit_factor, 4),
         "win_rate": round(result.win_rate, 4),
         "trade_count": result.trade_count,
+        "buy_trades": sum(1 for t in trades if getattr(t, 'side', 0) == 1),
+        "sell_trades": sum(1 for t in trades if getattr(t, 'side', 0) == -1),
         "max_drawdown": round(dd, 2),
         "sharpe_ratio": round(compute_sharpe(result.equity_curve), 4),
         "sortino_ratio": round(compute_sortino(result.equity_curve), 4),
@@ -354,12 +362,19 @@ def make_objective(
     ohlcv_df: pd.DataFrame,
     best_tracker: BestResultTracker | None = None,
     tracker: "TopKTracker | None" = None,
+    objective_metric: str = "sharpe",
+    optimize_side: str | None = None,
 ):
     """Create a closure that Optuna can call with trial params.
 
-    Simultaneous mode: suggests asymmetric parameters for BOTH long and
-    short sides in every trial.  Runs a single ensemble backtest and
-    returns the Annualized Monthly Sharpe Ratio (Consistency Score).
+    Supports three optimization modes:
+      - optimize_side=None: simultaneous ensemble (both long+short params)
+      - optimize_side="long": only long-side params, short side disabled
+      - optimize_side="short": only short-side params, long side disabled
+
+    Supports two objective functions:
+      - objective_metric="sharpe": Annualized Monthly Sharpe Ratio
+      - objective_metric="sortino": Annualized Monthly Sortino Ratio
 
     Args:
         base_cfg: Base strategy config dict.
@@ -368,6 +383,8 @@ def make_objective(
         best_tracker: Optional BestResultTracker — O(1) memory, replaces
             the old unbounded dict that stored all trial results.
         tracker: Optional TopKTracker to collect top configs.
+        objective_metric: "sharpe" or "sortino".
+        optimize_side: "long", "short", or None (both sides / ensemble).
     """
     # Pre-create a strategy instance for parameter routing
     strategy = create_execution_strategy(base_cfg)
@@ -378,8 +395,10 @@ def make_objective(
     )
 
     # Compute trade floor from prediction data span (once, not per trial)
+    # Use halved floor for single-side optimization (18/year vs 36/year)
+    _floor_rate = TRADES_PER_YEAR_FLOOR_SINGLE if optimize_side else TRADES_PER_YEAR_FLOOR
     _backtest_years = (predictions_df.index.max() - predictions_df.index.min()).days / 365.25
-    _trade_floor = max(1.0, TRADES_PER_YEAR_FLOOR * _backtest_years)
+    _trade_floor = max(1.0, _floor_rate * _backtest_years)
 
     def _suggest_side_params(trial: optuna.Trial, suffix: str) -> dict:
         """Suggest params for one side with the given suffix."""
@@ -396,15 +415,32 @@ def make_objective(
         }
         return params
 
+    def _disable_side(cfg: dict, side_to_disable: str) -> None:
+        """Disable a side by setting all tier min_prob to 1.0."""
+        if side_to_disable in cfg and "tiers" in cfg[side_to_disable]:
+            for tier in cfg[side_to_disable]["tiers"]:
+                tier["min_prob"] = 1.0
+
     def objective(trial: optuna.Trial) -> float:
         cfg = copy.deepcopy(base_cfg)
 
         if is_tiered:
-            # Simultaneous: suggest asymmetric params for both sides
-            long_params = _suggest_side_params(trial, "long")
-            short_params = _suggest_side_params(trial, "short")
-            strategy.apply_trial_params(cfg, long_params, side="long")
-            strategy.apply_trial_params(cfg, short_params, side="short")
+            if optimize_side == "long":
+                # Single-side: only suggest long params, disable short
+                side_params = _suggest_side_params(trial, "long")
+                strategy.apply_trial_params(cfg, side_params, side="long")
+                _disable_side(cfg, "short")
+            elif optimize_side == "short":
+                # Single-side: only suggest short params, disable long
+                side_params = _suggest_side_params(trial, "short")
+                strategy.apply_trial_params(cfg, side_params, side="short")
+                _disable_side(cfg, "long")
+            else:
+                # Simultaneous: suggest asymmetric params for both sides
+                long_params = _suggest_side_params(trial, "long")
+                short_params = _suggest_side_params(trial, "short")
+                strategy.apply_trial_params(cfg, long_params, side="long")
+                strategy.apply_trial_params(cfg, short_params, side="short")
         else:
             # Non-tiered: single set of params
             params = {
@@ -425,9 +461,7 @@ def make_objective(
         engine = BacktestEngine.from_config(cfg)
         result = engine.run(predictions_df, ohlcv_df)
 
-        # NOTE: final_score is computed below — defer update to after scoring
-
-        # --- Consistency Score: Annualized Monthly Sharpe ---
+        # --- Scoring ---
         if result.trade_count == 0 or not result.trades:
             return -9999.0
 
@@ -439,25 +473,37 @@ def make_objective(
         trades_df = trades_df.set_index("exit_dt").sort_index()
 
         monthly_pnls = trades_df["pnl"].resample("ME").sum().dropna()
-
         monthly_pnl_vals = monthly_pnls.values
-        std_pnl = float(np.std(monthly_pnl_vals))
 
-        if len(monthly_pnl_vals) == 0 or std_pnl < 1e-9:
+        if len(monthly_pnl_vals) == 0:
             return -9999.0
 
-        annualized_sharpe = float(
-            (np.mean(monthly_pnl_vals) / std_pnl) * np.sqrt(12)
-        )
+        if objective_metric == "sortino":
+            # --- Annualized Monthly Sortino ---
+            neg_pnls = monthly_pnl_vals[monthly_pnl_vals < 0]
+            if len(neg_pnls) == 0 or float(np.std(neg_pnls)) < 1e-9:
+                annualized_score = 10.0  # cap to avoid inf
+            else:
+                annualized_score = float(
+                    (np.mean(monthly_pnl_vals) / np.std(neg_pnls)) * np.sqrt(12)
+                )
+        else:
+            # --- Annualized Monthly Sharpe ---
+            std_pnl = float(np.std(monthly_pnl_vals))
+            if std_pnl < 1e-9:
+                return -9999.0
+            annualized_score = float(
+                (np.mean(monthly_pnl_vals) / std_pnl) * np.sqrt(12)
+            )
 
         # --- Trade Floor Penalty ---
-        # Negative Sharpe returned as-is (multiplying by weight < 1 would
+        # Negative score returned as-is (multiplying by weight < 1 would
         # *improve* a negative score — the opposite of the intended effect).
-        if annualized_sharpe > 0:
+        if annualized_score > 0:
             weight = _trade_floor_weight(result.trade_count, _trade_floor)
-            final_score = annualized_sharpe * weight
+            final_score = annualized_score * weight
         else:
-            final_score = annualized_sharpe
+            final_score = annualized_score
 
         # Track top configs (penalized score so ranking matches Optuna)
         if tracker is not None:
@@ -490,17 +536,17 @@ def run_optimization(
     n_jobs: int = 1,
     quiet: bool = False,
     label: str = "",
+    objective_metric: str = "sharpe",
+    optimize_side: str | None = None,
 ) -> tuple[dict, BacktestResult]:
     """Run strategy parameter optimization.
-
-    For TieredEnsembleStrategy configs, BOTH sides are optimized
-    simultaneously in a single study.  The objective is the Annualized
-    Monthly Sharpe Ratio (Consistency Score) of the combined portfolio.
 
     Args:
         holdout_months: If set, reserve the last N months of predictions
             as an unseen holdout.  Optuna only sees data before the cutoff.
             Falls back to config key ``holdout_months`` when *None*.
+        objective_metric: "sharpe" or "sortino".
+        optimize_side: "long", "short", or None (both sides / ensemble).
 
     Returns:
         Tuple of (best_config, best_result).  Holdout metrics (if any)
@@ -520,12 +566,22 @@ def run_optimization(
         and base_cfg.get("short", {}).get("tiers")
     )
 
+    # Determine optimization mode description
+    if optimize_side:
+        mode_str = f"SINGLE-SIDE ({optimize_side.upper()})"
+    elif is_tiered:
+        mode_str = "SIMULTANEOUS ENSEMBLE"
+    else:
+        mode_str = "SINGLE CONFIG"
+
+    obj_str = "Annualized Monthly Sortino" if objective_metric == "sortino" else "Annualized Monthly Sharpe"
+
     print("=" * 70)
     print(f"STRATEGY PARAMETER OPTIMIZATION: {model_name}")
     print(f"  Config: {config_path}")
     print(f"  Trials: {n_trials}")
-    print(f"  Mode: {'SIMULTANEOUS ENSEMBLE' if is_tiered else 'SINGLE CONFIG'}")
-    print(f"  Objective: Annualized Monthly Sharpe (Consistency Score)")
+    print(f"  Mode: {mode_str}")
+    print(f"  Objective: {obj_str}")
     print("=" * 70)
 
     # Resolve OHLCV
@@ -572,9 +628,16 @@ def run_optimization(
               f"{predictions_df.index.min().date()} -> {predictions_df.index.max().date()} "
               f"({len(predictions_df):,} bars)")
 
-    # Run baseline
+    # Run baseline (with side-appropriate config for fair comparison)
     print("\n--- BASELINE ---")
-    baseline_engine = BacktestEngine.from_config(base_cfg)
+    baseline_cfg = copy.deepcopy(base_cfg)
+    if optimize_side and is_tiered:
+        # Disable the other side for a fair baseline comparison
+        other_side = "short" if optimize_side == "long" else "long"
+        if other_side in baseline_cfg and "tiers" in baseline_cfg[other_side]:
+            for tier in baseline_cfg[other_side]["tiers"]:
+                tier["min_prob"] = 1.0
+    baseline_engine = BacktestEngine.from_config(baseline_cfg)
     baseline_result = baseline_engine.run(predictions_df, ohlcv_df, label="Baseline")
     baseline_metrics = extract_metrics(baseline_result)
     print(f"  PnL: ${baseline_metrics['total_pnl']:,.2f}  "
@@ -583,15 +646,20 @@ def run_optimization(
           f"Trades: {baseline_metrics['trade_count']}  "
           f"DD: ${baseline_metrics['max_drawdown']:,.2f}")
 
-    # ── Unified optimization (simultaneous for tiered, single for others) ─
+    # ── Optimization ─────────────────────────────────────────────────
     best_result_tracker = BestResultTracker()
     tracker = TopKTracker(k=5, save_dir="configs/strategies/candidates")
-    objective = make_objective(base_cfg, predictions_df, ohlcv_df, best_result_tracker, tracker=tracker)
+    objective = make_objective(
+        base_cfg, predictions_df, ohlcv_df, best_result_tracker, tracker=tracker,
+        objective_metric=objective_metric, optimize_side=optimize_side,
+    )
 
     study = optuna.create_study(
         direction="maximize",
         study_name=f"strategy_opt_{model_name}",
     )
+
+    score_label = objective_metric.capitalize()
 
     def trial_callback(study_: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
         if trial.state != optuna.trial.TrialState.COMPLETE:
@@ -600,12 +668,13 @@ def run_optimization(
         if completed % 50 == 0:
             elapsed = time.perf_counter() - start_time
             print(f"  Trial {completed}/{n_trials}  "
-                  f"Sharpe={trial.value:.3f}  [{elapsed:.0f}s]")
+                  f"{score_label}={trial.value:.3f}  [{elapsed:.0f}s]")
 
     print(f"\n--- OPTIMIZING ({n_trials} trials, n_jobs={n_jobs}) ---")
     send_telegram(
         f"[Strategy Optimizer] {model_name}\n"
-        f"Started: {n_trials} trials (n_jobs={n_jobs})"
+        f"Started: {n_trials} trials (n_jobs={n_jobs})\n"
+        f"Objective: {objective_metric}"
     )
     try:
         study.optimize(
@@ -622,7 +691,7 @@ def run_optimization(
     best_trial = study.best_trial
 
     print(f"\n--- RESULTS ({elapsed:.0f}s) ---")
-    print(f"Best trial #{best_trial.number}: Sharpe={best_trial.value:.4f}")
+    print(f"Best trial #{best_trial.number}: {score_label}={best_trial.value:.4f}")
     print(f"  Params: {dict(best_trial.params)}")
 
     # End notification with best performance
@@ -633,7 +702,7 @@ def run_optimization(
             f"[Strategy Optimizer] {model_name}\n"
             f"COMPLETE ({elapsed:.0f}s / {elapsed/60:.1f}m)\n"
             f"Best Trial: #{best_trial.number}/{n_trials}\n"
-            f"Best Sharpe: {best_trial.value:.4f}\n"
+            f"Best {score_label}: {best_trial.value:.4f}\n"
             f"PnL: ${best_m['total_pnl']:,.2f}  PF: {best_m['profit_factor']:.2f}\n"
             f"Trades: {best_m['trade_count']}  WR: {best_m['win_rate']:.1%}\n"
             f"DD: ${best_m['max_drawdown']:,.2f}"
@@ -643,13 +712,27 @@ def run_optimization(
             f"[Strategy Optimizer] {model_name}\n"
             f"COMPLETE ({elapsed:.0f}s / {elapsed/60:.1f}m)\n"
             f"Best Trial: #{best_trial.number}/{n_trials}\n"
-            f"Best Sharpe: {best_trial.value:.4f}"
+            f"Best {score_label}: {best_trial.value:.4f}"
         )
 
     # Reconstruct best config from best trial params
     best_cfg = copy.deepcopy(base_cfg)
     strategy = create_execution_strategy(best_cfg)
-    if is_tiered:
+
+    if is_tiered and optimize_side:
+        # Single-side: only the optimized side's params are in the trial
+        side_params = {
+            k.replace(f"_{optimize_side}", ""): v
+            for k, v in best_trial.params.items()
+            if k.endswith(f"_{optimize_side}")
+        }
+        strategy.apply_trial_params(best_cfg, side_params, side=optimize_side)
+        # Disable the other side
+        other_side = "short" if optimize_side == "long" else "long"
+        if other_side in best_cfg and "tiers" in best_cfg[other_side]:
+            for tier in best_cfg[other_side]["tiers"]:
+                tier["min_prob"] = 1.0
+    elif is_tiered:
         # Split suffixed params back into per-side dicts
         long_params = {k.replace("_long", ""): v for k, v in best_trial.params.items() if k.endswith("_long")}
         short_params = {k.replace("_short", ""): v for k, v in best_trial.params.items() if k.endswith("_short")}
@@ -658,9 +741,10 @@ def run_optimization(
     else:
         strategy.apply_trial_params(best_cfg, dict(best_trial.params))
 
-    # Final ensemble backtest with best params
+    # Final backtest with best params
+    opt_label = f"Optimized_{optimize_side}" if optimize_side else "Optimized_Ensemble"
     best_engine = BacktestEngine.from_config(best_cfg)
-    best_result = best_engine.run(predictions_df, ohlcv_df, label="Optimized_Ensemble")
+    best_result = best_engine.run(predictions_df, ohlcv_df, label=opt_label)
     best_metrics = extract_metrics(best_result)
 
     print(f"\n  OPTIMIZED: PnL=${best_metrics['total_pnl']:,.2f}  "
@@ -674,13 +758,30 @@ def run_optimization(
           f"Trades={baseline_metrics['trade_count']}  "
           f"DD=${baseline_metrics['max_drawdown']:,.2f}")
 
-    # Build optuna_info with both per-side and ensemble details
-    if is_tiered:
+    # Build optuna_info
+    if is_tiered and optimize_side:
+        best_cfg["optuna_info"] = {
+            "trial_number": best_trial.number,
+            "timestamp": pd.Timestamp.now().isoformat(timespec="seconds"),
+            "optimizer": "strategy_optimizer",
+            "mode": f"single_side_{optimize_side}",
+            "objective": objective_metric,
+            "optimize_side": optimize_side,
+            "n_trials": n_trials,
+            "params": side_params,
+            "all_trial_params": dict(best_trial.params),
+            "consistency_score": best_trial.value,
+            "metrics": best_metrics,
+            "baseline_metrics": baseline_metrics,
+            "wall_time_seconds": round(elapsed, 1),
+        }
+    elif is_tiered:
         best_cfg["optuna_info"] = {
             "trial_number": best_trial.number,
             "timestamp": pd.Timestamp.now().isoformat(timespec="seconds"),
             "optimizer": "strategy_optimizer",
             "mode": "simultaneous_ensemble",
+            "objective": objective_metric,
             "n_trials": n_trials,
             "long_params": long_params,
             "short_params": short_params,
@@ -696,6 +797,7 @@ def run_optimization(
             "timestamp": pd.Timestamp.now().isoformat(timespec="seconds"),
             "optimizer": "strategy_optimizer",
             "mode": "single_config",
+            "objective": objective_metric,
             "n_trials": n_trials,
             "params": dict(best_trial.params),
             "consistency_score": best_trial.value,
@@ -721,37 +823,21 @@ def run_optimization(
     elif _holdout_months > 0:
         print("\n  WARNING: Holdout period has 0 prediction rows — skipping holdout backtest.")
 
-    # Save optimized config
+    # Save optimized config — filename includes side and objective for namespacing
     if _holdout_months > 0:
         best_cfg["holdout_months"] = _holdout_months
-    opt_config_name = Path(config_path).stem + "_opt.json"
+
+    suffix_parts = []
+    if optimize_side:
+        suffix_parts.append(optimize_side)
+    suffix_parts.append(objective_metric)
+    opt_suffix = "_".join(suffix_parts)
+
+    opt_config_name = Path(config_path).stem + f"_opt_{opt_suffix}.json"
     opt_config_path = os.path.join(os.path.dirname(config_path), opt_config_name)
     with open(opt_config_path, "w") as f:
         json.dump(best_cfg, f, indent=4)
     print(f"\nSaved optimized config: {opt_config_path}")
-
-    # Extract standalone side configs
-    if is_tiered:
-        for side in ["long", "short"]:
-            side_cfg = copy.deepcopy(best_cfg)
-            # Remove the other side's models
-            if "models" in side_cfg:
-                other_side = "short" if side == "long" else "long"
-                if other_side in side_cfg["models"]:
-                    del side_cfg["models"][other_side]
-            
-            # Disable the other side in tiered setup by setting threshold to 1.0
-            other_side_key = "short" if side == "long" else "long"
-            if other_side_key in side_cfg:
-                if "tiers" in side_cfg[other_side_key]:
-                    for tier in side_cfg[other_side_key]["tiers"]:
-                        tier["min_prob"] = 1.0
-
-            side_config_name = Path(config_path).stem + f"_opt_{side}.json"
-            side_config_path = os.path.join(os.path.dirname(config_path), side_config_name)
-            with open(side_config_path, "w") as f:
-                json.dump(side_cfg, f, indent=4)
-            print(f"Saved {side}-only config: {side_config_path}")
 
     return best_cfg, best_result
 
@@ -770,8 +856,8 @@ def main() -> None:
         help="Path to base strategy JSON config"
     )
     parser.add_argument(
-        "--n-trials", type=int, default=1000,
-        help="Number of Optuna trials (default: 1000)"
+        "--n-trials", type=int, default=500,
+        help="Number of Optuna trials (default: 500)"
     )
     parser.add_argument(
         "--predictions", default=None,
@@ -790,7 +876,17 @@ def main() -> None:
         "--jobs", type=int, default=1,
         help="Number of parallel Optuna trial evaluations (default: 1)"
     )
+    parser.add_argument(
+        "--objective", choices=["sharpe", "sortino"], default="sharpe",
+        help="Objective function: sharpe (default) or sortino"
+    )
+    parser.add_argument(
+        "--side", choices=["long", "short", "both"], default="both",
+        help="Which side to optimize: long, short, or both (default: both)"
+    )
     args = parser.parse_args()
+
+    _side = None if args.side == "both" else args.side
 
     run_optimization(
         config_path=args.config,
@@ -799,8 +895,11 @@ def main() -> None:
         ohlcv_path=args.data,
         holdout_months=args.holdout_months,
         n_jobs=args.jobs,
+        objective_metric=args.objective,
+        optimize_side=_side,
     )
 
 
 if __name__ == "__main__":
     main()
+
