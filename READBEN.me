@@ -18,10 +18,13 @@ Major next steps:
 -OBSERVE THE MODEL. LET IT COOK. Expect minimum 10 trades a month. Let's see the performance, and identify bugs. This is our chance to make sure the order execution is rock solid. 
 ##
 
+
+
 # References for steps
 
 Step 1: Train
 .\gcp\run_canary_batch.ps1 -Manifest "configs\canary_batch_hourset07_scout.json" -EnableTelegram
+.\gcp\run_sweep_batch.ps1 -ManifestPath "configs\canary_batch_manifest.json"
 
 Step 2: Optimize
 python agent/batch_post_optimizer.py --batch-dir reports/batch_runs/batch_20260511_2116 --n-trials 1000

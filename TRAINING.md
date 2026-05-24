@@ -1,4 +1,49 @@
-﻿# Re-Running HourSet_08 Production Sweep — Full 201 Features
+﻿
+Viewed hourly_ensemble_008_2.json:1-34
+
+Exactly right — `run_sweep_batch.ps1` is now the universal orchestrator. Canary vs production is just a matter of what manifest you feed it. And correct, `hourly_ensemble_008_2.json` is **not** the manifest — it's the strategy config. They're two different things:
+
+| File | Purpose | Location | Controls |
+|---|---|---|---|
+| **Manifest** | *What* to run | `configs/canary_batch_manifest.json` or `configs/sweep_batch_manifest.json` | Targets, trial counts, VM sizing, metrics, GCS paths |
+| **Strategy Config** | *How* to train | `configs/strategies/hourly_ensemble_008_2.json` | Feature filter, TP/SL, thresholds, execution params |
+
+The manifest **references** the strategy config by filename:
+```
+manifest.json  →  "strategy_config": "hourly_ensemble_008_2.json"
+                                       ↓
+                   configs/strategies/hourly_ensemble_008_2.json
+```
+
+**The two manifests I created for you:**
+
+- **`configs/canary_batch_manifest.json`** — 8 targets, 20 trials, 20 post-opt trials
+- **`configs/sweep_batch_manifest.json`** — 8 targets, 500 trials, 1500 post-opt trials
+
+Both point to `hourly_ensemble_008_2.json` (no feature filter). To run either:
+
+```powershell
+# Canary (20 trials — what's running now):
+.\gcp\run_sweep_batch.ps1 -ManifestPath "configs\canary_batch_manifest.json"
+
+# Production (500 trials — after canary validates):
+.\gcp\run_sweep_batch.ps1 -ManifestPath "configs\sweep_batch_manifest.json"
+```
+
+Meanwhile, the 8-VM canary is deploying. Let me check where it's at:
+
+VM 1 deployed, VM 2 deploying. The orchestrator launches them sequentially (each takes ~60s to create), then monitors them all in parallel. All 8 should be running within the next few minutes. You'll get Telegram updates as each one completes.
+
+
+
+========================================
+========================================
+========================================
+========================================
+
+
+
+# Re-Running HourSet_08 Production Sweep — Full 201 Features
 
 ## How It Works
 
@@ -70,3 +115,8 @@ When complete, you'll find:
 > python -c "import pickle; m = pickle.load(open(r'C:\CL_Analyst_Data\models\registry\E2E_HourSet_08_short_logloss\final_model.pkl','rb')); print(f'Features: {m.num_feature()}')"
 > ```
 > This should now print `Features: 201` instead of `Features: 15`.
+
+
+
+========================================
+========================================
