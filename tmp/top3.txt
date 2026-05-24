@@ -1,6 +1,0 @@
-|    | Long Model             | Short Model             |   Trades | Win Rate   |   Profit Factor |   Net PnL | Max DD     | Tail PnL   |
-|---:|:-----------------------|:------------------------|---------:|:-----------|----------------:|----------:|:-----------|:-----------|
-|  0 | long_logloss           | short_average_precision |      679 | 35.2%      |            0.97 |  -6422.66 | -15,108.66 | -8,986.84  |
-|  1 | long_logloss           | short_logloss           |     1141 | 34.5%      |            0.97 | -10807.3  | -29,258.66 | 310.86     |
-|  2 | long_average_precision | short_logloss           |     1194 | 33.9%      |            0.89 | -41053.2  | -56,330.30 | 5,024.69   |
-|  3 | long_average_precision | short_average_precision |      772 | 33.2%      |            0.84 | -42287    | -46,588.43 | -4,997.35  |

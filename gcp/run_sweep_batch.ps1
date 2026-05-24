@@ -860,10 +860,9 @@ if ($batchState.completed -gt 0) {
         # Wait for optimizer VM to finish (self-shutdown)
         Write-Host ""
         Write-Host "Waiting for optimizer VM to complete (zone: $optActualZone)..." -ForegroundColor Cyan
-        $optMaxWait = 180  # 3 hours max
         $optElapsed = 0
 
-        while ($optElapsed -lt $optMaxWait) {
+        while ($true) {
             Start-Sleep -Seconds 60
             $optElapsed++
             $optStatus = gcloud compute instances describe $optVmName --zone=$optActualZone --format="get(status)" 2>$null
@@ -875,10 +874,6 @@ if ($batchState.completed -gt 0) {
             if ($optElapsed % 5 -eq 0) {
                 Write-Host "  [$(Get-Date -F 'HH:mm:ss')] Optimizer running... (${optElapsed}min)" -ForegroundColor Gray
             }
-        }
-
-        if ($optElapsed -ge $optMaxWait) {
-            Write-Host "  WARNING: Optimizer exceeded ${optMaxWait}min timeout." -ForegroundColor Yellow
         }
 
         # Download results from GCS to local batch directory

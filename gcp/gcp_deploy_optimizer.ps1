@@ -289,10 +289,9 @@ Write-Host "  Polling every 2 minutes. Press Ctrl+C to stop monitoring (VM conti
 Write-Host ""
 
 $pollInterval = 120  # seconds
-$maxPolls = 180      # 6 hours max wait
 $pollCount = 0
 
-while ($pollCount -lt $maxPolls) {
+while ($true) {
     $pollCount++
     $elapsed = [math]::Round($pollCount * $pollInterval / 60, 0)
 
@@ -364,8 +363,4 @@ while ($pollCount -lt $maxPolls) {
 
     Start-Sleep -Seconds $pollInterval
 }
-
-Write-Host "  TIMEOUT: Max poll time reached (6 hours)" -ForegroundColor Red
-Send-TelegramAlert "[TIMEOUT] Post-Optimizer monitor timed out after 6 hours`nBatch: $BatchId"
-exit 1
 

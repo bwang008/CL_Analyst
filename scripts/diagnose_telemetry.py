@@ -2,7 +2,8 @@
 import sqlite3
 import pandas as pd
 
-conn = sqlite3.connect("data/live_telemetry.db")
+from src.data_paths import get_data_path
+conn = sqlite3.connect(str(get_data_path("live_telemetry.db")))
 
 # Check table sizes
 print("=== Table Sizes ===")
@@ -13,7 +14,7 @@ for t in ["market_bars", "raw_front_month_bars", "trade_ledger"]:
 # Recent signals
 print("\n=== Recent Signals (last 20) ===")
 df = pd.read_sql(
-    "SELECT timestamp, signal, probability, action_taken "
+    "SELECT timestamp, signal, confidence_pct, action_taken "
     "FROM trade_ledger ORDER BY id DESC LIMIT 20",
     conn,
 )
@@ -26,10 +27,10 @@ else:
 print("\n=== Probability Distribution ===")
 df_prob = pd.read_sql(
     "SELECT COUNT(*) as n, "
-    "MIN(probability) as min_prob, "
-    "AVG(probability) as avg_prob, "
-    "MAX(probability) as max_prob "
-    "FROM trade_ledger WHERE probability IS NOT NULL",
+    "MIN(confidence_pct) as min_prob, "
+    "AVG(confidence_pct) as avg_prob, "
+    "MAX(confidence_pct) as max_prob "
+    "FROM trade_ledger WHERE confidence_pct IS NOT NULL",
     conn,
 )
 print(df_prob.to_string(index=False))
