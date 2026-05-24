@@ -265,7 +265,7 @@ if ($sshExitCode -ne 0) {
 
 # --- [6/6] Verify ---
 Write-Host "`n[6/6] Verifying tmux session..."
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 10
 $tmuxCheck = gcloud compute ssh $VmName --zone=$Zone `
     --command="tmux has-session -t sweep 2>/dev/null && echo RUNNING" `
     --quiet 2>$null

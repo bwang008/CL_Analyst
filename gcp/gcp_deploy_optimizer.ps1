@@ -34,7 +34,7 @@ if ($env:PATH -notlike "*$gcloudBin*") {
     $env:PATH = "$gcloudBin;$env:PATH"
 }
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectDir = Split-Path -Parent $ScriptDir
 $GcpUser = $env:USERNAME
@@ -297,7 +297,8 @@ while ($pollCount -lt $maxPolls) {
     $elapsed = [math]::Round($pollCount * $pollInterval / 60, 0)
 
     # Check if any optimization report exists on GCS
-    $gcsFiles = gsutil ls "$Bucket/$GcsOptPrefix/batch_summary_optimized_*.md" 2>$null
+    $gcsFiles = $null
+    try { $gcsFiles = gsutil ls "$Bucket/$GcsOptPrefix/batch_summary_optimized_*.md" 2>$null } catch {}
     if ($gcsFiles) {
         Write-Host ""
         Write-Host "  Reports detected on GCS after ~${elapsed} min!" -ForegroundColor Green

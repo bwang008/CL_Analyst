@@ -586,6 +586,9 @@ while (-not $allDone) {
                 "VM: ``$($exp.VmName)```n" +
                 "Exit code: $deployExit`n" +
                 "``````$errText``````")
+            # Always attempt to delete the VM — it may have been created before the
+            # verification step failed (e.g. tmux race condition). Prevents VM leaks.
+            Remove-ExperimentVm -VmName $exp.VmName -VmZone $actualZone
             $exp.Status       = "DEPLOY_FAILED"
             $exp.FailureReason = "Deploy exit code $deployExit"
             $batchState.failed++
