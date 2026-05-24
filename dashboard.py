@@ -260,7 +260,7 @@ def render_batch_overview(df: pd.DataFrame, progress: dict, side_filter: str,
         "pre_trades", "pre_pf", "pre_pnl",
         "opt_trades", "opt_pf", "opt_pnl",
         "holdout_pnl", "holdout_trades",
-        "consistency", "opt_sharpe",
+        "consistency", "opt_sharpe", "opt_sortino",
     ]
     show = filtered[[c for c in display_cols if c in filtered.columns]].copy()
     show.columns = [
@@ -268,7 +268,7 @@ def render_batch_overview(df: pd.DataFrame, progress: dict, side_filter: str,
         "Pre Trades", "Pre PF", "Pre PnL",
         "Opt Trades", "Opt PF", "Opt PnL",
         "Holdout PnL", "Holdout Trades",
-        "Consistency", "Sharpe",
+        "Consistency", "Sharpe", "Sortino",
     ][:len(show.columns)]
 
     st.dataframe(
