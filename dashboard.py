@@ -144,7 +144,8 @@ def render_sidebar() -> tuple[str, str, str, str]:
 #  SECTION 1 — BATCH OVERVIEW
 # ═══════════════════════════════════════════════════════════════
 
-def render_batch_overview(df: pd.DataFrame, progress: dict, side_filter: str) -> str | None:
+def render_batch_overview(df: pd.DataFrame, progress: dict, side_filter: str,
+                          batch_dir: str) -> str | None:
     st.markdown('<div class="section-header">📋 Section 1 — Batch Overview</div>', unsafe_allow_html=True)
 
     if df.empty:
@@ -176,6 +177,81 @@ def render_batch_overview(df: pd.DataFrame, progress: dict, side_filter: str) ->
         k5.metric("⚠️ Zero Pre-Trades", len(zero_signal))
     else:
         k5.metric("Pre-Trade Sanity", "✅ All OK")
+
+    # ── Manifest / Batch Config ──
+    manifest = load_batch_manifest(batch_dir)
+    if manifest:
+        with st.expander("📄 Batch Config (manifest.json)", expanded=False):
+            defaults = manifest.get("defaults", {})
+            experiments = manifest.get("experiments", [])
+            comment = manifest.get("_comment", "")
+
+            if comment:
+                st.caption(f"💬 *{comment}*")
+
+            # Key training / infra settings in metric cards
+            mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+            mc1.metric("Optuna Trials", defaults.get("n_trials", "—"))
+            mc2.metric("Post-Opt Trials", defaults.get("post_optimizer_trials", "—"))
+            mc3.metric("Machine Type", defaults.get("machine_type", "—"))
+            mc4.metric("Max Folds", defaults.get("max_folds", "—"))
+            mc5.metric("Timeout (min)", defaults.get("timeout_minutes", "—"))
+
+            mc6, mc7, mc8, mc9 = st.columns(4)
+            mc6.metric("Max Concurrent VMs", defaults.get("max_concurrent_vms", "—"))
+            mc7.metric("vCPUs / VM", defaults.get("vcpus_per_vm", "—"))
+            mc8.metric("Max vCPU Budget", defaults.get("max_concurrent_vcpus", "—"))
+            mc9.metric("Holdout Months", defaults.get("post_optimizer_holdout_months", "—"))
+
+            # Hyperparameter search bounds
+            st.markdown("##### Hyperparameter Search Bounds")
+            bounds_data = {
+                "Parameter": [
+                    "max_depth", "num_leaves", "learning_rate",
+                    "min_child_samples", "feature_fraction", "n_estimators (max)",
+                    "early_stopping_rounds",
+                ],
+                "Min": [
+                    defaults.get("max_depth_min", "—"),
+                    defaults.get("num_leaves_min", "—"),
+                    defaults.get("learning_rate_min", "—"),
+                    defaults.get("min_child_samples_min", "—"),
+                    defaults.get("feature_fraction_min", "—"),
+                    "—",
+                    "—",
+                ],
+                "Max": [
+                    defaults.get("max_depth_max", "—"),
+                    defaults.get("num_leaves_max", "—"),
+                    defaults.get("learning_rate_max", "—"),
+                    defaults.get("min_child_samples_max", "—"),
+                    defaults.get("feature_fraction_max", "—"),
+                    defaults.get("max_n_estimators", "—"),
+                    defaults.get("early_stopping_rounds", "—"),
+                ],
+            }
+            st.dataframe(pd.DataFrame(bounds_data), use_container_width=True, hide_index=True)
+
+            # Experiment target list
+            if experiments:
+                st.markdown("##### Experiment Targets")
+                exp_rows = []
+                for exp in experiments:
+                    exp_rows.append({
+                        "Label": exp.get("label", "—"),
+                        "Target Long": exp.get("target_long", "—"),
+                        "Target Short": exp.get("target_short", "—"),
+                        "GCS Prefix": exp.get("gcs_prefix", "—"),
+                    })
+                st.dataframe(pd.DataFrame(exp_rows), use_container_width=True, hide_index=True)
+
+            # Strategy config & data path
+            st.markdown("##### Data & Strategy")
+            st.code(f"Strategy Config: {defaults.get('strategy_config', 'N/A')}\n"
+                    f"GCS Data Path:   {defaults.get('gcs_data_path', 'N/A')}\n"
+                    f"Metrics:         {defaults.get('metrics', 'N/A')}\n"
+                    f"Provisioning:    {defaults.get('provisioning_model', 'N/A')}",
+                    language=None)
 
     # ── Leaderboard Table ──
     st.markdown("#### Leaderboard")
@@ -490,7 +566,7 @@ def main():
     progress = load_batch_progress(batch_dir)
 
     # Section 1
-    selected_key = render_batch_overview(df, progress, side_filter)
+    selected_key = render_batch_overview(df, progress, side_filter, batch_dir)
 
     # Section 2
     if selected_key and not df.empty:
