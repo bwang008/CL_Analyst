@@ -1,0 +1,183 @@
+{
+    "nickname": "HourSet_08_Ensemble_02",
+    "description": "Asymmetric ensemble: Long from HS08 3x1 12H logloss (Sharpe-optimized, trial #233/500), Short from HS08 3x1 24H logloss (Sortino-optimized, trial #71/500). Per-side independent optimization from batch_20260518_2321.",
+    "execution_class": "TieredEnsembleStrategy",
+    "exit_mode": "TIERED",
+    "tp_atr_mult": 9.5,
+    "sl_atr_mult": 0.5,
+    "trailing_atr_mult": 4.25,
+    "tp_cooldown_bars": 0,
+    "sl_cooldown_bars": 4,
+    "max_hold_bars": 240,
+    "allow_concurrent": false,
+    "max_concurrent": 1,
+    "max_position_size": 1,
+    "execution_symbol": "CL",
+    "bar_size": "1h",
+    "cooldown_bars": 11,
+    "consecutive_signal_threshold": 0,
+    "live_config": {
+        "client_id": 1001,
+        "entry_mode": "marketable_limit",
+        "exit_mode": "marketable_limit"
+    },
+    "models": {
+        "long": {
+            "experiment_id": "E2E_HourSet_08_long_logloss",
+            "predictions_path": "data/predictions/oos_predictions_sweep_hs08_3x1_12h_20260518_2321_long_logloss.csv",
+            "threshold": 0.53
+        },
+        "short": {
+            "experiment_id": "E2E_HourSet_08_short_logloss",
+            "predictions_path": "data/predictions/oos_predictions_sweep_hs08_3x1_24h_20260518_2321_short_logloss.csv",
+            "threshold": 0.51
+        }
+    },
+    "long": {
+        "tp_atr_mult": 1.75,
+        "sl_atr_mult": 4.0,
+        "trailing_atr_mult": 2.25,
+        "cooldown_bars": 5,
+        "max_hold_bars": 240,
+        "consecutive_signal_threshold": 0,
+        "atr_period": 24,
+        "trailing_sl_atr_offset": 2.5,
+        "tiered_exits": [
+            {
+                "qty_pct": 1.0,
+                "tp_atr_mult": 1.75
+            }
+        ],
+        "tiers": [
+            {
+                "min_prob": 0.53,
+                "lots": 1,
+                "tp_atr_mult": 1.75,
+                "sl_atr_mult": 4.0,
+                "trailing_atr_mult": 2.25,
+                "max_hold_bars": 240,
+                "label": "hs08_3x1_12h_long_sharpe"
+            }
+        ]
+    },
+    "short": {
+        "tp_atr_mult": 9.5,
+        "sl_atr_mult": 0.5,
+        "trailing_atr_mult": 4.25,
+        "cooldown_bars": 11,
+        "max_hold_bars": 168,
+        "consecutive_signal_threshold": 0,
+        "atr_period": 36,
+        "trailing_sl_atr_offset": 1.5,
+        "tiered_exits": [
+            {
+                "qty_pct": 1.0,
+                "tp_atr_mult": 9.5
+            }
+        ],
+        "tiers": [
+            {
+                "min_prob": 0.51,
+                "lots": 1,
+                "tp_atr_mult": 9.5,
+                "sl_atr_mult": 0.5,
+                "trailing_atr_mult": 4.25,
+                "max_hold_bars": 168,
+                "label": "hs08_3x1_24h_short_sortino"
+            }
+        ]
+    },
+    "features": [
+        "ICHIMOKU_*",
+        "TREND_DMA_*",
+        "ATR_14",
+        "VOL_ROC_12",
+        "VOL_ROC_24",
+        "VOL_ROC_72",
+        "DIST_KURT_12",
+        "DIST_KURT_24",
+        "DIST_KURT_72",
+        "DIST_SKEW_12",
+        "DIST_SKEW_24",
+        "DIST_SKEW_72",
+        "log_ret"
+    ],
+    "entry_threshold": 0.53,
+    "holdout_months": 6,
+    "optuna_source": {
+        "long": "optimization_results_sharpe.json / HS08 3x1 12H|long|logloss (trial #233/500, objective=sharpe)",
+        "short": "optimization_results_sortino.json / HS08 3x1 24H|short|logloss (trial #71/500, objective=sortino)",
+        "batch": "batch_20260518_2321"
+    },
+    "optuna_info": {
+        "timestamp": "2026-05-21T18:14:00",
+        "optimizer": "strategy_optimizer",
+        "mode": "per_side_independent",
+        "long_source": {
+            "experiment": "HS08 3x1 12H",
+            "metric": "logloss",
+            "objective": "sharpe",
+            "trial": 233,
+            "n_trials": 500
+        },
+        "short_source": {
+            "experiment": "HS08 3x1 24H",
+            "metric": "logloss",
+            "objective": "sortino",
+            "trial": 71,
+            "n_trials": 500
+        },
+        "long_params": {
+            "tp_atr_mult": 1.75,
+            "sl_atr_mult": 4.0,
+            "trailing_atr_mult": 2.25,
+            "trailing_sl_atr_offset": 2.5,
+            "cooldown_bars": 5,
+            "max_hold_bars": 240,
+            "consecutive_signal_threshold": 0,
+            "entry_threshold": 0.53,
+            "atr_period": 24
+        },
+        "short_params": {
+            "tp_atr_mult": 9.5,
+            "sl_atr_mult": 0.5,
+            "trailing_atr_mult": 4.25,
+            "trailing_sl_atr_offset": 1.5,
+            "cooldown_bars": 11,
+            "max_hold_bars": 168,
+            "consecutive_signal_threshold": 0,
+            "entry_threshold": 0.51,
+            "atr_period": 36
+        },
+        "long_metrics": {
+            "total_pnl": 62321.42,
+            "profit_factor": 1.1975,
+            "win_rate": 0.729,
+            "trade_count": 668,
+            "max_drawdown": -16705.06,
+            "sharpe_ratio": 1.9353,
+            "sortino_ratio": 0.8005,
+            "calmar_ratio": 0.221,
+            "avg_trade_pnl": 93.3,
+            "avg_duration_bars": 14.9,
+            "profit_per_drawdown": 3.7307,
+            "holdout_pnl": 7697.85,
+            "holdout_trades": 62
+        },
+        "short_metrics": {
+            "total_pnl": 46228.9,
+            "profit_factor": 1.3017,
+            "win_rate": 0.116,
+            "trade_count": 707,
+            "max_drawdown": -25983.71,
+            "sharpe_ratio": 1.7491,
+            "sortino_ratio": 0.7017,
+            "calmar_ratio": 0.1054,
+            "avg_trade_pnl": 65.39,
+            "avg_duration_bars": 8.7,
+            "profit_per_drawdown": 1.7791,
+            "holdout_pnl": -4889.45,
+            "holdout_trades": 64
+        }
+    }
+}

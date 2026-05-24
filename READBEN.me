@@ -36,13 +36,15 @@ python agent/backtest_engine.py --config configs/strategies/hs08_scout_3x1_12h_l
 python agent/backtest_engine.py --config configs/strategies/hs08_sweep_4x1_6h_precision_opt.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" --slippage-per-side 0.01
 python agent/backtest_engine.py --config configs/strategies/test_canary_5x1_12H.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" --slippage-per-side 0.01
 python agent/backtest_engine.py --config configs/strategies/hs08_sweep_5x1_12h_precision_opt.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" --slippage-per-side 0.01
+python agent/backtest_engine.py --config configs/strategies/HourSet_08_Ensemble_02_05212026_opt.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" --slippage-per-side 0.01
+
 
 
 
 Step 4: Run live_trader
 python -m src.live_execution.live_trader --config configs/strategies/HourSet_08_Ensemble_01_opt.json
 python src/live_execution/live_trader.py --config configs/strategies/hs08_scout_3x1_12h_logloss_opt.json
-
+python src/live_execution/live_trader.py --config configs/strategies/HourSet_08_Ensemble_02_05212026_opt.json
 
 Step 3.5: Validate Parity (run before deploying to live)
 python -m pytest tests/test_config_parity.py tests/test_pipeline_parity.py tests/test_per_side_atr.py tests/test_execution_parity.py -v

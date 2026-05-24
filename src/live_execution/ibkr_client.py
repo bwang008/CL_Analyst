@@ -162,11 +162,12 @@ class IBKRConnectionManager:
         ]
         last_exc: Optional[Exception] = None
 
-        # Try client IDs from the initial value up to 31
+        # Try up to 32 client IDs starting from the initial value in case of conflicts
         start_id = self.client_id
         cid = start_id
+        max_cid = start_id + 31
 
-        while cid <= self._MAX_CLIENT_ID:
+        while cid <= max_cid:
             self._last_error = None
             got_client_id_error = False
 

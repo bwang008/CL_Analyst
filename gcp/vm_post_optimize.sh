@@ -234,10 +234,14 @@ echo "============================================================" | tee -a "$L
 # Final log upload
 gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
 
-# Shutdown VM if requested
+# Delete VM if requested (not just shutdown — fully remove to avoid disk charges)
 if [ "$SHUTDOWN" = true ]; then
-    echo "Shutting down optimizer VM in 15 seconds..." | tee -a "$LOG"
+    echo "Self-deleting optimizer VM in 15 seconds..." | tee -a "$LOG"
     gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
     sleep 15
-    sudo shutdown -h now
+    # Self-delete: VM removes itself from GCP entirely
+    VM_NAME=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/name)
+    VM_ZONE=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/zone | awk -F/ '{print $NF}')
+    gcloud compute instances delete "$VM_NAME" --zone="$VM_ZONE" --quiet 2>/dev/null || sudo shutdown -h now
 fi
+

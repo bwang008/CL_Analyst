@@ -257,9 +257,9 @@ if ($tmuxCheck -match "RUNNING") {
 }
 
 # Note: The canary-style gcp_monitor.ps1 is NOT used for the optimizer VM.
-# The optimizer doesn't produce canary heartbeat files (STATUS.json/pipeline_summary.json),
-# so the monitor would send false failure alerts. The optimizer VM self-reports
-# progress via Telegram and auto-shuts down on completion.
+# Instead, we poll GCS directly for completed report files below.
+
+$LocalBatchDir = Join-Path $ProjectDir "reports\batch_runs\$BatchId"
 
 Write-Host ""
 Write-Host "=====================================================" -ForegroundColor Green
@@ -268,12 +268,103 @@ Write-Host "=====================================================" -ForegroundCo
 Write-Host ""
 Write-Host "  VM:           $VmName"
 Write-Host "  Batch:        $BatchId"
-Write-Host "  Expected:     ~10-15 minutes"
-$gcsOut = "$Bucket/$GcsOptPrefix/"
-Write-Host "  GCS output:   $gcsOut"
+Write-Host "  GCS output:   $Bucket/$GcsOptPrefix/"
+Write-Host "  Local output: $LocalBatchDir"
 Write-Host ""
-Write-Host "Useful commands:" -ForegroundColor Cyan
-Write-Host "  Check status:     .\gcp\gcp_check_status.ps1 -VmName $VmName"
-Write-Host "  View live output: gcloud compute ssh $VmName --zone=$Zone --command='tmux attach -t optimizer'"
-Write-Host "  Download results: gsutil -m cp -r $gcsOut ./"
+
+if ($NoMonitor) {
+    Write-Host "Monitoring disabled (-NoMonitor). Download results manually:" -ForegroundColor Yellow
+    Write-Host "  gsutil -m cp $Bucket/$GcsOptPrefix/batch_summary_optimized_*.md $LocalBatchDir\"
+    Write-Host "  gsutil -m cp $Bucket/$GcsOptPrefix/optimization_results_*.json $LocalBatchDir\"
+    Write-Host ""
+    Write-Host "Useful commands:" -ForegroundColor Cyan
+    Write-Host "  View live output: gcloud compute ssh $VmName --zone=$Zone --command='tmux attach -t optimizer'"
+    Write-Host ""
+    exit 0
+}
+
+# --- [7/7] Poll GCS for results and download when complete ---
+Write-Host "[7/7] Monitoring GCS for completed reports..." -ForegroundColor Cyan
+Write-Host "  Polling every 2 minutes. Press Ctrl+C to stop monitoring (VM continues running)."
 Write-Host ""
+
+$pollInterval = 120  # seconds
+$maxPolls = 180      # 6 hours max wait
+$pollCount = 0
+
+while ($pollCount -lt $maxPolls) {
+    $pollCount++
+    $elapsed = [math]::Round($pollCount * $pollInterval / 60, 0)
+
+    # Check if any optimization report exists on GCS
+    $gcsFiles = gsutil ls "$Bucket/$GcsOptPrefix/batch_summary_optimized_*.md" 2>$null
+    if ($gcsFiles) {
+        Write-Host ""
+        Write-Host "  Reports detected on GCS after ~${elapsed} min!" -ForegroundColor Green
+
+        # Download all reports and results to local batch dir
+        if (!(Test-Path $LocalBatchDir)) { New-Item -ItemType Directory -Path $LocalBatchDir -Force | Out-Null }
+
+        Write-Host "  Downloading reports..."
+        gsutil -m cp "$Bucket/$GcsOptPrefix/batch_summary_optimized_*.md" "$LocalBatchDir\" 2>$null
+        gsutil -m cp "$Bucket/$GcsOptPrefix/optimization_results_*.json" "$LocalBatchDir\" 2>$null
+
+        # Download batch configs if they exist
+        $batchConfigsExist = gsutil ls "$Bucket/$GcsOptPrefix/batch_configs/" 2>$null
+        if ($batchConfigsExist) {
+            $localConfigs = Join-Path $LocalBatchDir "configs"
+            if (!(Test-Path $localConfigs)) { New-Item -ItemType Directory -Path $localConfigs -Force | Out-Null }
+            gsutil -m cp "$Bucket/$GcsOptPrefix/batch_configs/*.json" "$localConfigs\" 2>$null
+            Write-Host "  Downloaded batch configs"
+        }
+
+        # Download logs
+        gsutil -m cp "$Bucket/$GcsOptPrefix/logs/*" (Join-Path $LocalBatchDir "logs\") 2>$null
+
+        # List what we downloaded
+        Write-Host ""
+        Write-Host "  Downloaded to: $LocalBatchDir" -ForegroundColor Green
+        Get-ChildItem $LocalBatchDir -Filter "batch_summary_optimized_*" | ForEach-Object {
+            Write-Host "    $($_.Name) ($([math]::Round($_.Length/1KB, 1)) KB)" -ForegroundColor White
+        }
+        Get-ChildItem $LocalBatchDir -Filter "optimization_results_*" | ForEach-Object {
+            Write-Host "    $($_.Name) ($([math]::Round($_.Length/1KB, 1)) KB)" -ForegroundColor White
+        }
+
+        Write-Host ""
+        Send-TelegramAlert "[COMPLETE] Post-Optimizer Results Downloaded`nBatch: $BatchId`nLocal: $LocalBatchDir"
+
+        Write-Host "=====================================================" -ForegroundColor Green
+        Write-Host " RESULTS DOWNLOADED SUCCESSFULLY" -ForegroundColor Green
+        Write-Host "=====================================================" -ForegroundColor Green
+        Write-Host ""
+        exit 0
+    }
+
+    # Not ready yet — show status
+    $statusStr = "  [$pollCount] Waiting... (~${elapsed} min elapsed)"
+
+    # Check if VM still exists
+    $vmStatus = gcloud compute instances describe $VmName --zone=$Zone --format="value(status)" 2>$null
+    if ($vmStatus) {
+        Write-Host "$statusStr | VM: $vmStatus" -ForegroundColor DarkGray
+    } else {
+        Write-Host "$statusStr | VM deleted (checking GCS one more time...)" -ForegroundColor Yellow
+        # VM gone but no reports — give it one more check
+        Start-Sleep -Seconds 10
+        $finalCheck = gsutil ls "$Bucket/$GcsOptPrefix/batch_summary_optimized_*.md" 2>$null
+        if (!$finalCheck) {
+            Write-Host "  ERROR: VM deleted but no reports found on GCS!" -ForegroundColor Red
+            Send-TelegramAlert "[ERROR] Post-Optimizer VM deleted but no reports found`nBatch: $BatchId`nGCS: $Bucket/$GcsOptPrefix/"
+            exit 1
+        }
+        continue  # Will download on next iteration
+    }
+
+    Start-Sleep -Seconds $pollInterval
+}
+
+Write-Host "  TIMEOUT: Max poll time reached (6 hours)" -ForegroundColor Red
+Send-TelegramAlert "[TIMEOUT] Post-Optimizer monitor timed out after 6 hours`nBatch: $BatchId"
+exit 1
+

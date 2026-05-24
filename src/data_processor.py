@@ -57,6 +57,12 @@ DATASET_VERSIONS = {
         'Removes noisy targets, expands asymmetric targets (3x1, 4x1, 5x1) '
         'for 6H, 12H, 24H, and retains core 2x1.'
     ),
+    'Hour4Set_01': (
+        '4-Hour bar dataset (process_hour4set_01): '
+        'Same feature architecture as HourSet_08 with AlphaFactory windows '
+        'scaled to 4H bars (6,18,42,84,210). Targets: 2x1,3x1,4x1,5x1 '
+        'at 24H,48H,96H horizons (6,12,24 bars). Designed for multi-day swing trading.'
+    ),
 }
 
 
@@ -847,6 +853,8 @@ class DataProcessor:
             return self.process_hourset_07()
         elif self.dataset_version == "HourSet_08":
             return self.process_hourset_08()
+        elif self.dataset_version == "Hour4Set_01":
+            return self.process_hour4set_01()
         else:
             raise ValueError(f"Unknown dataset version: {self.dataset_version}. "
                            f"Available: {list(DATASET_VERSIONS.keys())}")
@@ -1531,7 +1539,7 @@ class DataProcessor:
         return df
 
     # ------------------------------------------------------------------
-    # Hourly resampling
+    # OHLCV resampling
     # ------------------------------------------------------------------
     @staticmethod
     def resample_to_hourly(df: pd.DataFrame) -> pd.DataFrame:
@@ -1560,6 +1568,38 @@ class DataProcessor:
         df_h = df.resample("1h").agg(agg).dropna(subset=["Close"])
         print(f"  Resampled 5-min -> 1H: {len(df)} -> {len(df_h)} bars")
         return df_h
+
+    @staticmethod
+    def resample_ohlcv(df: pd.DataFrame, freq: str) -> pd.DataFrame:
+        """Resample 5-minute OHLCV bars to an arbitrary frequency.
+
+        Uses the same default pandas label/closed convention as
+        ``resample_to_hourly`` for consistency with the live trader.
+
+        Aggregation rules:
+            Open   -> first
+            High   -> max
+            Low    -> min
+            Close  -> last
+            Volume -> sum
+
+        Args:
+            df: DataFrame with DatetimeIndex and OHLCV columns.
+            freq: Pandas frequency string (e.g., '4h', '1D').
+
+        Returns:
+            DataFrame with resampled bars.
+        """
+        agg = {
+            "Open": "first",
+            "High": "max",
+            "Low": "min",
+            "Close": "last",
+            "Volume": "sum",
+        }
+        df_out = df.resample(freq).agg(agg).dropna(subset=["Close"])
+        print(f"  Resampled 5-min -> {freq}: {len(df)} -> {len(df_out)} bars")
+        return df_out
 
     # ------------------------------------------------------------------
     # set_11c: set_11 variant with Spread-Adjusted Momentum features
@@ -2252,6 +2292,145 @@ class DataProcessor:
 
         print("=" * 60)
         print("Processing Complete — HourSet_08")
+        print(f"Output : {saved_path}")
+        print(f"Shape  : {df.shape}")
+        target_cols = sorted(c for c in df.columns if c.startswith("TARGET_"))
+        print(f"Targets: {target_cols}")
+        duration = datetime.now() - start_time
+        print(f"Wall time: {str(duration).split('.')[0]}")
+        print("=" * 60)
+
+        self.df = df
+        return df
+
+    def process_hour4set_01(self) -> pd.DataFrame:
+        """4-Hour bar dataset for multi-day swing trading.
+
+        Same feature architecture as HourSet_08 with all AlphaFactory windows
+        scaled from 1H to 4H bar resolution.  Targets use 24H/48H/96H horizons
+        (6/12/24 bars at 4H) — the same bar-count structure as HourSet_08 but
+        representing longer calendar time appropriate for 4H swing strategies.
+
+        Pipeline
+        --------
+        1. Load 5-min raw data
+        2. Resample to 4H bars via ``resample_ohlcv('4h')``
+        3. Add cyclical time + day-of-week features
+        4. AlphaFactory: windows = [6, 18, 42, 84, 210] bars
+           (1d, 3d, 1w, 2w, 5w in calendar time)
+        5. External macro features (FRED + COT)
+        6. RAW columns (30-bar = 120H forward window)
+        7. Triple Barrier targets: 2x1, 3x1, 4x1, 5x1 @ 6, 12, 24 bars
+        8. Continuous return targets at 6, 12, 24 bars
+        9. Normalize + cleanup (600 warmup) + save
+        """
+        start_time = datetime.now()
+        print("=" * 60)
+        print("Starting Data Processing Pipeline - HOUR4SET_01")
+        print("  4-Hour bars + stationary indicators + precision targets")
+        print(f"Started at: {start_time.isoformat(timespec='seconds')}")
+        print("=" * 60)
+
+        # ── Step 1: Load 5-min data and resample to 4H ────────────────
+        df = self.load_data()
+        print(f"  [10%] Loaded {len(df)} 5-min rows")
+        df = self.resample_ohlcv(df, "4h")
+        print(f"  [15%] Resampled to {len(df)} 4-hour bars at "
+              f"{datetime.now().isoformat(timespec='seconds')}")
+
+        # ── Step 2: Time features ──────────────────────────────────────
+        df = self.add_time_features(df, include_day_of_week=True)
+        print(f"  [20%] Time features added")
+
+        # ── Step 3: AlphaFactory — windows scaled to 4H bars ──────────
+        # Calendar equivalents: 1d=6, 3d=18, 1w=42, 2w=84, 5w=210
+        windows = [6, 18, 42, 84, 210]
+        macro_windows = {
+            "1W": 168, "2W": 336, "1M": 840,
+            "3M": 2160, "6M": 4320,
+        }
+        df = AlphaFactory(df, bars_per_hour=0.25).add_all_features(
+            windows=windows,
+            include_momentum=True,
+            include_macro=True,
+            include_extended=True,
+            include_dma=True,
+            include_ichimoku=True,
+            macro_windows=macro_windows,
+            log_progress=True,
+        )
+        print(f"  [50%] AlphaFactory features added at "
+              f"{datetime.now().isoformat(timespec='seconds')}")
+
+        # ── Step 4: External macro features (FRED + COT) ──────────────
+        macro_engine = MacroFeatureEngine()
+        df = macro_engine.merge_all(df)
+        n_macro = len(macro_engine.get_feature_names())
+        print(f"  [55%] {n_macro} external macro features added at "
+              f"{datetime.now().isoformat(timespec='seconds')}")
+
+        # ── Step 5: RAW columns for evaluation (30 bars = 120H) ───────
+        raw_horizon = 30  # 30 × 4H = 120H = 5 trading days
+        future_high = (
+            df["High"].iloc[::-1]
+            .rolling(window=raw_horizon, min_periods=1)
+            .max().iloc[::-1].shift(-1)
+        )
+        future_low = (
+            df["Low"].iloc[::-1]
+            .rolling(window=raw_horizon, min_periods=1)
+            .min().iloc[::-1].shift(-1)
+        )
+        df["RAW_Close"] = df["Close"].copy()
+        df["RAW_Future_High"] = future_high
+        df["RAW_Future_Low"] = future_low
+        print("  - Added RAW_Close, RAW_Future_High, RAW_Future_Low")
+
+        # ── Step 6: Precision Target Suite ─────────────────────────────
+        # Horizons in 4H bars: 6=24H (1d), 12=48H (2d), 24=96H (4d)
+        # Same bar-count structure as HourSet_08 but longer calendar time
+        target_multipliers = [2.0, 3.0, 4.0, 5.0]
+        target_horizons_4h = {"24H": 6, "48H": 12, "96H": 24}
+
+        for tp_mult in target_multipliers:
+            tp_label = str(int(tp_mult)) if tp_mult.is_integer() else str(tp_mult).replace(".", "p")
+            for tag, horizon_bars in target_horizons_4h.items():
+                df = self.add_triple_barrier_target(
+                    df,
+                    prefix=f"TARGET_TRIPLE_{tp_label}x1_{tag}",
+                    tp_atr_mult=tp_mult,
+                    sl_atr_mult=1.0,
+                    max_horizon=horizon_bars,
+                    atr_period=14,
+                )
+
+        # Continuous return targets
+        df = self.add_return_target(df, horizons=[6, 12, 24])
+        print(f"  [80%] All targets created at "
+              f"{datetime.now().isoformat(timespec='seconds')}")
+
+        # ── Step 7: Normalize features ─────────────────────────────────
+        df = self.normalize_features(df)
+
+        # ── Step 8: Cleanup ────────────────────────────────────────────
+        # 600 warmup rows at 4H ≈ 100 days; covers longest macro window
+        # (6M = 4320 hours × 0.25 bars/hr = 1080 bars, but first ~600
+        #  rows are sufficient for feature stabilisation after ffill)
+        df = self.cleanup(
+            df,
+            drop_raw_returns=True,
+            warmup_rows=600,
+            max_warmup_bars=600,
+            keep_ohlcv=self.keep_ohlcv,
+        )
+
+        # ── Step 9: Save ───────────────────────────────────────────────
+        saved_path = self.save(df)
+        print(f"  [100%] Saved output at "
+              f"{datetime.now().isoformat(timespec='seconds')}")
+
+        print("=" * 60)
+        print("Processing Complete — Hour4Set_01")
         print(f"Output : {saved_path}")
         print(f"Shape  : {df.shape}")
         target_cols = sorted(c for c in df.columns if c.startswith("TARGET_"))
