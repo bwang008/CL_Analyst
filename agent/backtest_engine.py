@@ -1832,6 +1832,21 @@ def main() -> None:
         if len(chunks) == 0 or chunks[-1] < ohlcv_a.index.max():
             chunks.append(ohlcv_a.index.max())
             
+        # --- Compute purge gap from target horizon ---
+        # Triple-barrier targets encode the horizon in their name, e.g.
+        # TARGET_TRIPLE_2x1_24H_LONG → 24 hours.  We parse it to create
+        # a purge gap between the training end and OOS start, preventing
+        # the last N training labels from peeking into OOS feature data.
+        _purge_hours = 48  # conservative default (matches 576 bars at 5-min)
+        import re as _re
+        for _side_key in ("long", "short"):
+            _tgt = models_cfg.get(_side_key, {}).get("target", "")
+            _m = _re.search(r"_(\d+)H(?:_|$)", _tgt)
+            if _m:
+                _purge_hours = max(_purge_hours, int(_m.group(1)))
+        _purge_offset = pd.Timedelta(hours=_purge_hours)
+        print(f"  Purge gap: {_purge_hours}H ({_purge_offset}) — prevents target label leakage at train/OOS boundary")
+
         oos_preds = []
         for i in range(len(chunks) - 1):
             chunk_start = chunks[i]
@@ -1844,8 +1859,14 @@ def main() -> None:
             is_start_long = chunk_start - DateOffset(years=lb_years_long) if lb_years_long else ohlcv_a.index.min()
             is_start_short = chunk_start - DateOffset(years=lb_years_short) if lb_years_short else ohlcv_a.index.min()
             
-            is_df_long = ohlcv_a[(ohlcv_a.index >= is_start_long) & (ohlcv_a.index < chunk_start)]
-            is_df_short = ohlcv_a[(ohlcv_a.index >= is_start_short) & (ohlcv_a.index < chunk_start)]
+            # Apply purge gap: training data must end purge_hours before
+            # the OOS window starts so that target labels (which look forward
+            # by up to the target horizon) cannot peek into OOS data.
+            train_end_long = chunk_start - _purge_offset
+            train_end_short = chunk_start - _purge_offset
+            
+            is_df_long = ohlcv_a[(ohlcv_a.index >= is_start_long) & (ohlcv_a.index < train_end_long)]
+            is_df_short = ohlcv_a[(ohlcv_a.index >= is_start_short) & (ohlcv_a.index < train_end_short)]
             
             oos_df = ohlcv_a[(ohlcv_a.index >= chunk_start) & (ohlcv_a.index < chunk_end)]
             if oos_df.empty:

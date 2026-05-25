@@ -690,7 +690,7 @@ if ($batchState.completed -gt 0) {
     # Clean up optimizer VM
     gcloud compute instances delete $optVmName --zone=$optZone --quiet 2>$null
 } else {
-    Write-Host "  Skipping post-optimization — no completed experiments." -ForegroundColor Yellow
+    Write-Host "  Skipping post-optimization - no completed experiments." -ForegroundColor Yellow
 }
 Write-Host ""
 

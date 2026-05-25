@@ -38,12 +38,25 @@ html, body, [class*="st-"] { font-family: 'Inter', sans-serif; }
 div[data-testid="stMetric"] {
     background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
     border: 1px solid #0f3460;
-    border-radius: 12px;
-    padding: 16px 20px;
+    border-radius: 10px;
+    padding: 8px 12px;
     box-shadow: 0 4px 16px rgba(0,0,0,.25);
 }
-div[data-testid="stMetric"] label { color: #a8b2d1 !important; font-size: 0.78rem !important; }
-div[data-testid="stMetric"] [data-testid="stMetricValue"] { color: #ccd6f6 !important; font-weight: 600 !important; }
+div[data-testid="stMetric"] label {
+    color: #a8b2d1 !important;
+    font-size: 0.72rem !important;
+    white-space: normal !important;
+    word-break: break-word !important;
+    overflow: visible !important;
+}
+div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+    color: #ccd6f6 !important;
+    font-weight: 600 !important;
+    font-size: 1.25rem !important;
+    white-space: normal !important;
+    word-break: break-word !important;
+    overflow: visible !important;
+}
 /* Positive / Negative deltas */
 .pnl-pos { color: #64ffda; font-weight: 600; }
 .pnl-neg { color: #ff6b6b; font-weight: 600; }
@@ -278,7 +291,7 @@ def render_batch_overview(df: pd.DataFrame, progress: dict, side_filter: str,
     )
 
     # ── Drill-down selector ──
-    options = filtered["key"].tolist()
+    options = sorted(filtered["key"].tolist())
     selected_key = st.selectbox("🔍 Select experiment for drill-down", options, index=0)
     return selected_key
 
@@ -287,6 +300,98 @@ def render_batch_overview(df: pd.DataFrame, progress: dict, side_filter: str,
 #  SECTION 2 — EXPERIMENT DRILL-DOWN
 # ═══════════════════════════════════════════════════════════════
 
+def _render_feature_importance(row, experiment_label: str, ml_metric: str, progress: dict):
+    st.markdown(f"### 🧬 Feature Importance · {experiment_label} · {row['side'].upper()} · {ml_metric}")
+
+    exp_dir = _find_experiment_dir(progress, experiment_label)
+    if not exp_dir:
+        st.warning("Experiment directory not found in execution progress.")
+        return
+
+    p = Path(exp_dir)
+    candidates = list(p.rglob("feature_importance.csv"))
+
+    fi_path = None
+    if candidates:
+        for c in candidates:
+            parent_name = c.parent.name.lower()
+            if row['side'].lower() in parent_name and ml_metric.lower() in parent_name:
+                fi_path = c
+                break
+        if not fi_path:
+            fi_path = candidates[0]
+
+    if not fi_path or not fi_path.is_file():
+        st.warning("Feature importance CSV not found for this experiment model.")
+        return
+
+    try:
+        df_fi = pd.read_csv(fi_path)
+    except Exception as e:
+        st.error(f"Error reading feature importance file: {e}")
+        return
+
+    if df_fi.empty or "feature" not in df_fi.columns or "importance" not in df_fi.columns:
+        st.warning("Feature importance CSV is empty or format is invalid.")
+        return
+
+    # Sort and clean
+    df_fi = df_fi.sort_values(by="importance", ascending=False).reset_index(drop=True)
+
+    total_feats = len(df_fi)
+    active_feats = len(df_fi[df_fi["importance"] > 0])
+    zero_feats = len(df_fi[df_fi["importance"] == 0])
+
+    # Render KPI metrics
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Features", f"{total_feats:,}")
+    c2.metric("Active Features (Gain > 0)", f"{active_feats:,}")
+    c3.metric("Unused Features (Gain = 0)", f"{zero_feats:,}")
+
+    # Top 15 horizontal bar chart
+    top_15 = df_fi.head(15).copy()
+    # Reverse for plotting so highest is at the top
+    top_15_plot = top_15.iloc[::-1]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=top_15_plot["importance"],
+        y=top_15_plot["feature"],
+        orientation="h",
+        marker=dict(
+            color=top_15_plot["importance"],
+            colorscale=[[0, "#0f3460"], [1, "#64ffda"]],
+        ),
+        hovertemplate="<b>%{y}</b><br>Gain Importance: %{x:,.2f}<extra></extra>",
+    ))
+    fig.update_layout(
+        title=f"Top 15 Most Influential Features (LGBM Gain)",
+        template="plotly_dark",
+        paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+        xaxis_title="Total Gain / Importance",
+        yaxis_title="Feature Name",
+        font=dict(family="Inter", color="#ccd6f6"),
+        height=450,
+        margin=dict(l=150, r=20, t=50, b=50),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Detailed side-by-side tables
+    st.markdown("#### Feature Importance Rankings")
+    t1, t2 = st.columns(2)
+    with t1:
+        st.markdown("**🏆 Top 15 Most Important Features**")
+        st.dataframe(df_fi.head(15), use_container_width=True, hide_index=True)
+
+    with t2:
+        st.markdown("**📉 Bottom 15 Least Important Features**")
+        st.dataframe(df_fi.tail(15), use_container_width=True, hide_index=True)
+
+    # Entire list expander
+    with st.expander("🔍 View All Features Ranking", expanded=False):
+        st.dataframe(df_fi, use_container_width=True)
+
+
 def render_drilldown(df: pd.DataFrame, selected_key: str, progress: dict):
     st.markdown('<div class="section-header">🔬 Section 2 — Experiment Drill-Down</div>', unsafe_allow_html=True)
 
@@ -294,9 +399,10 @@ def render_drilldown(df: pd.DataFrame, selected_key: str, progress: dict):
     experiment_label = row["experiment"]
     ml_metric = row["ml_metric"]
 
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📈 Optimization Detail",
         "📊 Charts",
+        "🧬 Feature Importance",
         "⚙️ Hyperparameters",
         "🔧 Execution & Errors",
     ])
@@ -356,8 +462,12 @@ def render_drilldown(df: pd.DataFrame, selected_key: str, progress: dict):
     with tab2:
         _render_charts(row, experiment_label, ml_metric, progress)
 
-    # ── Tab 3: Hyperparameters ──
+    # ── Tab 3: Feature Importance ──
     with tab3:
+        _render_feature_importance(row, experiment_label, ml_metric, progress)
+
+    # ── Tab 4: Hyperparameters ──
+    with tab4:
         st.markdown(f"### Best Trial: #{row['trial_number']} / {row['n_trials']}")
         st.markdown(f"**Wall time:** {row['wall_time_s']:.1f}s")
         params = row.get("params", {})
@@ -371,8 +481,8 @@ def render_drilldown(df: pd.DataFrame, selected_key: str, progress: dict):
         safe_row["params"] = params
         st.json(safe_row)
 
-    # ── Tab 4: Execution & Errors ──
-    with tab4:
+    # ── Tab 5: Execution & Errors ──
+    with tab5:
         _render_execution(experiment_label, progress)
 
 

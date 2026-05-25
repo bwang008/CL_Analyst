@@ -1,8 +1,13 @@
 ## To-do
 Development:
--Move batch_post_optimizer to cloud
--Have batch_post_optimizer run as part of the batch cloud process so it doesn't need to stop and be run locally to complete.
-	-If 4 targets take 7 hours, then 12 targets will be more than a full day. High costs... Let's make sure this is what we want to do. 
+-Change the timeframe of the training. It seems like we are seeing alpha decay
+If we try to train on more recent data, we might find that the alpha holds better
+We can try to create a system that constantly retrains on the latest information
+Easier said than done, but worth checking out
+I noticed alpha is best in the backtest on the oldest data right after training ends
+So the hope is that if we make the cutoff closer to actual live system, we can get good alpha
+We know that our targets and training method is good, so maybe we can cut down backtest and holdout time. 
+
 
 Training:
 -Review the canary runs for the most recent 2x1,3x1,4x1,5x1 in C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\batch_runs\batch_20260512_2133
@@ -18,7 +23,7 @@ Major next steps:
 -OBSERVE THE MODEL. LET IT COOK. Expect minimum 10 trades a month. Let's see the performance, and identify bugs. This is our chance to make sure the order execution is rock solid. 
 ##
 
-
+========================================================================
 
 # References for steps
 
@@ -40,7 +45,8 @@ python agent/backtest_engine.py --config configs/strategies/hs08_sweep_4x1_6h_pr
 python agent/backtest_engine.py --config configs/strategies/test_canary_5x1_12H.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" --slippage-per-side 0.01
 python agent/backtest_engine.py --config configs/strategies/hs08_sweep_5x1_12h_precision_opt.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" --slippage-per-side 0.01
 python agent/backtest_engine.py --config configs/strategies/HourSet_08_Ensemble_02_05212026_opt.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" --slippage-per-side 0.01
-
+python agent/backtest_engine.py --config configs/strategies/HourSet_08_Ensemble_03_05242026.json --data data/processed/CL_HourSet_08.parquet
+python agent/backtest_engine.py --config configs/strategies/HourSet_08_Ensemble_03_05242026.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" --slippage-per-side 0.01
 
 
 
@@ -48,6 +54,9 @@ Step 4: Run live_trader
 python -m src.live_execution.live_trader --config configs/strategies/HourSet_08_Ensemble_01_opt.json
 python src/live_execution/live_trader.py --config configs/strategies/hs08_scout_3x1_12h_logloss_opt.json
 python src/live_execution/live_trader.py --config configs/strategies/HourSet_08_Ensemble_02_05212026_opt.json
+python src/live_execution/live_trader.py --config configs/strategies/HourSet_08_Ensemble_03_05242026.json
+
+
 
 Step 3.5: Validate Parity (run before deploying to live)
 python -m pytest tests/test_config_parity.py tests/test_pipeline_parity.py tests/test_per_side_atr.py tests/test_execution_parity.py -v

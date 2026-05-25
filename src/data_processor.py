@@ -796,9 +796,9 @@ class DataProcessor:
         """Mirror the saved file to the other data location."""
         try:
             mirror_file(Path(saved_path))
-            print(f"  ↳ Mirrored {Path(saved_path).name}")
+            print(f"  -> Mirrored {Path(saved_path).name}")
         except (ValueError, OSError) as exc:
-            print(f"  ↳ Mirror failed: {exc}")
+            print(f"  -> Mirror failed: {exc}")
     
     def process(self, threshold: float = 0.08, horizon: int = None) -> pd.DataFrame:
         """
