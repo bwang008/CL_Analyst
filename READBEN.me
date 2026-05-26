@@ -76,9 +76,16 @@ wsl -d Ubuntu-22.04 -u bwang008 /home/bwang008/Jts/ibgateway/ibgateway
 sudo systemctl start live-trader.service
 #CHECK THE status
 systemctl status ibc-gateway.service live-trader.service
+
 journalctl -u live-trader.service -f
 
 #kill the service
+sudo systemctl stop live-trader.service
+
+#Stop it from running
+sudo systemctl disable live-trader.service ibc-gateway.service
+#restart the service
+sudo systemctl enable ibc-gateway.service live-trader.service
 
 ===
 # Start the headless IB Gateway (managed by IBC)

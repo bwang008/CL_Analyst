@@ -454,6 +454,124 @@ python tests/test_config_parity.py --compare configs/strategies/hs08_scout_3x1_1
 - **Time Dilation** — Recovery `bars_held` estimation used hardcoded `/5` (5-minute assumption), causing premature `TIME_BARRIER` exits for hourly strategies after reboots. Fixed to use `bar_size` from strategy config.
 - **Initial SL Tracking** — `active_positions.sl_price` was overwritten by trailing stop modifications, making bracket reconciliation impossible. `initial_sl_price` column preserves the original SL for auditing.
 
+## Headless & Production Deployment (WSL 2 / Ubuntu VPS)
+
+The system is equipped with a production-grade, headless background deployment architecture suitable for local execution inside WSL 2 (Ubuntu 22.04) or porting directly to a remote Cloud Linux VPS (e.g. AWS EC2, GCP Compute Engine).
+
+### Headless Architecture Overview
+To achieve 100% autonomous background operations without requiring a continuous interactive terminal or graphical display session, the deployment uses a dual-service systemd topology:
+1. **Automated GUI Virtualization**: IB Gateway requires an X-server graphical display to run. The system uses a virtual framebuffer wrapper (`xvfb-run`) to provision a virtual display (`:99`) in memory.
+2. **IBC Automated Logon**: The Java-based **IBC** daemon wraps the Gateway launcher, automatically passing encrypted credentials, bypassing standard EULA warnings, and handling automated daily restarts.
+3. **Pre-flight Port Synchronization**: The live trader systemd unit holds Python initialization until the headless gateway has successfully negotiated logon and opened the local socket API port (`4002`).
+
+```
+                +-------------------------------------------------------+
+                |                    WSL 2 / VPS Init                   |
+                +-------------------------------------------------------+
+                                           |
+                                           v
+                +-------------------------------------------------------+
+                |         ibc-gateway.service (xvfb-run Display :99)    |
+                +-------------------------------------------------------+
+                                           |
+                         starts and logs into paper account
+                                           |
+                                           v
+                                   Is Port 4002 open?
+                                           |
+                           +---------------+---------------+
+                           | No                            | Yes
+                           v                               v
+                     [Loop & Sleep]               +-----------------+
+                    (ExecStartPre check)          | Start Python    |
+                                                  | Live Trader     |
+                                                  +-----------------+
+```
+
+### Automatic Setup & Cloud VPS Portability
+A unified, dynamic bash utility is located at `deploy/setup_ubuntu.sh` to automate environment setup. The script is **environment-agnostic** (it dynamically reads user home paths, active shell environment, and CPU architectures instead of hardcoding folders).
+
+#### What the setup script automates:
+* **System packages**: Installs Java JRE, Xvfb, tightvncserver, socat, net-tools, and logrotate.
+* **Scaffolding**: Configures `/opt/cl-trader/...` structures and correctly binds read/write chown privileges to the active user.
+* **IB Gateway & IBC**: Performs a silent headless download and extraction of the stable Gateway offline binary and IBC zip, configuring version and configuration symlinks automatically.
+* **Credential Vault**: Generates `/etc/cl-trader.env` equipped with strict secure permissions (`chmod 600`) so that passwords and API keys are readable only by root.
+* **Dynamic Interpolation**: Copies systemd template configurations to `/etc/systemd/system/` while dynamically substituting paths with the cloud user's actual home directory.
+
+To prepare a fresh instance, run:
+```bash
+chmod +x deploy/setup_ubuntu.sh
+./deploy/setup_ubuntu.sh
+```
+
+---
+
+### Core Operational Commands
+
+Once deployed, you can fully control the live trading stack using standard systemd utilities from **any directory** inside your terminal:
+
+#### 1. Controlling the Live Stack
+```bash
+# Start the entire stack (triggers gateway startup, waits for port 4002, then starts trader)
+sudo systemctl start live-trader.service
+
+# Stop the entire stack gracefully (positions are closed out, logs flushed, gateway stopped)
+sudo systemctl stop live-trader.service
+
+# Restart the live trader (useful for deploying fast config updates)
+sudo systemctl restart live-trader.service
+```
+
+#### 2. Following Live Outputs (Stdout/Stderr)
+```bash
+# Follow the live trade logs, model inferences, and heartbeats in real-time
+journalctl -u live-trader.service -f
+
+# Follow the background IB Gateway startup and automated login sequence
+journalctl -u ibc-gateway.service -f
+```
+
+#### 3. Managing Boot Auto-Start
+```bash
+# Enable the services to automatically start whenever WSL or the Cloud VPS boots up
+sudo systemctl enable ibc-gateway.service live-trader.service
+
+# Disable automatic boot-start (forces manual activation only)
+sudo systemctl disable live-trader.service ibc-gateway.service
+```
+
+---
+
+### Log Rotation & Retention
+To protect disk space from ballooning due to continuous standard output streams, the system deploys a custom logrotate configuration to `/etc/logrotate.d/cl-trader`:
+* **Frequency**: Rotates all `.log` files in `/home/bwang008/projects/CL_Analyst/reports/` and `/opt/cl-trader/logs/` daily.
+* **Retention**: Holds 14 days of back-history.
+* **Compression**: Automatically compresses rotated logs (`gzip`) to minimize the storage footprint.
+
+---
+
+### Cloud VPS GUI / VNC Troubleshooting (One-time EULA Check)
+When deploying to a remote cloud VPS (like AWS or GCP) for the very first time, IB Gateway requires you to manually accept EULAs once on screen. To do this headlessly:
+1. Connect VNC Server on the VPS:
+   ```bash
+   tightvncserver :1
+   ```
+2. Create an SSH tunnel from your local PC to forward port `5901`:
+   ```bash
+   ssh -L 5901:127.0.0.1:5901 user@vps-ip
+   ```
+3. Open a local VNC Viewer on your PC and connect to `127.0.0.1:5901`.
+4. Open a terminal inside the VNC desktop view and launch the Gateway manually once:
+   ```bash
+   ~/Jts/ibgateway/ibgateway
+   ```
+5. Log in, check the EULA boxes, and exit the Gateway.
+6. Kill VNC on the cloud VPS and start the systemd services—they will now log in automatically forever!
+   ```bash
+   vncserver -kill :1
+   sudo systemctl start live-trader.service
+   ```
+
 ## Project Structure
 
 ```

@@ -1,5 +1,30 @@
 # Agent Log
 
+## 2026-05-26 — Headless WSL/Ubuntu Deployment & Systemd Services Activation
+
+### Summary
+Implemented a fully autonomous, headless live trading deployment inside WSL 2 (Ubuntu 22.04) with production-grade systemd services (`ibc-gateway.service`, `live-trader.service`), logs management (logrotate), and automatic recovery.
+
+### Implementation
+1. **WSL Dependencies & Folder Prep**: Installed system dependencies (`default-jre`, `xvfb`, `socat`, etc.), created dynamic scaffolding directories (`/opt/cl-trader/...`), and chowned to the deploy user.
+2. **Conda Python 3.12 Environment**: Recreated the Python execution environment in WSL using Python 3.12 to resolve PyPI package conflicts (such as yanked `pandas-ta` packages requiring Python >=3.12).
+3. **Headless IB Gateway via IBC**:
+   - Provisioned stable IB Gateway 10.45 and IBC 3.19.0 inside WSL.
+   - Resolved path discrepancies using self-referential symlinks (`~/Jts/ibgateway/10.45 -> ~/Jts/ibgateway`) and folder mappings.
+   - Configured headless GUI logins using the modern `xvfb-run` wrapper.
+4. **Self-Healing Systemd Dependency Stack**:
+   - `ibc-gateway.service`: Starts the automated headless gateway.
+   - `live-trader.service`: Starts the Python engine. Formulated a pre-flight socket validation loop (`ExecStartPre`) that holds the Python startup sequence until port 4002 successfully responds. Added robust crash-recovery and shutdown timeouts.
+5. **Log Management**: Deployed logrotate configurations to manage storage footprints via daily compression and a 14-day retention limit.
+6. **Troubleshooting & Porting Optimization**:
+   - Identified and resolved a network porting trap where a local `.env` configuration overrode the loopback IP with the Windows host hypervisor IP (`172.28.16.1`). Resolved this by explicitly defining `--host 127.0.0.1` in the systemd script and sanitizing the local `.env`.
+   - Scripted a completely environment-agnostic setup automation utility `deploy/setup_ubuntu.sh` equipped with user path interpolation and TightVNC integration for cloud VPS environments.
+
+### Validation Results
+- Logged on successfully to the paper trading server.
+- The Python live trader dynamically loaded the ensemble strategy (`HourSet_08_Ensemble_03_05242026`), mapped the correct models (201 features each), and qualified the NYMEX Crude Oil continuous contract (`CLN6`).
+- Heartbeats, telemetry logs (`/opt/cl-trader/data/data/live_telemetry_cid1010.db`), and Telegram alert mechanisms verified fully functional in the background.
+
 ## 2026-05-25 — Global Execution Guard: Trade Pattern Analysis + Implementation
 
 ### Summary
