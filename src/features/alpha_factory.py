@@ -486,10 +486,17 @@ class AlphaFactory:
         _bb_slice["Close"] = _close_for_bb
         bb = _bb_slice.ta.bbands(length=20, std=2)
         if bb is not None and not bb.empty:
-            bb_width = bb.get("BBB_20_2.0")
-            if bb_width is None:
-                bb_width = bb.get("BBW_20_2.0")
-            bb_pctb = bb.get("BBP_20_2.0")
+            # pandas_ta column naming varies by version:
+            #   v0.3.14b (pandas 1.x): BBB_20_2.0, BBP_20_2.0
+            #   newer    (pandas 2.x): BBB_20_2.0_2.0, BBP_20_2.0_2.0
+            # Use prefix matching to handle both.
+            bb_width = None
+            bb_pctb = None
+            for col in bb.columns:
+                if col.startswith("BBB_") or col.startswith("BBW_"):
+                    bb_width = bb[col]
+                elif col.startswith("BBP_"):
+                    bb_pctb = bb[col]
 
             self.df["MOM_BB_Width"] = bb_width if bb_width is not None else np.nan
             self.df["MOM_BB_PctB"] = bb_pctb if bb_pctb is not None else np.nan
