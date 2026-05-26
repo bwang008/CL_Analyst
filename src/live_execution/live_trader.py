@@ -1,4 +1,4 @@
-"""
+﻿"""
 Live Event-Driven Execution Engine for CL Futures.
 
 This module implements the live trading loop that:
@@ -2871,6 +2871,15 @@ class LiveTrader:
             elif signal.skip_reason == "ATR_INVALID":
                 log.warning("ATR is invalid -- cannot calculate bracket levels")
                 action_taken = "SKIP_ATR_INVALID"
+            elif signal.skip_reason == "EXECUTION_GUARD":
+                log.warning(
+                    "[EXECUTION GUARD] new entries blocked "
+                    "(bar=%s, buy_prob=%.4f, sell_prob=%.4f)",
+                    bar_time,
+                    signal.buy_prob or 0.0,
+                    signal.sell_prob or 0.0,
+                )
+                action_taken = "SKIP_EXECUTION_GUARD"
             self.telemetry.log_signal(
                 timestamp=bar_time,
                 signal=signal.signal_label,

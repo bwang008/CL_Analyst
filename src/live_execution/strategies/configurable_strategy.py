@@ -73,8 +73,8 @@ class ConfigurableStrategy(Strategy):
             raise FileNotFoundError(
                 f"Strategy config not found: {config_path}"
             )
-        with open(config_file) as f:
-            self.config: dict = json.load(f)
+        from src.live_execution.config_loader import load_strategy_config
+        self.config: dict = load_strategy_config(config_file)
 
         self._nickname: str = self.config["nickname"]
         self._direction: str = self.config.get("direction", "BOTH").upper()

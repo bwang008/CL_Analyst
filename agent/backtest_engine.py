@@ -127,6 +127,7 @@ class BacktestResult:
     label: str = ""
     start_dt: pd.Timestamp | None = None
     end_dt: pd.Timestamp | None = None
+    blocked_trades_count: int = 0
 
     @property
     def total_pnl(self) -> float:
@@ -367,6 +368,7 @@ class BacktestEngine:
 
         # Concurrent mode state
         self._open_positions: list[_OpenPosition] = []
+        self._blocked_trades_count: int = 0
 
     @classmethod
     def from_config(cls, cfg: dict, **overrides) -> "BacktestEngine":
@@ -480,6 +482,7 @@ class BacktestEngine:
         self._trade_max_horizon = self.max_horizon
         self._trade_trailing_atr_mult = self.trailing_atr_mult
         self._trade_trailing_sl_atr_offset = self.trailing_sl_atr_offset
+        self._blocked_trades_count = 0
 
         # Reset mutable engine state
         self._engine_state.position = 0
@@ -1032,6 +1035,7 @@ class BacktestEngine:
             label=label,
             start_dt=ohlcv.index.min() if not ohlcv.empty else None,
             end_dt=ohlcv.index.max() if not ohlcv.empty else None,
+            blocked_trades_count=self._blocked_trades_count,
         )
 
     def _floating_pnl_single(self, close: float) -> float:
@@ -1180,8 +1184,11 @@ class BacktestEngine:
 
             # Dispatch orders to existing FSM entry point
             if self._state == TradeState.FLAT:
+                has_entry = any(order.action in ("BUY", "SELL") for order in orders)
                 # ExecutionGuard: block new entries during toxic periods
                 if self._execution_guard and not self._execution_guard.is_entry_allowed(ts):
+                    if has_entry:
+                        self._blocked_trades_count += 1
                     pass  # Guard blocked — skip entry
                 else:
                     for order in orders:
@@ -1242,17 +1249,21 @@ class BacktestEngine:
             )
 
             # 4. Dispatch orders (ExecutionGuard: block new entries during toxic periods)
-            if not self._execution_guard or self._execution_guard.is_entry_allowed(ts):
-                for order in orders:
-                    if order.action in ("BUY", "SELL"):
-                        # Select ATR by trade side
-                        side_atr = atr_long if order.side == 1 else atr_short
-                        if (
-                            not (np.isnan(side_atr) if isinstance(side_atr, float) else False)
-                            and side_atr > 0
-                            and len(self._open_positions) < self.max_concurrent
-                        ):
-                            self._open_new_position(ts, row, order.side, side_atr, lots=order.lots, order=order)
+            is_allowed = not self._execution_guard or self._execution_guard.is_entry_allowed(ts)
+            for order in orders:
+                if order.action in ("BUY", "SELL"):
+                    if not is_allowed:
+                        if len(self._open_positions) < self.max_concurrent:
+                            self._blocked_trades_count += 1
+                        continue
+                    # Select ATR by trade side
+                    side_atr = atr_long if order.side == 1 else atr_short
+                    if (
+                        not (np.isnan(side_atr) if isinstance(side_atr, float) else False)
+                        and side_atr > 0
+                        and len(self._open_positions) < self.max_concurrent
+                    ):
+                        self._open_new_position(ts, row, order.side, side_atr, lots=order.lots, order=order)
 
             # 5. Record equity: realized + floating
             self._equity_curve.append(
@@ -1350,6 +1361,7 @@ def format_report(
     lines.append("  AGGREGATE SUMMARY")
     lines.append("-" * w)
     lines.append(f"  Total Trades:     {result.trade_count}")
+    lines.append(f"  Blocked Trades:   {result.blocked_trades_count}")
     lines.append(f"  Win Rate:         {result.win_rate:.1%}")
     lines.append(f"  Profit Factor:    {result.profit_factor:.2f}")
     lines.append(f"  Total Net PnL:    ${result.total_pnl:>14,.2f}")

@@ -245,11 +245,23 @@ class ExecutionGuard:
     # ------------------------------------------------------------------
 
     def _log_block(self, reason: str) -> None:
-        """Emit a warning only when the block reason changes (edge-triggered)."""
+        """Emit a warning only when the block reason changes (edge-triggered).
+
+        When transitioning from allowed→blocked or between different block
+        reasons, logs a clear 'GUARD ACTIVATED' message. Subsequent bars
+        with the same reason are silent to avoid log spam.
+        """
         if reason != self._last_block_reason:
-            log.warning(reason)
+            log.warning("[GUARD ACTIVATED] %s", reason)
             self._last_block_reason = reason
 
     def _clear_block(self) -> None:
-        """Reset the block tracker when entry becomes allowed again."""
-        self._last_block_reason = None
+        """Reset the block tracker when entry becomes allowed again.
+
+        When transitioning from blocked→allowed, logs a clear
+        'GUARD DEACTIVATED' message so the user knows entries are
+        flowing again.
+        """
+        if self._last_block_reason is not None:
+            log.info("[GUARD DEACTIVATED] new entries allowed")
+            self._last_block_reason = None
