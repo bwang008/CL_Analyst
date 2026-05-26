@@ -390,9 +390,9 @@ def build_atr_cache(
     Returns a dict {period: atr_series} so Stage 1 (vectorbt prescreener) can
     look up a pre-built series instead of recomputing it per grid combo.
 
-    NOTE: This cache is used exclusively by the Stage 1 vbt prescreener.
-    BacktestEngine.run() always recomputes ATR internally (lines 930-948) and
-    we do NOT attempt to bypass that — no changes to backtest_engine.py.
+    NOTE: For Stage 2 (Optuna + BacktestEngine), use attach_atr_cache() instead
+    — it stamps ATR_{period} columns directly onto the OHLCV DataFrame so
+    BacktestEngine.run() can short-circuit its internal recomputation.
 
     Args:
         ohlcv_df: OHLCV DataFrame with columns High, Low, Close (DateTime index).
@@ -409,6 +409,47 @@ def build_atr_cache(
         ),
     )
     return {p: tr.rolling(p).mean() for p in periods}
+
+
+def attach_atr_cache(
+    ohlcv_df: pd.DataFrame,
+    periods: list[int] | None = None,
+) -> pd.DataFrame:
+    """Pre-compute ATR columns and attach them directly to the OHLCV DataFrame.
+
+    Stamps columns named ATR_{period} onto ohlcv_df (in-place) for every period
+    in `periods`. BacktestEngine.run() detects these columns and uses them as a
+    fast-path, completely eliminating per-trial ATR recomputation from the Optuna
+    hot loop. Trials that would have computed ATR_14, ATR_20, etc. via a rolling
+    mean now just index into a pre-built numpy array.
+
+    Zero fidelity loss: the ATR formula is identical to BacktestEngine's own
+    computation (simple rolling mean of True Range). The values are computed once
+    here, and the engine's fallback path remains intact for any period not cached.
+
+    Args:
+        ohlcv_df: OHLCV DataFrame with columns High, Low, Close (DateTime index).
+                  Modified in-place; also returned for chaining.
+        periods:  ATR periods to pre-compute. Defaults to range(10, 52, 2),
+                  covering every period the Optuna search space can suggest.
+
+    Returns:
+        The same DataFrame with ATR_{period} columns added.
+    """
+    if periods is None:
+        periods = list(range(10, 52, 2))
+    tr = np.maximum(
+        ohlcv_df["High"] - ohlcv_df["Low"],
+        np.maximum(
+            (ohlcv_df["High"] - ohlcv_df["Close"].shift(1)).abs(),
+            (ohlcv_df["Low"] - ohlcv_df["Close"].shift(1)).abs(),
+        ),
+    )
+    for p in periods:
+        col = f"ATR_{p}"
+        if col not in ohlcv_df.columns:          # skip if already stamped
+            ohlcv_df[col] = tr.rolling(p).mean()
+    return ohlcv_df
 
 
 # ---------------------------------------------------------------------------
@@ -866,6 +907,7 @@ def run_optimization(
 
     print("\nLoading data...")
     ohlcv_df = load_ohlcv(ohlcv_path)
+    ohlcv_df = attach_atr_cache(ohlcv_df)   # stamp ATR_{period} cols once; BacktestEngine skips recomputation per trial
     print(f"  Predictions: {len(predictions_df):,} rows  cols={list(predictions_df.columns)}")
     print(f"  OHLCV: {len(ohlcv_df):,} rows")
     print(f"  Date range: {predictions_df.index.min()} to {predictions_df.index.max()}")
@@ -1199,6 +1241,7 @@ def run_hybrid_optimization(
 
     print("\nLoading data...")
     ohlcv_df = load_ohlcv(ohlcv_path)
+    ohlcv_df = attach_atr_cache(ohlcv_df)   # stamp ATR_{period} cols once; BacktestEngine skips recomputation per trial
     print(f"  Predictions: {len(predictions_df):,} rows  cols={list(predictions_df.columns)}")
     print(f"  OHLCV: {len(ohlcv_df):,} rows")
     print(f"  Date range: {predictions_df.index.min()} to {predictions_df.index.max()}")

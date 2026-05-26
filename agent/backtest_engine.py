@@ -941,23 +941,30 @@ class BacktestEngine:
         """
         self._reset_state()
 
-        # Compute per-side ATR on the OHLCV data
+        # Compute per-side ATR on the OHLCV data.
+        # Fast path: if ATR_{period} columns were pre-stamped by attach_atr_cache()
+        # in strategy_optimizer.py, use them directly and skip the rolling-mean
+        # recomputation.  This eliminates the dominant per-trial overhead in the
+        # Optuna hot loop.  Falls back to the legacy computation for any period
+        # not found in the DataFrame (zero fidelity loss — same formula).
         ohlcv = ohlcv_df.copy()
-        tr = np.maximum(
-            ohlcv["High"] - ohlcv["Low"],
-            np.maximum(
-                (ohlcv["High"] - ohlcv["Close"].shift(1)).abs(),
-                (ohlcv["Low"] - ohlcv["Close"].shift(1)).abs(),
-            ),
-        )
-        if self.atr_period_long == self.atr_period_short:
-            # Same period for both sides — compute once, share reference
-            shared_atr = tr.rolling(self.atr_period_long).mean()
-            ohlcv["atr_long_"] = shared_atr
-            ohlcv["atr_short_"] = shared_atr
-        else:
-            ohlcv["atr_long_"] = tr.rolling(self.atr_period_long).mean()
-            ohlcv["atr_short_"] = tr.rolling(self.atr_period_short).mean()
+        long_col  = f"ATR_{self.atr_period_long}"
+        short_col = f"ATR_{self.atr_period_short}"
+        long_cached  = long_col  in ohlcv_df.columns
+        short_cached = short_col in ohlcv_df.columns
+
+        if not long_cached or not short_cached:
+            # At least one side needs the rolling mean — compute True Range once
+            tr = np.maximum(
+                ohlcv["High"] - ohlcv["Low"],
+                np.maximum(
+                    (ohlcv["High"] - ohlcv["Close"].shift(1)).abs(),
+                    (ohlcv["Low"]  - ohlcv["Close"].shift(1)).abs(),
+                ),
+            )
+
+        ohlcv["atr_long_"]  = ohlcv_df[long_col].values  if long_cached  else tr.rolling(self.atr_period_long).mean()
+        ohlcv["atr_short_"] = ohlcv_df[short_col].values if short_cached else tr.rolling(self.atr_period_short).mean()
         # Legacy column: used by legacy loop methods and as default
         ohlcv["atr_"] = ohlcv["atr_short_"]
 
