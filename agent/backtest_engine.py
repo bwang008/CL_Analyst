@@ -64,6 +64,7 @@ from src.live_execution.strategies.execution_models import (
     HOLD,
     create_execution_strategy,
 )
+from src.live_execution.execution_guard import ExecutionGuard
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +314,7 @@ class BacktestEngine:
         max_concurrent: int = 1,
         execution_strategy: Optional[BaseExecutionStrategy] = None,
         consecutive_signal_threshold: int = 0,
+        execution_guard: Optional[ExecutionGuard] = None,
     ) -> None:
         self.tp_atr_mult = tp_atr_mult
         self.sl_atr_mult = sl_atr_mult
@@ -335,6 +337,9 @@ class BacktestEngine:
 
         # Pluggable execution strategy (None = legacy signal_sides fallback)
         self._execution_strategy = execution_strategy
+
+        # Global execution guard (blocks new entries during toxic periods)
+        self._execution_guard = execution_guard
 
         # Mutable engine state (allocated once, reused across bars)
         self._engine_state = EngineState()
@@ -379,6 +384,11 @@ class BacktestEngine:
         # Safety check: warn if top-level params are shadowed by tier overrides
         cls._check_parameter_shadowing(cfg, strategy)
 
+        # Instantiate execution guard if risk filter keys are present
+        guard = None
+        if cfg.get("blocked_entry_hours_est") or cfg.get("block_long_weekends"):
+            guard = ExecutionGuard(cfg)
+
         sc = StrategyConfig.from_dict(cfg)
         kwargs = {
             "tp_atr_mult": sc.tp_atr_mult,
@@ -395,6 +405,7 @@ class BacktestEngine:
             "trailing_sl_atr_offset_long": sc.long.trailing_sl_atr_offset,
             "trailing_sl_atr_offset_short": sc.short.trailing_sl_atr_offset,
             "execution_strategy": strategy,
+            "execution_guard": guard,
         }
         kwargs.update(overrides)
         return cls(**kwargs)
@@ -1169,13 +1180,17 @@ class BacktestEngine:
 
             # Dispatch orders to existing FSM entry point
             if self._state == TradeState.FLAT:
-                for order in orders:
-                    if order.action in ("BUY", "SELL"):
-                        sig = order.side
-                        # Select ATR by trade side
-                        side_atr = atr_long if sig == 1 else atr_short
-                        self._on_flat(ts, row, sig, side_atr, lots=order.lots, order=order)
-                        break  # single-position: only one entry per bar
+                # ExecutionGuard: block new entries during toxic periods
+                if self._execution_guard and not self._execution_guard.is_entry_allowed(ts):
+                    pass  # Guard blocked — skip entry
+                else:
+                    for order in orders:
+                        if order.action in ("BUY", "SELL"):
+                            sig = order.side
+                            # Select ATR by trade side
+                            side_atr = atr_long if sig == 1 else atr_short
+                            self._on_flat(ts, row, sig, side_atr, lots=order.lots, order=order)
+                            break  # single-position: only one entry per bar
 
             # Record equity: realized + floating
             self._equity_curve.append(
@@ -1226,17 +1241,18 @@ class BacktestEngine:
                 atr, pb, ps, self._engine_state,
             )
 
-            # 4. Dispatch orders
-            for order in orders:
-                if order.action in ("BUY", "SELL"):
-                    # Select ATR by trade side
-                    side_atr = atr_long if order.side == 1 else atr_short
-                    if (
-                        not (np.isnan(side_atr) if isinstance(side_atr, float) else False)
-                        and side_atr > 0
-                        and len(self._open_positions) < self.max_concurrent
-                    ):
-                        self._open_new_position(ts, row, order.side, side_atr, lots=order.lots, order=order)
+            # 4. Dispatch orders (ExecutionGuard: block new entries during toxic periods)
+            if not self._execution_guard or self._execution_guard.is_entry_allowed(ts):
+                for order in orders:
+                    if order.action in ("BUY", "SELL"):
+                        # Select ATR by trade side
+                        side_atr = atr_long if order.side == 1 else atr_short
+                        if (
+                            not (np.isnan(side_atr) if isinstance(side_atr, float) else False)
+                            and side_atr > 0
+                            and len(self._open_positions) < self.max_concurrent
+                        ):
+                            self._open_new_position(ts, row, order.side, side_atr, lots=order.lots, order=order)
 
             # 5. Record equity: realized + floating
             self._equity_curve.append(
@@ -1755,8 +1771,8 @@ def main() -> None:
 
     # If --config is provided, create engine from strategy JSON
     if args.config is not None:
-        with open(args.config) as f:
-            strategy_cfg = json.load(f)
+        from src.live_execution.config_loader import load_strategy_config
+        strategy_cfg = load_strategy_config(args.config)
 
         bt = BacktestEngine.from_config(
             strategy_cfg,

@@ -90,6 +90,48 @@ class ExecutionGuard:
         # Edge-triggered logging: only log when the block reason changes
         self._last_block_reason: str | None = None
 
+        # Configure logging to write to reports/backtest_engine_log and suppress console output
+        # ONLY if running inside a backtest context (and NOT pytest or live trader)
+        import sys
+        from pathlib import Path
+
+        is_backtest = False
+        if sys.argv and sys.argv[0]:
+            main_script = Path(sys.argv[0]).name
+            # Check if executing via backtest_engine, sweep_ensembles, or execution_param_sweeper
+            # But do NOT redirect logging if we are running in pytest
+            if ("backtest_engine" in main_script or 
+                "sweep" in main_script or 
+                "sweeper" in main_script) and "pytest" not in main_script:
+                is_backtest = True
+
+        if is_backtest:
+            # Direct logs to reports/backtest_engine_log and prevent propagation
+            project_root = Path(__file__).resolve().parent.parent.parent
+            log_dir = project_root / "reports"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = log_dir / "backtest_engine_log"
+
+            # Setup dedicated logger file handler
+            log.propagate = False
+            
+            # Remove and close any existing file handlers to prevent duplicate logs/leaks
+            for h in list(log.handlers):
+                try:
+                    h.close()
+                except Exception:
+                    pass
+                log.removeHandler(h)
+
+            file_handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+            file_formatter = logging.Formatter(
+                "%(asctime)s [%(levelname)s] %(message)s", 
+                datefmt="%Y-%m-%d %H:%M:%S"
+            )
+            file_handler.setFormatter(file_formatter)
+            log.addHandler(file_handler)
+            log.setLevel(logging.WARNING)
+
     def _precompute_year(self, year: int) -> None:
         """Pre-compute CME holidays and toxic adjacent days for a specific year."""
         if year in self._precomputed_years:

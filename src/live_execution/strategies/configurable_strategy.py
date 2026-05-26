@@ -42,6 +42,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 from src.data_paths import get_model_path as _dp_model_path
 from src.live_execution.strategies.execution_models import create_execution_strategy, EngineState
+from src.live_execution.execution_guard import ExecutionGuard
 
 
 def _sigmoid(x: float) -> float:
@@ -286,6 +287,16 @@ class ConfigurableStrategy(Strategy):
         # ── Execution Strategy ──────────────────────────────────────────
         self._exec_strategy = create_execution_strategy(self.config)
 
+        # ── Execution Guard ─────────────────────────────────────────────
+        if self.config.get("blocked_entry_hours_est") or self.config.get("block_long_weekends"):
+            self._execution_guard = ExecutionGuard(self.config)
+            log.info("[%s] ExecutionGuard active: blocked_hours=%s, block_long_weekends=%s",
+                     self._nickname,
+                     self.config.get('blocked_entry_hours_est', []),
+                     self.config.get('block_long_weekends', False))
+        else:
+            self._execution_guard = None
+
     def _load_model(self, experiment_id: str, label: str, model_path: str | None = None) -> LGBMLearner:
         """Load a LGBMLearner from the model registry or a direct path.
 
@@ -376,15 +387,26 @@ class ConfigurableStrategy(Strategy):
         elif current_position < 0:
             side = -1
 
+        # ExecutionGuard: block new entries during toxic periods
+        dt = pd.Timestamp.now(tz="America/New_York")
+        if current_position == 0 and self._execution_guard:
+            if not self._execution_guard.is_entry_allowed(dt):
+                return TradeSignal(
+                    action="HOLD",
+                    probability=max(buy_prob, sell_prob),
+                    confidence_pct=max(buy_prob, sell_prob) * 100.0,
+                    signal_label="Hold",
+                    skip_reason="EXECUTION_GUARD",
+                    buy_prob=buy_prob,
+                    sell_prob=sell_prob,
+                )
+
         state = EngineState(
             position=1 if current_position != 0 else 0,
             side=side,
             bars_held=0,  # Live trader tracks its own state, so we just provide FSM equivalents
             open_positions=1 if current_position != 0 else 0,
         )
-
-        # Dummy datetime for strategy interface
-        dt = pd.Timestamp.now()
 
         orders = self._exec_strategy.on_bar(
             dt=dt,

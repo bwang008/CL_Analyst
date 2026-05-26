@@ -51,6 +51,15 @@ from src.live_execution.strategies.execution_models import create_execution_stra
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
+# ---------------------------------------------------------------------------
+# Optional vectorbt import — used only by Stage 1 prescreener
+# ---------------------------------------------------------------------------
+try:
+    import vectorbt as vbt
+    _VBT_AVAILABLE = True
+except ImportError:
+    _VBT_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------
 # Best result tracking — O(1) memory replacement for unbounded results_cache
@@ -369,6 +378,209 @@ def _resolve_prob_column(df: pd.DataFrame, keyword: str) -> str | None:
         if kw in col.lower():
             return col
     return None
+
+
+def build_atr_cache(
+    ohlcv_df: pd.DataFrame,
+    periods: list[int],
+) -> dict[int, pd.Series]:
+    """Pre-compute ATR series for each period in `periods`.
+
+    The ATR is the simple rolling mean of True Range (matching BacktestEngine).
+    Returns a dict {period: atr_series} so Stage 1 (vectorbt prescreener) can
+    look up a pre-built series instead of recomputing it per grid combo.
+
+    NOTE: This cache is used exclusively by the Stage 1 vbt prescreener.
+    BacktestEngine.run() always recomputes ATR internally (lines 930-948) and
+    we do NOT attempt to bypass that — no changes to backtest_engine.py.
+
+    Args:
+        ohlcv_df: OHLCV DataFrame with columns High, Low, Close (DateTime index).
+        periods:  List of ATR period integers to pre-compute.
+
+    Returns:
+        Dict mapping period -> ATR pd.Series (same index as ohlcv_df).
+    """
+    tr = np.maximum(
+        ohlcv_df["High"] - ohlcv_df["Low"],
+        np.maximum(
+            (ohlcv_df["High"] - ohlcv_df["Close"].shift(1)).abs(),
+            (ohlcv_df["Low"] - ohlcv_df["Close"].shift(1)).abs(),
+        ),
+    )
+    return {p: tr.rolling(p).mean() for p in periods}
+
+
+# ---------------------------------------------------------------------------
+# Stage 1 grid constants (used by run_vbt_prescreener)
+# ---------------------------------------------------------------------------
+
+_VBT_ENTRY_THRESHOLDS   = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80]
+_VBT_TP_MULTIPLIERS     = [1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0]
+_VBT_SL_MULTIPLIERS     = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 4.5]
+_VBT_MAX_HOLD_BARS_LIST = [24, 48, 96, 144, 192, 240]
+
+
+def run_vbt_prescreener(
+    predictions_df: pd.DataFrame,
+    ohlcv_df: pd.DataFrame,
+    optimize_side: str,                # "long" or "short"
+    objective_metric: str = "sharpe",  # "sharpe" or "sortino"
+    top_n: int = 20,
+    atr_period: int = 14,
+    contract_multiplier: float = 1000.0,
+    commission_per_side: float = 2.50,
+    min_trades: int = 10,
+) -> list[dict]:
+    """Stage 1: fast vectorbt grid sweep over core parameters.
+
+    Sweeps entry_threshold x tp_atr_mult x sl_atr_mult x max_hold_bars on a
+    simplified model (no trailing stop, cooldown, or tiered dispatch). Used
+    as a coarse pre-screener to warm-start Stage 2 Optuna.
+
+    Returns a list of up to `top_n` param dicts ranked by approximate
+    annualized Sharpe/Sortino, ready to pass to study.enqueue_trial().
+
+    Each returned dict uses the suffixed key convention matching
+    _suggest_side_params(trial, suffix) so that enqueue_trial works correctly:
+        e.g., {"tp_atr_mult_long": 2.5, "sl_atr_mult_long": 1.0, ...}
+
+    Approximate only — Stage 2 (BacktestEngine) provides full fidelity.
+    """
+    if not _VBT_AVAILABLE:
+        raise ImportError(
+            "vectorbt is required for Stage 1 prescreening. "
+            "Install it with: pip install vectorbt"
+        )
+    if optimize_side not in ("long", "short"):
+        raise ValueError(f"optimize_side must be 'long' or 'short', got {optimize_side!r}")
+
+    suffix = optimize_side  # e.g. "long" or "short"
+
+    # ── Align predictions and OHLCV on a common datetime index ──────────────
+    common_idx = predictions_df.index.intersection(ohlcv_df.index)
+    preds = predictions_df.loc[common_idx]
+    ohlcv = ohlcv_df.loc[common_idx]
+
+    close = ohlcv["Close"]
+
+    # ── Probability column ───────────────────────────────────────────────────
+    keyword = "buy" if optimize_side == "long" else "sell"
+    prob_col = _resolve_prob_column(preds, keyword)
+    if prob_col is None:
+        raise ValueError(
+            f"Cannot find '{keyword}' probability column in predictions_df. "
+            f"Available columns: {list(preds.columns)}"
+        )
+    prob_series = preds[prob_col]
+
+    # ── ATR series for entry ────────────────────────────────────────────────
+    atr_cache = build_atr_cache(ohlcv_df, [atr_period])
+    atr_series = atr_cache[atr_period].reindex(common_idx)
+
+    # ── Annualisation factor for 5-min bars ─────────────────────────────────
+    bars_per_year = 105_120  # 252 trading days * 6.5 h * 12 bars/h
+
+    results: list[tuple[float, dict]] = []
+
+    for threshold in _VBT_ENTRY_THRESHOLDS:
+        # Entry mask is the same for all (tp, sl, hold) at this threshold
+        if optimize_side == "long":
+            entries_mask = prob_series > threshold
+        else:
+            entries_mask = prob_series > threshold
+
+        # ── Relative SL / TP fractions (per bar) ────────────────────────────
+        # sl_stop and tp_stop in vectorbt are fractions of the entry price
+        # We pre-compute them as pd.Series aligned to close
+        # For bars without a valid ATR we skip (NaN → no entry)
+        atr_frac = atr_series / close  # fraction of close price
+
+        for tp_mult in _VBT_TP_MULTIPLIERS:
+            for sl_mult in _VBT_SL_MULTIPLIERS:
+                tp_frac = tp_mult * atr_frac
+                sl_frac = sl_mult * atr_frac
+
+                for max_hold in _VBT_MAX_HOLD_BARS_LIST:
+                    try:
+                        if optimize_side == "long":
+                            pf = vbt.Portfolio.from_signals(
+                                close,
+                                entries=entries_mask,
+                                exits=pd.Series(False, index=close.index),
+                                sl_stop=sl_frac,
+                                tp_stop=tp_frac,
+                                max_orders=max_hold,
+                                fees=0.0,
+                                freq=None,
+                            )
+                        else:  # short
+                            pf = vbt.Portfolio.from_signals(
+                                close,
+                                short_entries=entries_mask,
+                                short_exits=pd.Series(False, index=close.index),
+                                sl_stop=sl_frac,
+                                tp_stop=tp_frac,
+                                max_orders=max_hold,
+                                fees=0.0,
+                                freq=None,
+                            )
+                    except Exception:
+                        # Any vectorbt construction error → skip this combo
+                        continue
+
+                    try:
+                        stats = pf.stats()
+                        trade_count = int(stats.get("Total Trades", 0))
+                    except Exception:
+                        trade_count = 0
+
+                    if trade_count < min_trades:
+                        continue
+
+                    # ── Score computation ────────────────────────────────────
+                    try:
+                        rets = pf.returns()
+                        if hasattr(rets, "values"):
+                            ret_vals = rets.values
+                        else:
+                            ret_vals = np.asarray(rets)
+
+                        ret_vals = ret_vals[np.isfinite(ret_vals)]
+                        if len(ret_vals) < 2:
+                            continue
+
+                        mean_r = np.mean(ret_vals)
+                        std_r = np.std(ret_vals)
+
+                        if objective_metric == "sortino":
+                            neg = ret_vals[ret_vals < 0]
+                            if len(neg) == 0 or np.std(neg) < 1e-12:
+                                score = 10.0 if mean_r > 0 else 0.0
+                            else:
+                                score = float(mean_r / np.std(neg) * np.sqrt(bars_per_year))
+                        else:  # sharpe
+                            if std_r < 1e-12:
+                                continue
+                            score = float(mean_r / std_r * np.sqrt(bars_per_year))
+
+                        if not np.isfinite(score):
+                            continue
+
+                    except Exception:
+                        continue
+
+                    param_dict = {
+                        f"tp_atr_mult_{suffix}": float(tp_mult),
+                        f"sl_atr_mult_{suffix}": float(sl_mult),
+                        f"entry_threshold_{suffix}": float(threshold),
+                        f"max_hold_bars_{suffix}": int(max_hold),
+                    }
+                    results.append((score, param_dict))
+
+    # Sort descending by score and return top_n
+    results.sort(key=lambda x: x[0], reverse=True)
+    return [p for _, p in results[:top_n]]
 
 
 def _load_ensemble_predictions(base_cfg: dict) -> pd.DataFrame:
@@ -884,6 +1096,354 @@ def run_optimization(
     with open(opt_config_path, "w") as f:
         json.dump(best_cfg, f, indent=4)
     print(f"\nSaved optimized config: {opt_config_path}")
+
+    return best_cfg, best_result
+
+
+# ---------------------------------------------------------------------------
+# Two-Stage Hybrid Optimizer
+# ---------------------------------------------------------------------------
+
+
+def run_hybrid_optimization(
+    config_path: str,
+    n_trials: int = 150,
+    predictions_path: str | None = None,
+    ohlcv_path: str | None = None,
+    holdout_months: int | None = None,
+    n_jobs: int = 1,
+    quiet: bool = False,
+    label: str = "",
+    objective_metric: str = "sharpe",
+    optimize_side: str | None = None,
+    vbt_top_n: int = 20,
+) -> tuple[dict, BacktestResult]:
+    """Two-Stage Hybrid optimizer: vectorbt pre-screen → Optuna warm-start.
+
+    Drop-in replacement for run_optimization() with a reduced n_trials budget.
+
+    Stage 1 (vectorbt): Fast grid sweep over entry_threshold x tp_atr_mult x
+        sl_atr_mult x max_hold_bars. Simplified model — no trailing stop,
+        cooldown, or tiered dispatch.
+
+    Stage 2 (Optuna + BacktestEngine): Full-fidelity optimization warm-started
+        from Stage 1 survivors. Uses study.enqueue_trial() to seed TPE with
+        the top vbt_top_n configurations before free exploration begins.
+
+    ATR Cache: Pre-computed via build_atr_cache() for Stage 1 only.
+        BacktestEngine.run() always recomputes ATR internally — this cache
+        does NOT bypass engine internals (zero changes to backtest_engine.py).
+
+    Args:
+        n_trials: Stage 2 Optuna trial budget AFTER warm-start injection.
+            Total effective trials = vbt_top_n (enqueued) + n_trials (TPE).
+        optimize_side: "long", "short", or None (both sides). When None,
+            Stage 1 skips prescreening (vbt only supports single-side) and
+            falls back to straight warm-start with default mid-range params.
+        vbt_top_n: Number of Stage 1 configs to inject via enqueue_trial.
+
+    Returns:
+        Tuple of (best_config, best_result) — same format as run_optimization().
+    """
+    start_time = time.perf_counter()
+
+    with open(config_path) as f:
+        base_cfg = json.load(f)
+
+    model_name = base_cfg.get("nickname", Path(config_path).stem)
+    if label:
+        model_name = f"{label} | {model_name}"
+    is_tiered = (
+        base_cfg.get("execution_class") == "TieredEnsembleStrategy"
+        and base_cfg.get("long", {}).get("tiers")
+        and base_cfg.get("short", {}).get("tiers")
+    )
+
+    if optimize_side:
+        mode_str = f"HYBRID SINGLE-SIDE ({optimize_side.upper()})"
+    elif is_tiered:
+        mode_str = "HYBRID SIMULTANEOUS ENSEMBLE"
+    else:
+        mode_str = "HYBRID SINGLE CONFIG"
+
+    obj_str = "Annualized Monthly Sortino" if objective_metric == "sortino" else "Annualized Monthly Sharpe"
+
+    print("=" * 70)
+    print(f"HYBRID STRATEGY OPTIMIZATION: {model_name}")
+    print(f"  Config: {config_path}")
+    print(f"  Stage 1 top-N: {vbt_top_n} | Stage 2 trials: {n_trials}")
+    print(f"  Mode: {mode_str}")
+    print(f"  Objective: {obj_str}")
+    print("=" * 70)
+
+    # ── Load config, OHLCV, predictions (mirrors run_optimization) ──────────
+    training_info = base_cfg.get("training_info", {})
+    if ohlcv_path is None:
+        ohlcv_path = training_info.get("data", "data/processed/CL_set_06.parquet")
+
+    if predictions_path is not None:
+        predictions_df = load_predictions(predictions_path)
+    elif "models" in base_cfg:
+        try:
+            predictions_df = _load_ensemble_predictions(base_cfg)
+            predictions_path = "<merged from models block>"
+        except FileNotFoundError:
+            predictions_path = training_info.get("oos_predictions", "reports/oos_predictions.csv")
+            predictions_df = load_predictions(predictions_path)
+    else:
+        predictions_path = training_info.get("oos_predictions", "reports/oos_predictions.csv")
+        predictions_df = load_predictions(predictions_path)
+
+    print(f"  Predictions: {predictions_path}")
+    print(f"  OHLCV data: {ohlcv_path}")
+
+    print("\nLoading data...")
+    ohlcv_df = load_ohlcv(ohlcv_path)
+    print(f"  Predictions: {len(predictions_df):,} rows  cols={list(predictions_df.columns)}")
+    print(f"  OHLCV: {len(ohlcv_df):,} rows")
+    print(f"  Date range: {predictions_df.index.min()} to {predictions_df.index.max()}")
+
+    # ── Holdout split ────────────────────────────────────────────────────────
+    _holdout_months = holdout_months if holdout_months is not None else base_cfg.get("holdout_months", 0)
+    holdout_preds = None
+    holdout_cutoff = None
+    if _holdout_months > 0:
+        pred_end = predictions_df.index.max()
+        holdout_cutoff = pred_end - pd.DateOffset(months=_holdout_months)
+        holdout_preds = predictions_df[predictions_df.index >= holdout_cutoff].copy()
+        predictions_df = predictions_df[predictions_df.index < holdout_cutoff].copy()
+        print(f"  Holdout:  {_holdout_months} months reserved "
+              f"({holdout_cutoff.date()} -> {pred_end.date()}, "
+              f"{len(holdout_preds):,} bars)")
+        print(f"  Optimizer window: "
+              f"{predictions_df.index.min().date()} -> {predictions_df.index.max().date()} "
+              f"({len(predictions_df):,} bars)")
+
+    # ── Baseline ─────────────────────────────────────────────────────────────
+    print("\n--- BASELINE ---")
+    baseline_cfg = copy.deepcopy(base_cfg)
+    if optimize_side and is_tiered:
+        other_side = "short" if optimize_side == "long" else "long"
+        if other_side in baseline_cfg and "tiers" in baseline_cfg[other_side]:
+            for tier in baseline_cfg[other_side]["tiers"]:
+                tier["min_prob"] = 1.0
+    baseline_engine = BacktestEngine.from_config(baseline_cfg)
+    baseline_result = baseline_engine.run(predictions_df, ohlcv_df, label="Baseline")
+    baseline_metrics = extract_metrics(baseline_result)
+    print(f"  PnL: ${baseline_metrics['total_pnl']:,.2f}  "
+          f"PF: {baseline_metrics['profit_factor']:.2f}  "
+          f"WR: {baseline_metrics['win_rate']:.1%}  "
+          f"Trades: {baseline_metrics['trade_count']}  "
+          f"DD: ${baseline_metrics['max_drawdown']:,.2f}")
+
+    # ── Stage 1: vectorbt coarse grid sweep ──────────────────────────────────
+    if optimize_side in ("long", "short") and _VBT_AVAILABLE:
+        print("\n--- STAGE 1: vectorbt coarse grid sweep ---")
+        stage1_configs = run_vbt_prescreener(
+            predictions_df=predictions_df,
+            ohlcv_df=ohlcv_df,
+            optimize_side=optimize_side,
+            objective_metric=objective_metric,
+            top_n=vbt_top_n,
+        )
+        print(f"  Stage 1 complete: {len(stage1_configs)} configs to warm-start")
+    else:
+        stage1_configs = []
+        if not _VBT_AVAILABLE and optimize_side in ("long", "short"):
+            print("  [WARNING] vectorbt not available — skipping Stage 1 prescreening")
+        elif optimize_side is None:
+            print("  Stage 1 skipped: optimize_side=None (vbt supports single-side only)")
+
+    # ── Stage 2: Optuna warm-started from Stage 1 ────────────────────────────
+    score_label = objective_metric.capitalize()
+
+    best_result_tracker = BestResultTracker()
+    tracker = TopKTracker(k=5, save_dir="configs/strategies/candidates")
+    objective = make_objective(
+        base_cfg, predictions_df, ohlcv_df, best_result_tracker,
+        tracker=tracker, objective_metric=objective_metric,
+        optimize_side=optimize_side,
+    )
+
+    study = optuna.create_study(
+        direction="maximize",
+        study_name=f"hybrid_opt_{model_name}",
+    )
+
+    # Inject Stage 1 warm-start configs
+    for params in stage1_configs:
+        try:
+            study.enqueue_trial(params)
+        except Exception as e:
+            print(f"  [WARN] enqueue_trial failed for {params}: {e}")
+    if stage1_configs:
+        print(f"  Enqueued {len(stage1_configs)} Stage 1 warm-start trials")
+
+    def trial_callback(study_: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        if trial.state != optuna.trial.TrialState.COMPLETE:
+            return
+        completed = trial.number + 1
+        total_effective = len(stage1_configs) + n_trials
+        if completed % 50 == 0:
+            elapsed = time.perf_counter() - start_time
+            print(f"  Trial {completed}/{total_effective}  "
+                  f"{score_label}={trial.value:.3f}  [{elapsed:.0f}s]")
+
+    print(f"\n--- STAGE 2: OPTIMIZING ({n_trials} TPE trials, n_jobs={n_jobs}) ---")
+    send_telegram(
+        f"[Hybrid Optimizer] {model_name}\n"
+        f"Stage 1: {len(stage1_configs)} warm-start configs\n"
+        f"Stage 2: {n_trials} trials (n_jobs={n_jobs})\n"
+        f"Objective: {objective_metric}"
+    )
+    try:
+        study.optimize(
+            objective, n_trials=n_trials, n_jobs=n_jobs,
+            callbacks=[trial_callback],
+            show_progress_bar=(n_jobs == 1 and not quiet),
+        )
+    except KeyboardInterrupt:
+        print("\n  [!] Optimization interrupted by user.")
+    finally:
+        tracker.save_best()
+
+    elapsed = time.perf_counter() - start_time
+    best_trial = study.best_trial
+
+    print(f"\n--- RESULTS ({elapsed:.0f}s) ---")
+    print(f"Best trial #{best_trial.number}: {score_label}={best_trial.value:.4f}")
+    print(f"  Params: {dict(best_trial.params)}")
+
+    if best_result_tracker.result is not None and best_result_tracker.trial_number == best_trial.number:
+        best_m = extract_metrics(best_result_tracker.result)
+        send_telegram(
+            f"[Hybrid Optimizer] {model_name}\n"
+            f"COMPLETE ({elapsed:.0f}s / {elapsed/60:.1f}m)\n"
+            f"Best Trial: #{best_trial.number}\n"
+            f"Best {score_label}: {best_trial.value:.4f}\n"
+            f"PnL: ${best_m['total_pnl']:,.2f}  PF: {best_m['profit_factor']:.2f}\n"
+            f"Trades: {best_m['trade_count']}  WR: {best_m['win_rate']:.1%}\n"
+            f"DD: ${best_m['max_drawdown']:,.2f}"
+        )
+    else:
+        send_telegram(
+            f"[Hybrid Optimizer] {model_name}\n"
+            f"COMPLETE ({elapsed:.0f}s / {elapsed/60:.1f}m)\n"
+            f"Best Trial: #{best_trial.number}\n"
+            f"Best {score_label}: {best_trial.value:.4f}"
+        )
+
+    # ── Reconstruct best config ──────────────────────────────────────────────
+    best_cfg = copy.deepcopy(base_cfg)
+    strategy = create_execution_strategy(best_cfg)
+
+    if is_tiered and optimize_side:
+        side_params = {
+            k.replace(f"_{optimize_side}", ""): v
+            for k, v in best_trial.params.items()
+            if k.endswith(f"_{optimize_side}")
+        }
+        strategy.apply_trial_params(best_cfg, side_params, side=optimize_side)
+        other_side = "short" if optimize_side == "long" else "long"
+        if other_side in best_cfg and "tiers" in best_cfg[other_side]:
+            for tier in best_cfg[other_side]["tiers"]:
+                tier["min_prob"] = 1.0
+    elif is_tiered:
+        long_params = {k.replace("_long", ""): v for k, v in best_trial.params.items() if k.endswith("_long")}
+        short_params = {k.replace("_short", ""): v for k, v in best_trial.params.items() if k.endswith("_short")}
+        strategy.apply_trial_params(best_cfg, long_params, side="long")
+        strategy.apply_trial_params(best_cfg, short_params, side="short")
+    else:
+        strategy.apply_trial_params(best_cfg, dict(best_trial.params))
+
+    # ── Final backtest ───────────────────────────────────────────────────────
+    opt_label = f"Hybrid_Optimized_{optimize_side}" if optimize_side else "Hybrid_Optimized_Ensemble"
+    best_engine = BacktestEngine.from_config(best_cfg)
+    best_result = best_engine.run(predictions_df, ohlcv_df, label=opt_label)
+    best_metrics = extract_metrics(best_result)
+
+    print(f"\n  OPTIMIZED: PnL=${best_metrics['total_pnl']:,.2f}  "
+          f"PF={best_metrics['profit_factor']:.2f}  "
+          f"WR={best_metrics['win_rate']:.1%}  "
+          f"Trades={best_metrics['trade_count']}  "
+          f"DD=${best_metrics['max_drawdown']:,.2f}")
+    print(f"  BASELINE:  PnL=${baseline_metrics['total_pnl']:,.2f}  "
+          f"PF={baseline_metrics['profit_factor']:.2f}  "
+          f"WR={baseline_metrics['win_rate']:.1%}  "
+          f"Trades={baseline_metrics['trade_count']}  "
+          f"DD=${baseline_metrics['max_drawdown']:,.2f}")
+
+    # ── Build optuna_info (tagged as "hybrid") ───────────────────────────────
+    _optuna_info_base = {
+        "trial_number": best_trial.number,
+        "timestamp": pd.Timestamp.now().isoformat(timespec="seconds"),
+        "optimizer": "strategy_optimizer",
+        "objective": objective_metric,
+        "n_trials": n_trials,
+        "vbt_top_n": vbt_top_n,
+        "stage1_configs_count": len(stage1_configs),
+        "consistency_score": best_trial.value,
+        "baseline_metrics": baseline_metrics,
+        "wall_time_seconds": round(elapsed, 1),
+    }
+    if is_tiered and optimize_side:
+        best_cfg["optuna_info"] = {
+            **_optuna_info_base,
+            "mode": f"hybrid_single_side_{optimize_side}",
+            "optimize_side": optimize_side,
+            "params": side_params,
+            "all_trial_params": dict(best_trial.params),
+            "metrics": best_metrics,
+        }
+    elif is_tiered:
+        best_cfg["optuna_info"] = {
+            **_optuna_info_base,
+            "mode": "hybrid_simultaneous_ensemble",
+            "long_params": long_params,
+            "short_params": short_params,
+            "params": dict(best_trial.params),
+            "ensemble_metrics": best_metrics,
+        }
+    else:
+        best_cfg["optuna_info"] = {
+            **_optuna_info_base,
+            "mode": "hybrid_single_config",
+            "params": dict(best_trial.params),
+            "metrics": best_metrics,
+        }
+
+    # ── Holdout backtest ─────────────────────────────────────────────────────
+    if holdout_preds is not None and len(holdout_preds) > 0:
+        print(f"\n--- HOLDOUT BACKTEST ({_holdout_months} months, unseen by optimizer) ---")
+        holdout_engine = BacktestEngine.from_config(best_cfg)
+        holdout_result = holdout_engine.run(holdout_preds, ohlcv_df, label="Holdout")
+        holdout_metrics = extract_metrics(holdout_result)
+        best_cfg["optuna_info"]["holdout_metrics"] = holdout_metrics
+        best_cfg["optuna_info"]["holdout_months"] = _holdout_months
+        best_cfg["optuna_info"]["holdout_cutoff"] = holdout_cutoff.isoformat()
+        print(f"  HOLDOUT:   PnL=${holdout_metrics['total_pnl']:,.2f}  "
+              f"PF={holdout_metrics['profit_factor']:.2f}  "
+              f"WR={holdout_metrics['win_rate']:.1%}  "
+              f"Trades={holdout_metrics['trade_count']}  "
+              f"DD=${holdout_metrics['max_drawdown']:,.2f}")
+    elif _holdout_months > 0:
+        print("\n  WARNING: Holdout period has 0 prediction rows — skipping holdout backtest.")
+
+    # ── Save optimized config ────────────────────────────────────────────────
+    if _holdout_months > 0:
+        best_cfg["holdout_months"] = _holdout_months
+
+    suffix_parts = []
+    if optimize_side:
+        suffix_parts.append(optimize_side)
+    suffix_parts.append(objective_metric)
+    opt_suffix = "_".join(suffix_parts)
+
+    opt_config_name = Path(config_path).stem + f"_hybrid_{opt_suffix}.json"
+    opt_config_path = os.path.join(os.path.dirname(config_path), opt_config_name)
+    with open(opt_config_path, "w") as f:
+        json.dump(best_cfg, f, indent=4)
+    print(f"\nSaved hybrid-optimized config: {opt_config_path}")
 
     return best_cfg, best_result
 
