@@ -71,6 +71,50 @@ WSL
 
 SETUP IBKR ON WSL
 wsl -d Ubuntu-22.04 -u bwang008 /home/bwang008/Jts/ibgateway/ibgateway
+
+#Run the single command:
+sudo systemctl start live-trader.service
+#CHECK THE status
+systemctl status ibc-gateway.service live-trader.service
+journalctl -u live-trader.service -f
+
+#kill the service
+
+===
+# Start the headless IB Gateway (managed by IBC)
+sudo systemctl start ibc-gateway.service
+# Start the Live Trader Python engine
+sudo systemctl start live-trader.service
+
+#Turn on logging
+journalctl -u live-trader.service -f
+
+A. Stream Live Trader Output (Real-Time)
+To watch the active trade logic, bar updates, model inferences, and Telegram notifications as they happen:
+
+journalctl -u live-trader.service -f
+(The -f flag stands for "follow", which behaves exactly like tail -f and streams new output dynamically.)
+
+B. Stream IB Gateway / IBC Startup Output (Real-Time)
+To watch the headless gateway initialize, JVM memory allocation, and the automated login progress:
+
+journalctl -u ibc-gateway.service -f
+C. View Persistent File Logs
+The live trader also writes its detailed execution logs directly to files. You can find these files in your WSL repository clone under:
+
+tail -n 100 -f /home/bwang008/projects/CL_Analyst/reports/livetrader_*.log
+4. Verification Check
+After running the start commands, you can verify that everything is running and listening correctly with these commands:
+
+Verify Services are Active:
+
+systemctl status ibc-gateway.service live-trader.service
+Verify IB Gateway Port is Open: Check if port 4002 is listening inside WSL (indicating a successful IBKR connection):
+bash
+
+
+ss -tlnp | grep 4002
+
 ---
 
 ### Deploy to Live Trader
