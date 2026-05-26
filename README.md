@@ -1,6 +1,6 @@
 # CL_Analyst
 
-Machine learning pipeline for predicting significant price movements in Crude Oil (CL) futures using 5-minute OHLCV data.
+Machine learning pipeline for predicting significant price movements in Crude Oil (CL) futures using multi-timeframe (5-minute and hourly) OHLCV data.
 
 ## Setup
 
@@ -10,6 +10,9 @@ Create a Python environment and install dependencies:
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
+
+# Optional: Install additional dependencies to run the streamlit dashboard
+python -m pip install -r requirements-dashboard.txt
 ```
 
 Create a `.env` file from `.env.example` and set `CL_DATA_ROOT` to a directory
@@ -26,12 +29,12 @@ python main.py process
 python main.py train
 ```
 
-## Architecture (current champion: S_Ultimate / EXP-017)
+## Architecture (current champion: HourSet_08_Ensemble_03)
 
 ### Data flow
 1. **Raw OHLCV**: `data/raw/CL.csv`
 2. **Processing**: `src/data_processor.py`
-   - time features + AlphaFactory feature generation
+   - time features + AlphaFactory feature generation (supports 5m and 1h intervals)
    - target construction (Triple Barrier)
    - cleanup + save to `data/processed/*.parquet`
 3. **Training/Evaluation**: `main.py train`
@@ -176,6 +179,38 @@ print(f"Best Iteration: {getattr(model, 'best_iteration', 'Not found')}")
 ```
 If `Best Iteration` equals `Num trees` (e.g., 500 = 500), the model did not early stop and completed its full configured duration.
 
+### Interactive Streamlit Dashboard
+
+An interactive dashboard is available to inspect batch experiments, optimization trials, model registries, and detailed performance metrics.
+
+#### Setup & Launch
+First, ensure that the dashboard dependencies are installed:
+```bash
+python -m pip install -r requirements-dashboard.txt
+```
+To run the dashboard locally:
+```bash
+streamlit run dashboard.py
+```
+
+#### Dashboard Overview & Features
+The dashboard is split into three main modules:
+1. **Section 1: Batch Overview**
+   * **Dropdown Batch Selector**: Scans the `reports/batch_runs/` folder and allows you to select any run.
+   * **KPI Highlights**: Surfaces Total Experiments, Successful Runs, Best Optimization PnL, and Best Holdout PnL, along with a warning card if zero trades were triggered.
+   * **Full Batch Metadata**: Parses and displays GCS paths, hyperparameter search bounds, machine specs, and Optuna settings directly from `manifest.json`.
+   * **Experiment Leaderboard**: Displays a comprehensive, color-coded leaderboard sorted by Sharpe or Sortino objectives across Long and Short positions.
+2. **Section 2: Experiment Drill-down**
+   * **Performance Comparison**: Compares the metrics for the Pre-Optimization Baseline, Post-Optimization, and the Holdout validation set side-by-side.
+   * **Interactive Equity Charts**: Rendered with Plotly, including Monthly Net PnLs, Drawdowns, and Cumulative PnL curves.
+   * **Exit Distributions**: Pie charts detailing whether trades exited via Take Profit, Stop Loss, Trailing BE, or Time Barriers.
+   * **LGBM Gain Feature Importance**: Interactive Top 15 horizontal bar charts and bottom 15 unused/low importance tables extracted directly from LGBM models.
+   * **Diagnostic Execution Reports**: Surface VM names, wall-times, exit codes, and failure details.
+3. **Section 3: Model Registry Browser**
+   * Inspects all models located in `models/registry/`.
+   * Shows model strategies, training targets, feature sizes, and integrity validation (presence of model `.pkl` and `.csv` predictions).
+   * Allows drills down to read raw configurations inside `experiment_config.json`.
+
 ### Prediction + backtest file conventions
 This is the shared contract so prediction files can be used across backtesters.
 
@@ -202,19 +237,35 @@ This is the shared contract so prediction files can be used across backtesters.
 - Outputs go to `reports/oos_regimes/` (summary CSV + per-regime predictions).
 
 ### Champion model configuration
-- **Experiment ID**: `EXP-017` (`S_Ultimate`)
-- **Target**: `TARGET_TRIPLE_2x1_24H_LONG`
-- **Dataset**: `data/processed/CL_set_06.parquet`
-- **Training**: walk-forward (expanding window), `balance_mode=downsample`
-- **Objective**: binary + focal loss (`use_focal=true`)
-- **Key params**:
-  - `num_leaves=31`, `max_depth=4`, `learning_rate~0.0524`, `min_child_samples=166`, `n_estimators=1000`
+
+The production-grade model is **`HourSet_08_Ensemble_03`**, an asymmetric ensemble strategy that integrates hourly LightGBM predictors for long and short directions optimized independently.
+
+* **Backtest Command**:
+  ```bash
+  python agent/backtest_engine.py \
+    --config configs/strategies/HourSet_08_Ensemble_03_05242026.json \
+    --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet" \
+    --slippage-per-side 0.01
+  ```
+* **Strategy Configuration**: [HourSet_08_Ensemble_03_05242026.json](file:///c:/Users/bwang/Documents/GitHub/CL_Analyst_Development/configs/strategies/HourSet_08_Ensemble_03_05242026.json)
+* **Dataset**: `C:\CL_Analyst_Data\data\processed\CL_HourSet_08.parquet` (Hourly bar size: `1h`)
+* **Execution Strategy**: `TieredEnsembleStrategy` / `TIERED` exit mode
+* **Structure & Parameters**:
+
+| Side | Underling Experiment / Model | Probability Threshold | TP (ATR Mult) | SL (ATR Mult) | Trailing (ATR Mult) | Cooldown (Bars) | Max Hold (Bars) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Long** | `E2E_HourSet_08_long_logloss` (Trial #191) | `0.59` | `5.75` | `3.75` | `2.0` | `21` | `144` |
+| **Short** | `E2E_HourSet_08_short_logloss` (Trial #703) | `0.68` | `9.50` | `3.25` | `4.75` | `13` | `48` |
+
+#### Key Performance Metrics (Holdout / OOS)
+* **Long Model Holdout PnL**: `$8,172` (51 trades, 70.76% win rate, Sharpe: 2.5883)
+* **Short Model Holdout PnL**: `$2,018` (31 trades, 49.26% win rate, Sharpe: 2.4803)
 
 ### Primary artifacts
-- **Metrics**: `reports/vault_metrics.json`
-- **Predictions**: `reports/vault_predictions.csv`
-- **Model artifact**: `models/final_model.pkl`
-- **Registry (archived bundles)**: `models/registry/` (catalog in `models/registry/README.md`)
+* **Asymmetric Ensemble Config**: `configs/strategies/HourSet_08_Ensemble_03_05242026.json`
+* **Long Model Predictions**: `data/predictions/oos_predictions_sweep_hs08_3x1_24h_20260523_2040_long_logloss.csv`
+* **Short Model Predictions**: `data/predictions/oos_predictions_sweep_hs08_4x1_6h_20260523_2040_short_logloss.csv`
+* **Registry (archived bundles)**: `models/registry/` (catalog in `models/registry/README.md`)
 
 ## Global Risk Filters (ExecutionGuard)
 
