@@ -227,3 +227,54 @@ def test_edge_triggered_logging(default_config: dict, caplog: pytest.LogCaptureF
     # Should log again since the state was reset
     blocked_messages = [r for r in caplog.records if "BLOCKED" in r.message]
     assert len(blocked_messages) == 1
+
+
+def test_day_specific_blocked_hours(caplog: pytest.LogCaptureFixture) -> None:
+    """Verify that day-specific blocked hours block entries correctly only on those days,
+    and have no effect on other days, and that empty configurations have no effect.
+    """
+    config = {
+        "blocked_entry_hours_est": [8],
+        "blocked_entry_hours_by_day": {"Wednesday": [11]},
+        "block_long_weekends": False,
+        "override_global_filters": False,
+    }
+    guard = ExecutionGuard(config)
+
+    # Wednesday 2025-02-12
+    ts_wed_11 = pd.Timestamp("2025-02-12 11:00:00")
+    # Monday 2025-02-10
+    ts_mon_11 = pd.Timestamp("2025-02-10 11:00:00")
+    # Tuesday 2025-02-11
+    ts_tue_11 = pd.Timestamp("2025-02-11 11:00:00")
+    # Thursday 2025-02-13
+    ts_thu_11 = pd.Timestamp("2025-02-13 11:00:00")
+    # Friday 2025-02-14
+    ts_fri_11 = pd.Timestamp("2025-02-14 11:00:00")
+
+    # 1. Hour 11 is blocked on Wednesday
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert not guard.is_entry_allowed(ts_wed_11)
+        assert "BLOCKED: 11:00 bar on Wednesday (blocked_entry_hours_by_day)" in caplog.text
+
+    # 2. Hour 11 is NOT blocked on Monday, Tuesday, Thursday, Friday
+    for ts in [ts_mon_11, ts_tue_11, ts_thu_11, ts_fri_11]:
+        assert guard.is_entry_allowed(ts), f"Hour 11 should be allowed on {ts.strftime('%A')}"
+
+    # 3. Hour 8 is blocked every day (retains global hourly config blocking)
+    for day_ts in [ts_mon_11, ts_tue_11, ts_wed_11, ts_thu_11, ts_fri_11]:
+        ts_8 = day_ts.replace(hour=8)
+        assert not guard.is_entry_allowed(ts_8), f"Hour 8 should be blocked on {ts_8.strftime('%A')}"
+
+    # 4. Empty blocked_entry_hours_by_day has no effect
+    config_empty = {
+        "blocked_entry_hours_est": [8],
+        "blocked_entry_hours_by_day": {},
+        "block_long_weekends": False,
+        "override_global_filters": False,
+    }
+    guard_empty = ExecutionGuard(config_empty)
+    assert guard_empty.is_entry_allowed(ts_wed_11)
+    assert guard_empty.is_entry_allowed(ts_mon_11)
+

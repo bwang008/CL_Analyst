@@ -5,8 +5,8 @@
 ## Project
 Crude oil (CL) 5-minute bar ML trading system using LightGBM with focal loss, walk-forward validation, and IBKR live execution.
 
-## Current State (2026-05-13)
-- **Zero-Touch Pipeline**: The GCP Canary batch orchestrator now automatically routes downloaded JSON configs, CSV predictions, and PKL models to their active local directories (`configs/strategies`, `data/predictions`, `models/registry`), eliminating manual file moving.
+## Current State (2026-05-25)
+- **Global Execution Guard**: Implemented config-driven trade blocking for toxic hours (8AM, 11AM EST) and long-weekend transitions. Applied automatically to all strategies via `configs/global_risk_filters.json` inheritance unless `override_global_filters: true`.
 - **Modern Alpha Pipeline Architecture**: Shifted the E2E ML pipeline to a true 3-way split (Train / Execution Validation / OOS Holdout) to support autonomous threshold optimization without data leakage.
 - **Data Starvation Fixed**: Identified that legacy splits (Train Cutoff = 2019) starved the model of critical COVID-era volatility. The new split timeline is `TrainCutoffDate = 2023-01-01` and `HoldoutCutoffDate = 2025-01-01`.
 - **Optuna Constriction**: Tightened LightGBM hyperparameter bounds (`min_child_samples` >= 150, `learning_rate` <= 0.02) to forcefully eliminate noise-memorization.
@@ -32,7 +32,10 @@ Crude oil (CL) 5-minute bar ML trading system using LightGBM with focal loss, wa
 | `models/registry/` | Archived model bundles (PKL + metrics + predictions) |
 | `models/production/` | **Production model PKL** (lean momentum short) |
 | `configs/strategies/` | Live trading and backtest strategy configs |
-| `.agents/workflows/` | Slash commands — run `/sweep-ensembles`, `/run-tests`, `/commit`, `/next`, etc. |
+| `.agents/workflows/` | Slash commands -- run `/sweep-ensembles`, `/run-tests`, `/commit`, `/next`, `/analyze-trade-patterns`, etc. |
+| `configs/global_risk_filters.json` | Global execution guard rules (auto-inherited by all strategies) |
+| `src/live_execution/execution_guard.py` | ExecutionGuard class (hour/holiday blocking logic) |
+| `src/live_execution/config_loader.py` | Centralized config loader with global filter inheritance |
 
 ### Documentation Maintenance Protocol
 To keep the AI context window sharp, all agents must follow these rules before ending a session:
@@ -60,7 +63,7 @@ To keep the AI context window sharp, all agents must follow these rules before e
 - `live_trader_test` (merged from `development` 2026-03-21)
 
 ## Last Completed Task
-- **Zero-Touch Pipeline Automation (2026-05-13)**: Refactored `gcp_monitor.ps1` to automatically copy downloaded configs, predictions, and models into the active project folders. Also modified `vm_e2e_pipeline.py` to inject relative paths (`data/predictions/...`) into the generated `.json` configs.
+- **Global Execution Guard (2026-05-25)**: Analyzed losing trade patterns, identified toxic 9AM/11AM EST entry windows and long-weekend transitions. Built `ExecutionGuard` class with config inheritance (`global_risk_filters.json` auto-merges into all strategies). Integrated into backtest engine + live trader. Guarded backtest: +$6,029 PnL, -27 trades, +0.06 PF improvement. 56/56 tests pass.
 - **Modern Pipeline GCP Strategy Validation (2026-04-29)**: Investigated why the 12H model failed (Profit Factor 0.87). Found that 12H horizons are mathematically incompatible with the 2.0x ATR take-profit expectation. Pivoted back to 72H targets. 
 - **Data Starvation Diagnosis (2026-04-29)**: Identified that the new 3-way E2E data split was starving the LightGBM models of COVID-era training data (TrainCutoff was pushed back to 2019 to leave room for the execution validation split). 
 - **Modern Alpha Timeline Shift (2026-04-29)**: Re-aligned the split structure (`TrainCutoffDate=2023-01-01`, `HoldoutCutoffDate=2025-01-01`) so the model trains on the highly volatile 2020-2022 period, ensuring a fair baseline comparison. Deployed the Modern Canary run (`optuna-runner-72h-mod`).

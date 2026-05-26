@@ -1,4 +1,4 @@
-﻿"""
+"""
 Live Event-Driven Execution Engine for CL Futures.
 
 This module implements the live trading loop that:
@@ -201,6 +201,11 @@ class LiveTrader:
         # Strategy (owns model, config, threshold, sizing, bracket math)
         self.strategy = strategy
         self.feature_names: list[str] = strategy.feature_names
+        self._needs_macro: bool = any(
+            f.startswith(("MACRO_VIX", "MACRO_OVX", "MACRO_DXY",
+                          "MACRO_YIELD_CURVE", "MACRO_FED_FUNDS", "COT_"))
+            for f in self.feature_names
+        )
 
         # Read max_hold_bars from strategy config (keeps backtest & live in sync)
         strategy_config = getattr(strategy, "config", {})
@@ -563,17 +568,9 @@ class LiveTrader:
                     )
 
             # Step 7: Refresh external macro data if stale and model needs it
-            _needs_macro = any(
-                f.startswith(("MACRO_VIX", "MACRO_OVX", "MACRO_DXY",
-                              "MACRO_YIELD_CURVE", "MACRO_FED_FUNDS", "COT_"))
-                for f in self.feature_names
-            )
-            if _needs_macro:
+            if self._needs_macro:
                 log.info("Model uses external macro features — checking freshness...")
-                try:
-                    MacroFeatureEngine().refresh_if_stale()
-                except Exception as exc:
-                    log.warning("Macro data refresh failed: %s (will use existing data)", exc)
+                MacroFeatureEngine().refresh_if_stale()
 
             # Step 8: Warm-start via DataManager
             self._warm_start()
@@ -3259,6 +3256,11 @@ class LiveTrader:
             self.manager.ib.isConnected() if getattr(self.manager, "ib", None) else False,
             subs_status,
         )
+
+        # Periodic macro data freshness check
+        if getattr(self, "_needs_macro", False):
+            from src.features.macro_features import MacroFeatureEngine
+            MacroFeatureEngine().refresh_if_stale()
 
     def _check_stale_bars(self) -> bool:
         """Proactive watchdog — signal reconnect if bars are stale during market hours.

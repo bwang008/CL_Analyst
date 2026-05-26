@@ -41,6 +41,7 @@ python main.py train
    - friction-aware PnL, long/short compatible (commission + slippage + CL multiplier)
    - supports `--config configs/strategies/*.json` for strategy-driven backtests
    - sizing tiers, trailing stops, concurrent positions, ensemble strategies
+   - **Global Risk Filters**: automatic entry blocking during toxic hours/holidays (see below)
 
 ## Experiment Pipeline
 
@@ -215,6 +216,76 @@ This is the shared contract so prediction files can be used across backtesters.
 - **Model artifact**: `models/final_model.pkl`
 - **Registry (archived bundles)**: `models/registry/` (catalog in `models/registry/README.md`)
 
+## Global Risk Filters (ExecutionGuard)
+
+The system includes a **Global Execution Guard** that blocks new trade entries during structurally toxic market periods. This guard is applied **automatically to every strategy** (both backtest and live) unless explicitly overridden.
+
+### How It Works
+
+A centralized config file `configs/global_risk_filters.json` defines house-wide risk rules. When any strategy config is loaded (via `backtest_engine.py` or `live_trader.py`), the `load_strategy_config()` function in `src/live_execution/config_loader.py` automatically merges these global rules into the strategy config — **only if the strategy does not already define those keys itself**.
+
+```
+Strategy JSON (trade params only)
+        |
+        v
+load_strategy_config() ──merges──> global_risk_filters.json
+        |
+        v
+Merged config dict ──> BacktestEngine / ConfigurableStrategy
+        |
+        v
+ExecutionGuard.is_entry_allowed(timestamp) ──> blocks or allows new entries
+```
+
+### Config File: `configs/global_risk_filters.json`
+
+```json
+{
+  "blocked_entry_hours_est": [8, 11],
+  "block_long_weekends": true,
+  "long_weekend_block_scope": ["BEFORE_LONG_WEEKEND", "AFTER_LONG_WEEKEND"],
+  "override_global_filters": false
+}
+```
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `blocked_entry_hours_est` | `list[int]` | Bar hours (EST) to block new entries. `[8]` blocks the 8:00 bar (filled at 9:00 AM NYMEX open). |
+| `block_long_weekends` | `bool` | If `true`, blocks entries on days adjacent to CME holidays (long weekend transitions). |
+| `long_weekend_block_scope` | `list[str]` | Which adjacency types to block: `BEFORE_LONG_WEEKEND`, `AFTER_LONG_WEEKEND`. |
+| `override_global_filters` | `bool` | Set `true` in a **strategy JSON** to skip global filter inheritance entirely. |
+
+### Key Design Rules
+
+1. **All strategies inherit global filters by default.** You do not need to add filter keys to individual strategy JSONs.
+2. **To disable for a specific strategy**, add `"override_global_filters": true` to that strategy's JSON file.
+3. **The guard only blocks new entries.** Open positions continue managing TP/SL/trailing stops through blocked periods.
+4. **Actual holiday shortened sessions are NOT blocked** — only the adjacent transition days (which are structurally toxic).
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `configs/global_risk_filters.json` | Global house rules (hours, holidays) |
+| `src/live_execution/config_loader.py` | Centralized config loader with inheritance merge |
+| `src/live_execution/execution_guard.py` | Guard logic (`is_entry_allowed()`) with edge-triggered logging |
+| `tests/test_execution_guard.py` | 10 unit tests covering hours, holidays, overrides, timezones |
+
+### Live Trader Logging
+
+When the guard blocks an entry in live mode, the terminal shows:
+```
+WARNING [GUARD ACTIVATED] BLOCKED: 08:00 bar in blocked_entry_hours_est
+WARNING [EXECUTION GUARD] new entries blocked (bar=2026-01-20 08:00, buy_prob=0.72, sell_prob=0.34)
+```
+When the blocked period ends:
+```
+INFO [GUARD DEACTIVATED] new entries allowed
+```
+Heartbeats, PnL updates, and position management continue normally. Telemetry records `action_taken="SKIP_EXECUTION_GUARD"` for audit.
+
+---
+
 ## Live Execution (Paper Trading)
 
 ### Overview
@@ -345,7 +416,9 @@ CL_Analyst/
 |   +-- features/
 |   |   +-- alpha_factory.py       # Feature generation engine (159 features in set_07, 174 in set_08)
 |   +-- live_execution/
+|       +-- config_loader.py       # Centralized config loader (global filter inheritance)
 |       +-- data_manager.py        # Three-Tier data manager (seed -> cache -> backfill)
+|       +-- execution_guard.py     # Global Execution Guard (hour/holiday entry blocking)
 |       +-- ibkr_client.py         # IBKR connection, data, front-month, orders
 |       +-- live_trader.py         # Live execution engine (Two-Stream)
 |       +-- strategy.py            # Strategy ABC + TradeSignal dataclass
@@ -356,6 +429,7 @@ CL_Analyst/
 |       +-- utils/
 |           +-- time_utils.py      # IBKR duration string utilities
 +-- configs/
+|   +-- global_risk_filters.json   # Global execution guard rules (auto-inherited by all strategies)
 |   +-- strategies/                # Strategy JSON configs (trade management + model refs)
 |       +-- manatee.json           # Long strategy (EXP-017, client_id=10)
 |       +-- koala.json             # Short strategy (EXP-020, client_id=11)
@@ -385,6 +459,7 @@ CL_Analyst/
 |   +-- validate_parity.py               # Shadow log prediction parity validation
 |   +-- trade_reconciler.py              # Live-to-backtest trade reconciliation
 +-- tests/                         # Pytest test suite (440+ tests)
+|   +-- test_execution_guard.py          # ExecutionGuard unit tests (hours, holidays, overrides)
 |   +-- test_config_parity.py            # Config parameter parity (BT vs LT)
 |   +-- test_pipeline_parity.py          # Feature pipeline parity (batch vs live)
 |   +-- test_per_side_atr.py             # Per-side ATR bracket sizing

@@ -107,10 +107,9 @@ class MacroFeatureEngine:
         if fred_stale:
             api_key = os.environ.get("FRED_API_KEY", "")
             if not api_key:
-                log.warning(
+                raise ValueError(
                     "FRED_API_KEY not set — cannot refresh FRED data. "
-                    "Add FRED_API_KEY to .env or set as environment variable. "
-                    "Using existing (possibly stale) data if available."
+                    "Add FRED_API_KEY to .env or set as environment variable."
                 )
             else:
                 try:
@@ -124,7 +123,8 @@ class MacroFeatureEngine:
                     self._fred_df = None
                     log.info("FRED data refreshed successfully")
                 except Exception as exc:
-                    log.warning("Failed to refresh FRED data: %s", exc)
+                    log.error("Failed to refresh FRED data: %s", exc)
+                    raise exc
 
         # --- COT refresh ---
         cot_stale = True
@@ -156,7 +156,8 @@ class MacroFeatureEngine:
                 self._cot_df = None
                 log.info("COT data refreshed successfully")
             except Exception as exc:
-                log.warning("Failed to refresh COT data: %s", exc)
+                log.error("Failed to refresh COT data: %s", exc)
+                raise exc
 
     # ------------------------------------------------------------------
     # Loading

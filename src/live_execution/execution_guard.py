@@ -72,6 +72,7 @@ class ExecutionGuard:
         """
         self.config = config
         self.blocked_entry_hours_est = config.get("blocked_entry_hours_est", [])
+        self.blocked_entry_hours_by_day = config.get("blocked_entry_hours_by_day", {})
         self.block_long_weekends = config.get("block_long_weekends", False)
         self.long_weekend_block_scope = config.get(
             "long_weekend_block_scope",
@@ -211,6 +212,14 @@ class ExecutionGuard:
         hour = ts_est.hour
         if hour in self.blocked_entry_hours_est:
             reason = f"BLOCKED: {hour:02d}:00 bar in blocked_entry_hours_est"
+            self._log_block(reason)
+            return False
+
+        # Day-specific hour blocking
+        day_name = ts_est.strftime("%A")
+        blocked_hours_for_day = self.blocked_entry_hours_by_day.get(day_name, [])
+        if hour in blocked_hours_for_day:
+            reason = f"BLOCKED: {hour:02d}:00 bar on {day_name} (blocked_entry_hours_by_day)"
             self._log_block(reason)
             return False
 

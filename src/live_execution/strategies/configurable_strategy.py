@@ -288,11 +288,12 @@ class ConfigurableStrategy(Strategy):
         self._exec_strategy = create_execution_strategy(self.config)
 
         # ── Execution Guard ─────────────────────────────────────────────
-        if self.config.get("blocked_entry_hours_est") or self.config.get("block_long_weekends"):
+        if self.config.get("blocked_entry_hours_est") or self.config.get("block_long_weekends") or self.config.get("blocked_entry_hours_by_day"):
             self._execution_guard = ExecutionGuard(self.config)
-            log.info("[%s] ExecutionGuard active: blocked_hours=%s, block_long_weekends=%s",
+            log.info("[%s] ExecutionGuard active: blocked_hours=%s, blocked_hours_by_day=%s, block_long_weekends=%s",
                      self._nickname,
                      self.config.get('blocked_entry_hours_est', []),
+                     self.config.get('blocked_entry_hours_by_day', {}),
                      self.config.get('block_long_weekends', False))
         else:
             self._execution_guard = None
