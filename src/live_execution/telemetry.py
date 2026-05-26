@@ -315,7 +315,15 @@ class TelemetryDB:
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
             self._conn = sqlite3.connect(str(self.db_path))
-            self._conn.execute("PRAGMA journal_mode=WAL;")
+            try:
+                self._conn.execute("PRAGMA journal_mode=WAL;")
+            except sqlite3.OperationalError as e:
+                import logging
+                logging.getLogger("TelemetryDB").warning(
+                    "Failed to set journal_mode=WAL (%s). Falling back to default journal mode. "
+                    "This is common on WSL mounts (/mnt/c) or network shares.",
+                    e
+                )
         return self._conn
 
     def close(self) -> None:
