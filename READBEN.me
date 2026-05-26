@@ -74,9 +74,10 @@ wsl -d Ubuntu-22.04 -u bwang008 /home/bwang008/Jts/ibgateway/ibgateway
 
 #Run the single command:
 sudo systemctl start live-trader.service
-#CHECK THE status
+#CHECK THE status of services
 systemctl status ibc-gateway.service live-trader.service
 
+#Check live trader output
 journalctl -u live-trader.service -o cat -f
 
 #kill the service
