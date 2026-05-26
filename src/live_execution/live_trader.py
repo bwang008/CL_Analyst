@@ -206,6 +206,7 @@ class LiveTrader:
                           "MACRO_YIELD_CURVE", "MACRO_FED_FUNDS", "COT_"))
             for f in self.feature_names
         )
+        self._last_macro_check_time: float = 0.0
 
         # Read max_hold_bars from strategy config (keeps backtest & live in sync)
         strategy_config = getattr(strategy, "config", {})
@@ -571,6 +572,7 @@ class LiveTrader:
             if self._needs_macro:
                 log.info("Model uses external macro features — checking freshness...")
                 MacroFeatureEngine().refresh_if_stale()
+                self._last_macro_check_time = time.time()
 
             # Step 8: Warm-start via DataManager
             self._warm_start()
@@ -3259,8 +3261,11 @@ class LiveTrader:
 
         # Periodic macro data freshness check
         if getattr(self, "_needs_macro", False):
-            from src.features.macro_features import MacroFeatureEngine
-            MacroFeatureEngine().refresh_if_stale()
+            now = time.time()
+            if now - getattr(self, "_last_macro_check_time", 0.0) >= 3600.0:
+                self._last_macro_check_time = now
+                from src.features.macro_features import MacroFeatureEngine
+                MacroFeatureEngine().refresh_if_stale()
 
     def _check_stale_bars(self) -> bool:
         """Proactive watchdog — signal reconnect if bars are stale during market hours.

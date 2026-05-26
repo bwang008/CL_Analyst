@@ -58,13 +58,14 @@ class TestLiveMacroRefresh:
 
     @patch("src.features.macro_features.MacroFeatureEngine.refresh_if_stale")
     def test_heartbeat_triggers_refresh(self, mock_refresh):
-        """Heartbeat must invoke refresh_if_stale when needs_macro is True."""
+        """Heartbeat must invoke refresh_if_stale when needs_macro is True but rate-limit to once per hour."""
         strategy = DummyStrategy(feature_names=["MACRO_VIX"])
         trader = LiveTrader(
             strategy=strategy,
             dry_run=True,
         )
         assert trader._needs_macro is True
+        assert trader._last_macro_check_time == 0.0
 
         # Trigger heartbeat log (mock dependencies so it doesn't try to touch live portfolios)
         trader.manager = MagicMock()
@@ -72,8 +73,11 @@ class TestLiveMacroRefresh:
         trader._last_bar_time_5m = None
         trader._subscriptions_lost = False
 
-        # Call heartbeat
+        # First call: triggers refresh (since elapsed >= 3600)
         trader._log_heartbeat()
+        assert mock_refresh.call_count == 1
+        assert trader._last_macro_check_time > 0.0
 
-        # refresh_if_stale must be called
-        mock_refresh.assert_called_once()
+        # Second call immediately: does NOT trigger refresh (rate-limited)
+        trader._log_heartbeat()
+        assert mock_refresh.call_count == 1
