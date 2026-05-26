@@ -301,6 +301,16 @@ class LiveTrader:
         )
 
         # DataManagers for warm-start (Two-Brain Hub)
+        # Log resolved data paths loudly so cross-environment issues
+        # (Windows vs WSL vs cloud) are immediately visible in logs.
+        from src.data_paths import get_data_root as _get_data_root, _CL_DATA_ROOT
+        log.info(
+            "DATA PATHS: CL_DATA_ROOT=%s  PROJECT_ROOT=%s",
+            _CL_DATA_ROOT or "(NOT SET)",
+            _get_data_root().parent if _CL_DATA_ROOT else "(fallback)",
+        )
+        log.info("DATA PATHS: 5m seed=%s  cache=%s", seed_path, cache_path)
+
         self.data_manager_5m = DataManager(
             seed_path=seed_path,
             cache_path=cache_path,
@@ -314,10 +324,27 @@ class LiveTrader:
             # 1h models use a dedicated 1h data manager to avoid pacing limits.
             # Seed from the full historical 1H parquet (cl-1h_bk_HourSet_06.parquet)
             # which lives alongside the processed datasets in CL_DATA_ROOT/data/processed/.
-            from src.data_paths import get_data_root as _get_data_root
             _data_root = _get_data_root()
             cache_path_1h = str(_data_root / "processed" / "warm_start_cache_1h.parquet")
             seed_path_1h = str(_data_root / "processed" / "CL_HourSet_08.parquet")
+            log.info("DATA PATHS: 1h seed=%s  cache=%s", seed_path_1h, cache_path_1h)
+
+            # Hard validation: the 1H seed must exist. If it doesn't, the
+            # DataManager would fall back to an IBKR-only backfill that produces
+            # too few bars, causing NaN features and silent inference degradation.
+            _seed_1h_path = Path(seed_path_1h)
+            _cache_1h_path = Path(cache_path_1h)
+            if not _cache_1h_path.exists() and not _seed_1h_path.exists():
+                raise FileNotFoundError(
+                    f"CRITICAL: Neither 1H cache nor seed file found!\n"
+                    f"  cache: {cache_path_1h}\n"
+                    f"  seed:  {seed_path_1h}\n"
+                    f"  CL_DATA_ROOT={_CL_DATA_ROOT}\n"
+                    f"Ensure CL_DATA_ROOT points to the shared data directory "
+                    f"containing data/processed/CL_HourSet_08.parquet, or copy "
+                    f"the seed file to this environment."
+                )
+
             self.data_manager_1h = DataManager(
                 seed_path=seed_path_1h,
                 cache_path=cache_path_1h,
@@ -2532,15 +2559,6 @@ class LiveTrader:
                     "Low": "min", "Close": "last",
                     "Volume": "sum",
                 }).dropna(subset=["Close"])
-                # Forward-fill temporal gaps (weekends/holidays) so rolling
-                # indicators like bbands(20) don't see NaN mid-window.
-                # Without this, the 20-bar BB lookback spanning a weekend
-                # produces all-NaN → zero-filled MOM_BB_Width / MOM_BB_PctB.
-                df_resampled = df_resampled.asfreq(
-                    f"{resample_hours}h"
-                ).ffill()
-                # asfreq can re-introduce NaN at the edges; drop them
-                df_resampled = df_resampled.dropna(subset=["Close"])
                 if len(df_resampled) > 0:
                     log.info(
                         "RESAMPLED %s BAR: %s  (%d bars from 1H stream)",

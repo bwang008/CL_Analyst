@@ -1,5 +1,5 @@
 {
-    "nickname": "HourSet_08_Ensemble_03",
+    "nickname": "HourSet_08_Ensemble_03_v2",
     "description": "Asymmetric ensemble: Long from HS08 3x1 24H logloss (Sharpe-optimized, trial #191/1000, holdout PnL: $8,172), Short from HS08 4x1 6H logloss (Sharpe-optimized, trial #703/1000, holdout PnL: $2,018). Per-side independent optimization from batch_20260523_2040.",
     "execution_class": "TieredEnsembleStrategy",
     "exit_mode": "TIERED",
@@ -11,7 +11,7 @@
     "max_hold_bars": 48,
     "allow_concurrent": false,
     "max_concurrent": 1,
-    "max_position_size": 1,
+    "max_position_size": 2,
     "execution_symbol": "CL",
     "bar_size": "1h",
     "cooldown_bars": 13,
@@ -48,7 +48,7 @@
         ],
         "tiers": [
             {
-                "min_prob": 0.58,
+                "min_prob": 0.59,
                 "lots": 1,
                 "tp_atr_mult": 5.75,
                 "sl_atr_mult": 3.75,
@@ -75,7 +75,16 @@
         ],
         "tiers": [
             {
-                "min_prob": 0.67,
+                "min_prob": 0.77,
+                "lots": 2,
+                "tp_atr_mult": 9.5,
+                "sl_atr_mult": 3.25,
+                "trailing_atr_mult": 4.75,
+                "max_hold_bars": 48,
+                "label": "hs08_4x1_6h_short_aggressive"
+            },
+            {
+                "min_prob": 0.68,
                 "lots": 1,
                 "tp_atr_mult": 9.5,
                 "sl_atr_mult": 3.25,
