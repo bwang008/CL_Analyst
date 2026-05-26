@@ -2532,6 +2532,15 @@ class LiveTrader:
                     "Low": "min", "Close": "last",
                     "Volume": "sum",
                 }).dropna(subset=["Close"])
+                # Forward-fill temporal gaps (weekends/holidays) so rolling
+                # indicators like bbands(20) don't see NaN mid-window.
+                # Without this, the 20-bar BB lookback spanning a weekend
+                # produces all-NaN → zero-filled MOM_BB_Width / MOM_BB_PctB.
+                df_resampled = df_resampled.asfreq(
+                    f"{resample_hours}h"
+                ).ffill()
+                # asfreq can re-introduce NaN at the edges; drop them
+                df_resampled = df_resampled.dropna(subset=["Close"])
                 if len(df_resampled) > 0:
                     log.info(
                         "RESAMPLED %s BAR: %s  (%d bars from 1H stream)",

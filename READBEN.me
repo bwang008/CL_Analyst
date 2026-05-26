@@ -99,10 +99,13 @@ journalctl -u live-trader.service --since "2026-05-26 00:00:00" --until "2026-05
 #kill the service
 sudo systemctl stop live-trader.service
 
-#Stop it from running
+
+#Stop it from running again when wsl starts up
 sudo systemctl disable live-trader.service ibc-gateway.service
-#restart the service
+
+#restart the service so it starts at startup
 sudo systemctl enable ibc-gateway.service live-trader.service
+sudo systemctl start live-trader.service
 
 ===
 # Start the headless IB Gateway (managed by IBC)

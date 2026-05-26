@@ -454,6 +454,7 @@ def main():
     )
     parser.add_argument("--force", action="store_true", help="Regenerate all plots even if they exist")
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD, help="Primary threshold (default: 0.60)")
+    parser.add_argument("--csv", type=str, nargs="+", help="Explicit list of prediction CSV files to plot")
     args = parser.parse_args()
 
     print(f"Registry: {REGISTRY_DIR}")
@@ -464,10 +465,24 @@ def main():
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    models = discover_models(REGISTRY_DIR)
-    if not models:
-        print("No models with oos_predictions.csv found in registry.")
-        sys.exit(1)
+    if args.csv:
+        models = []
+        for csv_str in args.csv:
+            csv_path = Path(csv_str)
+            if not csv_path.is_absolute():
+                csv_path = PROJECT_ROOT / csv_str
+            if csv_path.exists():
+                models.append((csv_path.stem, csv_path))
+            else:
+                print(f"Error: CSV file not found: {csv_str}")
+        if not models:
+            print("No valid CSV files found/provided.")
+            sys.exit(1)
+    else:
+        models = discover_models(REGISTRY_DIR)
+        if not models:
+            print("No models with oos_predictions.csv found in registry.")
+            sys.exit(1)
 
     print(f"Found {len(models)} model(s) with OOS predictions:\n")
 
