@@ -48,7 +48,7 @@
         ],
         "tiers": [
             {
-                "min_prob": 0.59,
+                "min_prob": 0.58,
                 "lots": 1,
                 "tp_atr_mult": 5.75,
                 "sl_atr_mult": 3.75,
@@ -75,7 +75,7 @@
         ],
         "tiers": [
             {
-                "min_prob": 0.68,
+                "min_prob": 0.67,
                 "lots": 1,
                 "tp_atr_mult": 9.5,
                 "sl_atr_mult": 3.25,

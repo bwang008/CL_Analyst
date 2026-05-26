@@ -1328,8 +1328,19 @@ def format_report(
         if models:
             long_id = models.get("long", {}).get("experiment_id", "N/A")
             short_id = models.get("short", {}).get("experiment_id", "N/A")
-            long_thr = models.get("long", {}).get("threshold", "?")
-            short_thr = models.get("short", {}).get("threshold", "?")
+            # Derive effective thresholds from tiers (source of truth for
+            # TieredEnsembleStrategy) with fallback to models.*.threshold
+            # for non-tiered strategies.
+            long_tiers = config.get("long", {}).get("tiers", [])
+            short_tiers = config.get("short", {}).get("tiers", [])
+            if long_tiers:
+                long_thr = min(float(t.get("min_prob", 1.0)) for t in long_tiers)
+            else:
+                long_thr = models.get("long", {}).get("threshold", "?")
+            if short_tiers:
+                short_thr = min(float(t.get("min_prob", 1.0)) for t in short_tiers)
+            else:
+                short_thr = models.get("short", {}).get("threshold", "?")
             lines.append(f"  Strategy:       {nickname}")
             lines.append(f"  Models:         {long_id} (Long) + {short_id} (Short)")
             lines.append(f"  Threshold:      Buy >= {long_thr}, Sell >= {short_thr}")

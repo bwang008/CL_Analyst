@@ -479,6 +479,36 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
         self.long_consecutive_threshold = long_cfg.get("consecutive_signal_threshold", config.get("consecutive_signal_threshold", 0))
         self.short_consecutive_threshold = short_cfg.get("consecutive_signal_threshold", config.get("consecutive_signal_threshold", 0))
 
+        # Derive effective thresholds from tiers (single source of truth).
+        # The effective threshold for a side is the lowest min_prob across
+        # its tiers — i.e., the minimum probability required to trade at all.
+        self.long_threshold: float = (
+            min(t["min_prob"] for t in self.long_tiers)
+            if self.long_tiers else 1.0
+        )
+        self.short_threshold: float = (
+            min(t["min_prob"] for t in self.short_tiers)
+            if self.short_tiers else 1.0
+        )
+
+        # Validate: warn if models.*.threshold diverges from effective tier
+        # threshold.  models.*.threshold is cosmetic/informational — the
+        # tiers[*].min_prob values are what actually control execution.
+        import warnings
+        models = config.get("models", {})
+        for side_key, eff_thr in (("long", self.long_threshold), ("short", self.short_threshold)):
+            model_thr = (models.get(side_key, {}) or {}).get("threshold")
+            if model_thr is not None and abs(model_thr - eff_thr) > 1e-9:
+                warnings.warn(
+                    f"[TieredEnsembleStrategy] models.{side_key}.threshold "
+                    f"({model_thr}) differs from effective tier min_prob "
+                    f"({eff_thr}). The tier min_prob is used for execution. "
+                    f"Update {side_key}.tiers[*].min_prob to change the "
+                    f"actual entry threshold.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
     @staticmethod
     def _parse_tiers(raw: list[dict], base_cfg: dict = None) -> list[dict]:
         """Parse and sort tiers by min_prob descending (first match wins)."""

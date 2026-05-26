@@ -46,11 +46,20 @@ def run_backtest(long_path, short_path, base_config, data_path, temp_config, lon
     cfg["models"]["long"]["predictions_path"] = f"{long_path}/oos_predictions.csv"
     cfg["models"]["long"]["threshold"]        = final_long_thr   # enforce threshold!
 
+    # For TieredEnsembleStrategy: also write into tiers[*].min_prob,
+    # which is the actual source of truth for execution.
+    for tier in cfg.get("long", {}).get("tiers", []):
+        tier["min_prob"] = final_long_thr
+
     # --- Patch Short model ---
     cfg["models"]["short"]["experiment_id"]   = short_path.split("/")[-1]
     cfg["models"]["short"]["model_path"]       = short_path
     cfg["models"]["short"]["predictions_path"] = f"{short_path}/oos_predictions.csv"
     cfg["models"]["short"]["threshold"]        = final_short_thr  # enforce threshold!
+
+    # For TieredEnsembleStrategy: also write into tiers[*].min_prob.
+    for tier in cfg.get("short", {}).get("tiers", []):
+        tier["min_prob"] = final_short_thr
 
     # Save temp config
     with open(temp_config, "w") as f:

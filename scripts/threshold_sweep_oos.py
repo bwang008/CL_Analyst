@@ -30,6 +30,12 @@ def run_sweep():
         cfg["nickname"] = f"Asym_TH_{th:.2f}"
         cfg["models"]["long"]["threshold"] = float(th)
         cfg["models"]["short"]["threshold"] = float(th)
+        # For TieredEnsembleStrategy: also write into tiers[*].min_prob,
+        # which is the actual source of truth for execution.
+        for tier in cfg.get("long", {}).get("tiers", []):
+            tier["min_prob"] = float(th)
+        for tier in cfg.get("short", {}).get("tiers", []):
+            tier["min_prob"] = float(th)
         
         bt = BacktestEngine.from_config(cfg)
         res = bt.run(preds, ohlcv, label=f"TH_{th:.2f}")
