@@ -77,7 +77,7 @@ sudo systemctl start live-trader.service
 #CHECK THE status
 systemctl status ibc-gateway.service live-trader.service
 
-journalctl -u live-trader.service -f
+journalctl -u live-trader.service -o cat -f
 
 #kill the service
 sudo systemctl stop live-trader.service
