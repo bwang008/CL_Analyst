@@ -9,9 +9,11 @@ Type=simple
 EnvironmentFile=/etc/cl-trader.env
 
 # IBC manages IB Gateway startup, 2FA, and daily restarts.
-# Xvfb provides a virtual X display since IB Gateway requires X11 even headless.
-ExecStartPre=/usr/bin/bash -c 'pgrep Xvfb || /usr/bin/Xvfb :1 -screen 0 1024x768x24 &'
-ExecStart=/opt/ibc/scripts/ibcstart.sh \
+# xvfb-run wraps the entire process with a virtual X display,
+# auto-selecting an available display number and tying Xvfb
+# lifecycle to this service (no orphaned Xvfb processes).
+ExecStart=/usr/bin/xvfb-run --auto-servernum --server-args="-screen 0 1024x768x24" \
+    /opt/ibc/scripts/ibcstart.sh \
     "${IBC_GATEWAY_VERSION}" \
     --gateway \
     --mode=${TRADING_MODE} \
@@ -24,13 +26,12 @@ RestartSec=30
 StartLimitIntervalSec=600
 StartLimitBurst=10
 
-# Environment for headless X11
-Environment=DISPLAY=:1
+# JVM memory limit for IB Gateway
 Environment=JAVA_TOOL_OPTIONS=-Xmx512m
 
-# Run as dedicated service user (not root)
-User=cltrader
-Group=cltrader
+# Run as local user (not root)
+User=bwang008
+Group=bwang008
 
 # Logging to journald
 StandardOutput=journal

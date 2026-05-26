@@ -1,0 +1,23 @@
+# Log rotation for CL Analyst live trader application logs.
+# These are the per-client_id log files written by the Python engine
+# (separate from journald output which has its own rotation).
+/home/bwang008/projects/CL_Analyst/reports/livetrader_*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+
+# IB Gateway / IBC logs (if any are written to disk)
+/opt/cl-trader/logs/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

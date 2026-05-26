@@ -317,7 +317,7 @@ class LiveTrader:
             from src.data_paths import get_data_root as _get_data_root
             _data_root = _get_data_root()
             cache_path_1h = str(_data_root / "processed" / "warm_start_cache_1h.parquet")
-            seed_path_1h = str(_data_root / "processed" / "cl-1h_bk_HourSet_06.parquet")
+            seed_path_1h = str(_data_root / "processed" / "CL_HourSet_08.parquet")
             self.data_manager_1h = DataManager(
                 seed_path=seed_path_1h,
                 cache_path=cache_path_1h,

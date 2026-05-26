@@ -1,5 +1,5 @@
 [Unit]
-Description=CL Analyst Live Trader (hourly_ensemble_004)
+Description=CL Analyst Live Trader (hourly_ensemble_008)
 Documentation=https://github.com/bwang/CL_Analyst_Development
 After=ibc-gateway.service
 Requires=ibc-gateway.service
@@ -8,12 +8,18 @@ Requires=ibc-gateway.service
 Type=simple
 EnvironmentFile=/etc/cl-trader.env
 
-# Activate venv and run the live trader
-ExecStart=/opt/cl-trader/venv/bin/python -m src.live_execution.live_trader \
-    --config configs/strategies/hourly_ensemble_004.json \
+# Pre-flight: wait for IB Gateway API port to be listening.
+# Times out after 120s to avoid infinite spin if gateway never starts.
+ExecStartPre=/usr/bin/timeout 120 /bin/bash -c \
+    'while ! nc -z 127.0.0.1 4002; do sleep 2; echo "Waiting for IB Gateway API on port 4002..."; done'
+
+# Run the live trader using the absolute Conda python path.
+# -m src.live_execution.live_trader delegates to cli.main().
+ExecStart=/home/bwang008/miniconda3/envs/trader/bin/python -m src.live_execution.live_trader \
+    --config configs/strategies/HourSet_08_Ensemble_03_05242026.json \
     --port 4002
 
-WorkingDirectory=/opt/cl-trader/app
+WorkingDirectory=/home/bwang008/projects/CL_Analyst
 
 # Self-healing: restart on ANY failure (crash, OOM, etc.)
 Restart=always
@@ -21,9 +27,13 @@ RestartSec=60
 StartLimitIntervalSec=3600
 StartLimitBurst=10
 
-# Run as dedicated service user (not root)
-User=cltrader
-Group=cltrader
+# Graceful shutdown: give the trader time to close IBKR connections,
+# flush warm-start cache, and cancel pending orders before SIGKILL.
+TimeoutStopSec=30
+
+# Run as local user (not root)
+User=bwang008
+Group=bwang008
 
 # Logging to journald (also logs to reports/livetrader_*.log)
 StandardOutput=journal
