@@ -65,6 +65,12 @@ python -m pytest tests/test_config_parity.py tests/test_pipeline_parity.py tests
 python scripts/validate_parity.py
 python tests/test_config_parity.py --compare configs/strategies/hs08_scout_3x1_12h_logloss_opt.json
 
+
+Step 5: Examine the PnL
+"Hey, can you query my live_telemetry_cid1010.db inside WSL and give me a performance report of my strategy's PnL, 
+win rate, and equity curve over the last 30 days?"
+
+
 ==================================
 WSL 
 ==================================
@@ -79,6 +85,16 @@ systemctl status ibc-gateway.service live-trader.service
 
 #Check live trader output
 journalctl -u live-trader.service -o cat -f
+
+#Check live trader for previous session
+journalctl -u live-trader.service -b -1 -o cat
+
+#Audit specific times:
+# View all logs since yesterday
+journalctl -u live-trader.service --since "yesterday" -o cat
+# View all logs between specific hours
+journalctl -u live-trader.service --since "2026-05-26 00:00:00" --until "2026-05-26 02:00:00" -o cat
+
 
 #kill the service
 sudo systemctl stop live-trader.service

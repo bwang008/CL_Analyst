@@ -3,7 +3,7 @@
 # (separate from journald output which has its own rotation).
 /home/bwang008/projects/CL_Analyst/reports/livetrader_*.log {
     daily
-    rotate 14
+    rotate 90
     compress
     delaycompress
     missingok
@@ -14,7 +14,7 @@
 # IB Gateway / IBC logs (if any are written to disk)
 /opt/cl-trader/logs/*.log {
     daily
-    rotate 14
+    rotate 90
     compress
     delaycompress
     missingok
