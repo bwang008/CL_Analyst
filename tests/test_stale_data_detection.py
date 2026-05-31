@@ -11,8 +11,7 @@ import pytest
 from src.features.macro_features import (
     MacroFeatureEngine,
     StaleDataException,
-    _STALE_CRITICAL_SERIES,
-    _STALE_REPEAT_THRESHOLD,
+    _STALE_THRESHOLDS,
 )
 
 
@@ -58,40 +57,63 @@ class TestValueStaleness:
         engine._check_value_staleness(df)  # Should not raise
 
     def test_single_repeat_passes(self):
-        """One repeat (below threshold) should not raise."""
-        # threshold is 2, so exactly 1 repeat shouldn't fire
-        if _STALE_REPEAT_THRESHOLD > 1:
-            df = self._make_fred_df([119.00, 119.2868])
-            engine = MacroFeatureEngine()
-            engine._check_value_staleness(df)  # Should not raise
+        """One repeat (below VIX/OVX threshold of 2) should not raise."""
+        # VIX threshold is 2, so 1 repeat should not fire
+        df = self._make_fred_df([20.5, 20.5])  # only 1 repeat in tail
+        # Manually set 1 repeat: first is different
+        import numpy as np
+        dates = pd.date_range("2026-01-01", periods=32, freq="B")
+        prefix = np.linspace(15.0, 25.0, 30)
+        dxy_vals = np.concatenate([prefix, [20.5, 20.6]])  # last 2 are DIFFERENT
+        df2 = pd.DataFrame({
+            "DXY": np.linspace(118, 120, 32),  # always varying (threshold=6)
+            "VIX": np.concatenate([prefix, [20.5, 20.6]]),  # distinct at tail
+            "OVX": np.linspace(30, 40, 32),   # always varying
+        }, index=dates)
+        engine = MacroFeatureEngine()
+        engine._check_value_staleness(df2)  # Should not raise
 
     def test_exact_threshold_raises(self):
-        """Exactly _STALE_REPEAT_THRESHOLD identical values should raise."""
-        repeated = [119.2868] * _STALE_REPEAT_THRESHOLD
-        df = self._make_fred_df(repeated)
+        """Exactly VIX threshold (2) identical values should raise for VIX."""
+        vix_threshold = _STALE_THRESHOLDS["VIX"]  # 2
+        import numpy as np
+        n = 35
+        dates = pd.date_range("2026-01-01", periods=n, freq="B")
+        prefix_len = n - vix_threshold
+        df = pd.DataFrame({
+            "DXY": np.linspace(118, 120, n),  # always varying (threshold=6, won't trigger)
+            "VIX": np.concatenate([np.linspace(15, 20, prefix_len), [20.5] * vix_threshold]),
+            "OVX": np.linspace(30, 40, n),   # always varying
+        }, index=dates)
         engine = MacroFeatureEngine()
         with pytest.raises(StaleDataException) as exc_info:
             engine._check_value_staleness(df)
-        assert "DXY" in exc_info.value.stale_series
-        assert exc_info.value.repeat_count >= _STALE_REPEAT_THRESHOLD
+        assert "VIX" in exc_info.value.stale_series
+        assert exc_info.value.repeat_count >= vix_threshold
 
-    def test_four_repeats_raises(self):
-        """Four identical DXY values (realistic scenario) must raise."""
-        df = self._make_fred_df([119.2868, 119.2868, 119.2868, 119.2868])
+    def test_dxy_six_repeats_raises(self):
+        """Six identical DXY values (realistic FRED lag scenario) must raise."""
+        df = self._make_fred_df([119.2868, 119.2868, 119.2868, 119.2868, 119.2868, 119.2868])
         engine = MacroFeatureEngine()
         with pytest.raises(StaleDataException) as exc_info:
             engine._check_value_staleness(df)
         assert exc_info.value.stale_series["DXY"] == pytest.approx(119.2868)
-        assert exc_info.value.repeat_count == 4
+        assert exc_info.value.repeat_count == 6
+
+    def test_dxy_five_repeats_passes(self):
+        """Five identical DXY values is within the FRED lag tolerance (threshold=6)."""
+        df = self._make_fred_df([119.2868, 119.2868, 119.2868, 119.2868, 119.2868])
+        engine = MacroFeatureEngine()
+        engine._check_value_staleness(df)  # Should NOT raise
 
     def test_multiple_stale_series(self):
         """Multiple series stale at the same time."""
-        dates = pd.date_range("2026-01-01", periods=35, freq="B")
+        dates = pd.date_range("2026-01-01", periods=40, freq="B")
         prefix = np.linspace(100, 120, 30)
         df = pd.DataFrame({
-            "DXY": np.concatenate([prefix, [119.28] * 5]),
-            "VIX": np.concatenate([prefix, [20.5] * 5]),
-            "OVX": np.linspace(30, 40, 35),  # this one is fine
+            "DXY": np.concatenate([prefix, [119.28] * 10]),  # 10 repeats > threshold(6)
+            "VIX": np.concatenate([prefix, [20.5] * 10]),    # 10 repeats > threshold(2)
+            "OVX": np.linspace(30, 40, 40),                  # this one is fine
         }, index=dates)
         engine = MacroFeatureEngine()
         with pytest.raises(StaleDataException) as exc_info:
@@ -108,10 +130,12 @@ class TestValueStaleness:
         engine._check_value_staleness(df)  # Should not raise
 
     def test_critical_series_list(self):
-        """Verify the critical series list contains expected entries."""
-        assert "DXY" in _STALE_CRITICAL_SERIES
-        assert "VIX" in _STALE_CRITICAL_SERIES
-        assert "OVX" in _STALE_CRITICAL_SERIES
+        """Verify the thresholds dict contains expected series."""
+        assert "DXY" in _STALE_THRESHOLDS
+        assert "VIX" in _STALE_THRESHOLDS
+        assert "OVX" in _STALE_THRESHOLDS
+        # DXY should have a higher threshold than VIX/OVX due to FRED lag
+        assert _STALE_THRESHOLDS["DXY"] > _STALE_THRESHOLDS["VIX"]
 
     def test_missing_column_skipped(self):
         """Missing columns should be gracefully skipped, not crash."""

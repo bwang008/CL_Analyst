@@ -43,10 +43,19 @@ CHANGE_WINDOWS = [1, 3, 7, 14, 35]
 PCTILE_WINDOWS = [14, 35, 60]
 
 # Series that must change between consecutive trading days.
-# If any of these have identical values for >= _STALE_REPEAT_THRESHOLD
+# If any of these have identical values for >= the per-series threshold
 # consecutive days at the tail, StaleDataException is raised.
-_STALE_CRITICAL_SERIES = ["DXY", "VIX", "OVX"]
-_STALE_REPEAT_THRESHOLD = 2  # 2 consecutive identical daily values = stale
+#
+# Per-series thresholds reflect real-world FRED publication lags:
+#   DXY  (DTWEXBGS) — Broad Dollar Index: FRED lags 3-5 business days.
+#                     Use 6 to avoid false positives from normal lag.
+#   VIX  (VIXCLS)   — Published daily by CBOE, 1-day lag. Use 2.
+#   OVX  (OVXCLS)   — Published daily by CBOE, 1-day lag. Use 2.
+_STALE_THRESHOLDS: dict[str, int] = {
+    "DXY": 6,   # FRED Broad Dollar Index: 3-5 day publication lag is normal
+    "VIX": 2,   # CBOE VIX: updates daily
+    "OVX": 2,   # CBOE OVX: updates daily
+}
 
 
 class StaleDataException(RuntimeError):
@@ -269,12 +278,12 @@ class MacroFeatureEngine:
         stale: dict[str, float] = {}
         max_repeats = 0
 
-        for col in _STALE_CRITICAL_SERIES:
+        for col, threshold in _STALE_THRESHOLDS.items():
             if col not in df.columns:
                 continue
 
             series = df[col].dropna()
-            if len(series) < _STALE_REPEAT_THRESHOLD + 1:
+            if len(series) < threshold + 1:
                 continue
 
             # Count how many consecutive identical values at the tail
@@ -286,13 +295,13 @@ class MacroFeatureEngine:
                 else:
                     break
 
-            if n_repeat >= _STALE_REPEAT_THRESHOLD:
+            if n_repeat >= threshold:
                 stale[col] = float(tail_val)
                 max_repeats = max(max_repeats, n_repeat)
                 log.warning(
                     "FRED value-staleness: %s stuck at %.4f for %d "
                     "consecutive trading days (threshold=%d)",
-                    col, tail_val, n_repeat, _STALE_REPEAT_THRESHOLD,
+                    col, tail_val, n_repeat, threshold,
                 )
 
         if stale:
