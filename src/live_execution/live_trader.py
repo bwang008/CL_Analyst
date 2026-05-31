@@ -59,7 +59,7 @@ load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
 # Project imports
 from src.features.alpha_factory import AlphaFactory
-from src.features.macro_features import MacroFeatureEngine
+from src.features.macro_features import MacroFeatureEngine, StaleDataException
 from src.live_execution.strategy import Strategy, TradeSignal
 
 from src.live_execution.strategies.configurable_strategy import ConfigurableStrategy
@@ -248,6 +248,12 @@ class LiveTrader:
             strategy_config.get("max_position_size", max_lots_from_tiers)
         )
         self._emergency_halt: bool = False
+        # Safety Mute: blocks new entries when macro data is stale.
+        # Unlike _emergency_halt (permanent), mute auto-recovers when
+        # the periodic macro refresh detects fresh data.
+        self._data_mute: bool = False
+        self._data_mute_reason: str = ""
+        self._data_mute_since: float = 0.0
         self._order_timestamps: list[float] = []
         self._last_filled_entry_order_id = None
         log.info("Strategy: %s  direction=%s", strategy.name, strategy.direction)
@@ -598,7 +604,25 @@ class LiveTrader:
             # Step 7: Refresh external macro data if stale and model needs it
             if self._needs_macro:
                 log.info("Model uses external macro features — checking freshness...")
-                MacroFeatureEngine().refresh_if_stale()
+                try:
+                    MacroFeatureEngine().refresh_if_stale()
+                    # Also verify value-level freshness (file may be
+                    # new but contain repeated data from FRED).
+                    MacroFeatureEngine()._build_fred_features()
+                except StaleDataException as e:
+                    self._data_mute = True
+                    self._data_mute_reason = str(e)
+                    self._data_mute_since = time.time()
+                    msg = (
+                        f"🚨 *SAFETY MUTE ACTIVATED AT STARTUP*\n"
+                        f"Stale FRED data — new entries BLOCKED until resolved.\n"
+                        f"`{e}`"
+                    )
+                    log.critical(msg)
+                    try:
+                        self._telegram.send(msg)
+                    except Exception:
+                        pass
                 self._last_macro_check_time = time.time()
 
             # Step 8: Warm-start via DataManager
@@ -2606,9 +2630,32 @@ class LiveTrader:
 
         # 1. Generate features (always — needed for INFERENCE display)
         # Use stream for bar_size to inform feature engineering scale
-        features = build_live_features(
-            rolling_df, self.feature_names, lean=self._lean_features, bar_size=stream
-        )
+        try:
+            features = build_live_features(
+                rolling_df, self.feature_names, lean=self._lean_features, bar_size=stream
+            )
+        except StaleDataException as exc:
+            if not self._data_mute:
+                self._data_mute = True
+                self._data_mute_reason = str(exc)
+                self._data_mute_since = time.time()
+                msg = (
+                    f"🚨 *SAFETY MUTE ACTIVATED*\n"
+                    f"Stale FRED data detected — new entries BLOCKED.\n"
+                    f"`{exc}`"
+                )
+                log.critical(msg)
+                try:
+                    self._telegram.send(msg)
+                except Exception:
+                    pass
+            else:
+                log.warning(
+                    "SAFETY MUTE still active (%.0f min) — stale data persists: %s",
+                    (time.time() - self._data_mute_since) / 60, exc,
+                )
+            # Cannot generate features with stale data — skip this bar
+            return
         if features is None:
             log.info("Feature generation skipped (insufficient data or NaN)")
             return
@@ -2810,6 +2857,24 @@ class LiveTrader:
                 sell_prob=signal.sell_prob,
             )
 
+        # Safety Mute: block entries when macro data is stale.
+        # Inference still runs (for display/telemetry) but no orders.
+        if self._data_mute and signal.action in ("BUY", "SELL", "ENTER", "SHORT"):
+            mute_mins = (time.time() - self._data_mute_since) / 60
+            log.warning(
+                "SAFETY MUTE blocking %s signal (muted %.0f min): %s",
+                signal.action, mute_mins, self._data_mute_reason,
+            )
+            signal = TradeSignal(
+                action="HOLD",
+                probability=signal.probability,
+                confidence_pct=signal.confidence_pct,
+                signal_label="Hold",
+                skip_reason="SAFETY_MUTE_STALE_DATA",
+                buy_prob=signal.buy_prob,
+                sell_prob=signal.sell_prob,
+            )
+
         # Update Thread-Safe Virtual Ledger (Dual Stream Netting)
         if signal.action == "ENTER":
             self._virtual_ledger[stream] = signal.direction * signal.lots
@@ -2906,6 +2971,16 @@ class LiveTrader:
                     signal.sell_prob or 0.0,
                 )
                 action_taken = "SKIP_EXECUTION_GUARD"
+            elif signal.skip_reason == "SAFETY_MUTE_STALE_DATA":
+                log.warning(
+                    "[SAFETY MUTE] %s signal blocked — stale macro data "
+                    "(bar=%s, buy_prob=%.4f, sell_prob=%.4f)",
+                    signal.signal_label,
+                    bar_time,
+                    signal.buy_prob or 0.0,
+                    signal.sell_prob or 0.0,
+                )
+                action_taken = "SKIP_SAFETY_MUTE"
             self.telemetry.log_signal(
                 timestamp=bar_time,
                 signal=signal.signal_label,
@@ -3276,14 +3351,19 @@ class LiveTrader:
             pnl_str = ""
 
         subs_status = " | subs_lost=True ⚠️" if self._subscriptions_lost else ""
+        mute_status = (
+            f" | DATA_MUTE={int((time.time() - self._data_mute_since) / 60)}min ⚠️"
+            if self._data_mute else ""
+        )
         log.info(
-            "HEARTBEAT: alive | last_bar=%s | market=%s | position=%s%s | connected=%s%s",
+            "HEARTBEAT: alive | last_bar=%s | market=%s | position=%s%s | connected=%s%s%s",
             last_bar_str,
             market_status,
             pos_str,
             pnl_str,
             self.manager.ib.isConnected() if getattr(self.manager, "ib", None) else False,
             subs_status,
+            mute_status,
         )
 
         # Periodic macro data freshness check
@@ -3291,8 +3371,50 @@ class LiveTrader:
             now = time.time()
             if now - getattr(self, "_last_macro_check_time", 0.0) >= 3600.0:
                 self._last_macro_check_time = now
-                from src.features.macro_features import MacroFeatureEngine
-                MacroFeatureEngine().refresh_if_stale()
+                from src.features.macro_features import MacroFeatureEngine, StaleDataException
+                try:
+                    MacroFeatureEngine().refresh_if_stale()
+                    # If refresh_if_stale succeeded, test if staleness
+                    # has resolved by doing a trial feature build.
+                    if self._data_mute:
+                        try:
+                            MacroFeatureEngine()._build_fred_features()
+                            # No exception = data is fresh again
+                            self._data_mute = False
+                            self._data_mute_reason = ""
+                            mute_mins = (time.time() - self._data_mute_since) / 60
+                            self._data_mute_since = 0.0
+                            msg = (
+                                f"✅ *SAFETY MUTE CLEARED*\n"
+                                f"FRED data is fresh again after {mute_mins:.0f} min.\n"
+                                f"New entries are now permitted."
+                            )
+                            log.info(msg)
+                            try:
+                                self._telegram.send(msg)
+                            except Exception:
+                                pass
+                        except StaleDataException as e:
+                            log.info(
+                                "SAFETY MUTE still active — data still stale: %s", e
+                            )
+                except StaleDataException as e:
+                    if not self._data_mute:
+                        self._data_mute = True
+                        self._data_mute_reason = str(e)
+                        self._data_mute_since = time.time()
+                        msg = (
+                            f"🚨 *SAFETY MUTE ACTIVATED*\n"
+                            f"Stale FRED data detected during periodic refresh.\n"
+                            f"`{e}`"
+                        )
+                        log.critical(msg)
+                        try:
+                            self._telegram.send(msg)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    log.error("Macro refresh failed: %s", e, exc_info=True)
 
     def _check_stale_bars(self) -> bool:
         """Proactive watchdog — signal reconnect if bars are stale during market hours.

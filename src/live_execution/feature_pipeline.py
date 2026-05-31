@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from src.features.alpha_factory import AlphaFactory
-from src.features.macro_features import MacroFeatureEngine
+from src.features.macro_features import MacroFeatureEngine, StaleDataException
 
 log = logging.getLogger("LiveTrader")
 
@@ -196,6 +196,10 @@ def build_live_features(
     if _has_external_macro:
         try:
             work = MacroFeatureEngine().merge_all(work)
+        except StaleDataException:
+            # Let staleness exceptions propagate directly so the live
+            # trader can catch them and enter Safety Mute mode.
+            raise
         except Exception as exc:
             log.error("CRITICAL: Error merging macro features: %s", exc, exc_info=True)
             raise RuntimeError(f"CRITICAL: Macro Feature Engine failed. Cannot generate live features. Reason: {exc}") from exc

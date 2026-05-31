@@ -42,6 +42,50 @@ CHANGE_WINDOWS = [1, 3, 7, 14, 35]
 # Percentile windows (in trading days) — floor at 14 for meaningful ranks
 PCTILE_WINDOWS = [14, 35, 60]
 
+# Series that must change between consecutive trading days.
+# If any of these have identical values for >= _STALE_REPEAT_THRESHOLD
+# consecutive days at the tail, StaleDataException is raised.
+_STALE_CRITICAL_SERIES = ["DXY", "VIX", "OVX"]
+_STALE_REPEAT_THRESHOLD = 2  # 2 consecutive identical daily values = stale
+
+
+class StaleDataException(RuntimeError):
+    """Raised when FRED macro data contains stale (repeated) values.
+
+    This means the FRED CSV file passed the file-age freshness check
+    but contains identical daily values for critical series (DXY, VIX,
+    OVX) — producing zero-valued CHG_1D features the model has never
+    seen during training.
+
+    The live trader should catch this and enter Safety Mute mode,
+    blocking new entries until the data resolves.
+
+    Attributes:
+        stale_series: Dict mapping series name to the repeated value.
+        repeat_count: Number of consecutive identical values detected.
+    """
+
+    def __init__(
+        self,
+        stale_series: dict[str, float],
+        repeat_count: int,
+        message: str = "",
+    ):
+        self.stale_series = stale_series
+        self.repeat_count = repeat_count
+        if not message:
+            names = ", ".join(
+                f"{k}={v:.4f}" for k, v in stale_series.items()
+            )
+            message = (
+                f"FRED data contains stale values: {names} "
+                f"(repeated for {repeat_count} consecutive trading days). "
+                f"CHG_1D features will be zero — model input is corrupted. "
+                f"Live entries are blocked until data updates."
+            )
+        super().__init__(message)
+
+
 
 class MacroFeatureEngine:
     """Merge external macro data into a bar-level OHLCV DataFrame.
@@ -196,6 +240,68 @@ class MacroFeatureEngine:
         return df
 
     # ------------------------------------------------------------------
+    # Value-staleness detection
+    # ------------------------------------------------------------------
+
+    def _check_value_staleness(self, df: pd.DataFrame) -> None:
+        """Raise ``StaleDataException`` if critical FRED series are stuck.
+
+        Examines the tail of each series in ``_STALE_CRITICAL_SERIES``.
+        If any series has ``_STALE_REPEAT_THRESHOLD`` or more consecutive
+        identical values at the **end** of the dataset, the data is
+        considered stale regardless of the CSV file's modification time.
+
+        This catches the scenario where FRED returns a "fresh" file
+        whose actual data hasn't updated — producing CHG_1D = 0 for a
+        feature the model has never seen at that value during training.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            The FRED daily DataFrame (Date-indexed, already ffilled and
+            +1 day shifted) as built inside ``_build_fred_features``.
+
+        Raises
+        ------
+        StaleDataException
+            When one or more critical series have repeated tail values.
+        """
+        stale: dict[str, float] = {}
+        max_repeats = 0
+
+        for col in _STALE_CRITICAL_SERIES:
+            if col not in df.columns:
+                continue
+
+            series = df[col].dropna()
+            if len(series) < _STALE_REPEAT_THRESHOLD + 1:
+                continue
+
+            # Count how many consecutive identical values at the tail
+            tail_val = series.iloc[-1]
+            n_repeat = 0
+            for val in reversed(series.values):
+                if val == tail_val:
+                    n_repeat += 1
+                else:
+                    break
+
+            if n_repeat >= _STALE_REPEAT_THRESHOLD:
+                stale[col] = float(tail_val)
+                max_repeats = max(max_repeats, n_repeat)
+                log.warning(
+                    "FRED value-staleness: %s stuck at %.4f for %d "
+                    "consecutive trading days (threshold=%d)",
+                    col, tail_val, n_repeat, _STALE_REPEAT_THRESHOLD,
+                )
+
+        if stale:
+            raise StaleDataException(
+                stale_series=stale,
+                repeat_count=max_repeats,
+            )
+
+    # ------------------------------------------------------------------
     # FRED Feature Engineering
     # ------------------------------------------------------------------
 
@@ -253,6 +359,11 @@ class MacroFeatureEngine:
             features["MACRO_FED_FUNDS"] = df["FED_FUNDS"]
 
         log.debug("Built %d FRED features", len(features.columns))
+
+        # Value-staleness gate: raise if critical series have repeated
+        # values at the tail — file age alone does not guarantee freshness.
+        self._check_value_staleness(df)
+
         return features
 
     # ------------------------------------------------------------------
