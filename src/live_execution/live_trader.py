@@ -2407,12 +2407,156 @@ class LiveTrader:
                 log.info("Subscribed to front-month live bars")
 
             self._subscriptions_lost = False
+
+            # 3. Backfill any gap from the disconnect period
+            await self._backfill_reconnect_gap_async()
+
             log.info("Reconnection complete — live bars flowing again")
 
         except Exception:
             log.exception("Deferred resubscription failed — will retry on next reconnect")
         finally:
             self._resubscribe_pending = False
+
+    async def _backfill_reconnect_gap_async(self) -> None:
+        """Backfill bars missed during a disconnect/hibernation gap.
+
+        After reconnecting, detects the gap between the last known bar
+        timestamp and now, requests historical bars from IBKR via the
+        async API, and injects them into the rolling DataFrames and
+        DataManager caches.
+
+        This prevents phantom price spikes in rolling indicators when
+        bars are missed due to connectivity loss, hibernation, etc.
+        """
+        from src.live_execution.ibkr_client import build_cl_contract, ib_bars_to_dataframe
+
+        now = pd.Timestamp.now()
+
+        # ── 5M gap backfill ──────────────────────────────────────────
+        if self._last_bar_time_5m is not None:
+            gap_5m = now - self._last_bar_time_5m
+            gap_5m_min = gap_5m.total_seconds() / 60
+
+            if gap_5m_min > 10:  # Only backfill if gap > 10 minutes
+                gap_days = max(1, int(gap_5m.total_seconds() / 86400) + 1)
+                duration_str = f"{gap_days} D"
+                log.info(
+                    "RECONNECT BACKFILL (5M): gap=%.0f min (%s → %s), "
+                    "requesting %s from IBKR",
+                    gap_5m_min, self._last_bar_time_5m, now, duration_str,
+                )
+
+                try:
+                    contract = build_cl_contract(continuous=True)
+                    contract = self.manager.qualify_contract(contract)
+
+                    bars = await self.manager.ib.reqHistoricalDataAsync(
+                        contract,
+                        endDateTime="",
+                        durationStr=duration_str,
+                        barSizeSetting="5 mins",
+                        whatToShow="TRADES",
+                        useRTH=False,
+                        formatDate=1,
+                        keepUpToDate=False,
+                    )
+
+                    if bars:
+                        chunk_df = ib_bars_to_dataframe(bars)
+                        # Only keep bars newer than our last known bar
+                        new_bars = chunk_df[chunk_df.index > self._last_bar_time_5m]
+                        if len(new_bars) > 0:
+                            self.rolling_df_5m = pd.concat([self.rolling_df_5m, new_bars])
+                            # Dedup and sort
+                            self.rolling_df_5m = self.rolling_df_5m[
+                                ~self.rolling_df_5m.index.duplicated(keep="last")
+                            ].sort_index()
+                            if len(self.rolling_df_5m) > _MAX_ROLLING_BARS:
+                                self.rolling_df_5m = self.rolling_df_5m.iloc[-_MAX_ROLLING_BARS:]
+
+                            # Update DataManager cache
+                            if self.data_manager_5m is not None:
+                                for _, row in new_bars.iterrows():
+                                    self.data_manager_5m.append_bar(row.to_frame().T)
+                                self.data_manager_5m.save_cache()
+
+                            self._last_bar_time_5m = self.rolling_df_5m.index[-1]
+                            log.info(
+                                "RECONNECT BACKFILL (5M): stitched %d bars, "
+                                "latest=%s",
+                                len(new_bars), self._last_bar_time_5m,
+                            )
+                        else:
+                            log.info("RECONNECT BACKFILL (5M): no new bars to stitch")
+                    else:
+                        log.warning("RECONNECT BACKFILL (5M): IBKR returned no bars")
+                except Exception:
+                    log.exception("RECONNECT BACKFILL (5M) failed — continuing without backfill")
+            else:
+                log.info("RECONNECT BACKFILL (5M): gap < 10 min — no backfill needed")
+
+        # ── 1H gap backfill ──────────────────────────────────────────
+        if self._last_bar_time_1h is not None and self._bar_size in ("1h", "2h", "4h"):
+            gap_1h = now - self._last_bar_time_1h
+            gap_1h_min = gap_1h.total_seconds() / 60
+
+            if gap_1h_min > 70:  # Only backfill if gap > 70 min (1 bar + margin)
+                gap_days = max(1, int(gap_1h.total_seconds() / 86400) + 1)
+                duration_str = f"{gap_days} D"
+                log.info(
+                    "RECONNECT BACKFILL (1H): gap=%.0f min (%s → %s), "
+                    "requesting %s from IBKR",
+                    gap_1h_min, self._last_bar_time_1h, now, duration_str,
+                )
+
+                try:
+                    contract = build_cl_contract(continuous=True)
+                    contract = self.manager.qualify_contract(contract)
+
+                    bars = await self.manager.ib.reqHistoricalDataAsync(
+                        contract,
+                        endDateTime="",
+                        durationStr=duration_str,
+                        barSizeSetting="1 hour",
+                        whatToShow="TRADES",
+                        useRTH=False,
+                        formatDate=1,
+                        keepUpToDate=False,
+                    )
+
+                    if bars:
+                        chunk_df = ib_bars_to_dataframe(bars)
+                        new_bars = chunk_df[chunk_df.index > self._last_bar_time_1h]
+                        if len(new_bars) > 0:
+                            self.rolling_df_1h = pd.concat([self.rolling_df_1h, new_bars])
+                            self.rolling_df_1h = self.rolling_df_1h[
+                                ~self.rolling_df_1h.index.duplicated(keep="last")
+                            ].sort_index()
+                            if len(self.rolling_df_1h) > _MAX_ROLLING_BARS:
+                                self.rolling_df_1h = self.rolling_df_1h.iloc[-_MAX_ROLLING_BARS:]
+
+                            # Update DataManager cache
+                            if self.data_manager_1h is not None:
+                                for _, row in new_bars.iterrows():
+                                    self.data_manager_1h.append_bar(row.to_frame().T)
+                                self.data_manager_1h.save_cache()
+
+                            self._last_bar_time_1h = self.rolling_df_1h.index[-1]
+                            log.info(
+                                "RECONNECT BACKFILL (1H): stitched %d bars, "
+                                "latest=%s",
+                                len(new_bars), self._last_bar_time_1h,
+                            )
+                        else:
+                            log.info("RECONNECT BACKFILL (1H): no new bars to stitch")
+                    else:
+                        log.warning("RECONNECT BACKFILL (1H): IBKR returned no bars")
+                except Exception:
+                    log.exception("RECONNECT BACKFILL (1H) failed — continuing without backfill")
+            else:
+                log.info("RECONNECT BACKFILL (1H): gap < 70 min — no backfill needed")
+
 
     def _resubscribe_and_backfill(self) -> None:
         """Synchronous resubscription — used by _reconnect() after a clean reconnect.
