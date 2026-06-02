@@ -2487,6 +2487,11 @@ class LiveTrader:
                                 "latest=%s",
                                 len(new_bars), self._last_bar_time_5m,
                             )
+                            self._telegram.send(
+                                f"🔄 *Reconnect Backfill (5M) Completed*\n"
+                                f"Successfully stitched *{len(new_bars)}* missing 5-minute bars into cache.\n"
+                                f"Latest: `{self._last_bar_time_5m}`"
+                            )
                         else:
                             log.info("RECONNECT BACKFILL (5M): no new bars to stitch")
                     else:
@@ -2547,6 +2552,11 @@ class LiveTrader:
                                 "RECONNECT BACKFILL (1H): stitched %d bars, "
                                 "latest=%s",
                                 len(new_bars), self._last_bar_time_1h,
+                            )
+                            self._telegram.send(
+                                f"🔄 *Reconnect Backfill (1H) Completed*\n"
+                                f"Successfully stitched *{len(new_bars)}* missing 1-hour bars into cache.\n"
+                                f"Latest: `{self._last_bar_time_1h}`"
                             )
                         else:
                             log.info("RECONNECT BACKFILL (1H): no new bars to stitch")
