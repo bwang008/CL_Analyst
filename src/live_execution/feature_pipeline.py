@@ -145,6 +145,7 @@ def build_live_features(
     _has_ichimoku = any(f.startswith("ICHIMOKU_") for f in feature_names)
     _has_dma = any(f.startswith("TREND_DMA_") for f in feature_names)
     _has_exh_div = any(f.startswith("EXHDIV_") for f in feature_names)
+    _has_term_structure = any(f.startswith("TS_") for f in feature_names)
 
     factory = AlphaFactory(work, bars_per_hour=_bars_per_hour)
     if lean:
@@ -158,6 +159,7 @@ def build_live_features(
             include_ichimoku=_has_ichimoku,
             include_dma=_has_dma,
             include_exhaustion_divergence=_has_exh_div,
+            include_term_structure=_has_term_structure,
         )
     elif is_set_07:
         work = factory.add_all_features(
@@ -169,6 +171,7 @@ def build_live_features(
             include_ichimoku=_has_ichimoku,
             include_dma=_has_dma,
             include_exhaustion_divergence=_has_exh_div,
+            include_term_structure=_has_term_structure,
         )
     else:
         work = factory.add_all_features(
@@ -178,6 +181,7 @@ def build_live_features(
             include_ichimoku=_has_ichimoku,
             include_dma=_has_dma,
             include_exhaustion_divergence=_has_exh_div,
+            include_term_structure=_has_term_structure,
         )
 
     # 2b. Add STOCH specifically if lean but the strategy requests it

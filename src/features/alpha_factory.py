@@ -188,6 +188,7 @@ class AlphaFactory:
         include_exhaustion_divergence: bool = False,
         include_dma: bool = False,
         include_ichimoku: bool = False,
+        include_term_structure: bool = False,
         macro_windows: dict[str, int] | None = None,
         log_progress: bool = False,
     ) -> pd.DataFrame:
@@ -203,6 +204,9 @@ class AlphaFactory:
             include_exhaustion_divergence: Add exhaustion divergence
                 cluster (set_12+): slope divergence, temporal peak
                 offset, and effort-reward ratio.
+            include_term_structure: Add term structure shape features
+                (HourSet_09+): Diff, Ratio, and Inversion transforms
+                comparing fast windows to the slowest anchor window.
             macro_windows: Dict of label→hourly-window for macro context.
             log_progress: Print progress timestamps.
         """
@@ -271,6 +275,14 @@ class AlphaFactory:
             if log_progress:
                 from datetime import datetime as _dt
                 print(f"[AlphaFactory] Ichimoku done at {_dt.now().isoformat(timespec='seconds')}")
+
+        if include_term_structure:
+            if log_progress:
+                print("[AlphaFactory] Term structure shapes start")
+            self.add_term_structure_shapes()
+            if log_progress:
+                from datetime import datetime as _dt
+                print(f"[AlphaFactory] Term structure shapes done at {_dt.now().isoformat(timespec='seconds')}")
 
         self.df.replace([np.inf, -np.inf], np.nan, inplace=True)
         if log_progress:
@@ -723,6 +735,149 @@ class AlphaFactory:
                 self.df["VOLFLOW_VWAP_DIST_288"]
                 - self.df["VOLFLOW_VWAP_DIST_10080"]
             )
+
+        return self.df
+
+    # ------------------------------------------------------------------
+    # Term Structure Shapes (HourSet_09+)
+    # ------------------------------------------------------------------
+
+    # Configuration: (column_prefix, short_name, epsilon, indicator_type)
+    # - column_prefix: the base indicator prefix to discover windows from
+    # - short_name: compact name used in the TS_ output column
+    # - epsilon: small constant for denominator clipping (bounded only)
+    # - indicator_type: "bounded" (strictly positive / [0,1]) or
+    #                   "signed" (crosses zero — slopes, oscillators)
+    #
+    # BOUNDED indicators get: Diff, Ratio, Invert
+    # SIGNED  indicators get: Diff, Sign_Agreement, Regime_Cross
+    #   (no Ratio — division on zero-crossing data creates asymptotic
+    #    instability; no Invert — Fast>Slow conflates regime states)
+    TERM_STRUCTURE_FAMILIES: list[tuple[str, str, float, str]] = [
+        ("VOL_PARK",           "VOL_PARK",    1e-8,  "bounded"),
+        ("VOL_YZ",             "VOL_YZ",      1e-8,  "bounded"),
+        ("TREND_DONCHIAN_POS", "DONCHIAN",    1e-5,  "bounded"),
+        ("TREND_LR_SLOPE",     "LR_SLOPE",    1e-8,  "signed"),
+        ("VOLFLOW_VWAP_DIST",  "VWAP_DIST",   1e-8,  "signed"),
+        ("VOLFLOW_CMF",        "CMF",         1e-8,  "signed"),
+        ("MOM_STOCH_K",        "STOCH_K",     1e-5,  "bounded"),
+        ("STRUC_EFFICIENCY",   "EFFICIENCY",  1e-5,  "bounded"),
+        ("LIQ_CORWIN",         "CORWIN",      1e-8,  "bounded"),
+    ]
+
+    def add_term_structure_shapes(
+        self,
+        families: list[tuple[str, str, float, str]] | None = None,
+    ) -> pd.DataFrame:
+        """Compute Term Structure Shape features via Protocol A (Anchor).
+
+        For each indicator family that exists across multiple lookback
+        windows, compare every faster window to the slowest (anchor)
+        window using type-aware transforms:
+
+        **BOUNDED** indicators (strictly positive or [0,1] range):
+            Diff:    Fast - Slow            (absolute spread / velocity)
+            Ratio:   Fast / clip(Slow, ε)   (relative magnitude)
+            Invert:  (Fast > Slow).int()    (regime shift boolean)
+
+        **SIGNED** indicators (cross zero — slopes, oscillators):
+            Diff:           Fast - Slow     (spread — always valid)
+            Sign_Agreement: ((Fast>0) == (Slow>0)).int()
+                            (are micro and macro in the same regime?)
+            Regime_Cross:   ((Fast>0) & (Slow<0) | (Fast<0) & (Slow>0)).int()
+                            (has micro flipped while macro hasn't?)
+
+        Ratios are **not computed** for signed indicators because
+        division on zero-crossing data creates asymptotic instability
+        as the denominator approaches zero.
+
+        The anchor is auto-detected as the largest window suffix found
+        in ``self.df.columns`` for each prefix.
+
+        Args:
+            families: Override list of (prefix, short_name, epsilon,
+                indicator_type) tuples.  Defaults to
+                ``TERM_STRUCTURE_FAMILIES``.
+
+        Returns:
+            self.df with TS_* columns appended.
+        """
+        if families is None:
+            families = self.TERM_STRUCTURE_FAMILIES
+
+        for prefix, short_name, eps, indicator_type in families:
+            # Discover all windows for this prefix in the DataFrame
+            pattern = f"{prefix}_"
+            matching_cols = [
+                c for c in self.df.columns if c.startswith(pattern)
+            ]
+            if len(matching_cols) < 2:
+                continue  # Need at least 2 windows for term structure
+
+            # Extract window integers from column names
+            windows_found: dict[int, str] = {}
+            for col in matching_cols:
+                suffix = col[len(pattern):]
+                try:
+                    w = int(suffix)
+                    windows_found[w] = col
+                except ValueError:
+                    continue  # Skip non-integer suffixes
+
+            if len(windows_found) < 2:
+                continue
+
+            # Protocol A: anchor = slowest (largest) window
+            sorted_windows = sorted(windows_found.keys())
+            anchor_w = sorted_windows[-1]
+            anchor_col = windows_found[anchor_w]
+            anchor_series = self.df[anchor_col]
+
+            is_signed = indicator_type == "signed"
+
+            # Precompute clipped denominator for Ratio (bounded only)
+            if not is_signed:
+                denom = anchor_series.clip(lower=eps)
+
+            for fast_w in sorted_windows[:-1]:  # All except anchor
+                fast_col = windows_found[fast_w]
+                fast_series = self.df[fast_col]
+                tag = f"{fast_w}v{anchor_w}"
+
+                # 1) Diff (Spread) — valid for both types
+                self.df[f"TS_{short_name}_DIFF_{tag}"] = (
+                    fast_series - anchor_series
+                )
+
+                if is_signed:
+                    # Signed path: no Ratio (zero-crossing instability),
+                    # replace Invert with regime-aware booleans.
+
+                    # 2) Sign Agreement: micro and macro in same regime?
+                    self.df[f"TS_{short_name}_SIGN_AGREE_{tag}"] = (
+                        ((fast_series > 0) == (anchor_series > 0))
+                        .astype(int)
+                    )
+
+                    # 3) Regime Cross: micro flipped while macro hasn't?
+                    self.df[f"TS_{short_name}_REGIME_CROSS_{tag}"] = (
+                        (
+                            ((fast_series > 0) & (anchor_series < 0))
+                            | ((fast_series < 0) & (anchor_series > 0))
+                        ).astype(int)
+                    )
+                else:
+                    # Bounded path: Ratio and Invert are well-defined.
+
+                    # 2) Ratio (Magnitude)
+                    self.df[f"TS_{short_name}_RATIO_{tag}"] = (
+                        fast_series / denom
+                    )
+
+                    # 3) Inversion (Regime Shift)
+                    self.df[f"TS_{short_name}_INVERT_{tag}"] = (
+                        (fast_series > anchor_series).astype(int)
+                    )
 
         return self.df
 

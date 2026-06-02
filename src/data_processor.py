@@ -63,6 +63,13 @@ DATASET_VERSIONS = {
         'scaled to 4H bars (6,18,42,84,210). Targets: 2x1,3x1,4x1,5x1 '
         'at 24H,48H,96H horizons (6,12,24 bars). Designed for multi-day swing trading.'
     ),
+    'HourSet_09': (
+        'Term Structure Shapes (process_hourset_09): '
+        'HourSet_08 + 108 TS_* features — Diff, Ratio, and Inversion '
+        'transforms comparing fast windows to 840-bar anchor (Protocol A). '
+        'Families: VOL_PARK, VOL_YZ, DONCHIAN, LR_SLOPE, VWAP_DIST, CMF, '
+        'STOCH_K, EFFICIENCY, CORWIN. Optuna-toggleable via term_structure bucket.'
+    ),
 }
 
 
@@ -853,6 +860,8 @@ class DataProcessor:
             return self.process_hourset_07()
         elif self.dataset_version == "HourSet_08":
             return self.process_hourset_08()
+        elif self.dataset_version == "HourSet_09":
+            return self.process_hourset_09()
         elif self.dataset_version == "Hour4Set_01":
             return self.process_hour4set_01()
         else:
@@ -2295,6 +2304,136 @@ class DataProcessor:
         print(f"Output : {saved_path}")
         print(f"Shape  : {df.shape}")
         target_cols = sorted(c for c in df.columns if c.startswith("TARGET_"))
+        print(f"Targets: {target_cols}")
+        duration = datetime.now() - start_time
+        print(f"Wall time: {str(duration).split('.')[0]}")
+        print("=" * 60)
+
+        self.df = df
+        return df
+
+    def process_hourset_09(self) -> pd.DataFrame:
+        """HourSet_08 + Term Structure Shape features (Diff/Ratio/Inversion).
+
+        Identical pipeline to HourSet_08 with `include_term_structure=True`
+        to add ~108 TS_* features capturing cross-window velocity, magnitude,
+        and regime shift signals via Protocol A (Anchor to 840-bar window).
+
+        New features (all Optuna-toggleable via "term_structure" bucket):
+            TS_{FAMILY}_DIFF_{fast}v{slow}    — absolute spread
+            TS_{FAMILY}_RATIO_{fast}v{slow}   — relative magnitude
+            TS_{FAMILY}_INVERT_{fast}v{slow}  — boolean regime shift
+
+        Families: VOL_PARK, VOL_YZ, DONCHIAN, LR_SLOPE, VWAP_DIST, CMF,
+                  STOCH_K, EFFICIENCY, CORWIN
+        """
+        start_time = datetime.now()
+        print("=" * 60)
+        print("Starting Data Processing Pipeline - HOURSET_09")
+        print("  1-Hour bars + stationary indicators + term structure shapes")
+        print(f"Started at: {start_time.isoformat(timespec='seconds')}")
+        print("=" * 60)
+
+        # ── Step 1: Load 5-min data and resample to 1H ───────────────
+        df = self.load_data()
+        print(f"  [10%] Loaded {len(df)} 5-min rows")
+        df = self.resample_to_hourly(df)
+        print(f"  [15%] Resampled to {len(df)} hourly bars at "
+              f"{datetime.now().isoformat(timespec='seconds')}")
+
+        # ── Step 2: Time features ─────────────────────────────────────
+        df = self.add_time_features(df, include_day_of_week=True)
+        print(f"  [20%] Time features added")
+
+        # ── Step 3: AlphaFactory — stationary indicators + TS shapes ──
+        windows = [24, 72, 168, 336, 840]
+        macro_windows = {
+            "1W": 168, "2W": 336, "1M": 840,
+            "3M": 2160, "6M": 4320,
+        }
+        df = AlphaFactory(df, bars_per_hour=1).add_all_features(
+            windows=windows,
+            include_momentum=True,
+            include_macro=True,
+            include_extended=True,
+            include_dma=True,
+            include_ichimoku=True,
+            include_term_structure=True,
+            macro_windows=macro_windows,
+            log_progress=True,
+        )
+        print(f"  [50%] AlphaFactory features added at "
+              f"{datetime.now().isoformat(timespec='seconds')}")
+
+        # ── Step 4: External macro features (FRED + COT) ─────────────
+        macro_engine = MacroFeatureEngine()
+        df = macro_engine.merge_all(df)
+        n_macro = len(macro_engine.get_feature_names())
+        print(f"  [55%] {n_macro} external macro features added at "
+              f"{datetime.now().isoformat(timespec='seconds')}")
+
+        # ── Step 5: RAW columns for evaluation (120H forward window) ──
+        raw_horizon = 120
+        future_high = (
+            df["High"].iloc[::-1]
+            .rolling(window=raw_horizon, min_periods=1)
+            .max().iloc[::-1].shift(-1)
+        )
+        future_low = (
+            df["Low"].iloc[::-1]
+            .rolling(window=raw_horizon, min_periods=1)
+            .min().iloc[::-1].shift(-1)
+        )
+        df["RAW_Close"] = df["Close"].copy()
+        df["RAW_Future_High"] = future_high
+        df["RAW_Future_Low"] = future_low
+        print("  - Added RAW_Close, RAW_Future_High, RAW_Future_Low")
+
+        # ── Step 6: Precision Target Suite ────────────────────────────
+        target_multipliers = [2.0, 3.0, 4.0, 5.0]
+        target_horizons = [6, 12, 24]
+
+        for tp_mult in target_multipliers:
+            tp_label = str(int(tp_mult)) if tp_mult.is_integer() else str(tp_mult).replace(".", "p")
+            for horizon_h in target_horizons:
+                df = self.add_triple_barrier_target(
+                    df,
+                    prefix=f"TARGET_TRIPLE_{tp_label}x1_{horizon_h}H",
+                    tp_atr_mult=tp_mult,
+                    sl_atr_mult=1.0,
+                    max_horizon=horizon_h,
+                    atr_period=14,
+                )
+
+        # 6c: Continuous return targets
+        df = self.add_return_target(df, horizons=[6, 12, 24, 72, 120])
+        print(f"  [80%] All targets created at "
+              f"{datetime.now().isoformat(timespec='seconds')}")
+
+        # ── Step 7: Normalize features ────────────────────────────────
+        df = self.normalize_features(df)
+
+        # ── Step 8: Cleanup ───────────────────────────────────────────
+        df = self.cleanup(
+            df,
+            drop_raw_returns=True,
+            warmup_rows=2200,
+            max_warmup_bars=2200,
+            keep_ohlcv=self.keep_ohlcv,
+        )
+
+        # ── Step 9: Save ──────────────────────────────────────────────
+        saved_path = self.save(df)
+        print(f"  [100%] Saved output at "
+              f"{datetime.now().isoformat(timespec='seconds')}")
+
+        print("=" * 60)
+        print("Processing Complete — HourSet_09")
+        print(f"Output : {saved_path}")
+        print(f"Shape  : {df.shape}")
+        ts_cols = sorted(c for c in df.columns if c.startswith("TS_"))
+        target_cols = sorted(c for c in df.columns if c.startswith("TARGET_"))
+        print(f"TS features: {len(ts_cols)}")
         print(f"Targets: {target_cols}")
         duration = datetime.now() - start_time
         print(f"Wall time: {str(duration).split('.')[0]}")

@@ -56,6 +56,9 @@ FEATURE_BUCKETS: dict[str, list[str]] = {
     # Slope divergence, temporal peak offset, effort-reward ratio
     "divergence": ["EXHDIV_"],
 
+    # Term structure shapes: Diff, Ratio, Inversion across windows
+    "term_structure": ["TS_"],
+
     # AlphaFactory macro context (rolling regime indicators)
     "macro_tech": ["MACRO_"],
 

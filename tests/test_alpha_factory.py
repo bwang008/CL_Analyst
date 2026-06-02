@@ -306,3 +306,143 @@ def test_exhaustion_divergence_no_lookahead(long_trend_data):
                 f"Lookahead detected in {col}: {v1} vs {v2}"
             )
 
+
+def test_term_structure_shapes_columns_exist(long_trend_data):
+    """Term structure features should be created for each eligible family."""
+    factory = AlphaFactory(long_trend_data)
+    df = factory.add_all_features(
+        windows=[10, 20, 50],
+        include_macro=False,
+        include_extended=True,
+        include_term_structure=True,
+    )
+
+    # BOUNDED family (VOL_PARK): should have DIFF, RATIO, INVERT
+    for transform in ["DIFF", "RATIO", "INVERT"]:
+        for fast in [10, 20]:
+            col = f"TS_VOL_PARK_{transform}_{fast}v50"
+            assert col in df.columns, f"Missing bounded TS column: {col}"
+
+    # SIGNED family (LR_SLOPE): should have DIFF, SIGN_AGREE, REGIME_CROSS
+    for transform in ["DIFF", "SIGN_AGREE", "REGIME_CROSS"]:
+        for fast in [10, 20]:
+            col = f"TS_LR_SLOPE_{transform}_{fast}v50"
+            assert col in df.columns, f"Missing signed TS column: {col}"
+
+    # SIGNED families must NOT have RATIO or INVERT columns
+    for signed_name in ["LR_SLOPE", "VWAP_DIST", "CMF"]:
+        for bad_transform in ["RATIO", "INVERT"]:
+            for fast in [10, 20]:
+                col = f"TS_{signed_name}_{bad_transform}_{fast}v50"
+                assert col not in df.columns, (
+                    f"Signed family should NOT have {bad_transform}: {col}"
+                )
+
+    # Total TS columns:
+    #   6 bounded × 3 transforms × 2 fast = 36
+    #   3 signed  × 3 transforms × 2 fast = 18
+    #   Total = 54
+    ts_cols = [c for c in df.columns if c.startswith("TS_")]
+    assert len(ts_cols) == 54, (
+        f"Expected 54 TS columns, got {len(ts_cols)}: {sorted(ts_cols)}"
+    )
+
+
+def test_term_structure_shapes_math_correctness(long_trend_data):
+    """Verify Diff, Ratio, and Inversion math for bounded indicators."""
+    factory = AlphaFactory(long_trend_data)
+    df = factory.add_all_features(
+        windows=[10, 20, 50],
+        include_macro=False,
+        include_extended=True,
+        include_term_structure=True,
+    )
+
+    # Check DIFF = fast - slow (exactly)
+    diff_col = "TS_VOL_PARK_DIFF_10v50"
+    expected_diff = df["VOL_PARK_10"] - df["VOL_PARK_50"]
+    pd.testing.assert_series_equal(
+        df[diff_col], expected_diff, check_names=False,
+    )
+
+    # Check RATIO: positive for non-negative bounded indicators
+    ratio_col = "TS_VOL_PARK_RATIO_10v50"
+    ratio_vals = df[ratio_col].dropna()
+    assert (ratio_vals >= 0).all(), "VOL_PARK ratio should be non-negative"
+
+    # Check INVERT is binary {0, 1}
+    invert_col = "TS_VOL_PARK_INVERT_10v50"
+    invert_vals = df[invert_col].dropna()
+    assert set(invert_vals.unique()).issubset({0, 1}), (
+        f"INVERT should be binary, got {invert_vals.unique()}"
+    )
+
+    # Verify INVERT matches the sign of DIFF
+    valid_mask = df[diff_col].notna() & df[invert_col].notna()
+    diff_positive = df.loc[valid_mask, diff_col] > 0
+    invert_one = df.loc[valid_mask, invert_col] == 1
+    assert (diff_positive == invert_one).all(), (
+        "INVERT=1 should align with DIFF>0"
+    )
+
+
+def test_term_structure_no_inf(long_trend_data):
+    """Term structure features should have no inf values after inf replacement."""
+    factory = AlphaFactory(long_trend_data)
+    df = factory.add_all_features(
+        windows=[10, 20, 50],
+        include_macro=False,
+        include_extended=True,
+        include_term_structure=True,
+    )
+
+    ts_cols = [c for c in df.columns if c.startswith("TS_")]
+    for col in ts_cols:
+        series = df[col].dropna()
+        assert not np.isinf(series).any(), f"{col} contains inf values"
+
+
+def test_term_structure_signed_regime_features(long_trend_data):
+    """Signed indicators should produce Sign_Agreement and Regime_Cross."""
+    factory = AlphaFactory(long_trend_data)
+    factory.add_trend_cluster(window=10)
+    factory.add_trend_cluster(window=50)
+    df = factory.add_term_structure_shapes()
+
+    # Sign Agreement should be binary {0, 1}
+    agree_col = "TS_LR_SLOPE_SIGN_AGREE_10v50"
+    assert agree_col in df.columns, f"Missing: {agree_col}"
+    agree_vals = df[agree_col].dropna()
+    assert set(agree_vals.unique()).issubset({0, 1}), (
+        f"SIGN_AGREE should be binary, got {agree_vals.unique()}"
+    )
+
+    # Regime Cross should be binary {0, 1}
+    cross_col = "TS_LR_SLOPE_REGIME_CROSS_10v50"
+    assert cross_col in df.columns, f"Missing: {cross_col}"
+    cross_vals = df[cross_col].dropna()
+    assert set(cross_vals.unique()).issubset({0, 1}), (
+        f"REGIME_CROSS should be binary, got {cross_vals.unique()}"
+    )
+
+    # Sign Agreement and Regime Cross should be complementary:
+    # SIGN_AGREE=1 when both same sign, REGIME_CROSS=1 when opposite signs.
+    # They should never BOTH be 1 at the same time.
+    valid = df[agree_col].notna() & df[cross_col].notna()
+    both_one = (df.loc[valid, agree_col] == 1) & (df.loc[valid, cross_col] == 1)
+    assert not both_one.any(), (
+        "SIGN_AGREE and REGIME_CROSS should never both be 1"
+    )
+
+    # Verify math: Sign Agreement = (Fast>0) == (Slow>0)
+    fast = df["TREND_LR_SLOPE_10"]
+    slow = df["TREND_LR_SLOPE_50"]
+    expected_agree = ((fast > 0) == (slow > 0)).astype(int)
+    pd.testing.assert_series_equal(
+        df[agree_col], expected_agree, check_names=False,
+    )
+
+    # No RATIO should exist for signed indicators
+    assert f"TS_LR_SLOPE_RATIO_10v50" not in df.columns, (
+        "Signed indicator should NOT have RATIO column"
+    )
