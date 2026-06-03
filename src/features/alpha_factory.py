@@ -327,7 +327,11 @@ class AlphaFactory:
 
     def add_liquidity_cluster(self, window: int = 24) -> pd.DataFrame:
         """Liquidity proxies from OHLCV data."""
-        dollar_vol = (self.close * self.volume).clip(lower=1e-8)
+        # Guard against zero-volume bars (IBKR overnight/weekend placeholders)
+        # that inflate Amihud by 10 orders of magnitude via the old 1e-8 clip.
+        # NaN lets rolling().mean() skip these bars naturally.
+        raw_dv = self.close * self.volume
+        dollar_vol = raw_dv.where(raw_dv > 0, np.nan)
         suffix = f"_{window}"
         self.df[f"LIQ_AMIHUD{suffix}"] = (
             (self.df["log_ret"].abs() / dollar_vol).rolling(window).mean() * 1e6
