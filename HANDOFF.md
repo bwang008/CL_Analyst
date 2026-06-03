@@ -258,3 +258,8 @@ Creates registry-compatible bundles + production_artifacts.zip → GCS
 2. **Monitor Amihud Fix**: Verify live predictions now produce a wider probability distribution (comparable to OOS backtests) after the zero-volume Amihud fix.
 3. **Investigate MACRO_DXY_CHG_1D**: Feed appears stale (constant 0.0). Check FRED data refresh logic.
 4. **HourSet_09 Batch Evaluation**: Evaluate remaining E02–E09 ensemble combinations from `batch_20260602_0330`.
+
+
+"Shadow log entries before 2026-06-03 07:51 UTC contain corrupted LIQ_AMIHUD_* values (~18 billion instead of ~0.02) due to the zero-volume clip bug fixed in commit 7726a9f. These are observational artifacts — no action needed."
+
+Do not ever touch or delete READBEN.me it's my personal file.

@@ -12,6 +12,8 @@ from src.features.macro_features import (
     MacroFeatureEngine,
     StaleDataException,
     _STALE_THRESHOLDS,
+    _FEATURE_STALE_THRESHOLD,
+    _FEATURE_STALE_CRITICAL,
 )
 
 
@@ -81,7 +83,7 @@ class TestValueStaleness:
         dates = pd.date_range("2026-01-01", periods=n, freq="B")
         prefix_len = n - vix_threshold
         df = pd.DataFrame({
-            "DXY": np.linspace(118, 120, n),  # always varying (threshold=7, won't trigger)
+            "DXY": np.linspace(118, 120, n),  # always varying (threshold=5, won't trigger)
             "VIX": np.concatenate([np.linspace(15, 20, prefix_len), [20.5] * vix_threshold]),
             "OVX": np.linspace(30, 40, n),   # always varying
         }, index=dates)
@@ -104,18 +106,18 @@ class TestValueStaleness:
         engine = MacroFeatureEngine()
         engine._check_value_staleness(df)  # Should NOT raise
 
-    def test_dxy_seven_repeats_raises(self):
-        """Seven identical DXY values must raise (threshold=7, exactly at boundary)."""
-        df = self._make_fred_df([119.2868] * 7)
+    def test_dxy_five_repeats_raises(self):
+        """Five identical DXY values must raise (threshold=5, exactly at boundary)."""
+        df = self._make_fred_df([119.2868] * 5)
         engine = MacroFeatureEngine()
         with pytest.raises(StaleDataException) as exc_info:
             engine._check_value_staleness(df)
         assert exc_info.value.stale_series["DXY"] == pytest.approx(119.2868)
-        assert exc_info.value.repeat_count == 7
+        assert exc_info.value.repeat_count == 5
 
-    def test_dxy_six_repeats_passes(self):
-        """Six identical DXY values should NOT raise (threshold=7, normal FRED lag)."""
-        df = self._make_fred_df([119.2868] * 6)
+    def test_dxy_four_repeats_passes(self):
+        """Four identical DXY values should NOT raise (threshold=5, normal FRED lag)."""
+        df = self._make_fred_df([119.2868] * 4)
         engine = MacroFeatureEngine()
         engine._check_value_staleness(df)  # Should NOT raise
 
@@ -124,8 +126,8 @@ class TestValueStaleness:
         dates = pd.date_range("2026-01-01", periods=40, freq="B")
         prefix = np.linspace(100, 120, 30)
         df = pd.DataFrame({
-            "DXY": np.concatenate([prefix, [119.28] * 10]),  # 10 repeats > threshold(6)
-            "VIX": np.concatenate([prefix, [20.5] * 10]),    # 10 repeats > threshold(2)
+            "DXY": np.concatenate([prefix, [119.28] * 10]),  # 10 repeats > threshold(5)
+            "VIX": np.concatenate([prefix, [20.5] * 10]),    # 10 repeats > threshold(3)
             "OVX": np.linspace(30, 40, 40),                  # this one is fine
         }, index=dates)
         engine = MacroFeatureEngine()
@@ -160,3 +162,95 @@ class TestValueStaleness:
         }, index=dates)
         engine = MacroFeatureEngine()
         engine._check_value_staleness(df)  # Should not raise
+
+
+class TestFeatureStaleness:
+    """Test _check_feature_staleness — derived CHG_1D zero detection."""
+
+    def _make_features_df(
+        self,
+        dxy_chg_values: list[float],
+        n_prefix: int = 30,
+    ) -> pd.DataFrame:
+        """Build a features DataFrame with MACRO_DXY_CHG_1D column."""
+        dates = pd.date_range(
+            "2026-01-01",
+            periods=n_prefix + len(dxy_chg_values),
+            freq="B",
+        )
+        prefix = np.linspace(-0.01, 0.01, n_prefix)  # varying CHG_1D
+        full = np.concatenate([prefix, dxy_chg_values])
+        return pd.DataFrame({
+            "MACRO_DXY_CHG_1D": full,
+            "MACRO_VIX_CHG_1D": np.linspace(-0.02, 0.02, len(full)),
+            "MACRO_OVX_CHG_1D": np.linspace(-0.01, 0.01, len(full)),
+        }, index=dates)
+
+    def test_fresh_features_pass(self):
+        """Non-zero CHG_1D values should not raise."""
+        features = self._make_features_df([0.001, -0.002, 0.003, 0.001])
+        engine = MacroFeatureEngine()
+        engine._check_feature_staleness(features)  # Should not raise
+
+    def test_two_zero_chg_passes(self):
+        """Two consecutive CHG_1D=0 (normal weekend) should NOT raise."""
+        features = self._make_features_df([0.0, 0.0])
+        engine = MacroFeatureEngine()
+        engine._check_feature_staleness(features)  # Should not raise
+
+    def test_three_zero_chg_raises(self):
+        """Three consecutive CHG_1D=0 (threshold) should raise."""
+        features = self._make_features_df([0.0, 0.0, 0.0])
+        engine = MacroFeatureEngine()
+        with pytest.raises(StaleDataException) as exc_info:
+            engine._check_feature_staleness(features)
+        assert "MACRO_DXY_CHG_1D" in exc_info.value.stale_series
+        assert exc_info.value.stale_series["MACRO_DXY_CHG_1D"] == 0.0
+
+    def test_non_zero_constant_passes(self):
+        """CHG_1D stuck at a non-zero constant should NOT raise.
+
+        Only zero-stuckness is a staleness signal; a non-zero constant
+        could be a legitimate regime (e.g., stable macro conditions).
+        """
+        features = self._make_features_df([0.005, 0.005, 0.005])
+        engine = MacroFeatureEngine()
+        engine._check_feature_staleness(features)  # Should not raise
+
+    def test_mixed_zero_non_zero_passes(self):
+        """Non-consecutive zeros should NOT raise."""
+        features = self._make_features_df([0.0, 0.001, 0.0, 0.0])
+        engine = MacroFeatureEngine()
+        engine._check_feature_staleness(features)  # Should not raise
+
+    def test_multiple_features_stale(self):
+        """Multiple features stuck at zero should all appear in exception."""
+        dates = pd.date_range("2026-01-01", periods=33, freq="B")
+        prefix = np.linspace(-0.01, 0.01, 30)
+        zeros = [0.0, 0.0, 0.0]
+        features = pd.DataFrame({
+            "MACRO_DXY_CHG_1D": np.concatenate([prefix, zeros]),
+            "MACRO_VIX_CHG_1D": np.concatenate([prefix, zeros]),
+            "MACRO_OVX_CHG_1D": np.linspace(-0.01, 0.01, 33),  # varying
+        }, index=dates)
+        engine = MacroFeatureEngine()
+        with pytest.raises(StaleDataException) as exc_info:
+            engine._check_feature_staleness(features)
+        assert "MACRO_DXY_CHG_1D" in exc_info.value.stale_series
+        assert "MACRO_VIX_CHG_1D" in exc_info.value.stale_series
+        assert "MACRO_OVX_CHG_1D" not in exc_info.value.stale_series
+
+    def test_missing_feature_column_skipped(self):
+        """Missing feature columns should be gracefully skipped."""
+        dates = pd.date_range("2026-01-01", periods=10, freq="B")
+        features = pd.DataFrame({
+            "MACRO_YIELD_CURVE_SIGN": [1.0] * 10,
+        }, index=dates)
+        engine = MacroFeatureEngine()
+        engine._check_feature_staleness(features)  # Should not raise
+
+    def test_feature_stale_threshold_value(self):
+        """Verify the threshold constant is sensible."""
+        assert _FEATURE_STALE_THRESHOLD == 3
+        assert len(_FEATURE_STALE_CRITICAL) == 3
+        assert "MACRO_DXY_CHG_1D" in _FEATURE_STALE_CRITICAL

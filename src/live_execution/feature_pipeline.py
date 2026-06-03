@@ -11,6 +11,7 @@ Both the live trader and parity validation scripts consume it.
 
 from __future__ import annotations
 
+import collections
 import logging
 from typing import Optional
 
@@ -40,6 +41,58 @@ _MACRO_WINDOWS_SET_07 = {
 _SET_07_SENTINEL_FEATURES = frozenset([
     "DIST_SKEW_288", "Time_DayOfWeek_Sin", "MOM_STOCH_K_864",
 ])
+
+# ---------------------------------------------------------------------------
+# Inference-Level Feature Variance Monitor
+# ---------------------------------------------------------------------------
+
+# Rolling buffer of recent feature snapshots for variance monitoring.
+# Detects features stuck at constant values across inference cycles,
+# catching issues that pass the FRED-level circuit breaker (e.g.,
+# a feature "changing" but stuck at an extreme constant like Amihud).
+_FEATURE_HISTORY: collections.deque = collections.deque(maxlen=48)
+
+# Minimum number of inferences before variance checks activate.
+_VARIANCE_MIN_HISTORY = 24
+
+# Feature name patterns to monitor for zero-variance.
+_VARIANCE_CRITICAL_PATTERNS = ("CHG_1D", "CHG_3D")
+
+
+def _check_inference_feature_variance(
+    features_row: pd.DataFrame,
+    feature_names: list[str],
+) -> None:
+    """Log warnings if critical features show zero variance over recent inferences.
+
+    This is a **warning-only** monitor — it does not raise exceptions or
+    block entries.  Warnings surface in the live trader log and Telegram
+    heartbeat messages, enabling early detection without trade disruption.
+
+    Called once per inference cycle with the single-row feature DataFrame.
+    """
+    snapshot = features_row[feature_names].iloc[0].to_dict()
+    _FEATURE_HISTORY.append(snapshot)
+
+    if len(_FEATURE_HISTORY) < _VARIANCE_MIN_HISTORY:
+        return
+
+    history_df = pd.DataFrame(list(_FEATURE_HISTORY))
+    critical_cols = [
+        c for c in history_df.columns
+        if any(p in c for p in _VARIANCE_CRITICAL_PATTERNS)
+    ]
+
+    for col in critical_cols:
+        if col not in history_df.columns:
+            continue
+        col_std = history_df[col].std()
+        if col_std == 0:
+            log.warning(
+                "FEATURE VARIANCE ALERT: %s has been constant (%.4f) "
+                "for %d consecutive inferences",
+                col, history_df[col].iloc[-1], len(history_df),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -260,5 +313,14 @@ def build_live_features(
             nan_count, nan_cols,
         )
         last_row = last_row.fillna(0)
+
+    # 7. Inference-level feature variance monitoring (warning-only).
+    #    Tracks recent feature vectors and warns if any critical CHG
+    #    feature has zero variance — catches stuck features that pass
+    #    the FRED-level circuit breaker.
+    try:
+        _check_inference_feature_variance(last_row, feature_names)
+    except Exception:
+        pass  # Never let monitoring crash inference
 
     return last_row

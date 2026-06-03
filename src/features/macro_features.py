@@ -48,15 +48,31 @@ PCTILE_WINDOWS = [14, 35, 60]
 #
 # Per-series thresholds reflect real-world FRED publication lags:
 #   DXY  (DTWEXBGS) — Broad Dollar Index: FRED lags 3-5 business days.
-#                     Use 7 to cover the lag + weekend gap robustly.
+#                     Tightened to 5 (was 7): the old threshold allowed
+#                     5-6 days of CHG_1D=0.0 without triggering mute.
+#                     With weekend ffill producing 2 identical values and
+#                     FRED's 3-5 day lag, 5 catches extended stale periods
+#                     while still tolerating normal long-weekend gaps (3-4).
 #   VIX  (VIXCLS)   — Published daily by CBOE, but FRED sometimes lags
 #                     1-2 days. Use 3 to avoid false weekend mutes.
 #   OVX  (OVXCLS)   — Same as VIX. Use 3.
 _STALE_THRESHOLDS: dict[str, int] = {
-    "DXY": 7,   # FRED Broad Dollar Index: 3-5 day lag + weekend buffer
+    "DXY": 5,   # FRED Broad Dollar Index: 3-5 day lag (tightened from 7)
     "VIX": 3,   # CBOE VIX via FRED: 1-2 day lag, use 3 for weekend safety
     "OVX": 3,   # CBOE OVX via FRED: same as VIX
 }
+
+# Derived features that must not be stuck at zero for extended periods.
+# These are computed as pct_change(1) of critical series.  Even if raw
+# values pass the _STALE_THRESHOLDS check, FRED publication lag can
+# produce identical raw values (2-4 repeats, below threshold) whose
+# pct_change is 0.0 — a value the model rarely saw during training.
+_FEATURE_STALE_THRESHOLD = 3  # consecutive trading days of CHG_1D == 0.0
+_FEATURE_STALE_CRITICAL = [
+    "MACRO_DXY_CHG_1D",
+    "MACRO_VIX_CHG_1D",
+    "MACRO_OVX_CHG_1D",
+]
 
 
 class StaleDataException(RuntimeError):
@@ -311,6 +327,73 @@ class MacroFeatureEngine:
                 repeat_count=max_repeats,
             )
 
+    def _check_feature_staleness(self, features: pd.DataFrame) -> None:
+        """Raise ``StaleDataException`` if derived CHG_1D features are stuck at zero.
+
+        Complements ``_check_value_staleness`` by inspecting *computed*
+        features rather than raw FRED series.  This catches the scenario
+        where raw values pass the staleness check (e.g. only 2-4 repeated
+        values at the tail, below ``_STALE_THRESHOLDS``) but the derived
+        ``pct_change(1)`` is 0.0 for multiple consecutive trading days.
+
+        Parameters
+        ----------
+        features : pd.DataFrame
+            The daily-resolution features DataFrame produced by
+            ``_build_fred_features``, indexed by shifted Date.
+
+        Raises
+        ------
+        StaleDataException
+            When one or more critical CHG_1D features have been zero
+            for ``_FEATURE_STALE_THRESHOLD`` or more consecutive days.
+        """
+        stale: dict[str, float] = {}
+        threshold = _FEATURE_STALE_THRESHOLD
+
+        for feat in _FEATURE_STALE_CRITICAL:
+            if feat not in features.columns:
+                continue
+
+            series = features[feat].dropna()
+            if len(series) < threshold + 1:
+                continue
+
+            # Count consecutive zeros at the tail
+            tail_val = series.iloc[-1]
+            if tail_val != 0.0:
+                continue
+
+            n_zero = 0
+            for val in reversed(series.values):
+                if val == 0.0:
+                    n_zero += 1
+                else:
+                    break
+
+            if n_zero >= threshold:
+                stale[feat] = 0.0
+                log.warning(
+                    "Feature-staleness: %s stuck at 0.0 for %d "
+                    "consecutive trading days (threshold=%d)",
+                    feat, n_zero, threshold,
+                )
+
+        if stale:
+            raise StaleDataException(
+                stale_series=stale,
+                repeat_count=threshold,
+                message=(
+                    f"Derived features stuck at zero: "
+                    f"{", ".join(stale.keys())}. "
+                    f"Raw FRED values may pass staleness check but "
+                    f"publication lag produces zero CHG_1D features "
+                    f"for {threshold}+ consecutive days "
+                    f"-- model input is degraded. "
+                    f"Live entries are blocked until data updates."
+                ),
+            )
+
     # ------------------------------------------------------------------
     # FRED Feature Engineering
     # ------------------------------------------------------------------
@@ -373,6 +456,12 @@ class MacroFeatureEngine:
         # Value-staleness gate: raise if critical series have repeated
         # values at the tail — file age alone does not guarantee freshness.
         self._check_value_staleness(df)
+
+        # Feature-staleness gate: raise if derived CHG_1D features are
+        # stuck at zero.  This catches the blind spot where raw values
+        # differ slightly (below _STALE_THRESHOLDS) but pct_change
+        # produces 0.0 due to FRED publication lag + weekend ffill.
+        self._check_feature_staleness(features)
 
         return features
 
