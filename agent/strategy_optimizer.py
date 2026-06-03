@@ -724,6 +724,13 @@ def make_objective(
         cfg = copy.deepcopy(base_cfg)
 
         if is_tiered:
+            # Conflict resolution: strategy-level param (not per-side)
+            conflict_mode = trial.suggest_categorical(
+                "conflict_resolution",
+                ["hold", "close_existing_position", "reverse_position"],
+            )
+            cfg["conflict_resolution"] = conflict_mode
+
             if optimize_side == "long":
                 # Single-side: only suggest long params, disable short
                 side_params = _suggest_side_params(trial, "long")
@@ -771,7 +778,7 @@ def make_objective(
         trades_df["exit_dt"] = pd.to_datetime(trades_df["exit_dt"])
         trades_df = trades_df.set_index("exit_dt").sort_index()
 
-        monthly_pnls = trades_df["pnl"].resample("ME").sum().dropna()
+        monthly_pnls = trades_df["pnl"].resample("M").sum().dropna()
         monthly_pnl_vals = monthly_pnls.values
 
         if len(monthly_pnl_vals) == 0:

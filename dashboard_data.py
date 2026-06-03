@@ -350,8 +350,11 @@ def scan_prediction_files() -> list[str]:
     preds_dir = PROJECT_ROOT / "data" / "predictions"
     if not preds_dir.is_dir():
         return []
-    return sorted([
+    # Sort files by modification time, most recent first
+    files = list(preds_dir.glob("oos_predictions*.csv"))
+    files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+    return [
         str(f.relative_to(PROJECT_ROOT))
-        for f in preds_dir.glob("oos_predictions*.csv")
-    ])
+        for f in files
+    ]
 

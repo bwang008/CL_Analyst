@@ -231,22 +231,22 @@ def render_batch_overview(df: pd.DataFrame, progress: dict, side_filter: str,
                     "early_stopping_rounds",
                 ],
                 "Min": [
-                    defaults.get("max_depth_min", "—"),
-                    defaults.get("num_leaves_min", "—"),
-                    defaults.get("learning_rate_min", "—"),
-                    defaults.get("min_child_samples_min", "—"),
-                    defaults.get("feature_fraction_min", "—"),
+                    str(defaults.get("max_depth_min", "—")),
+                    str(defaults.get("num_leaves_min", "—")),
+                    str(defaults.get("learning_rate_min", "—")),
+                    str(defaults.get("min_child_samples_min", "—")),
+                    str(defaults.get("feature_fraction_min", "—")),
                     "—",
                     "—",
                 ],
                 "Max": [
-                    defaults.get("max_depth_max", "—"),
-                    defaults.get("num_leaves_max", "—"),
-                    defaults.get("learning_rate_max", "—"),
-                    defaults.get("min_child_samples_max", "—"),
-                    defaults.get("feature_fraction_max", "—"),
-                    defaults.get("max_n_estimators", "—"),
-                    defaults.get("early_stopping_rounds", "—"),
+                    str(defaults.get("max_depth_max", "—")),
+                    str(defaults.get("num_leaves_max", "—")),
+                    str(defaults.get("learning_rate_max", "—")),
+                    str(defaults.get("min_child_samples_max", "—")),
+                    str(defaults.get("feature_fraction_max", "—")),
+                    str(defaults.get("max_n_estimators", "—")),
+                    str(defaults.get("early_stopping_rounds", "—")),
                 ],
             }
             st.dataframe(pd.DataFrame(bounds_data), use_container_width=True, hide_index=True)
@@ -257,10 +257,10 @@ def render_batch_overview(df: pd.DataFrame, progress: dict, side_filter: str,
                 exp_rows = []
                 for exp in experiments:
                     exp_rows.append({
-                        "Label": exp.get("label", "—"),
-                        "Target Long": exp.get("target_long", "—"),
-                        "Target Short": exp.get("target_short", "—"),
-                        "GCS Prefix": exp.get("gcs_prefix", "—"),
+                        "Label": str(exp.get("label", "—")),
+                        "Target Long": str(exp.get("target_long", "—")),
+                        "Target Short": str(exp.get("target_short", "—")),
+                        "GCS Prefix": str(exp.get("gcs_prefix", "—")),
                     })
                 st.dataframe(pd.DataFrame(exp_rows), use_container_width=True, hide_index=True)
 
@@ -636,6 +636,22 @@ def _render_execution(experiment_label: str, progress: dict):
 #  SECTION 4 — SIGNAL ANALYSIS
 # ═══════════════════════════════════════════════════════════════
 
+def format_file_option(rel_path: str) -> str:
+    if not rel_path:
+        return "—"
+    path = Path(__file__).resolve().parent / rel_path
+    filename = path.name
+    try:
+        if path.exists():
+            import datetime
+            mtime = path.stat().st_mtime
+            dt = datetime.datetime.fromtimestamp(mtime)
+            return f"{filename} ({dt.strftime('%Y-%m-%d %H:%M')})"
+    except Exception:
+        pass
+    return filename
+
+
 def render_signal_analysis():
     """Section 4: Visualize long/short signal overlap, density, and autocorrelation."""
     st.markdown('<div class="section-header">🔬 Section 4 — Signal Analysis</div>', unsafe_allow_html=True)
@@ -647,25 +663,41 @@ def render_signal_analysis():
         st.warning("No prediction files found in `data/predictions/`. Run a backtest with predictions first.")
         return
 
-    # Auto-detect long vs short files
-    long_candidates = [f for f in pred_files if "long" in f.lower()]
-    short_candidates = [f for f in pred_files if "short" in f.lower()]
+    # Filter selection lists to prevent choosing a short predictions file on the long side (or vice-versa)
+    long_files = [f for f in pred_files if "short" not in Path(f).name.lower()]
+    if not long_files:
+        long_files = pred_files
+    short_files = [f for f in pred_files if "long" not in Path(f).name.lower()]
+    if not short_files:
+        short_files = pred_files
+
+    # Auto-detect default selected options from the filtered lists
+    long_candidates = [f for f in long_files if "long" in f.lower()]
+    short_candidates = [f for f in short_files if "short" in f.lower()]
 
     col_l, col_r = st.columns(2)
     with col_l:
-        long_path = st.selectbox(
-            "📈 Long Predictions",
-            pred_files,
-            index=pred_files.index(long_candidates[0]) if long_candidates else 0,
-            key="sa_long",
-        )
+        st.markdown("**📈 Long Predictions**")
+        with st.container(height=180):
+            long_path = st.radio(
+                "📈 Long Predictions Select",
+                long_files,
+                index=long_files.index(long_candidates[0]) if long_candidates and long_candidates[0] in long_files else 0,
+                key="sa_long",
+                label_visibility="collapsed",
+                format_func=format_file_option,
+            )
     with col_r:
-        short_path = st.selectbox(
-            "📉 Short Predictions",
-            pred_files,
-            index=pred_files.index(short_candidates[0]) if short_candidates else 0,
-            key="sa_short",
-        )
+        st.markdown("**📉 Short Predictions**")
+        with st.container(height=180):
+            short_path = st.radio(
+                "📉 Short Predictions Select",
+                short_files,
+                index=short_files.index(short_candidates[0]) if short_candidates and short_candidates[0] in short_files else 0,
+                key="sa_short",
+                label_visibility="collapsed",
+                format_func=format_file_option,
+            )
 
     # ── Threshold controls ──
     tcol1, tcol2, tcol3 = st.columns(3)
@@ -984,6 +1016,10 @@ def render_model_registry():
         "Feature Groups", "Boosting", "Leaves", "Depth",
         "LR", "Estimators", "Has PKL", "Has OOS",
     ]
+    # Ensure display columns have uniform string types to prevent Arrow serialization errors
+    for col in ["Leaves", "Depth", "LR", "Estimators", "Features"]:
+        if col in display.columns:
+            display[col] = display[col].apply(lambda x: str(x) if x != "" and x is not None else "—")
     st.dataframe(display, use_container_width=True, height=min(400, 38 * len(display) + 40))
 
     # Expandable detail

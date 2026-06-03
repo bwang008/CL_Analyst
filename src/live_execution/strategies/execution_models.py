@@ -462,9 +462,18 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
     execution parameters (tp_atr_mult, sl_atr_mult, trailing_atr_mult,
     max_hold_bars) which are passed to the engine via Order fields.
 
+    Conflict resolution when in-position and an opposing signal fires:
+        ``hold`` (default)
+            Ignore opposing signals — let TP/SL/trailing manage exit.
+        ``close_existing_position``
+            EXIT current trade when opposite signal fires.
+        ``reverse_position``
+            EXIT current trade + ENTER opposite in the same bar.
+
     Config shape::
 
         {
+            "conflict_resolution": "hold",  // optional, default="hold"
             "long": {
                 "experiment_id": "...",
                 "tiers": [
@@ -480,8 +489,10 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
         - If no tier matches, HOLD is returned.
         - When both buy and sell fire on the same bar, the higher
           probability wins (same conflict resolution as Conservative).
-        - When in a position, no new entries (no-flip behaviour).
+        - When in a position, behaviour depends on ``conflict_resolution``.
     """
+
+    VALID_CONFLICT_MODES = ("hold", "close_existing_position", "reverse_position")
 
     def __init__(self, config: dict) -> None:
         super().__init__(config)
@@ -496,6 +507,16 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
         self.short_cooldown_bars = short_cfg.get("cooldown_bars", config.get("cooldown_bars", 0))
         self.long_consecutive_threshold = long_cfg.get("consecutive_signal_threshold", config.get("consecutive_signal_threshold", 0))
         self.short_consecutive_threshold = short_cfg.get("consecutive_signal_threshold", config.get("consecutive_signal_threshold", 0))
+
+        # Conflict resolution mode
+        self.conflict_resolution: str = config.get(
+            "conflict_resolution", "hold"
+        )
+        if self.conflict_resolution not in self.VALID_CONFLICT_MODES:
+            raise ValueError(
+                f"Invalid conflict_resolution '{self.conflict_resolution}'. "
+                f"Must be one of {self.VALID_CONFLICT_MODES}"
+            )
 
         # Derive effective thresholds from tiers (single source of truth).
         # The effective threshold for a side is the lowest min_prob across
@@ -638,6 +659,9 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
                 for direction in cfg["models"]:
                     cfg["models"][direction]["threshold"] = threshold
 
+        if "conflict_resolution" in params:
+            cfg["conflict_resolution"] = params["conflict_resolution"]
+
         return cfg
 
     def _match_tier(
@@ -728,18 +752,53 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
             sell_ok = False
             sell_tier = None
 
-        # Bracket-only exit rule: once in a position, ignore new signals.
-        # Exits are managed exclusively by TP/SL/Trailing/Time-Barrier.
+        # ── IN POSITION ──
         if state.position != 0 or state.open_positions >= self.max_concurrent:
-            if buy_ok and sell_ok:
-                side = 1 if prob_buy >= prob_sell else -1
-                return [Order(action="HOLD", side=side, reason="POSITION_OPEN")]
-            elif buy_ok:
-                return [Order(action="HOLD", side=1, reason="POSITION_OPEN")]
-            elif sell_ok:
-                return [Order(action="HOLD", side=-1, reason="POSITION_OPEN")]
+            if self.conflict_resolution == "hold":
+                # Default: ignore all new signals while in position
+                if buy_ok and sell_ok:
+                    side = 1 if prob_buy >= prob_sell else -1
+                    return [Order(action="HOLD", side=side, reason="POSITION_OPEN")]
+                elif buy_ok:
+                    return [Order(action="HOLD", side=1, reason="POSITION_OPEN")]
+                elif sell_ok:
+                    return [Order(action="HOLD", side=-1, reason="POSITION_OPEN")]
+                return HOLD
+
+            # Conflict resolution modes that react to opposing signals
+            current_side = state.side
+            opposite_ok = (sell_ok if current_side == 1 else buy_ok)
+            opposite_tier = (sell_tier if current_side == 1 else buy_tier)
+            opposite_prob = (prob_sell if current_side == 1 else prob_buy)
+
+            if self.conflict_resolution == "close_existing_position":
+                if opposite_ok:
+                    return [Order(
+                        action="EXIT", side=current_side,
+                        reason=f"TIERED_EXIT opposite signal ({opposite_prob:.4f})",
+                    )]
+                return HOLD
+
+            elif self.conflict_resolution == "reverse_position":
+                if opposite_ok and opposite_tier is not None:
+                    exit_order = Order(
+                        action="EXIT", side=current_side,
+                        reason=f"TIERED_REVERSE exit ({opposite_prob:.4f})",
+                    )
+                    if current_side == 1:
+                        enter_order = self._tier_to_order(
+                            opposite_tier, "SELL", -1, opposite_prob
+                        )
+                    else:
+                        enter_order = self._tier_to_order(
+                            opposite_tier, "BUY", 1, opposite_prob
+                        )
+                    return [exit_order, enter_order]
+                return HOLD
+
             return HOLD
 
+        # ── FLAT ──
         if buy_ok and sell_ok:
             # Same-bar conflict: higher probability wins
             if prob_buy >= prob_sell:
@@ -1005,6 +1064,11 @@ class IsolatedAsymmetricalStrategy(BaseExecutionStrategy):
 
 class JointPortfolioStrategy(BaseExecutionStrategy):
     """Shared portfolio slot with configurable conflict resolution.
+
+    .. deprecated::
+        Use ``TieredEnsembleStrategy`` with ``conflict_resolution`` instead.
+        This class is kept for backward compatibility with existing configs
+        but all new configs should use ``TieredEnsembleStrategy``.
 
     Models compete for a single position (``allow_concurrent=False,
     max_concurrent=1``).  When both signals fire simultaneously or
