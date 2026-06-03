@@ -13,9 +13,11 @@ Performance note:
     per-bar to keep the 100k+ iteration loop fast.
 
 Concrete strategies:
-    SingleModelStrategy          — backward-compat single-direction
-    ConservativeEnsembleStrategy — dual-model, no position flipping
-    AggressiveEnsembleStrategy   — dual-model with position flipping
+    SingleModelStrategy              — backward-compat single-direction
+    ConservativeEnsembleStrategy     — dual-model, no position flipping
+    AggressiveEnsembleStrategy       — dual-model with position flipping
+    IsolatedAsymmetricalStrategy     — independent long/short, concurrent positions
+    JointPortfolioStrategy           — shared portfolio slot, conflict resolution
 """
 
 from __future__ import annotations
@@ -53,7 +55,8 @@ class Order:
     """Signal returned by a strategy for the engine to execute.
 
     Attributes:
-        action: "BUY", "SELL", or "HOLD".  (EXIT is deprecated and should not be produced.)
+        action: "BUY", "SELL", "HOLD", or "EXIT".  EXIT requests the engine
+                close the current position (used by JointPortfolioStrategy).
         side:   +1 for long entry, -1 for short entry.
         lots:   Number of contracts.
         reason: Human-readable reason for logging.
@@ -63,7 +66,7 @@ class Order:
         max_hold_bars: Per-trade time-barrier override (None = use engine global).
     """
 
-    action: str    # "BUY" | "SELL" | "HOLD"
+    action: str    # "BUY" | "SELL" | "HOLD" | "EXIT"
     side: int      # +1 | -1
     lots: int = 1
     reason: str = ""
@@ -158,6 +161,21 @@ class BaseExecutionStrategy(ABC):
                     cfg["models"][direction]["threshold"] = params["entry_threshold"]
 
         return cfg
+
+    def on_exit(
+        self, side: int, exit_reason: object, bars_held: int,
+    ) -> None:
+        """Called by the engine when a position is closed.
+
+        Override in subclasses that need to track per-side open/close
+        state internally (e.g. IsolatedAsymmetricalStrategy).
+
+        Args:
+            side:        +1 for long, -1 for short.
+            exit_reason: ExitReason enum value.
+            bars_held:   Number of bars the position was held.
+        """
+        pass  # Default no-op
 
     @abstractmethod
     def on_bar(
@@ -683,15 +701,15 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
         buy_ok = buy_tier is not None
         sell_ok = sell_tier is not None
 
-        # Track consecutive signals
+        # Track consecutive signals (only reset if model produced a prediction)
         if buy_ok:
             self._consecutive_long_signals += 1
-        else:
+        elif prob_buy > 0:
             self._consecutive_long_signals = 0
             
         if sell_ok:
             self._consecutive_short_signals += 1
-        else:
+        elif prob_sell > 0:
             self._consecutive_short_signals = 0
             
         # Check consecutive threshold rules
@@ -818,6 +836,404 @@ class BreakoutStraddleStrategy(BaseExecutionStrategy):
             
         return HOLD
 
+class IsolatedAsymmetricalStrategy(BaseExecutionStrategy):
+    """Independent long/short models with concurrent positions.
+
+    Each side tracks its own cooldowns, consecutive signal counters,
+    and open-position state.  Both can be in position simultaneously
+    (engine must use ``allow_concurrent=True, max_concurrent=2``).
+
+    No conflict resolution is needed — the two sides are fully
+    independent agents sharing the same price feed.
+
+    Config shape::
+
+        {
+            "execution_class": "IsolatedAsymmetricalStrategy",
+            "allow_concurrent": true,
+            "max_concurrent": 2,
+            "long": {
+                "tiers": [{"min_prob": 0.58, "lots": 1, ...}],
+                "cooldown_bars": 9,
+                "consecutive_signal_threshold": 0
+            },
+            "short": { ... same shape ... }
+        }
+    """
+
+    def __init__(self, config: dict) -> None:
+        super().__init__(config)
+        long_cfg = config.get("long", {})
+        short_cfg = config.get("short", {})
+        self.long_tiers = TieredEnsembleStrategy._parse_tiers(
+            long_cfg.get("tiers", []), long_cfg
+        )
+        self.short_tiers = TieredEnsembleStrategy._parse_tiers(
+            short_cfg.get("tiers", []), short_cfg
+        )
+        self.long_cooldown_bars = long_cfg.get(
+            "cooldown_bars", config.get("cooldown_bars", 0)
+        )
+        self.short_cooldown_bars = short_cfg.get(
+            "cooldown_bars", config.get("cooldown_bars", 0)
+        )
+        self.long_consecutive_threshold = long_cfg.get(
+            "consecutive_signal_threshold",
+            config.get("consecutive_signal_threshold", 0),
+        )
+        self.short_consecutive_threshold = short_cfg.get(
+            "consecutive_signal_threshold",
+            config.get("consecutive_signal_threshold", 0),
+        )
+
+        # Derive effective thresholds from tiers
+        self.long_threshold: float = (
+            min(t["min_prob"] for t in self.long_tiers)
+            if self.long_tiers else 1.0
+        )
+        self.short_threshold: float = (
+            min(t["min_prob"] for t in self.short_tiers)
+            if self.short_tiers else 1.0
+        )
+
+        # Internal per-side state
+        self._consecutive_long_signals: int = 0
+        self._consecutive_short_signals: int = 0
+        self._long_is_open: bool = False
+        self._short_is_open: bool = False
+        self._bars_since_long_exit: int = 9999
+        self._bars_since_short_exit: int = 9999
+
+    def on_exit(self, side: int, exit_reason: object, bars_held: int) -> None:
+        """Track per-side position closure."""
+        if side == 1:
+            self._long_is_open = False
+            self._bars_since_long_exit = 0
+        elif side == -1:
+            self._short_is_open = False
+            self._bars_since_short_exit = 0
+
+    def on_bar(
+        self,
+        dt: object,
+        open_: float,
+        high: float,
+        low: float,
+        close: float,
+        atr: float,
+        prob_buy: float,
+        prob_sell: float,
+        state: EngineState,
+    ) -> list[Order]:
+        # NaN guards
+        if np.isnan(prob_buy):
+            prob_buy = 0.0
+        if np.isnan(prob_sell):
+            prob_sell = 0.0
+
+        # Increment internal cooldown counters
+        self._bars_since_long_exit += 1
+        self._bars_since_short_exit += 1
+
+        # ── Long side evaluation ──
+        buy_tier = TieredEnsembleStrategy._match_tier(self, prob_buy, self.long_tiers)
+        buy_ok = buy_tier is not None
+
+        if buy_ok:
+            self._consecutive_long_signals += 1
+        elif prob_buy > 0:
+            self._consecutive_long_signals = 0
+
+        if (self.long_consecutive_threshold > 0
+                and self._consecutive_long_signals < self.long_consecutive_threshold):
+            buy_ok = False
+            buy_tier = None
+
+        if self._bars_since_long_exit <= self.long_cooldown_bars:
+            buy_ok = False
+            buy_tier = None
+
+        if self._long_is_open:
+            buy_ok = False
+            buy_tier = None
+
+        # ── Short side evaluation ──
+        sell_tier = TieredEnsembleStrategy._match_tier(self, prob_sell, self.short_tiers)
+        sell_ok = sell_tier is not None
+
+        if sell_ok:
+            self._consecutive_short_signals += 1
+        elif prob_sell > 0:
+            self._consecutive_short_signals = 0
+
+        if (self.short_consecutive_threshold > 0
+                and self._consecutive_short_signals < self.short_consecutive_threshold):
+            sell_ok = False
+            sell_tier = None
+
+        if self._bars_since_short_exit <= self.short_cooldown_bars:
+            sell_ok = False
+            sell_tier = None
+
+        if self._short_is_open:
+            sell_ok = False
+            sell_tier = None
+
+        # ── Build independent orders ──
+        orders: list[Order] = []
+
+        if buy_ok and buy_tier is not None:
+            self._long_is_open = True
+            orders.append(TieredEnsembleStrategy._tier_to_order(
+                self, buy_tier, "BUY", 1, prob_buy
+            ))
+
+        if sell_ok and sell_tier is not None:
+            self._short_is_open = True
+            orders.append(TieredEnsembleStrategy._tier_to_order(
+                self, sell_tier, "SELL", -1, prob_sell
+            ))
+
+        return orders if orders else HOLD
+
+    def apply_trial_params(
+        self, cfg: dict, params: dict, side: Optional[str] = None,
+    ) -> dict:
+        """Route optimizer params — delegates to TieredEnsembleStrategy logic."""
+        return TieredEnsembleStrategy.apply_trial_params(self, cfg, params, side)
+
+
+class JointPortfolioStrategy(BaseExecutionStrategy):
+    """Shared portfolio slot with configurable conflict resolution.
+
+    Models compete for a single position (``allow_concurrent=False,
+    max_concurrent=1``).  When both signals fire simultaneously or
+    an opposite signal fires while in position, the ``conflict_resolution``
+    config parameter determines the outcome.
+
+    Conflict resolution modes:
+        ``ignore_both``
+            Both fire while flat → HOLD.  In position → let TP/SL manage exit.
+        ``close_existing_position``
+            Opposite signal while in position → EXIT current trade.
+            Both fire while flat → higher probability wins.
+        ``reverse_position``
+            Opposite signal while in position → EXIT + ENTER opposite
+            in the same bar.  Both fire while flat → higher prob wins.
+
+    Config shape::
+
+        {
+            "execution_class": "JointPortfolioStrategy",
+            "allow_concurrent": false,
+            "max_concurrent": 1,
+            "conflict_resolution": "close_existing_position",
+            "long": { "tiers": [...], "cooldown_bars": 9, ... },
+            "short": { "tiers": [...], "cooldown_bars": 17, ... }
+        }
+    """
+
+    VALID_CONFLICT_MODES = ("ignore_both", "close_existing_position", "reverse_position")
+
+    def __init__(self, config: dict) -> None:
+        super().__init__(config)
+        long_cfg = config.get("long", {})
+        short_cfg = config.get("short", {})
+        self.long_tiers = TieredEnsembleStrategy._parse_tiers(
+            long_cfg.get("tiers", []), long_cfg
+        )
+        self.short_tiers = TieredEnsembleStrategy._parse_tiers(
+            short_cfg.get("tiers", []), short_cfg
+        )
+        self.long_cooldown_bars = long_cfg.get(
+            "cooldown_bars", config.get("cooldown_bars", 0)
+        )
+        self.short_cooldown_bars = short_cfg.get(
+            "cooldown_bars", config.get("cooldown_bars", 0)
+        )
+        self.long_consecutive_threshold = long_cfg.get(
+            "consecutive_signal_threshold",
+            config.get("consecutive_signal_threshold", 0),
+        )
+        self.short_consecutive_threshold = short_cfg.get(
+            "consecutive_signal_threshold",
+            config.get("consecutive_signal_threshold", 0),
+        )
+
+        # Conflict resolution mode
+        self.conflict_resolution: str = config.get(
+            "conflict_resolution", "close_existing_position"
+        )
+        if self.conflict_resolution not in self.VALID_CONFLICT_MODES:
+            raise ValueError(
+                f"Invalid conflict_resolution '{self.conflict_resolution}'. "
+                f"Must be one of {self.VALID_CONFLICT_MODES}"
+            )
+
+        # Derive effective thresholds from tiers
+        self.long_threshold: float = (
+            min(t["min_prob"] for t in self.long_tiers)
+            if self.long_tiers else 1.0
+        )
+        self.short_threshold: float = (
+            min(t["min_prob"] for t in self.short_tiers)
+            if self.short_tiers else 1.0
+        )
+
+        # Internal per-side state
+        self._consecutive_long_signals: int = 0
+        self._consecutive_short_signals: int = 0
+        self._current_side: int = 0  # 0=flat, 1=long, -1=short
+        self._bars_since_long_exit: int = 9999
+        self._bars_since_short_exit: int = 9999
+
+    def on_exit(self, side: int, exit_reason: object, bars_held: int) -> None:
+        """Track position closure."""
+        self._current_side = 0
+        if side == 1:
+            self._bars_since_long_exit = 0
+        elif side == -1:
+            self._bars_since_short_exit = 0
+
+    def on_bar(
+        self,
+        dt: object,
+        open_: float,
+        high: float,
+        low: float,
+        close: float,
+        atr: float,
+        prob_buy: float,
+        prob_sell: float,
+        state: EngineState,
+    ) -> list[Order]:
+        # NaN guards
+        if np.isnan(prob_buy):
+            prob_buy = 0.0
+        if np.isnan(prob_sell):
+            prob_sell = 0.0
+
+        # Increment internal cooldown counters
+        self._bars_since_long_exit += 1
+        self._bars_since_short_exit += 1
+
+        # ── Evaluate both sides ──
+        buy_tier = TieredEnsembleStrategy._match_tier(self, prob_buy, self.long_tiers)
+        sell_tier = TieredEnsembleStrategy._match_tier(self, prob_sell, self.short_tiers)
+        buy_ok = buy_tier is not None
+        sell_ok = sell_tier is not None
+
+        # Consecutive signal tracking (only reset if model produced a prediction)
+        if buy_ok:
+            self._consecutive_long_signals += 1
+        elif prob_buy > 0:
+            self._consecutive_long_signals = 0
+        if sell_ok:
+            self._consecutive_short_signals += 1
+        elif prob_sell > 0:
+            self._consecutive_short_signals = 0
+
+        # Consecutive threshold filtering
+        if (self.long_consecutive_threshold > 0
+                and self._consecutive_long_signals < self.long_consecutive_threshold):
+            buy_ok = False
+            buy_tier = None
+        if (self.short_consecutive_threshold > 0
+                and self._consecutive_short_signals < self.short_consecutive_threshold):
+            sell_ok = False
+            sell_tier = None
+
+        # Cooldown filtering
+        if self._bars_since_long_exit <= self.long_cooldown_bars:
+            buy_ok = False
+            buy_tier = None
+        if self._bars_since_short_exit <= self.short_cooldown_bars:
+            sell_ok = False
+            sell_tier = None
+
+        # ── IN POSITION ──
+        if state.position != 0:
+            current_side = state.side
+            opposite_ok = (sell_ok if current_side == 1 else buy_ok)
+            opposite_tier = (sell_tier if current_side == 1 else buy_tier)
+            opposite_prob = (prob_sell if current_side == 1 else prob_buy)
+
+            if self.conflict_resolution == "ignore_both":
+                # Let TP/SL/trailing manage the exit entirely
+                return HOLD
+
+            elif self.conflict_resolution == "close_existing_position":
+                if opposite_ok:
+                    # Exit current position; strategy can enter on next bar
+                    return [Order(
+                        action="EXIT", side=current_side,
+                        reason=f"JOINT_EXIT opposite signal ({opposite_prob:.4f})",
+                    )]
+                return HOLD
+
+            elif self.conflict_resolution == "reverse_position":
+                if opposite_ok and opposite_tier is not None:
+                    # Exit + enter opposite in same bar
+                    exit_order = Order(
+                        action="EXIT", side=current_side,
+                        reason=f"JOINT_REVERSE exit ({opposite_prob:.4f})",
+                    )
+                    if current_side == 1:
+                        # Was long, reversing to short
+                        self._current_side = -1
+                        enter_order = TieredEnsembleStrategy._tier_to_order(
+                            self, opposite_tier, "SELL", -1, opposite_prob
+                        )
+                    else:
+                        # Was short, reversing to long
+                        self._current_side = 1
+                        enter_order = TieredEnsembleStrategy._tier_to_order(
+                            self, opposite_tier, "BUY", 1, opposite_prob
+                        )
+                    return [exit_order, enter_order]
+                return HOLD
+
+        # ── FLAT ──
+        if buy_ok and sell_ok:
+            if self.conflict_resolution == "ignore_both":
+                # Both fire while flat → abstain
+                return HOLD
+            # Higher probability wins
+            if prob_buy >= prob_sell and buy_tier is not None:
+                self._current_side = 1
+                return [TieredEnsembleStrategy._tier_to_order(
+                    self, buy_tier, "BUY", 1, prob_buy
+                )]
+            elif sell_tier is not None:
+                self._current_side = -1
+                return [TieredEnsembleStrategy._tier_to_order(
+                    self, sell_tier, "SELL", -1, prob_sell
+                )]
+
+        if buy_ok and buy_tier is not None:
+            self._current_side = 1
+            return [TieredEnsembleStrategy._tier_to_order(
+                self, buy_tier, "BUY", 1, prob_buy
+            )]
+
+        if sell_ok and sell_tier is not None:
+            self._current_side = -1
+            return [TieredEnsembleStrategy._tier_to_order(
+                self, sell_tier, "SELL", -1, prob_sell
+            )]
+
+        return HOLD
+
+    def apply_trial_params(
+        self, cfg: dict, params: dict, side: Optional[str] = None,
+    ) -> dict:
+        """Route optimizer params — extends TieredEnsembleStrategy with conflict_resolution."""
+        cfg = TieredEnsembleStrategy.apply_trial_params(self, cfg, params, side)
+        if "conflict_resolution" in params:
+            cfg["conflict_resolution"] = params["conflict_resolution"]
+        return cfg
+
+
 # ---------------------------------------------------------------------------
 # Strategy Registry / Factory
 # ---------------------------------------------------------------------------
@@ -828,6 +1244,8 @@ STRATEGY_REGISTRY: dict[str, type[BaseExecutionStrategy]] = {
     "AggressiveEnsembleStrategy": AggressiveEnsembleStrategy,
     "TieredEnsembleStrategy": TieredEnsembleStrategy,
     "BreakoutStraddleStrategy": BreakoutStraddleStrategy,
+    "IsolatedAsymmetricalStrategy": IsolatedAsymmetricalStrategy,
+    "JointPortfolioStrategy": JointPortfolioStrategy,
 }
 
 

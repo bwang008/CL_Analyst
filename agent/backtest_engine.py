@@ -94,6 +94,7 @@ class ExitReason(Enum):
     SL = "SL"
     TRAILING_BE = "TRAILING_BE"  # Trailing stop hit at breakeven
     TIME_BARRIER = "TIME_BARRIER"  # 288 bars elapsed
+    SIGNAL_EXIT = "SIGNAL_EXIT"  # Strategy requested exit (conflict resolution)
 
 
 @dataclass
@@ -587,6 +588,10 @@ class BacktestEngine:
             self._engine_state.last_exit_bars_ago_long = 0
         elif self._side == -1:
             self._engine_state.last_exit_bars_ago_short = 0
+
+        # Notify strategy of exit (for internal state tracking)
+        if self._execution_strategy is not None:
+            self._execution_strategy.on_exit(self._side, exit_reason, self._bars_held)
 
         # FSM transition: always transition directly back to FLAT
         self._state = TradeState.FLAT
@@ -1189,6 +1194,13 @@ class BacktestEngine:
                 atr, pb, ps, self._engine_state,
             )
 
+            # Handle EXIT orders from strategy (e.g., JointPortfolioStrategy conflict resolution)
+            for order in orders:
+                if order.action == "EXIT" and self._state == TradeState.IN_POSITION:
+                    self._close_trade(ts, row.Close, ExitReason.SIGNAL_EXIT)
+                    self._update_engine_state()
+                    break
+
             # Dispatch orders to existing FSM entry point
             if self._state == TradeState.FLAT:
                 has_entry = any(order.action in ("BUY", "SELL") for order in orders)
@@ -1234,6 +1246,8 @@ class BacktestEngine:
                 if record is not None:
                     self._trades.append(record)
                     self._realized_pnl += record.net_pnl_dollars
+                    # Notify strategy of exit (for internal state tracking)
+                    strategy.on_exit(pos.side, record.exit_reason, record.duration_bars)
                 else:
                     surviving.append(pos)
             self._open_positions = surviving
@@ -1351,11 +1365,11 @@ def format_report(
             lines.append(f"  Direction:      {direction}")
             lines.append(f"  Threshold:      {threshold}")
 
-        tp = config.get("tp_atr_mult", "?")
-        sl = config.get("sl_atr_mult", "?")
-        trailing = config.get("trailing_atr_mult", "?")
+        tp = config.get("tp_atr_mult") or config.get("long", {}).get("tp_atr_mult", "?")
+        sl = config.get("sl_atr_mult") or config.get("long", {}).get("sl_atr_mult", "?")
+        trailing = config.get("trailing_atr_mult") or config.get("long", {}).get("trailing_atr_mult", "?")
         lines.append(f"  TP / SL:        {tp}x / {sl}x ATR")
-        trailing_note = " (disabled)" if trailing and trailing >= 50 else ""
+        trailing_note = " (disabled)" if isinstance(trailing, (int, float)) and trailing >= 50 else ""
         lines.append(f"  Trailing:       {trailing}x{trailing_note}")
 
     if predictions_path:
@@ -1443,7 +1457,7 @@ def format_report(
     long_trades = [t for t in result.trades if t.side == 1]
     short_trades = [t for t in result.trades if t.side == -1]
 
-    for reason in ["TP", "SL", "TRAILING_BE", "TIME_BARRIER"]:
+    for reason in ["TP", "SL", "TRAILING_BE", "TIME_BARRIER", "SIGNAL_EXIT"]:
         long_count = sum(
             1 for t in long_trades if t.exit_reason.value == reason
         )
@@ -1604,7 +1618,7 @@ def compare_runs(
 
     dist_a = result_a.exit_distribution
     dist_b = result_b.exit_distribution
-    for reason in ["TP", "SL", "TRAILING_BE", "TIME_BARRIER"]:
+    for reason in ["TP", "SL", "TRAILING_BE", "TIME_BARRIER", "SIGNAL_EXIT"]:
         da = dist_a.get(reason, {"count": 0, "pct": 0.0})
         db = dist_b.get(reason, {"count": 0, "pct": 0.0})
         val_a_str = f"{int(da['count'])} ({da['pct']:.1f}%)"

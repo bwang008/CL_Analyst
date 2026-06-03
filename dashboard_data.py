@@ -214,3 +214,144 @@ def scan_model_registry(registry_dir: str) -> pd.DataFrame:
             "_raw_config": cfg,
         })
     return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+# ═══════════════════════════════════════════════════════════════
+#  SIGNAL ANALYSIS DATA LOADERS
+# ═══════════════════════════════════════════════════════════════
+
+def _load_single_predictions(path: str) -> pd.DataFrame:
+    """Load a single prediction CSV with flexible column names."""
+    df = pd.read_csv(path)
+    # Normalise datetime index
+    dt_col = next((c for c in df.columns if c.lower() in ("datetime", "date")), None)
+    if dt_col:
+        df[dt_col] = pd.to_datetime(df[dt_col])
+        df = df.set_index(dt_col)
+    elif not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+    return df
+
+
+@st.cache_data(show_spinner="Loading prediction pair…")
+def load_prediction_pair(long_path: str, short_path: str) -> pd.DataFrame:
+    """Merge long prob_Buy + short prob_Sell into a single aligned DataFrame.
+
+    Returns DataFrame indexed by DateTime with columns:
+        prob_Buy, prob_Sell
+    Fills missing bars with 0.0 (no prediction on that bar).
+    """
+    long_df = _load_single_predictions(long_path)
+    short_df = _load_single_predictions(short_path)
+
+    # Resolve probability columns
+    buy_col = next((c for c in long_df.columns if "buy" in c.lower()), None)
+    sell_col = next((c for c in short_df.columns if "sell" in c.lower()), None)
+    if not buy_col or not sell_col:
+        return pd.DataFrame()
+
+    long_probs = long_df[[buy_col]].rename(columns={buy_col: "prob_Buy"})
+    short_probs = short_df[[sell_col]].rename(columns={sell_col: "prob_Sell"})
+    merged = long_probs.join(short_probs, how="outer").fillna(0.0)
+    merged.index.name = "DateTime"
+    return merged.sort_index()
+
+
+@st.cache_data(show_spinner=False)
+def compute_conflict_matrix(
+    df: pd.DataFrame, long_thr: float, short_thr: float
+) -> dict:
+    """Return 4-cell conflict matrix with counts and percentages.
+
+    Args:
+        df: DataFrame with prob_Buy and prob_Sell columns.
+        long_thr: Long entry threshold.
+        short_thr: Short entry threshold.
+
+    Returns:
+        Dict with keys: neither, long_only, short_only, conflict,
+        each containing 'count' and 'pct' values.
+    """
+    n = len(df)
+    if n == 0:
+        return {}
+    long_active = df["prob_Buy"] >= long_thr
+    short_active = df["prob_Sell"] >= short_thr
+
+    neither = (~long_active & ~short_active).sum()
+    long_only = (long_active & ~short_active).sum()
+    short_only = (~long_active & short_active).sum()
+    conflict = (long_active & short_active).sum()
+
+    return {
+        "neither":    {"count": int(neither),    "pct": neither / n * 100},
+        "long_only":  {"count": int(long_only),  "pct": long_only / n * 100},
+        "short_only": {"count": int(short_only), "pct": short_only / n * 100},
+        "conflict":   {"count": int(conflict),   "pct": conflict / n * 100},
+        "total_bars":  n,
+    }
+
+
+@st.cache_data(show_spinner=False)
+def compute_autocorrelation(
+    series: pd.Series, max_lag: int = 24
+) -> pd.Series:
+    """Binary ACF of signal_active at lags 1..max_lag."""
+    import numpy as np
+    binary = series.astype(float).values
+    mean = binary.mean()
+    var = binary.var()
+    if var == 0:
+        return pd.Series(0.0, index=range(1, max_lag + 1))
+    n = len(binary)
+    acf_vals = []
+    for lag in range(1, max_lag + 1):
+        if lag >= n:
+            acf_vals.append(0.0)
+        else:
+            cov = ((binary[lag:] - mean) * (binary[:-lag] - mean)).mean()
+            acf_vals.append(cov / var)
+    return pd.Series(acf_vals, index=range(1, max_lag + 1))
+
+
+@st.cache_data(show_spinner=False)
+def compute_run_length_stats(series: pd.Series) -> dict:
+    """Compute average/max consecutive run length for a binary signal series."""
+    runs = []
+    count = 0
+    for v in series:
+        if v:
+            count += 1
+        else:
+            if count > 0:
+                runs.append(count)
+            count = 0
+    if count > 0:
+        runs.append(count)
+    if not runs:
+        return {"mean_run": 0.0, "max_run": 0, "total_runs": 0, "run_distribution": {}}
+
+    import numpy as np
+    dist = {}
+    for r in runs:
+        dist[r] = dist.get(r, 0) + 1
+
+    return {
+        "mean_run": float(np.mean(runs)),
+        "max_run": int(max(runs)),
+        "total_runs": len(runs),
+        "run_distribution": dict(sorted(dist.items())),
+    }
+
+
+@st.cache_data(show_spinner=False)
+def scan_prediction_files() -> list[str]:
+    """Scan data/predictions/ for prediction CSVs."""
+    preds_dir = PROJECT_ROOT / "data" / "predictions"
+    if not preds_dir.is_dir():
+        return []
+    return sorted([
+        str(f.relative_to(PROJECT_ROOT))
+        for f in preds_dir.glob("oos_predictions*.csv")
+    ])
+

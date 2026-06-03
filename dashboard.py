@@ -19,6 +19,12 @@ from dashboard_data import (
     parse_ensemble_backtest,
     scan_model_registry,
     _find_experiment_dir,
+    # Signal analysis loaders
+    load_prediction_pair,
+    compute_conflict_matrix,
+    compute_autocorrelation,
+    compute_run_length_stats,
+    scan_prediction_files,
 )
 
 # ── Page config ──────────────────────────────────────────────
@@ -627,6 +633,334 @@ def _render_execution(experiment_label: str, progress: dict):
 
 
 # ═══════════════════════════════════════════════════════════════
+#  SECTION 4 — SIGNAL ANALYSIS
+# ═══════════════════════════════════════════════════════════════
+
+def render_signal_analysis():
+    """Section 4: Visualize long/short signal overlap, density, and autocorrelation."""
+    st.markdown('<div class="section-header">🔬 Section 4 — Signal Analysis</div>', unsafe_allow_html=True)
+    st.caption("Analyze long and short model prediction overlap, conflict frequency, and signal clustering.")
+
+    # ── File selection ──
+    pred_files = scan_prediction_files()
+    if not pred_files:
+        st.warning("No prediction files found in `data/predictions/`. Run a backtest with predictions first.")
+        return
+
+    # Auto-detect long vs short files
+    long_candidates = [f for f in pred_files if "long" in f.lower()]
+    short_candidates = [f for f in pred_files if "short" in f.lower()]
+
+    col_l, col_r = st.columns(2)
+    with col_l:
+        long_path = st.selectbox(
+            "📈 Long Predictions",
+            pred_files,
+            index=pred_files.index(long_candidates[0]) if long_candidates else 0,
+            key="sa_long",
+        )
+    with col_r:
+        short_path = st.selectbox(
+            "📉 Short Predictions",
+            pred_files,
+            index=pred_files.index(short_candidates[0]) if short_candidates else 0,
+            key="sa_short",
+        )
+
+    # ── Threshold controls ──
+    tcol1, tcol2, tcol3 = st.columns(3)
+    with tcol1:
+        long_thr = st.slider("Long Threshold", 0.40, 0.80, 0.58, 0.01, key="sa_long_thr")
+    with tcol2:
+        short_thr = st.slider("Short Threshold", 0.40, 0.80, 0.54, 0.01, key="sa_short_thr")
+    with tcol3:
+        rolling_window = st.select_slider(
+            "Rolling Window (bars)",
+            options=[6, 12, 24, 48, 72, 168],
+            value=24,
+            key="sa_window",
+        )
+
+    # ── Load data ──
+    merged = load_prediction_pair(long_path, short_path)
+    if merged.empty:
+        st.error("Could not load or merge prediction files. Check column names.")
+        return
+
+    st.caption(f"**Loaded:** {len(merged):,} prediction bars · "
+               f"{merged.index.min().strftime('%Y-%m-%d')} → {merged.index.max().strftime('%Y-%m-%d')}")
+
+    # ── Tabs ──
+    tab1, tab2, tab3 = st.tabs([
+        "📊 Probability Density",
+        "⚡ Conflict Matrix",
+        "📈 Autocorrelation",
+    ])
+
+    # ── Tab 1: Rolling Probability Density ──
+    with tab1:
+        _render_probability_density(merged, long_thr, short_thr, rolling_window)
+
+    # ── Tab 2: Conflict Matrix ──
+    with tab2:
+        _render_conflict_matrix(merged, long_thr, short_thr)
+
+    # ── Tab 3: Autocorrelation ──
+    with tab3:
+        _render_autocorrelation(merged, long_thr, short_thr)
+
+
+def _render_probability_density(
+    df: pd.DataFrame, long_thr: float, short_thr: float, window: int
+):
+    """Rolling probability density with threshold overlays."""
+    import numpy as np
+
+    # Only use bars with actual predictions (prob > 0)
+    buy_mask = df["prob_Buy"] > 0
+    sell_mask = df["prob_Sell"] > 0
+
+    # Compute rolling stats on prediction-only bars
+    buy_roll = df.loc[buy_mask, "prob_Buy"].rolling(window, min_periods=1)
+    sell_roll = df.loc[sell_mask, "prob_Sell"].rolling(window, min_periods=1)
+
+    fig = go.Figure()
+
+    # Buy probability band
+    buy_mean = buy_roll.mean()
+    buy_std = buy_roll.std().fillna(0)
+    fig.add_trace(go.Scatter(
+        x=buy_mean.index, y=(buy_mean + buy_std).values,
+        mode="lines", line=dict(width=0), showlegend=False,
+        hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=buy_mean.index, y=(buy_mean - buy_std).values,
+        mode="lines", line=dict(width=0),
+        fill="tonexty", fillcolor="rgba(100,255,218,0.12)",
+        showlegend=False, hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=buy_mean.index, y=buy_mean.values,
+        mode="lines", line=dict(color="#64ffda", width=2),
+        name=f"prob_Buy (rolling {window})",
+        hovertemplate="%{x|%Y-%m-%d %H:%M}<br>prob_Buy: %{y:.3f}<extra></extra>",
+    ))
+
+    # Sell probability band
+    sell_mean = sell_roll.mean()
+    sell_std = sell_roll.std().fillna(0)
+    fig.add_trace(go.Scatter(
+        x=sell_mean.index, y=(sell_mean + sell_std).values,
+        mode="lines", line=dict(width=0), showlegend=False,
+        hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=sell_mean.index, y=(sell_mean - sell_std).values,
+        mode="lines", line=dict(width=0),
+        fill="tonexty", fillcolor="rgba(255,107,107,0.12)",
+        showlegend=False, hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=sell_mean.index, y=sell_mean.values,
+        mode="lines", line=dict(color="#ff6b6b", width=2),
+        name=f"prob_Sell (rolling {window})",
+        hovertemplate="%{x|%Y-%m-%d %H:%M}<br>prob_Sell: %{y:.3f}<extra></extra>",
+    ))
+
+    # Threshold lines
+    fig.add_hline(y=long_thr, line_dash="dot", line_color="#64ffda",
+                  opacity=0.6, annotation_text=f"Long: {long_thr}")
+    fig.add_hline(y=short_thr, line_dash="dot", line_color="#ff6b6b",
+                  opacity=0.6, annotation_text=f"Short: {short_thr}")
+
+    fig.update_layout(
+        title="Rolling Probability Density (±1σ bands)",
+        template="plotly_dark",
+        paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+        xaxis_title="Date", yaxis_title="Probability",
+        yaxis=dict(range=[0.3, 0.85]),
+        font=dict(family="Inter", color="#ccd6f6"),
+        height=500,
+        legend=dict(orientation="h", y=-0.15),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # KPI row
+    k1, k2, k3, k4 = st.columns(4)
+    buy_above = (df.loc[buy_mask, "prob_Buy"] >= long_thr).sum()
+    sell_above = (df.loc[sell_mask, "prob_Sell"] >= short_thr).sum()
+    k1.metric("Buy Signals ≥ Threshold", f"{buy_above:,} ({buy_above/buy_mask.sum()*100:.1f}%)")
+    k2.metric("Sell Signals ≥ Threshold", f"{sell_above:,} ({sell_above/sell_mask.sum()*100:.1f}%)")
+    k3.metric("Buy Mean prob", f"{df.loc[buy_mask, 'prob_Buy'].mean():.4f}")
+    k4.metric("Sell Mean prob", f"{df.loc[sell_mask, 'prob_Sell'].mean():.4f}")
+
+
+def _render_conflict_matrix(df: pd.DataFrame, long_thr: float, short_thr: float):
+    """Render conflict matrix heatmap and rolling conflict rate."""
+    import numpy as np
+
+    matrix = compute_conflict_matrix(df, long_thr, short_thr)
+    if not matrix:
+        st.warning("No data to compute conflict matrix.")
+        return
+
+    # ── 4-cell Heatmap ──
+    z = [
+        [matrix["neither"]["pct"], matrix["short_only"]["pct"]],
+        [matrix["long_only"]["pct"], matrix["conflict"]["pct"]],
+    ]
+    text = [
+        [f"Neither\n{matrix['neither']['count']:,} bars\n({matrix['neither']['pct']:.1f}%)",
+         f"Short Only\n{matrix['short_only']['count']:,} bars\n({matrix['short_only']['pct']:.1f}%)"],
+        [f"Long Only\n{matrix['long_only']['count']:,} bars\n({matrix['long_only']['pct']:.1f}%)",
+         f"⚡ CONFLICT\n{matrix['conflict']['count']:,} bars\n({matrix['conflict']['pct']:.1f}%)"],
+    ]
+
+    fig_heat = go.Figure(go.Heatmap(
+        z=z,
+        x=["Short Inactive", "Short Active"],
+        y=["Long Inactive", "Long Active"],
+        text=text,
+        texttemplate="%{text}",
+        textfont=dict(size=14),
+        colorscale=[[0, "#1a1a2e"], [0.5, "#0f3460"], [1, "#e94560"]],
+        showscale=False,
+        hoverinfo="skip",
+    ))
+    fig_heat.update_layout(
+        title="Signal Conflict Matrix",
+        template="plotly_dark",
+        paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+        font=dict(family="Inter", color="#ccd6f6", size=13),
+        height=350,
+        xaxis=dict(side="top"),
+    )
+    st.plotly_chart(fig_heat, use_container_width=True)
+
+    # KPI row
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Total Bars", f"{matrix['total_bars']:,}")
+    conflict_rate = matrix["conflict"]["pct"]
+    k2.metric("Conflict Rate", f"{conflict_rate:.2f}%",
+             delta=f"{matrix['conflict']['count']:,} bars",
+             delta_color="inverse")
+    signal_rate = matrix["long_only"]["pct"] + matrix["short_only"]["pct"] + conflict_rate
+    k3.metric("Any Signal Rate", f"{signal_rate:.1f}%")
+
+    # ── Rolling Conflict Rate ──
+    st.markdown("#### Rolling Conflict Rate (7-day window)")
+    long_active = df["prob_Buy"] >= long_thr
+    short_active = df["prob_Sell"] >= short_thr
+    conflict_series = (long_active & short_active).astype(float)
+    rolling_conflict = conflict_series.rolling(168, min_periods=24).mean() * 100  # 168 bars = 7 days at 1H
+
+    fig_rc = go.Figure()
+    fig_rc.add_trace(go.Scatter(
+        x=rolling_conflict.index, y=rolling_conflict.values,
+        mode="lines", line=dict(color="#e94560", width=2),
+        fill="tozeroy", fillcolor="rgba(233,69,96,0.15)",
+        name="Conflict Rate",
+        hovertemplate="%{x|%Y-%m-%d}<br>Conflict: %{y:.1f}%<extra></extra>",
+    ))
+    fig_rc.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+        xaxis_title="Date", yaxis_title="Conflict Rate (%)",
+        font=dict(family="Inter", color="#ccd6f6"),
+        height=300,
+    )
+    st.plotly_chart(fig_rc, use_container_width=True)
+
+
+def _render_autocorrelation(df: pd.DataFrame, long_thr: float, short_thr: float):
+    """Render signal autocorrelation and run-length statistics."""
+    long_active = (df["prob_Buy"] >= long_thr) & (df["prob_Buy"] > 0)
+    short_active = (df["prob_Sell"] >= short_thr) & (df["prob_Sell"] > 0)
+
+    acf_long = compute_autocorrelation(long_active, max_lag=24)
+    acf_short = compute_autocorrelation(short_active, max_lag=24)
+
+    # ── ACF bar chart ──
+    fig_acf = go.Figure()
+    fig_acf.add_trace(go.Bar(
+        x=acf_long.index - 0.15, y=acf_long.values,
+        width=0.3, name="Long ACF",
+        marker_color="#64ffda", opacity=0.85,
+    ))
+    fig_acf.add_trace(go.Bar(
+        x=acf_short.index + 0.15, y=acf_short.values,
+        width=0.3, name="Short ACF",
+        marker_color="#ff6b6b", opacity=0.85,
+    ))
+    fig_acf.update_layout(
+        title="Signal Autocorrelation (Binary Active/Inactive)",
+        template="plotly_dark",
+        paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+        xaxis_title="Lag (bars)", yaxis_title="ACF",
+        font=dict(family="Inter", color="#ccd6f6"),
+        height=400,
+        barmode="group",
+        legend=dict(orientation="h", y=-0.15),
+    )
+    fig_acf.add_hline(y=0, line_dash="dash", line_color="#4a5568", opacity=0.4)
+    st.plotly_chart(fig_acf, use_container_width=True)
+
+    # ── Run-length statistics ──
+    st.markdown("#### Consecutive Signal Run Lengths")
+    run_long = compute_run_length_stats(long_active)
+    run_short = compute_run_length_stats(short_active)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Long Mean Run", f"{run_long['mean_run']:.1f} bars")
+    c2.metric("Long Max Run", f"{run_long['max_run']} bars")
+    c3.metric("Short Mean Run", f"{run_short['mean_run']:.1f} bars")
+    c4.metric("Short Max Run", f"{run_short['max_run']} bars")
+
+    # Run distribution chart
+    if run_long["run_distribution"] or run_short["run_distribution"]:
+        all_lens = sorted(set(list(run_long["run_distribution"].keys()) +
+                              list(run_short["run_distribution"].keys())))
+        # Cap at 20 for readability
+        all_lens = [l for l in all_lens if l <= 20]
+        if all_lens:
+            fig_runs = go.Figure()
+            fig_runs.add_trace(go.Bar(
+                x=[l - 0.15 for l in all_lens],
+                y=[run_long["run_distribution"].get(l, 0) for l in all_lens],
+                width=0.3, name="Long Runs",
+                marker_color="#64ffda", opacity=0.85,
+            ))
+            fig_runs.add_trace(go.Bar(
+                x=[l + 0.15 for l in all_lens],
+                y=[run_short["run_distribution"].get(l, 0) for l in all_lens],
+                width=0.3, name="Short Runs",
+                marker_color="#ff6b6b", opacity=0.85,
+            ))
+            fig_runs.update_layout(
+                title="Run Length Distribution (consecutive bars above threshold)",
+                template="plotly_dark",
+                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                xaxis_title="Run Length (bars)", yaxis_title="Count",
+                font=dict(family="Inter", color="#ccd6f6"),
+                height=350,
+                barmode="group",
+                legend=dict(orientation="h", y=-0.15),
+            )
+            st.plotly_chart(fig_runs, use_container_width=True)
+
+    # Interpretation
+    st.markdown("---")
+    if run_long["mean_run"] > 0 or run_short["mean_run"] > 0:
+        st.markdown(
+            f"**Interpretation:** Long signals cluster in runs of **{run_long['mean_run']:.1f}** bars "
+            f"(max {run_long['max_run']}), Short in runs of **{run_short['mean_run']:.1f}** bars "
+            f"(max {run_short['max_run']}). "
+            f"{'High ACF at lag 1–4 confirms clustered signals — `consecutive_signal_threshold` is effective.' if acf_long.iloc[:4].mean() > 0.3 or acf_short.iloc[:4].mean() > 0.3 else 'Low ACF suggests scattered signals — `consecutive_signal_threshold` may filter out too many entries.'}"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════
 #  SECTION 3 — MODEL REGISTRY
 # ═══════════════════════════════════════════════════════════════
 
@@ -682,9 +1016,13 @@ def main():
     if selected_key and not df.empty:
         render_drilldown(df, selected_key, progress)
 
-    # Section 3
+    # Section 3 — Model Registry
     st.markdown("---")
     render_model_registry()
+
+    # Section 4 — Signal Analysis
+    st.markdown("---")
+    render_signal_analysis()
 
 
 if __name__ == "__main__":

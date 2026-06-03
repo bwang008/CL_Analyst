@@ -197,6 +197,7 @@ $codeFiles = @(
     @{ Local = "src\data_paths.py";              Remote = "src/" },
     @{ Local = "src\live_execution\__init__.py";                   Remote = "src/live_execution/" },
     @{ Local = "src\live_execution\strategy_config.py";            Remote = "src/live_execution/" },
+    @{ Local = "src\live_execution\execution_guard.py";            Remote = "src/live_execution/" },
     @{ Local = "src\live_execution\strategies\__init__.py";        Remote = "src/live_execution/strategies/" },
     @{ Local = "src\live_execution\strategies\execution_models.py"; Remote = "src/live_execution/strategies/" },
     @{ Local = "src\live_execution\strategies\configurable_strategy.py"; Remote = "src/live_execution/strategies/" },
