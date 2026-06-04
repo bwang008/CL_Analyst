@@ -430,6 +430,10 @@ class LiveTrader:
         self._bot_start_time = datetime.now(timezone.utc)
         self._last_inference_time_sec: float = 0.0
         self._last_inference_bar_time: Optional[pd.Timestamp] = None
+        self._last_5m_bar_log: str = ""
+        self._last_1h_bar_log: str = ""
+        self._last_virtual_ledger_log: str = ""
+        self._last_inference_log: str = ""
         self._heartbeat_stop_event = threading.Event()
         self._heartbeat_thread: Optional[threading.Thread] = None
         # Event set on SIGINT/SIGTERM — used to interrupt interruptible sleeps
@@ -495,8 +499,18 @@ class LiveTrader:
 
         if self._last_inference_bar_time is not None:
             infer_str = f"`{self._last_inference_bar_time}`"
+            recent_logs_block = "\n📝 *Recent Activity*\n"
+            if self._last_5m_bar_log:
+                recent_logs_block += f"`{self._last_5m_bar_log}`\n"
+            if self._last_1h_bar_log:
+                recent_logs_block += f"`{self._last_1h_bar_log}`\n"
+            if self._last_virtual_ledger_log:
+                recent_logs_block += f"`{self._last_virtual_ledger_log}`\n"
+            if self._last_inference_log:
+                recent_logs_block += f"`{self._last_inference_log}`\n"
         else:
             infer_str = "❌ None (inference not yet computed)"
+            recent_logs_block = "\n📝 *Recent Activity*\n`Market Closed / No Data`\n"
 
         payload = (
             f"⏱️ Uptime: `{uptime_str}` | Broker: {broker_status}\n\n"
@@ -507,7 +521,8 @@ class LiveTrader:
             f"🧠 *MLOps & System*\n"
             f"Last Inference Bar: {infer_str}\n"
             f"Inference Latency: `{self._last_inference_time_sec:.4f}s`\n"
-            f"CPU: `{cpu_pct:.1f}%` | RAM: `{ram_pct:.1f}%` | Disk: `{disk_pct:.1f}%`"
+            f"CPU: `{cpu_pct:.1f}%` | RAM: `{ram_pct:.1f}%` | Disk: `{disk_pct:.1f}%`\n"
+            f"{recent_logs_block}"
         )
 
         if recent_errors:
@@ -2673,11 +2688,12 @@ class LiveTrader:
             return
         self._last_bar_time_5m = bar_time
 
-        log.info(
-            "NEW 5M BAR: %s  O=%.2f H=%.2f L=%.2f C=%.2f V=%.0f",
-            bar_time, new_row["Open"].iloc[0], new_row["High"].iloc[0],
-            new_row["Low"].iloc[0], new_row["Close"].iloc[0], new_row["Volume"].iloc[0],
+        bar_log = (
+            f"NEW 5M BAR: {bar_time}  O={new_row['Open'].iloc[0]:.2f} H={new_row['High'].iloc[0]:.2f} "
+            f"L={new_row['Low'].iloc[0]:.2f} C={new_row['Close'].iloc[0]:.2f} V={new_row['Volume'].iloc[0]:.0f}"
         )
+        log.info(bar_log)
+        self._last_5m_bar_log = f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} [INFO] {bar_log}"
 
         self.rolling_df_5m = pd.concat([self.rolling_df_5m, new_row])
         if len(self.rolling_df_5m) > _MAX_ROLLING_BARS:
@@ -2722,11 +2738,12 @@ class LiveTrader:
             return
         self._last_bar_time_1h = bar_time
 
-        log.info(
-            "NEW 1H BAR: %s  O=%.2f H=%.2f L=%.2f C=%.2f V=%.0f",
-            bar_time, new_row["Open"].iloc[0], new_row["High"].iloc[0],
-            new_row["Low"].iloc[0], new_row["Close"].iloc[0], new_row["Volume"].iloc[0],
+        bar_log = (
+            f"NEW 1H BAR: {bar_time}  O={new_row['Open'].iloc[0]:.2f} H={new_row['High'].iloc[0]:.2f} "
+            f"L={new_row['Low'].iloc[0]:.2f} C={new_row['Close'].iloc[0]:.2f} V={new_row['Volume'].iloc[0]:.0f}"
         )
+        log.info(bar_log)
+        self._last_1h_bar_log = f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} [INFO] {bar_log}"
 
         self.rolling_df_1h = pd.concat([self.rolling_df_1h, new_row])
         if len(self.rolling_df_1h) > _MAX_ROLLING_BARS:
@@ -3052,11 +3069,12 @@ class LiveTrader:
             self._virtual_ledger[stream] = 0
             
         net_target_position = sum(self._virtual_ledger.values())
-        log.info(
-            "VIRTUAL LEDGER [%s]: 5m=%d, 1h=%d -> NET TARGET: %d (Actual: %d)",
-            stream, self._virtual_ledger["5m"], self._virtual_ledger["1h"],
-            net_target_position, current_position,
+        ledger_log = (
+            f"VIRTUAL LEDGER [{stream}]: 5m={self._virtual_ledger['5m']}, 1h={self._virtual_ledger['1h']} "
+            f"-> NET TARGET: {net_target_position} (Actual: {current_position})"
         )
+        log.info(ledger_log)
+        self._last_virtual_ledger_log = f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} [INFO] {ledger_log}"
 
         # Shadow-replay logging: capture exact state for parity validation
         try:
@@ -3098,13 +3116,12 @@ class LiveTrader:
             sell_prob_str = "N/A"
 
         skip_str = f"  skip={signal.skip_reason}" if signal.skip_reason else ""
-        log.info(
-            "INFERENCE [%s] %s: buy_prob=%s  sell_prob=%s  "
-            "signal=%s  action=%s%s",
-            self.strategy.name, direction,
-            buy_prob_str, sell_prob_str,
-            signal.signal_label, signal.action, skip_str,
+        inference_log = (
+            f"INFERENCE [{self.strategy.name}] {direction}: buy_prob={buy_prob_str}  sell_prob={sell_prob_str}  "
+            f"signal={signal.signal_label}  action={signal.action}{skip_str}"
         )
+        log.info(inference_log)
+        self._last_inference_log = f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} [INFO] {inference_log}"
 
         # Always log BRACKET values (computed from strategy signal)
         if signal.tp_price and signal.sl_price:
