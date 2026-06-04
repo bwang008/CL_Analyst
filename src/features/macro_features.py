@@ -327,8 +327,8 @@ class MacroFeatureEngine:
                 repeat_count=max_repeats,
             )
 
-    def _check_feature_staleness(self, features: pd.DataFrame) -> None:
-        """Raise ``StaleDataException`` if derived CHG_1D features are stuck at zero.
+    def _check_feature_staleness(self, features: pd.DataFrame) -> list[str]:
+        """Warn if derived CHG_1D features are stuck at zero.
 
         Complements ``_check_value_staleness`` by inspecting *computed*
         features rather than raw FRED series.  This catches the scenario
@@ -336,17 +336,25 @@ class MacroFeatureEngine:
         values at the tail, below ``_STALE_THRESHOLDS``) but the derived
         ``pct_change(1)`` is 0.0 for multiple consecutive trading days.
 
+        This is a **warning-only** advisory.  It does NOT raise
+        ``StaleDataException`` or trigger the safety mute.  FRED's DXY
+        publication lag (3-5 business days) routinely produces 3-5
+        consecutive CHG_1D = 0.0 days that the model tolerates (it is
+        one feature among 200+).  Blocking all trades for a single
+        lagging feature is disproportionate to the risk.
+
+        The raw ``_check_value_staleness()`` remains the hard gate.
+
         Parameters
         ----------
         features : pd.DataFrame
             The daily-resolution features DataFrame produced by
             ``_build_fred_features``, indexed by shifted Date.
 
-        Raises
-        ------
-        StaleDataException
-            When one or more critical CHG_1D features have been zero
-            for ``_FEATURE_STALE_THRESHOLD`` or more consecutive days.
+        Returns
+        -------
+        list[str]
+            Names of features stuck at zero, empty if all OK.
         """
         stale: dict[str, float] = {}
         threshold = _FEATURE_STALE_THRESHOLD
@@ -374,25 +382,13 @@ class MacroFeatureEngine:
             if n_zero >= threshold:
                 stale[feat] = 0.0
                 log.warning(
-                    "Feature-staleness: %s stuck at 0.0 for %d "
-                    "consecutive trading days (threshold=%d)",
+                    "Feature-staleness advisory: %s stuck at 0.0 for %d "
+                    "consecutive trading days (threshold=%d) "
+                    "-- not blocking, FRED publication lag is likely cause",
                     feat, n_zero, threshold,
                 )
 
-        if stale:
-            raise StaleDataException(
-                stale_series=stale,
-                repeat_count=threshold,
-                message=(
-                    f"Derived features stuck at zero: "
-                    f"{", ".join(stale.keys())}. "
-                    f"Raw FRED values may pass staleness check but "
-                    f"publication lag produces zero CHG_1D features "
-                    f"for {threshold}+ consecutive days "
-                    f"-- model input is degraded. "
-                    f"Live entries are blocked until data updates."
-                ),
-            )
+        return list(stale.keys())
 
     # ------------------------------------------------------------------
     # FRED Feature Engineering
@@ -457,11 +453,16 @@ class MacroFeatureEngine:
         # values at the tail — file age alone does not guarantee freshness.
         self._check_value_staleness(df)
 
-        # Feature-staleness gate: raise if derived CHG_1D features are
-        # stuck at zero.  This catches the blind spot where raw values
-        # differ slightly (below _STALE_THRESHOLDS) but pct_change
-        # produces 0.0 due to FRED publication lag + weekend ffill.
-        self._check_feature_staleness(features)
+        # Feature-staleness advisory: warn if derived CHG_1D features
+        # are stuck at zero.  This is monitoring-only — does NOT raise.
+        # The raw _check_value_staleness() above is the hard mute gate.
+        stale_features = self._check_feature_staleness(features)
+        if stale_features:
+            log.warning(
+                "Feature-staleness detected in %s "
+                "(advisory only, not blocking trades)",
+                stale_features,
+            )
 
         return features
 

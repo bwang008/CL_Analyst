@@ -165,7 +165,11 @@ class TestValueStaleness:
 
 
 class TestFeatureStaleness:
-    """Test _check_feature_staleness — derived CHG_1D zero detection."""
+    """Test _check_feature_staleness -- derived CHG_1D zero detection.
+
+    Since the method now returns a list of stale feature names (warning-only)
+    instead of raising StaleDataException, all tests check return values.
+    """
 
     def _make_features_df(
         self,
@@ -187,44 +191,46 @@ class TestFeatureStaleness:
         }, index=dates)
 
     def test_fresh_features_pass(self):
-        """Non-zero CHG_1D values should not raise."""
+        """Non-zero CHG_1D values should return empty list."""
         features = self._make_features_df([0.001, -0.002, 0.003, 0.001])
         engine = MacroFeatureEngine()
-        engine._check_feature_staleness(features)  # Should not raise
+        result = engine._check_feature_staleness(features)
+        assert result == []
 
     def test_two_zero_chg_passes(self):
-        """Two consecutive CHG_1D=0 (normal weekend) should NOT raise."""
+        """Two consecutive CHG_1D=0 (normal weekend) should return empty list."""
         features = self._make_features_df([0.0, 0.0])
         engine = MacroFeatureEngine()
-        engine._check_feature_staleness(features)  # Should not raise
+        result = engine._check_feature_staleness(features)
+        assert result == []
 
-    def test_three_zero_chg_raises(self):
-        """Three consecutive CHG_1D=0 (threshold) should raise."""
+    def test_three_zero_chg_returns_stale(self):
+        """Three consecutive CHG_1D=0 (threshold) should return stale feature name."""
         features = self._make_features_df([0.0, 0.0, 0.0])
         engine = MacroFeatureEngine()
-        with pytest.raises(StaleDataException) as exc_info:
-            engine._check_feature_staleness(features)
-        assert "MACRO_DXY_CHG_1D" in exc_info.value.stale_series
-        assert exc_info.value.stale_series["MACRO_DXY_CHG_1D"] == 0.0
+        result = engine._check_feature_staleness(features)
+        assert "MACRO_DXY_CHG_1D" in result
 
     def test_non_zero_constant_passes(self):
-        """CHG_1D stuck at a non-zero constant should NOT raise.
+        """CHG_1D stuck at a non-zero constant should return empty list.
 
         Only zero-stuckness is a staleness signal; a non-zero constant
         could be a legitimate regime (e.g., stable macro conditions).
         """
         features = self._make_features_df([0.005, 0.005, 0.005])
         engine = MacroFeatureEngine()
-        engine._check_feature_staleness(features)  # Should not raise
+        result = engine._check_feature_staleness(features)
+        assert result == []
 
     def test_mixed_zero_non_zero_passes(self):
-        """Non-consecutive zeros should NOT raise."""
+        """Non-consecutive zeros should return empty list."""
         features = self._make_features_df([0.0, 0.001, 0.0, 0.0])
         engine = MacroFeatureEngine()
-        engine._check_feature_staleness(features)  # Should not raise
+        result = engine._check_feature_staleness(features)
+        assert result == []
 
     def test_multiple_features_stale(self):
-        """Multiple features stuck at zero should all appear in exception."""
+        """Multiple features stuck at zero should all appear in returned list."""
         dates = pd.date_range("2026-01-01", periods=33, freq="B")
         prefix = np.linspace(-0.01, 0.01, 30)
         zeros = [0.0, 0.0, 0.0]
@@ -234,20 +240,20 @@ class TestFeatureStaleness:
             "MACRO_OVX_CHG_1D": np.linspace(-0.01, 0.01, 33),  # varying
         }, index=dates)
         engine = MacroFeatureEngine()
-        with pytest.raises(StaleDataException) as exc_info:
-            engine._check_feature_staleness(features)
-        assert "MACRO_DXY_CHG_1D" in exc_info.value.stale_series
-        assert "MACRO_VIX_CHG_1D" in exc_info.value.stale_series
-        assert "MACRO_OVX_CHG_1D" not in exc_info.value.stale_series
+        result = engine._check_feature_staleness(features)
+        assert "MACRO_DXY_CHG_1D" in result
+        assert "MACRO_VIX_CHG_1D" in result
+        assert "MACRO_OVX_CHG_1D" not in result
 
     def test_missing_feature_column_skipped(self):
-        """Missing feature columns should be gracefully skipped."""
+        """Missing feature columns should return empty list."""
         dates = pd.date_range("2026-01-01", periods=10, freq="B")
         features = pd.DataFrame({
             "MACRO_YIELD_CURVE_SIGN": [1.0] * 10,
         }, index=dates)
         engine = MacroFeatureEngine()
-        engine._check_feature_staleness(features)  # Should not raise
+        result = engine._check_feature_staleness(features)
+        assert result == []
 
     def test_feature_stale_threshold_value(self):
         """Verify the threshold constant is sensible."""

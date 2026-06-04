@@ -156,6 +156,14 @@ logging.getLogger("ib_insync.wrapper").addFilter(CLOnlyLogFilter())
 # ---------------------------------------------------------------------------
 
 
+
+def _tg_escape(text: str) -> str:
+    """Escape Telegram Markdown special characters in dynamic text."""
+    for ch in ('_', '*', '`', '['):
+        text = text.replace(ch, '\\' + ch)
+    return text
+
+
 # ---------------------------------------------------------------------------
 # LiveTrader
 # ---------------------------------------------------------------------------
@@ -613,14 +621,17 @@ class LiveTrader:
                     self._data_mute = True
                     self._data_mute_reason = str(e)
                     self._data_mute_since = time.time()
-                    msg = (
-                        f"🚨 *SAFETY MUTE ACTIVATED AT STARTUP*\n"
-                        f"Stale FRED data — new entries BLOCKED until resolved.\n"
-                        f"`{e}`"
+                    log.critical(
+                        "[SAFETY MUTE] ACTIVATED AT STARTUP -- "
+                        "Stale FRED data, new entries BLOCKED: %s", e,
                     )
-                    log.critical(msg)
+                    tg_msg = (
+                        f"*[!] SAFETY MUTE ACTIVATED AT STARTUP*\n"
+                        f"Stale FRED data -- new entries BLOCKED.\n"
+                        f"{_tg_escape(str(e))}"
+                    )
                     try:
-                        self._telegram.send(msg)
+                        self._telegram.send(tg_msg)
                     except Exception:
                         pass
                 self._last_macro_check_time = time.time()
@@ -2793,14 +2804,17 @@ class LiveTrader:
                 self._data_mute = True
                 self._data_mute_reason = str(exc)
                 self._data_mute_since = time.time()
-                msg = (
-                    f"🚨 *SAFETY MUTE ACTIVATED*\n"
-                    f"Stale FRED data detected — new entries BLOCKED.\n"
-                    f"`{exc}`"
+                log.critical(
+                    "[SAFETY MUTE] ACTIVATED -- "
+                    "Stale FRED data detected, new entries BLOCKED: %s", exc,
                 )
-                log.critical(msg)
+                tg_msg = (
+                    f"*[!] SAFETY MUTE ACTIVATED*\n"
+                    f"Stale FRED data detected -- new entries BLOCKED.\n"
+                    f"{_tg_escape(str(exc))}"
+                )
                 try:
-                    self._telegram.send(msg)
+                    self._telegram.send(tg_msg)
                 except Exception:
                     pass
             else:
@@ -3538,14 +3552,19 @@ class LiveTrader:
                             self._data_mute_reason = ""
                             mute_mins = (time.time() - self._data_mute_since) / 60
                             self._data_mute_since = 0.0
-                            msg = (
-                                f"✅ *SAFETY MUTE CLEARED*\n"
+                            log.info(
+                                "[SAFETY MUTE] CLEARED -- "
+                                "FRED data is fresh again after %.0f min. "
+                                "New entries are now permitted.",
+                                mute_mins,
+                            )
+                            tg_msg = (
+                                f"*SAFETY MUTE CLEARED*\n"
                                 f"FRED data is fresh again after {mute_mins:.0f} min.\n"
                                 f"New entries are now permitted."
                             )
-                            log.info(msg)
                             try:
-                                self._telegram.send(msg)
+                                self._telegram.send(tg_msg)
                             except Exception:
                                 pass
                         except StaleDataException as e:
@@ -3557,14 +3576,17 @@ class LiveTrader:
                         self._data_mute = True
                         self._data_mute_reason = str(e)
                         self._data_mute_since = time.time()
-                        msg = (
-                            f"🚨 *SAFETY MUTE ACTIVATED*\n"
-                            f"Stale FRED data detected during periodic refresh.\n"
-                            f"`{e}`"
+                        log.critical(
+                            "[SAFETY MUTE] ACTIVATED during periodic refresh -- "
+                            "Stale FRED data, new entries BLOCKED: %s", e,
                         )
-                        log.critical(msg)
+                        tg_msg = (
+                            f"*[!] SAFETY MUTE ACTIVATED*\n"
+                            f"Stale FRED data detected during periodic refresh.\n"
+                            f"{_tg_escape(str(e))}"
+                        )
                         try:
-                            self._telegram.send(msg)
+                            self._telegram.send(tg_msg)
                         except Exception:
                             pass
                 except Exception as e:
