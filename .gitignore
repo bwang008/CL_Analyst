@@ -32,6 +32,7 @@ reports/
 !data/DATASETS.json
 !.cursor/worktrees.json
 # Strategy configs (JSON definitions for config-driven strategies)
+!configs/*.json
 !configs/strategies/**
 configs/strategies/candidates/**
 

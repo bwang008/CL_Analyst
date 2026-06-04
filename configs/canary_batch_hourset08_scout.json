@@ -1,0 +1,29 @@
+{
+  "_comment": "Recovered manifest for batch_20260511_2116",
+  "defaults": {
+    "gcs_data_path": "gs://cltrainer-optuna-results/data/cl-1h_bk_HourSet_08.parquet",
+    "strategy_config": "hourly_ensemble_008_2.json"
+  },
+  "experiments": [
+    {
+      "label": "hs08_2x1_12h",
+      "target_long": "TARGET_TRIPLE_2x1_12H_LONG",
+      "target_short": "TARGET_TRIPLE_2x1_12H_SHORT"
+    },
+    {
+      "label": "hs08_2x1_6h",
+      "target_long": "TARGET_TRIPLE_2x1_6H_LONG",
+      "target_short": "TARGET_TRIPLE_2x1_6H_SHORT"
+    },
+    {
+      "label": "hs08_3x1_12h",
+      "target_long": "TARGET_TRIPLE_3x1_12H_LONG",
+      "target_short": "TARGET_TRIPLE_3x1_12H_SHORT"
+    },
+    {
+      "label": "hs08_3x1_6h",
+      "target_long": "TARGET_TRIPLE_3x1_6H_LONG",
+      "target_short": "TARGET_TRIPLE_3x1_6H_SHORT"
+    }
+  ]
+}

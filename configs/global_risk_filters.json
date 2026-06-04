@@ -1,0 +1,7 @@
+{
+  "blocked_entry_hours_est": [8],
+  "blocked_entry_hours_by_day": {"Wednesday": [11]},
+  "block_long_weekends": false,
+  "long_weekend_block_scope": ["BEFORE_LONG_WEEKEND", "AFTER_LONG_WEEKEND"],
+  "override_global_filters": false
+}

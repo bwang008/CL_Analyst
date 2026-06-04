@@ -29,6 +29,7 @@ _GLOBAL_FILTERS_PATH = _PROJECT_ROOT / "configs" / "global_risk_filters.json"
 # Keys that are eligible for inheritance from global_risk_filters.json
 _INHERITABLE_KEYS = (
     "blocked_entry_hours_est",
+    "blocked_entry_hours_by_day",
     "block_long_weekends",
     "long_weekend_block_scope",
 )
@@ -37,11 +38,19 @@ _INHERITABLE_KEYS = (
 def _load_global_filters() -> dict:
     """Load the global risk filters JSON, returning {} if not found."""
     if not _GLOBAL_FILTERS_PATH.exists():
-        log.debug("No global risk filters found at %s", _GLOBAL_FILTERS_PATH)
+        log.warning(
+            "[ConfigLoader] ⚠ global_risk_filters.json NOT FOUND at %s — "
+            "ExecutionGuard risk filters will NOT be applied. "
+            "If this is a deployed environment, ensure the file is present.",
+            _GLOBAL_FILTERS_PATH,
+        )
         return {}
     with open(_GLOBAL_FILTERS_PATH) as f:
         data = json.load(f)
-    log.debug("Loaded global risk filters: %s", list(data.keys()))
+    log.info(
+        "[ConfigLoader] Loaded global risk filters: %s",
+        {k: v for k, v in data.items() if k != "override_global_filters"},
+    )
     return data
 
 

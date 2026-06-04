@@ -1,0 +1,79 @@
+{
+  "_comment": "Hour4Set_01 CANARY — 8 target pairs for fast 4H bar sweep validation. Shallow search, low trial count. n_trials=50, max_folds=3, post_optimizer_trials=20.",
+  "defaults": {
+    "machine_type": "c2-standard-16",
+    "provisioning_model": "STANDARD",
+    "gcs_data_path": "gs://cltrainer-optuna-results/data/cl-4h_bk_Hour4Set_01.parquet",
+    "strategy_config": "hour4_ensemble_001.json",
+    "metrics": "logloss,average_precision",
+    "timeout_minutes": 240,
+    "max_concurrent_vcpus": 288,
+    "vcpus_per_vm": 16,
+    "n_trials": 50,
+    "max_depth_min": 3,
+    "max_depth_max": 6,
+    "num_leaves_min": 15,
+    "num_leaves_max": 31,
+    "max_n_estimators": 500,
+    "early_stopping_rounds": 15,
+    "max_folds": 3,
+    "learning_rate_min": 0.005,
+    "learning_rate_max": 0.02,
+    "min_child_samples_min": 150,
+    "min_child_samples_max": 400,
+    "feature_fraction_min": 0.4,
+    "feature_fraction_max": 0.8,
+    "post_optimizer_trials": 20,
+    "post_optimizer_holdout_months": 6
+  },
+  "experiments": [
+    {
+      "label": "H4S01 3x1 24H",
+      "target_long": "TARGET_TRIPLE_3x1_24H_LONG",
+      "target_short": "TARGET_TRIPLE_3x1_24H_SHORT",
+      "gcs_prefix": "sweep_h4s01_3x1_24h"
+    },
+    {
+      "label": "H4S01 3x1 48H",
+      "target_long": "TARGET_TRIPLE_3x1_48H_LONG",
+      "target_short": "TARGET_TRIPLE_3x1_48H_SHORT",
+      "gcs_prefix": "sweep_h4s01_3x1_48h"
+    },
+    {
+      "label": "H4S01 3x1 96H",
+      "target_long": "TARGET_TRIPLE_3x1_96H_LONG",
+      "target_short": "TARGET_TRIPLE_3x1_96H_SHORT",
+      "gcs_prefix": "sweep_h4s01_3x1_96h"
+    },
+    {
+      "label": "H4S01 4x1 24H",
+      "target_long": "TARGET_TRIPLE_4x1_24H_LONG",
+      "target_short": "TARGET_TRIPLE_4x1_24H_SHORT",
+      "gcs_prefix": "sweep_h4s01_4x1_24h"
+    },
+    {
+      "label": "H4S01 4x1 48H",
+      "target_long": "TARGET_TRIPLE_4x1_48H_LONG",
+      "target_short": "TARGET_TRIPLE_4x1_48H_SHORT",
+      "gcs_prefix": "sweep_h4s01_4x1_48h"
+    },
+    {
+      "label": "H4S01 4x1 96H",
+      "target_long": "TARGET_TRIPLE_4x1_96H_LONG",
+      "target_short": "TARGET_TRIPLE_4x1_96H_SHORT",
+      "gcs_prefix": "sweep_h4s01_4x1_96h"
+    },
+    {
+      "label": "H4S01 5x1 48H",
+      "target_long": "TARGET_TRIPLE_5x1_48H_LONG",
+      "target_short": "TARGET_TRIPLE_5x1_48H_SHORT",
+      "gcs_prefix": "sweep_h4s01_5x1_48h"
+    },
+    {
+      "label": "H4S01 5x1 96H",
+      "target_long": "TARGET_TRIPLE_5x1_96H_LONG",
+      "target_short": "TARGET_TRIPLE_5x1_96H_SHORT",
+      "gcs_prefix": "sweep_h4s01_5x1_96h"
+    }
+  ]
+}

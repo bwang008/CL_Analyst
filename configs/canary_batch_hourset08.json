@@ -1,0 +1,87 @@
+{
+  "_comment": "HourSet_08 canary target sweep — 12 target pairs × logloss+precision. C2 compute-optimized. Override to n2-highcpu-48 + vcpus_per_vm=48 for speed runs.",
+  "defaults": {
+    "machine_type": "c2-standard-16",
+    "provisioning_model": "STANDARD",
+    "gcs_data_path": "gs://cltrainer-optuna-results/data/cl-1h_bk_HourSet_08.parquet",
+    "strategy_config": "hourly_ensemble_008_2.json",
+    "metrics": "logloss,average_precision",
+    "timeout_minutes": 60,
+    "max_concurrent_vcpus": 288,
+    "vcpus_per_vm": 16
+  },
+  "experiments": [
+    {
+      "label": "HS08 2x1 6H",
+      "target_long": "TARGET_TRIPLE_2x1_6H_LONG",
+      "target_short": "TARGET_TRIPLE_2x1_6H_SHORT",
+      "gcs_prefix": "canary_hs08_2x1_6h"
+    },
+    {
+      "label": "HS08 2x1 12H",
+      "target_long": "TARGET_TRIPLE_2x1_12H_LONG",
+      "target_short": "TARGET_TRIPLE_2x1_12H_SHORT",
+      "gcs_prefix": "canary_hs08_2x1_12h"
+    },
+    {
+      "label": "HS08 2x1 24H",
+      "target_long": "TARGET_TRIPLE_2x1_24H_LONG",
+      "target_short": "TARGET_TRIPLE_2x1_24H_SHORT",
+      "gcs_prefix": "canary_hs08_2x1_24h"
+    },
+    {
+      "label": "HS08 3x1 6H",
+      "target_long": "TARGET_TRIPLE_3x1_6H_LONG",
+      "target_short": "TARGET_TRIPLE_3x1_6H_SHORT",
+      "gcs_prefix": "canary_hs08_3x1_6h"
+    },
+    {
+      "label": "HS08 3x1 12H",
+      "target_long": "TARGET_TRIPLE_3x1_12H_LONG",
+      "target_short": "TARGET_TRIPLE_3x1_12H_SHORT",
+      "gcs_prefix": "canary_hs08_3x1_12h"
+    },
+    {
+      "label": "HS08 3x1 24H",
+      "target_long": "TARGET_TRIPLE_3x1_24H_LONG",
+      "target_short": "TARGET_TRIPLE_3x1_24H_SHORT",
+      "gcs_prefix": "canary_hs08_3x1_24h"
+    },
+    {
+      "label": "HS08 4x1 6H",
+      "target_long": "TARGET_TRIPLE_4x1_6H_LONG",
+      "target_short": "TARGET_TRIPLE_4x1_6H_SHORT",
+      "gcs_prefix": "canary_hs08_4x1_6h"
+    },
+    {
+      "label": "HS08 4x1 12H",
+      "target_long": "TARGET_TRIPLE_4x1_12H_LONG",
+      "target_short": "TARGET_TRIPLE_4x1_12H_SHORT",
+      "gcs_prefix": "canary_hs08_4x1_12h"
+    },
+    {
+      "label": "HS08 4x1 24H",
+      "target_long": "TARGET_TRIPLE_4x1_24H_LONG",
+      "target_short": "TARGET_TRIPLE_4x1_24H_SHORT",
+      "gcs_prefix": "canary_hs08_4x1_24h"
+    },
+    {
+      "label": "HS08 5x1 6H",
+      "target_long": "TARGET_TRIPLE_5x1_6H_LONG",
+      "target_short": "TARGET_TRIPLE_5x1_6H_SHORT",
+      "gcs_prefix": "canary_hs08_5x1_6h"
+    },
+    {
+      "label": "HS08 5x1 12H",
+      "target_long": "TARGET_TRIPLE_5x1_12H_LONG",
+      "target_short": "TARGET_TRIPLE_5x1_12H_SHORT",
+      "gcs_prefix": "canary_hs08_5x1_12h"
+    },
+    {
+      "label": "HS08 5x1 24H",
+      "target_long": "TARGET_TRIPLE_5x1_24H_LONG",
+      "target_short": "TARGET_TRIPLE_5x1_24H_SHORT",
+      "gcs_prefix": "canary_hs08_5x1_24h"
+    }
+  ]
+}

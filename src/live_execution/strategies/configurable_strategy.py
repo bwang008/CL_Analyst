@@ -297,6 +297,13 @@ class ConfigurableStrategy(Strategy):
                      self.config.get('block_long_weekends', False))
         else:
             self._execution_guard = None
+            log.warning(
+                "[%s] ⚠ ExecutionGuard is DISABLED — no blocked_entry_hours_est, "
+                "blocked_entry_hours_by_day, or block_long_weekends found in config. "
+                "Trades will NOT be blocked during toxic hours. "
+                "Check that configs/global_risk_filters.json exists and is being loaded.",
+                self._nickname,
+            )
 
     def _load_model(self, experiment_id: str, label: str, model_path: str | None = None) -> LGBMLearner:
         """Load a LGBMLearner from the model registry or a direct path.
