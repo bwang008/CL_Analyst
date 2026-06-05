@@ -3528,6 +3528,13 @@ class LiveTrader:
                         pos += getattr(item, "position", 0.0)
                         unr_pnl += getattr(item, "unrealizedPNL", 0.0) or 0.0
                         real_pnl += getattr(item, "realizedPNL", 0.0) or 0.0
+                
+                # If position is flat, IBKR drops the contract from portfolio().
+                # Fall back to the daily account-level Realized PnL to prevent resetting to $0.
+                if pos == 0:
+                    for av in self.manager.ib.accountValues():
+                        if av.tag == "RealizedPnL" and av.currency == "USD":
+                            real_pnl = float(av.value)
             
             pos_str = f"{pos:g} contracts" if pos != 0 else "FLAT"
             pnl_str = f" | unr_pnl=${unr_pnl:,.2f} | real_pnl=${real_pnl:,.2f}"
