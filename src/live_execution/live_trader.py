@@ -2350,8 +2350,13 @@ class LiveTrader:
 
         # Error 1100: Connectivity between IBKR and TWS has been lost
         # Error 1101: Connectivity restored, data lost
-        if errorCode in (1100, 1101):
-            log.warning("CONNECTIVITY LOST (code %d) — marking subscriptions as lost", errorCode)
+        # Warning 2103: Market data farm connection is broken
+        # Warning 2105: HMDS data farm connection is broken
+        # A data farm break can silently kill keepUpToDate subscriptions
+        # without ever firing error 10182.  Mark subscriptions as lost
+        # proactively so the 2104/2106 "OK" handler triggers resubscription.
+        if errorCode in (1100, 1101, 2103, 2105):
+            log.warning("CONNECTIVITY/DATA FARM LOST (code %d: %s) — marking subscriptions as lost", errorCode, errorString)
             self._subscriptions_lost = True
 
         # Error 1102: connectivity restored, data maintained
@@ -3621,15 +3626,17 @@ class LiveTrader:
 
         Returns True if the caller should trigger a reconnect.
 
-        Closes the gap between reactive resubscription (waits for IBKR
-        restore event) and socket-level reconnect (waits for socket to
-        die).  Without this, the system can sit in a zombie state for
-        30-90 minutes with the socket alive but all data farms severed.
-        """
-        # Only act when we KNOW subscriptions are broken
-        if not self._subscriptions_lost:
-            return False
+        This is the PRIMARY defense against silent subscription death.
+        IBKR's keepUpToDate subscriptions can silently stop delivering
+        bars without firing any error code (10182, 1100, 1101).  When
+        this happens, _subscriptions_lost is never set and the reactive
+        resubscription path is never triggered.
 
+        The watchdog is purely time-based: if no bars arrive for
+        _STALE_BAR_THRESHOLD_MINUTES while the market is open, force
+        a full disconnect + reconnect.  Market-hours gating prevents
+        false positives during weekends and daily halts.
+        """
         # Don't force reconnect outside market hours (no bars expected)
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         market_status = self._get_market_status(now)
@@ -3645,11 +3652,14 @@ class LiveTrader:
         if minutes_stale < _STALE_BAR_THRESHOLD_MINUTES:
             return False  # Not stale enough yet
 
+        subs_flag = "subs_lost=True" if self._subscriptions_lost else "subs_lost=False (silent death)"
         log.warning(
-            "STALE BAR WATCHDOG: no bars for %.0f min with "
-            "_subscriptions_lost=True — forcing disconnect + reconnect",
-            minutes_stale,
+            "STALE BAR WATCHDOG: no bars for %.0f min (%s) "
+            "— forcing disconnect + reconnect",
+            minutes_stale, subs_flag,
         )
+        # Mark subscriptions as lost so downstream recovery paths are consistent
+        self._subscriptions_lost = True
         # Disconnect first so _reconnect() starts with a clean state.
         try:
             self.manager.ib.disconnect()
