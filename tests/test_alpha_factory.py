@@ -317,14 +317,14 @@ def test_term_structure_shapes_columns_exist(long_trend_data):
         include_term_structure=True,
     )
 
-    # BOUNDED family (VOL_PARK): should have DIFF, RATIO, INVERT
-    for transform in ["DIFF", "RATIO", "INVERT"]:
+    # BOUNDED family (VOL_PARK): should have DIFF, RATIO, LOG_RATIO, INVERT, ZSCORE
+    for transform in ["DIFF", "RATIO", "LOG_RATIO", "INVERT", "ZSCORE"]:
         for fast in [10, 20]:
             col = f"TS_VOL_PARK_{transform}_{fast}v50"
             assert col in df.columns, f"Missing bounded TS column: {col}"
 
-    # SIGNED family (LR_SLOPE): should have DIFF, SIGN_AGREE, REGIME_CROSS
-    for transform in ["DIFF", "SIGN_AGREE", "REGIME_CROSS"]:
+    # SIGNED family (LR_SLOPE): should have DIFF, SIGN_AGREE, REGIME_CROSS, ZSCORE
+    for transform in ["DIFF", "SIGN_AGREE", "REGIME_CROSS", "ZSCORE"]:
         for fast in [10, 20]:
             col = f"TS_LR_SLOPE_{transform}_{fast}v50"
             assert col in df.columns, f"Missing signed TS column: {col}"
@@ -339,12 +339,12 @@ def test_term_structure_shapes_columns_exist(long_trend_data):
                 )
 
     # Total TS columns:
-    #   6 bounded × 3 transforms × 2 fast = 36
-    #   3 signed  × 3 transforms × 2 fast = 18
-    #   Total = 54
+    #   6 bounded × 5 transforms (DIFF, RATIO, LOG_RATIO, INVERT, ZSCORE) × 2 fast = 60
+    #   3 signed  × 4 transforms (DIFF, SIGN_AGREE, REGIME_CROSS, ZSCORE) × 2 fast = 24
+    #   Total = 84
     ts_cols = [c for c in df.columns if c.startswith("TS_")]
-    assert len(ts_cols) == 54, (
-        f"Expected 54 TS columns, got {len(ts_cols)}: {sorted(ts_cols)}"
+    assert len(ts_cols) == 84, (
+        f"Expected 84 TS columns, got {len(ts_cols)}: {sorted(ts_cols)}"
     )
 
 

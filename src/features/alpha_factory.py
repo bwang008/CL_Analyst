@@ -780,9 +780,10 @@ class AlphaFactory:
         window using type-aware transforms:
 
         **BOUNDED** indicators (strictly positive or [0,1] range):
-            Diff:    Fast - Slow            (absolute spread / velocity)
-            Ratio:   Fast / clip(Slow, ε)   (relative magnitude)
-            Invert:  (Fast > Slow).int()    (regime shift boolean)
+            Diff:      Fast - Slow              (absolute spread / velocity)
+            Ratio:     Fast / clip(Slow, ε)     (relative magnitude)
+            Log_Ratio: log(Fast / clip(Slow, ε)) (log-scaled relative magnitude)
+            Invert:    (Fast > Slow).int()      (regime shift boolean)
 
         **SIGNED** indicators (cross zero — slopes, oscillators):
             Diff:           Fast - Slow     (spread — always valid)
@@ -790,6 +791,9 @@ class AlphaFactory:
                             (are micro and macro in the same regime?)
             Regime_Cross:   ((Fast>0) & (Slow<0) | (Fast<0) & (Slow>0)).int()
                             (has micro flipped while macro hasn't?)
+
+        **ALL** indicators get:
+            ZScore: (Fast - anchor.rolling(anchor_w).mean()) / anchor.rolling(anchor_w).std()
 
         Ratios are **not computed** for signed indicators because
         division on zero-crossing data creates asymptotic instability
@@ -843,10 +847,19 @@ class AlphaFactory:
             if not is_signed:
                 denom = anchor_series.clip(lower=eps)
 
+            # Precompute rolling stats for Z-Score Anchor
+            anchor_mean = anchor_series.rolling(window=anchor_w, min_periods=1).mean()
+            anchor_std = anchor_series.rolling(window=anchor_w, min_periods=1).std().clip(lower=1e-8)
+
             for fast_w in sorted_windows[:-1]:  # All except anchor
                 fast_col = windows_found[fast_w]
                 fast_series = self.df[fast_col]
                 tag = f"{fast_w}v{anchor_w}"
+
+                # 0) Z-Score Anchor (Valid for both)
+                self.df[f"TS_{short_name}_ZSCORE_{tag}"] = (
+                    (fast_series - anchor_mean) / anchor_std
+                )
 
                 # 1) Diff (Spread) — valid for both types
                 self.df[f"TS_{short_name}_DIFF_{tag}"] = (
@@ -876,6 +889,12 @@ class AlphaFactory:
                     # 2) Ratio (Magnitude)
                     self.df[f"TS_{short_name}_RATIO_{tag}"] = (
                         fast_series / denom
+                    )
+
+                    # 2b) Log-Ratio (Normalized Magnitude for unbounded positive)
+                    # We add this to the superset and let feature_buckets decide which to keep
+                    self.df[f"TS_{short_name}_LOG_RATIO_{tag}"] = (
+                        np.log(fast_series / denom)
                     )
 
                     # 3) Inversion (Regime Shift)
