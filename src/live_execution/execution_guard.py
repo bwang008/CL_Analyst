@@ -65,7 +65,12 @@ class ExecutionGuard:
         ----------
         config : dict
             Configuration dictionary containing:
-            - blocked_entry_hours_est: list of ints (e.g. [8, 11])
+            - blocked_entry_hours_est: list of ints representing blocked FILL
+              hours in EST/EDT (e.g. [9] blocks fills at 9:00 AM pit open).
+              The backtest passes bar_start + 1h; the live trader passes
+              wall-clock time directly.
+            - blocked_entry_hours_by_day: dict mapping day name to list of ints
+              (e.g. {"Wednesday": [12]} blocks noon fills on EIA day)
             - block_long_weekends: bool
             - long_weekend_block_scope: list of str (default: BEFORE_LONG_WEEKEND, AFTER_LONG_WEEKEND)
             - override_global_filters: bool (default: False)
@@ -191,7 +196,9 @@ class ExecutionGuard:
         Parameters
         ----------
         timestamp : pd.Timestamp
-            The timestamp of the current bar (represents start of the hour).
+            The timestamp to check.  In the backtest, this is the bar-start
+            time shifted forward by one bar duration (= fill time).  In the
+            live trader, this is wall-clock time (= fill time).
 
         Returns
         -------

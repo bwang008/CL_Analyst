@@ -1,5 +1,10 @@
 """
 Unit tests for ExecutionGuard class.
+
+NOTE: blocked_entry_hours_est values express blocked FILL hours (the hour
+when the order actually fills), NOT bar-start hours.  The backtest engine
+shifts its bar timestamp by +1h before calling the guard; the live trader
+passes wall-clock time directly.
 """
 
 from __future__ import annotations
@@ -13,9 +18,14 @@ from src.live_execution.execution_guard import ExecutionGuard
 
 @pytest.fixture
 def default_config() -> dict:
-    """Default risk configuration matching configs/global_risk_filters.json."""
+    """Default risk configuration matching configs/global_risk_filters.json.
+
+    Hours use fill-time semantics:
+    - [9]  = block fills at 9:00 AM EST (NYMEX pit open)
+    - [12] = block fills at 12:00 PM EST on Wednesdays (EIA whipsaw)
+    """
     return {
-        "blocked_entry_hours_est": [8, 11],
+        "blocked_entry_hours_est": [9, 12],
         "block_long_weekends": True,
         "long_weekend_block_scope": ["BEFORE_LONG_WEEKEND", "AFTER_LONG_WEEKEND"],
         "override_global_filters": False,
@@ -23,23 +33,23 @@ def default_config() -> dict:
 
 
 def test_blocked_hours(default_config: dict, caplog: pytest.LogCaptureFixture) -> None:
-    """Verify that blocked hours return False and log correct reason."""
+    """Verify that blocked fill hours return False and log correct reason."""
     guard = ExecutionGuard(default_config)
 
     # Let's pick a regular Tuesday (not a holiday transition)
     # 2025-02-11 is a Tuesday
-    ts_08 = pd.Timestamp("2025-02-11 08:00:00")
-    ts_11 = pd.Timestamp("2025-02-11 11:00:00")
+    ts_09 = pd.Timestamp("2025-02-11 09:00:00")
+    ts_12 = pd.Timestamp("2025-02-11 12:00:00")
 
     with caplog.at_level(logging.WARNING):
-        assert not guard.is_entry_allowed(ts_08)
-        assert "BLOCKED: 08:00 bar in blocked_entry_hours_est" in caplog.text
+        assert not guard.is_entry_allowed(ts_09)
+        assert "BLOCKED: 09:00 bar in blocked_entry_hours_est" in caplog.text
 
     caplog.clear()
 
     with caplog.at_level(logging.WARNING):
-        assert not guard.is_entry_allowed(ts_11)
-        assert "BLOCKED: 11:00 bar in blocked_entry_hours_est" in caplog.text
+        assert not guard.is_entry_allowed(ts_12)
+        assert "BLOCKED: 12:00 bar in blocked_entry_hours_est" in caplog.text
 
 
 def test_non_blocked_hours(default_config: dict) -> None:
@@ -47,7 +57,7 @@ def test_non_blocked_hours(default_config: dict) -> None:
     guard = ExecutionGuard(default_config)
 
     # 2025-02-11 is a Tuesday
-    for hour in [0, 5, 7, 9, 10, 12, 15, 23]:
+    for hour in [0, 5, 7, 8, 10, 11, 13, 15, 23]:
         ts = pd.Timestamp(f"2025-02-11 {hour:02d}:00:00")
         assert guard.is_entry_allowed(ts), f"Hour {hour} should be allowed"
 
@@ -134,8 +144,8 @@ def test_override_global_filters(default_config: dict) -> None:
     guard = ExecutionGuard(config)
 
     # Blocked hours
-    assert guard.is_entry_allowed(pd.Timestamp("2025-02-11 08:00:00"))
-    assert guard.is_entry_allowed(pd.Timestamp("2025-02-11 11:00:00"))
+    assert guard.is_entry_allowed(pd.Timestamp("2025-02-11 09:00:00"))
+    assert guard.is_entry_allowed(pd.Timestamp("2025-02-11 12:00:00"))
 
     # Long weekend transitions
     assert guard.is_entry_allowed(pd.Timestamp("2025-01-17 10:00:00"))  # Friday before MLK Day
@@ -148,13 +158,13 @@ def test_timezone_normalization(default_config: dict) -> None:
     """Verify that tz-aware and tz-naive timestamps are normalized properly to America/New_York."""
     guard = ExecutionGuard(default_config)
 
-    # 08:00 AM EST is 13:00 UTC
-    # Passing 13:00 UTC should be blocked because it normalizes to 08:00 EST
-    ts_utc = pd.Timestamp("2025-02-11 13:00:00", tz="UTC")
+    # 09:00 AM EST is 14:00 UTC
+    # Passing 14:00 UTC should be blocked because it normalizes to 09:00 EST
+    ts_utc = pd.Timestamp("2025-02-11 14:00:00", tz="UTC")
     assert not guard.is_entry_allowed(ts_utc)
 
-    # 08:00 AM EST is 08:00 EST (America/New_York)
-    ts_est = pd.Timestamp("2025-02-11 08:00:00", tz="America/New_York")
+    # 09:00 AM EST is 09:00 EST (America/New_York)
+    ts_est = pd.Timestamp("2025-02-11 09:00:00", tz="America/New_York")
     assert not guard.is_entry_allowed(ts_est)
 
     # 10:00 AM EST is 15:00 UTC. It should be allowed.
@@ -204,7 +214,7 @@ def test_edge_triggered_logging(default_config: dict, caplog: pytest.LogCaptureF
     guard = ExecutionGuard(default_config)
 
     # Call is_entry_allowed 10 times on the same blocked hour
-    ts_blocked = pd.Timestamp("2025-02-11 08:00:00")
+    ts_blocked = pd.Timestamp("2025-02-11 09:00:00")
     with caplog.at_level(logging.WARNING):
         for _ in range(10):
             assert not guard.is_entry_allowed(ts_blocked)
@@ -232,49 +242,52 @@ def test_edge_triggered_logging(default_config: dict, caplog: pytest.LogCaptureF
 def test_day_specific_blocked_hours(caplog: pytest.LogCaptureFixture) -> None:
     """Verify that day-specific blocked hours block entries correctly only on those days,
     and have no effect on other days, and that empty configurations have no effect.
+
+    Config uses fill-time semantics:
+    - blocked_entry_hours_est [9] = block 9AM fills daily (NYMEX pit open)
+    - blocked_entry_hours_by_day Wednesday [12] = block noon fills on EIA day
     """
     config = {
-        "blocked_entry_hours_est": [8],
-        "blocked_entry_hours_by_day": {"Wednesday": [11]},
+        "blocked_entry_hours_est": [9],
+        "blocked_entry_hours_by_day": {"Wednesday": [12]},
         "block_long_weekends": False,
         "override_global_filters": False,
     }
     guard = ExecutionGuard(config)
 
     # Wednesday 2025-02-12
-    ts_wed_11 = pd.Timestamp("2025-02-12 11:00:00")
+    ts_wed_12 = pd.Timestamp("2025-02-12 12:00:00")
     # Monday 2025-02-10
-    ts_mon_11 = pd.Timestamp("2025-02-10 11:00:00")
+    ts_mon_12 = pd.Timestamp("2025-02-10 12:00:00")
     # Tuesday 2025-02-11
-    ts_tue_11 = pd.Timestamp("2025-02-11 11:00:00")
+    ts_tue_12 = pd.Timestamp("2025-02-11 12:00:00")
     # Thursday 2025-02-13
-    ts_thu_11 = pd.Timestamp("2025-02-13 11:00:00")
+    ts_thu_12 = pd.Timestamp("2025-02-13 12:00:00")
     # Friday 2025-02-14
-    ts_fri_11 = pd.Timestamp("2025-02-14 11:00:00")
+    ts_fri_12 = pd.Timestamp("2025-02-14 12:00:00")
 
-    # 1. Hour 11 is blocked on Wednesday
+    # 1. Hour 12 is blocked on Wednesday
     caplog.clear()
     with caplog.at_level(logging.WARNING):
-        assert not guard.is_entry_allowed(ts_wed_11)
-        assert "BLOCKED: 11:00 bar on Wednesday (blocked_entry_hours_by_day)" in caplog.text
+        assert not guard.is_entry_allowed(ts_wed_12)
+        assert "BLOCKED: 12:00 bar on Wednesday (blocked_entry_hours_by_day)" in caplog.text
 
-    # 2. Hour 11 is NOT blocked on Monday, Tuesday, Thursday, Friday
-    for ts in [ts_mon_11, ts_tue_11, ts_thu_11, ts_fri_11]:
-        assert guard.is_entry_allowed(ts), f"Hour 11 should be allowed on {ts.strftime('%A')}"
+    # 2. Hour 12 is NOT blocked on Monday, Tuesday, Thursday, Friday
+    for ts in [ts_mon_12, ts_tue_12, ts_thu_12, ts_fri_12]:
+        assert guard.is_entry_allowed(ts), f"Hour 12 should be allowed on {ts.strftime('%A')}"
 
-    # 3. Hour 8 is blocked every day (retains global hourly config blocking)
-    for day_ts in [ts_mon_11, ts_tue_11, ts_wed_11, ts_thu_11, ts_fri_11]:
-        ts_8 = day_ts.replace(hour=8)
-        assert not guard.is_entry_allowed(ts_8), f"Hour 8 should be blocked on {ts_8.strftime('%A')}"
+    # 3. Hour 9 is blocked every day (retains global hourly config blocking)
+    for day_ts in [ts_mon_12, ts_tue_12, ts_wed_12, ts_thu_12, ts_fri_12]:
+        ts_9 = day_ts.replace(hour=9)
+        assert not guard.is_entry_allowed(ts_9), f"Hour 9 should be blocked on {ts_9.strftime('%A')}"
 
     # 4. Empty blocked_entry_hours_by_day has no effect
     config_empty = {
-        "blocked_entry_hours_est": [8],
+        "blocked_entry_hours_est": [9],
         "blocked_entry_hours_by_day": {},
         "block_long_weekends": False,
         "override_global_filters": False,
     }
     guard_empty = ExecutionGuard(config_empty)
-    assert guard_empty.is_entry_allowed(ts_wed_11)
-    assert guard_empty.is_entry_allowed(ts_mon_11)
-
+    assert guard_empty.is_entry_allowed(ts_wed_12)
+    assert guard_empty.is_entry_allowed(ts_mon_12)

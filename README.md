@@ -292,8 +292,9 @@ ExecutionGuard.is_entry_allowed(timestamp) ──> blocks or allows new entries
 
 ```json
 {
-  "blocked_entry_hours_est": [8, 11],
-  "block_long_weekends": true,
+  "blocked_entry_hours_est": [9],
+  "blocked_entry_hours_by_day": {"Wednesday": [12]},
+  "block_long_weekends": false,
   "long_weekend_block_scope": ["BEFORE_LONG_WEEKEND", "AFTER_LONG_WEEKEND"],
   "override_global_filters": false
 }
@@ -301,7 +302,8 @@ ExecutionGuard.is_entry_allowed(timestamp) ──> blocks or allows new entries
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `blocked_entry_hours_est` | `list[int]` | Bar hours (EST) to block new entries. `[8]` blocks the 8:00 bar (filled at 9:00 AM NYMEX open). |
+| `blocked_entry_hours_est` | `list[int]` | Blocked **fill hours** (EST/EDT). `[9]` prevents fills at 9:00 AM NYMEX pit open. The backtest shifts bar timestamps by +1h (bar.Close fill model); the live trader uses wall-clock time directly. |
+| `blocked_entry_hours_by_day` | `dict[str, list[int]]` | Day-specific blocked fill hours. `{"Wednesday": [12]}` prevents noon fills on EIA inventory report day. |
 | `block_long_weekends` | `bool` | If `true`, blocks entries on days adjacent to CME holidays (long weekend transitions). |
 | `long_weekend_block_scope` | `list[str]` | Which adjacency types to block: `BEFORE_LONG_WEEKEND`, `AFTER_LONG_WEEKEND`. |
 | `override_global_filters` | `bool` | Set `true` in a **strategy JSON** to skip global filter inheritance entirely. |
@@ -312,6 +314,7 @@ ExecutionGuard.is_entry_allowed(timestamp) ──> blocks or allows new entries
 2. **To disable for a specific strategy**, add `"override_global_filters": true` to that strategy's JSON file.
 3. **The guard only blocks new entries.** Open positions continue managing TP/SL/trailing stops through blocked periods.
 4. **Actual holiday shortened sessions are NOT blocked** — only the adjacent transition days (which are structurally toxic).
+5. **Fill-time semantics.** Hours represent when the fill would occur, not bar-start time. The backtest engine fills at `bar.Close` (= next bar's Open for hourly bars), so it passes `bar_start + 1h` to the guard. The live trader fills immediately at wall-clock time.
 
 ### Files
 
@@ -326,8 +329,8 @@ ExecutionGuard.is_entry_allowed(timestamp) ──> blocks or allows new entries
 
 When the guard blocks an entry in live mode, the terminal shows:
 ```
-WARNING [GUARD ACTIVATED] BLOCKED: 08:00 bar in blocked_entry_hours_est
-WARNING [EXECUTION GUARD] new entries blocked (bar=2026-01-20 08:00, buy_prob=0.72, sell_prob=0.34)
+WARNING [GUARD ACTIVATED] BLOCKED: 09:00 bar in blocked_entry_hours_est
+WARNING [EXECUTION GUARD] new entries blocked (bar=2026-01-20 09:00, buy_prob=0.72, sell_prob=0.34)
 ```
 When the blocked period ends:
 ```

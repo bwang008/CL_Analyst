@@ -389,7 +389,7 @@ class BacktestEngine:
 
         # Instantiate execution guard if risk filter keys are present
         guard = None
-        if cfg.get("blocked_entry_hours_est") or cfg.get("block_long_weekends"):
+        if cfg.get("blocked_entry_hours_est") or cfg.get("block_long_weekends") or cfg.get("blocked_entry_hours_by_day"):
             guard = ExecutionGuard(cfg)
 
         sc = StrategyConfig.from_dict(cfg)
@@ -1204,8 +1204,12 @@ class BacktestEngine:
             # Dispatch orders to existing FSM entry point
             if self._state == TradeState.FLAT:
                 has_entry = any(order.action in ("BUY", "SELL") for order in orders)
-                # ExecutionGuard: block new entries during toxic periods
-                if self._execution_guard and not self._execution_guard.is_entry_allowed(ts):
+                # ExecutionGuard: block new entries during toxic periods.
+                # Config hours express blocked FILL times. The backtest fills
+                # at bar.Close (= bar_start + 1h for hourly bars), so shift
+                # the guard timestamp forward by 1h to match fill-time semantics.
+                fill_ts = ts + pd.Timedelta(hours=1)
+                if self._execution_guard and not self._execution_guard.is_entry_allowed(fill_ts):
                     if has_entry:
                         self._blocked_trades_count += 1
                     pass  # Guard blocked — skip entry
@@ -1270,7 +1274,9 @@ class BacktestEngine:
             )
 
             # 4. Dispatch orders (ExecutionGuard: block new entries during toxic periods)
-            is_allowed = not self._execution_guard or self._execution_guard.is_entry_allowed(ts)
+            # Config hours express blocked FILL times — shift by +1h (see single-position comment).
+            fill_ts = ts + pd.Timedelta(hours=1)
+            is_allowed = not self._execution_guard or self._execution_guard.is_entry_allowed(fill_ts)
             for order in orders:
                 if order.action in ("BUY", "SELL"):
                     if not is_allowed:
