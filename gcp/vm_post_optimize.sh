@@ -242,7 +242,7 @@ echo "  Selecting Top 8 Ensembles..." | tee -a "$LOG"
 python agent/select_top_ensembles.py \
     --md-report "$BATCH_DIR/batch_ensemble_pre_opt.md" \
     --output-json "$BATCH_DIR/top_8_ensembles.json" \
-    --top-n 4 \
+    --top-n 8 \
     2>&1 | tee -a "$LOG"
 
 # --- [4/5] Run batch_post_optimizer ---

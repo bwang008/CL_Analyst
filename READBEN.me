@@ -214,3 +214,10 @@ conda run -n trader --no-capture-output python -c "from main import get_processe
 
 #Check instances 
 gcloud compute instances list --format=json(name,zone,machineType,status,scheduling.provisioningModel)
+
+
+### Prompt CANARY HS09
+"Please execute the /run-cloud-batch workflow. Use the manifest path: configs\sweep_batch_hourset09_canary.json. Run it across the standard zones: us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f. Make sure to monitor it continuously until the post-optimizer finishes and the markdown reports are downloaded to my machine. This should sweep all 8 targets and optimize the top 8 ensembles."
+
+### PROMPT Canaary HS10
+"Please execute the /run-cloud-batch workflow. Use the manifest path: configs\sweep_batch_hourset10_canary.json. Run it across the standard zones: us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f. Make sure to monitor it continuously until the post-optimizer finishes and the markdown reports are downloaded to my machine. This should sweep all 8 targets and optimize the top 8 ensembles."

@@ -1,10 +1,10 @@
 {
-  "_comment": "HourSet_09 CANARY — 2 target pairs for E2E validation of Term Structure features (~20-30 min).",
+  "_comment": "HourSet_09 CANARY (8 targets) — 8 target pairs for fast pipeline validation (~20-30 min). Shallow search, low trial count.",
   "defaults": {
     "machine_type": "c2-standard-16",
     "provisioning_model": "STANDARD",
     "gcs_data_path": "gs://cltrainer-optuna-results/data/cl-1h_bk_HourSet_09.parquet",
-    "strategy_config": "hourly_ensemble_008_2.json",
+    "strategy_config": "HourSet_09_Ensemble_06022026.json",
     "metrics": "logloss,average_precision",
     "timeout_minutes": 240,
     "max_concurrent_vcpus": 288,
@@ -28,16 +28,52 @@
   },
   "experiments": [
     {
+      "label": "HS09 3x1 6H",
+      "target_long": "TARGET_TRIPLE_3x1_6H_LONG",
+      "target_short": "TARGET_TRIPLE_3x1_6H_SHORT",
+      "gcs_prefix": "sweep_hs09c_3x1_6h"
+    },
+    {
       "label": "HS09 3x1 12H",
       "target_long": "TARGET_TRIPLE_3x1_12H_LONG",
       "target_short": "TARGET_TRIPLE_3x1_12H_SHORT",
-      "gcs_prefix": "sweep_hs09_3x1_12h"
+      "gcs_prefix": "sweep_hs09c_3x1_12h"
+    },
+    {
+      "label": "HS09 3x1 24H",
+      "target_long": "TARGET_TRIPLE_3x1_24H_LONG",
+      "target_short": "TARGET_TRIPLE_3x1_24H_SHORT",
+      "gcs_prefix": "sweep_hs09c_3x1_24h"
+    },
+    {
+      "label": "HS09 4x1 6H",
+      "target_long": "TARGET_TRIPLE_4x1_6H_LONG",
+      "target_short": "TARGET_TRIPLE_4x1_6H_SHORT",
+      "gcs_prefix": "sweep_hs09c_4x1_6h"
+    },
+    {
+      "label": "HS09 4x1 12H",
+      "target_long": "TARGET_TRIPLE_4x1_12H_LONG",
+      "target_short": "TARGET_TRIPLE_4x1_12H_SHORT",
+      "gcs_prefix": "sweep_hs09c_4x1_12h"
     },
     {
       "label": "HS09 4x1 24H",
       "target_long": "TARGET_TRIPLE_4x1_24H_LONG",
       "target_short": "TARGET_TRIPLE_4x1_24H_SHORT",
-      "gcs_prefix": "sweep_hs09_4x1_24h"
+      "gcs_prefix": "sweep_hs09c_4x1_24h"
+    },
+    {
+      "label": "HS09 5x1 12H",
+      "target_long": "TARGET_TRIPLE_5x1_12H_LONG",
+      "target_short": "TARGET_TRIPLE_5x1_12H_SHORT",
+      "gcs_prefix": "sweep_hs09c_5x1_12h"
+    },
+    {
+      "label": "HS09 5x1 24H",
+      "target_long": "TARGET_TRIPLE_5x1_24H_LONG",
+      "target_short": "TARGET_TRIPLE_5x1_24H_SHORT",
+      "gcs_prefix": "sweep_hs09c_5x1_24h"
     }
   ]
 }
