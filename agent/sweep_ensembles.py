@@ -18,10 +18,11 @@ import pandas as pd
 def get_models_from_dir(directory, prefix=""):
     models = []
     if os.path.exists(directory):
-        for item in os.listdir(directory):
-            if item.startswith(prefix) and os.path.isdir(os.path.join(directory, item)):
-                if os.path.exists(os.path.join(directory, item, "oos_predictions.csv")):
-                    models.append(os.path.join(directory, item).replace("\\", "/"))
+        for root, dirs, files in os.walk(directory):
+            if "oos_predictions.csv" in files:
+                basename = os.path.basename(root)
+                if prefix == "" or basename.startswith(prefix) or prefix in root:
+                    models.append(root.replace("\\", "/"))
     return models
 
 def run_backtest(long_path, short_path, base_config, data_path, temp_config, long_threshold=None, short_threshold=None):
@@ -108,14 +109,17 @@ def main():
     parser.add_argument("--data", required=True, help="Parquet Dataset")
     parser.add_argument("--long-dir", required=True, help="Directory containing Long models")
     parser.add_argument("--short-dir", required=True, help="Directory containing Short models")
-    parser.add_argument("--output-csv", default="reports/ensemble_sweep_results.csv", help="Output CSV report")
-    parser.add_argument("--long-threshold",  type=float, default=None, help="Override Buy probability threshold (e.g. 0.55)")
+    parser.add_argument("--long-prefix", default="", help="Prefix string to filter Long models")
+    parser.add_argument("--short-prefix", default="", help="Prefix string to filter Short models")
+    parser.add_argument("--output-csv", default=None, help="Output CSV report")
+    parser.add_argument("--output-md", default=None, help="Output MD report")
+    parser.add_argument("--long-threshold", type=float, default=None, help="Override Buy probability threshold (e.g. 0.55)")
     parser.add_argument("--short-threshold", type=float, default=None, help="Override Sell probability threshold (e.g. 0.55)")
     args = parser.parse_args()
 
-    # Discover models
-    long_models = get_models_from_dir(args.long_dir)
-    short_models = get_models_from_dir(args.short_dir)
+    print(f"\nScanning for models...")
+    long_models = get_models_from_dir(args.long_dir, args.long_prefix)
+    short_models = get_models_from_dir(args.short_dir, args.short_prefix)
 
     print(f"Discovered {len(long_models)} Long and {len(short_models)} Short candidates.")
     if not long_models or not short_models:
@@ -133,47 +137,71 @@ def main():
 
     temp_cfg = "configs/strategies/temp_sweep_config.json"
     results = []
+    
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    def process_pair(lname, lpath, sname, spath):
+        # Temp config needs to be unique for concurrent execution
+        thread_temp_cfg = temp_cfg.replace(".json", f"_{lname}_{sname}.json")
+        met = run_backtest(
+            lpath, spath, args.base_config, args.data, thread_temp_cfg, 
+            args.long_threshold, args.short_threshold
+        )
+        if os.path.exists(thread_temp_cfg):
+            os.remove(thread_temp_cfg)
+        if not met: return None
+        return {
+            "Long Model": lname,
+            "Short Model": sname,
+            "Trades": int(met['trades']),
+            "Win Rate": met['winrate'],
+            "Profit Factor": float(met['pf']) if met['pf'] else 0.0,
+            "Net PnL": float(met['pnl'].replace(",", "")) if met['pnl'] else 0.0,
+            "Max DD": met['max_dd'],
+            "Tail PnL": met['tail_pnl'],
+            "print_str": f"{lname[:40]:<40} | {sname[:40]:<40} | {met['trades']:<4} | {met['winrate']:<5} | {met['pf']:<5} | {met['pnl']:<10} | {met['max_dd']:<10} | {met['tail_pnl']:<10}"
+        }
 
     print(f"{'Long Model':<40} | {'Short Model':<40} | {'Trds':<4} | {'WR%':<5} | {'PF':<5} | {'Net PnL':<10} | {'Max DD':<10} | {'Tail PnL':<10}")
     print("-" * 145)
 
-    for lm in long_models:
-        for sm in short_models:
-            lname = lm.split("/")[-1].replace("E2E_HourSet_02_long_", "long_").replace("HourSet_02_2p5x1_120H_long_", "long_120H_")
-            sname = sm.split("/")[-1].replace("E2E_HourSet_02_short_", "short_").replace("HourSet_02_2p5x1_120H_short_", "short_120H_")
-            
-            metrics = run_backtest(
-                lm, sm, args.base_config, args.data, temp_cfg,
-                long_threshold=args.long_threshold,
-                short_threshold=args.short_threshold,
-            )
-            print(f"{lname[:40]:<40} | {sname[:40]:<40} | {metrics['trades']:<4} | {metrics['winrate']:<5} | {metrics['pf']:<5} | {metrics['pnl']:<10} | {metrics['max_dd']:<10} | {metrics['tail_pnl']:<10}")
-            
-            # Append dict for Pandas
-            pnl_val = float(metrics['pnl'].replace(",", "")) if metrics['pnl'] else 0.0
-            pf_val = float(metrics['pf']) if metrics['pf'] else 0.0
-            
-            results.append({
-                "Long Model": lname,
-                "Short Model": sname,
-                "Trades": int(metrics['trades']),
-                "Win Rate": metrics['winrate'],
-                "Profit Factor": pf_val,
-                "Net PnL": pnl_val,
-                "Max DD": metrics['max_dd'],
-                "Tail PnL": metrics['tail_pnl']
-            })
-
-    if os.path.exists(temp_cfg):
-        os.remove(temp_cfg)
+    futures = []
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        for lpath in long_models:
+            lparts = lpath.split("/")
+            lname = f"{lparts[-2]}_{lparts[-1]}" if len(lparts) >= 2 else lparts[-1]
+            for spath in short_models:
+                sparts = spath.split("/")
+                sname = f"{sparts[-2]}_{sparts[-1]}" if len(sparts) >= 2 else sparts[-1]
+                futures.append(executor.submit(process_pair, lname, lpath, sname, spath))
+                
+        for future in as_completed(futures):
+            res = future.result()
+            if res:
+                print(res.pop("print_str"))
+                results.append(res)
         
     if results:
         df = pd.DataFrame(results)
         df = df.sort_values(by="Profit Factor", ascending=False)
         
-        os.makedirs(os.path.dirname(args.output_csv), exist_ok=True)
-        df.to_csv(args.output_csv, index=False)
-        print(f"\nSaved Sorted CSV Report to {args.output_csv}")
+        if hasattr(args, 'output_csv') and args.output_csv:
+            os.makedirs(os.path.dirname(args.output_csv), exist_ok=True)
+            df.to_csv(args.output_csv, index=False)
+            print(f"\nSaved Sorted CSV Report to {args.output_csv}")
+            
+        if hasattr(args, 'output_md') and args.output_md:
+            os.makedirs(os.path.dirname(args.output_md), exist_ok=True)
+            with open(args.output_md, 'w') as f:
+                f.write(f"# Ensemble Sweep Results\n\n")
+                try:
+                    f.write(df.to_markdown(index=False))
+                except ImportError:
+                    # tabulate not installed — fall back to plain text table
+                    f.write("```\n")
+                    f.write(df.to_string(index=False))
+                    f.write("\n```")
+            print(f"\nSaved Sorted MD Report to {args.output_md}")
 
 if __name__ == "__main__":
     main()

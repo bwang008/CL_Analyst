@@ -964,6 +964,8 @@ def run_optimization(
     study = optuna.create_study(
         direction="maximize",
         study_name=f"strategy_opt_{model_name}",
+        storage="sqlite:///optuna_study.db",
+        load_if_exists=True,
     )
 
     score_label = objective_metric.capitalize()
@@ -1318,6 +1320,8 @@ def run_hybrid_optimization(
     study = optuna.create_study(
         direction="maximize",
         study_name=f"hybrid_opt_{model_name}",
+        storage="sqlite:///optuna_study.db",
+        load_if_exists=True,
     )
 
     # Inject Stage 1 warm-start configs

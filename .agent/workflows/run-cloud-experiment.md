@@ -66,13 +66,16 @@ powershell -ExecutionPolicy Bypass -File .\gcp\run_sweep_batch.ps1 `
    - Captures crash diagnostics on failure
    - Generates consolidated batch summary
    - Deploys a post-optimizer VM, waits for completion, downloads results
-   - Produces final `batch_summary_optimized.md` and `wall_clock_summary.md`
+   - Sweeps 256 ensemble pairs and automatically selects Top 8
+   - Produces final `batch_ensemble_pre_opt.md`, `batch_summary_optimized.md`, and `wall_clock_summary.md`
 
 ### 5. Review results:
 ```
 reports/batch_runs/batch_<timestamp>/
 ├── batch_progress.json              ← live progress tracker
 ├── batch_summary.md                 ← unoptimized results
+├── batch_ensemble_pre_opt.md        ← baseline sweep of 256 ensembles
+├── top_8_ensembles.json             ← dynamically selected top ensembles
 ├── batch_summary_optimized.md       ← MAIN DELIVERABLE
 ├── wall_clock_summary.md            ← auto-generated timing report
 ├── optimization_results.json        ← raw optimization data

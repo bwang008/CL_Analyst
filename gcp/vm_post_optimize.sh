@@ -22,6 +22,35 @@ set -eo pipefail
 
 export PYTHONIOENCODING=utf8
 
+cleanup() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        echo "============================================================" | tee -a "$LOG"
+        echo " TRAP TRIGGERED: Script exited with code $exit_code" | tee -a "$LOG"
+        echo "============================================================" | tee -a "$LOG"
+    fi
+    
+    # Upload logs before dying
+    if [ -n "$GCS_OPT_PREFIX" ] && [ -n "$LOG" ]; then
+        echo "Uploading final logs to gs://$BUCKET/$GCS_OPT_PREFIX/logs/"
+        gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
+    fi
+
+    # Delete VM if requested
+    if [ "$SHUTDOWN" = true ]; then
+        echo "Self-deleting optimizer VM in 15 seconds..." | tee -a "$LOG"
+        sleep 15
+        VM_NAME=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/name || echo "")
+        VM_ZONE=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/zone | awk -F/ '{print $NF}' || echo "")
+        if [ -n "$VM_NAME" ] && [ -n "$VM_ZONE" ]; then
+            gcloud compute instances delete "$VM_NAME" --zone="$VM_ZONE" --quiet 2>/dev/null || sudo shutdown -h now
+        else
+            sudo shutdown -h now
+        fi
+    fi
+}
+trap cleanup EXIT
+
 # Activate environment
 source /opt/optuna-env/bin/activate
 
@@ -82,11 +111,12 @@ gsutil cp "$BUCKET/$GCS_OPT_PREFIX/manifest.json" "$BATCH_DIR/manifest.json" 2>&
 # Extract OHLCV GCS path from manifest
 OHLCV_GCS=$(python3 -c "import json; m=json.load(open('$BATCH_DIR/manifest.json')); print(m.get('defaults',{}).get('gcs_data_path',''))")
 OHLCV_BASENAME=$(basename "$OHLCV_GCS")
+STRATEGY_CONFIG=$(python3 -c "import json; m=json.load(open('$BATCH_DIR/manifest.json')); print(m.get('defaults',{}).get('strategy_config','hourly_ensemble_010.json'))")
 echo "  OHLCV GCS path: $OHLCV_GCS" | tee -a "$LOG"
+echo "  Strategy config: $STRATEGY_CONFIG" | tee -a "$LOG"
 
 if [ -z "$OHLCV_GCS" ]; then
     echo "  ERROR: No gcs_data_path found in manifest!" | tee -a "$LOG"
-    gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
     exit 1
 fi
 
@@ -162,17 +192,35 @@ echo "  Found $CONFIG_COUNT ensemble configs" | tee -a "$LOG"
 
 if [ "$ARTIFACT_COUNT" -eq 0 ]; then
     echo "  ERROR: No prediction CSVs found! Check GCS artifacts." | tee -a "$LOG"
-    gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
     exit 1
 fi
 
+# --- [3b/5] Sweep Ensembles ---
+echo "" | tee -a "$LOG"
+echo "[3b/5] Sweeping Ensembles (Baseline Config)..." | tee -a "$LOG"
+python agent/sweep_ensembles.py \
+    --base-config configs/strategies/$STRATEGY_CONFIG \
+    --data data/processed/$OHLCV_BASENAME \
+    --long-dir reports/ \
+    --short-dir reports/ \
+    --output-md "$BATCH_DIR/batch_ensemble_pre_opt.md" \
+    2>&1 | tee -a "$LOG"
+
+echo "  Selecting Top 8 Ensembles..." | tee -a "$LOG"
+python agent/select_top_ensembles.py \
+    --md-report "$BATCH_DIR/batch_ensemble_pre_opt.md" \
+    --output-json "$BATCH_DIR/top_8_ensembles.json" \
+    --top-n 8 \
+    2>&1 | tee -a "$LOG"
+
 # --- [4/5] Run batch_post_optimizer ---
 echo "" | tee -a "$LOG"
-echo "[4/5] Running batch post-optimizer..." | tee -a "$LOG"
-echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter" | tee -a "$LOG"
+echo "[4/5] Running batch post-optimizer on Top 8..." | tee -a "$LOG"
+echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --target-pairs-json $BATCH_DIR/top_8_ensembles.json --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter" | tee -a "$LOG"
 
 python agent/batch_post_optimizer.py \
     --batch-dir "$BATCH_DIR" \
+    --target-pairs-json "$BATCH_DIR/top_8_ensembles.json" \
     --n-trials "$N_TRIALS" \
     --holdout-months "$HOLDOUT_MONTHS" \
     --workers "$WORKERS" \
@@ -203,6 +251,9 @@ done
 for f in "$BATCH_DIR"/optimization_results_*.json; do
     [ -f "$f" ] && gsutil cp "$f" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
 done
+[ -f "$BATCH_DIR/batch_ensemble_pre_opt.md" ] && gsutil cp "$BATCH_DIR/batch_ensemble_pre_opt.md" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+[ -f "$BATCH_DIR/top_8_ensembles.json" ] && gsutil cp "$BATCH_DIR/top_8_ensembles.json" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+
 # Legacy fallback uploads
 [ -f "$BATCH_DIR/batch_summary_optimized.md" ] && gsutil cp "$BATCH_DIR/batch_summary_optimized.md" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
 [ -f "$BATCH_DIR/optimization_results.json" ] && gsutil cp "$BATCH_DIR/optimization_results.json" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
@@ -230,18 +281,4 @@ echo "  Wall time:     $((TOTAL_ELAPSED / 3600))h $((TOTAL_ELAPSED % 3600 / 60))
 echo "  GCS results:   $BUCKET/$GCS_OPT_PREFIX/" | tee -a "$LOG"
 echo "  Batch configs: $BATCH_DIR/configs/" | tee -a "$LOG"
 echo "============================================================" | tee -a "$LOG"
-
-# Final log upload
-gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
-
-# Delete VM if requested (not just shutdown — fully remove to avoid disk charges)
-if [ "$SHUTDOWN" = true ]; then
-    echo "Self-deleting optimizer VM in 15 seconds..." | tee -a "$LOG"
-    gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
-    sleep 15
-    # Self-delete: VM removes itself from GCP entirely
-    VM_NAME=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/name)
-    VM_ZONE=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/zone | awk -F/ '{print $NF}')
-    gcloud compute instances delete "$VM_NAME" --zone="$VM_ZONE" --quiet 2>/dev/null || sudo shutdown -h now
-fi
 

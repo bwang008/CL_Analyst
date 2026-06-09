@@ -159,7 +159,7 @@ $rows     = @()
 $failRows = @()
 
 foreach ($exp in $progress.experiments) {
-    $localDir     = $exp.local_dir
+    $localDir     = Join-Path $BatchDir $exp.gcs_prefix
     $summaryPath  = Join-Path $localDir "pipeline_summary.json"
 
     $row = [ordered]@{

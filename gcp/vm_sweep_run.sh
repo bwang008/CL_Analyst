@@ -20,6 +20,35 @@
 
 set -eo pipefail
 
+cleanup() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        echo "============================================================" | tee -a "$LOG"
+        echo " TRAP TRIGGERED: Script exited with code $exit_code" | tee -a "$LOG"
+        echo "============================================================" | tee -a "$LOG"
+    fi
+    
+    # Upload logs before dying
+    if [ -n "$JOB_NAME" ] && [ -n "$LOG" ]; then
+        echo "Uploading final logs to $BUCKET/$JOB_NAME/logs/"
+        gsutil cp "$LOG" "$BUCKET/$JOB_NAME/logs/" 2>/dev/null || true
+    fi
+
+    # Delete VM if requested
+    if [ "$SHUTDOWN" = true ]; then
+        echo "Self-deleting VM in 15 seconds..." | tee -a "$LOG"
+        sleep 15
+        VM_NAME=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/name || echo "")
+        VM_ZONE=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/zone | awk -F/ '{print $NF}' || echo "")
+        if [ -n "$VM_NAME" ] && [ -n "$VM_ZONE" ]; then
+            gcloud compute instances delete "$VM_NAME" --zone="$VM_ZONE" --quiet 2>/dev/null || sudo shutdown -h now
+        else
+            sudo shutdown -h now
+        fi
+    fi
+}
+trap cleanup EXIT
+
 # Activate environment
 source /opt/optuna-env/bin/activate
 
@@ -109,7 +138,6 @@ if [ "$REQUIRED_CPUS" -ne "$SYSTEM_CPUS" ]; then
     echo "  Required:      $REQUIRED_CPUS (N_WORKERS=$N_WORKERS × THREADS_PER_WORKER=$THREADS_PER_WORKER)" | tee -a "$LOG"
     echo "  Fix: adjust N_WORKERS and THREADS_PER_WORKER in this script to match the machine." | tee -a "$LOG"
     echo "" | tee -a "$LOG"
-    gsutil cp "$LOG" "$BUCKET/$JOB_NAME/logs/" 2>/dev/null || true
     exit 1
 fi
 # No TRIALS_PER_WORKER needed — each search runs the full N_TRIALS sequentially
@@ -312,9 +340,6 @@ else
     echo "  ⚠ Skipping E2E pipeline — no searches completed." | tee -a "$LOG"
 fi
 
-# Upload final log
-gsutil cp "$LOG" "$BUCKET/$JOB_NAME/logs/" 2>/dev/null || true
-
 TOTAL_ELAPSED=$(( $(date +%s) - START_TIME ))
 echo "" | tee -a "$LOG"
 echo "============================================================" | tee -a "$LOG"
@@ -327,11 +352,3 @@ echo "" | tee -a "$LOG"
 echo "Download results:" | tee -a "$LOG"
 echo "  gsutil -m cp -r ${BUCKET}/${JOB_NAME}/* ." | tee -a "$LOG"
 echo "" | tee -a "$LOG"
-
-# Shutdown VM if requested
-if [ "$SHUTDOWN" = true ]; then
-    echo "Shutting down VM in 30 seconds..." | tee -a "$LOG"
-    gsutil cp "$LOG" "$BUCKET/$JOB_NAME/logs/" 2>/dev/null || true
-    sleep 30
-    sudo shutdown -h now
-fi

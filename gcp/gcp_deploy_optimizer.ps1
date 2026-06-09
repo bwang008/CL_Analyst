@@ -188,6 +188,8 @@ $codeFiles = @(
     @{ Local = "agent\batch_post_optimizer.py";  Remote = "agent/" },
     @{ Local = "agent\generate_batch_configs.py"; Remote = "agent/" },
     @{ Local = "agent\strategy_optimizer.py";    Remote = "agent/" },
+    @{ Local = "agent\sweep_ensembles.py";       Remote = "agent/" },
+    @{ Local = "agent\select_top_ensembles.py";  Remote = "agent/" },
     @{ Local = "agent\backtest_engine.py";       Remote = "agent/" },
     @{ Local = "agent\__init__.py";              Remote = "agent/" },
     @{ Local = "src\util.py";                    Remote = "src/" },
@@ -223,6 +225,15 @@ foreach ($file in $codeFiles) {
         Write-Host "  WARNING: Missing $($file.Local)" -ForegroundColor Yellow
     }
 }
+
+# Upload strategy configs
+$configsDir = Join-Path $ProjectDir "configs\strategies\*.json"
+try {
+    gcloud compute scp "$configsDir" "${VmName}:${RemoteProject}/configs/strategies/" --zone=$Zone --quiet 2>$null
+} catch {
+    Write-Host "  WARNING: Failed to copy configs" -ForegroundColor Yellow
+}
+
 Write-Host "  Code uploaded!" -ForegroundColor Green
 
 # Fix CRLF line endings on shell scripts (Windows git checkout produces CRLF which breaks bash)

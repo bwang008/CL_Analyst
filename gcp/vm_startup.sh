@@ -31,7 +31,8 @@ pip install --no-cache-dir --quiet \
     'numpy>=1.21.0' \
     'scikit-learn>=1.0.0' \
     'pyarrow>=10.0.0' \
-    'sqlalchemy>=1.4.0'
+    'sqlalchemy>=1.4.0' \
+    'tabulate>=0.9.0'
 
 # Make venv accessible to all users (SSH user needs write access)
 chmod -R 777 /opt/optuna-env

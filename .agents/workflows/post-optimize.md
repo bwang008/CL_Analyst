@@ -8,7 +8,10 @@ description: Run strategy optimization on all models in a completed batch direct
 
 ## Overview
 
-Runs `batch_post_optimizer.py` on all completed experiments in a batch directory, optimizing strategy parameters (threshold, TP/SL, trailing, cooldown, hold bars, consecutive signals) for each target × metric × direction combination using Optuna. Trial count is set per-tier in the manifest (canary: 20, scout: 500, production: 1500).
+Runs `vm_post_optimize.sh` on a completed batch directory, which executes a 3-step pipeline natively on the cloud:
+1. **Sweep Ensembles**: Cross-pairs all Long and Short base models using a baseline config (`sweep_ensembles.py`)
+2. **Top-8 Selection**: Automatically filters and ranks the 256 ensembles based on trade count and holdout PnL (`select_top_ensembles.py`)
+3. **Targeted Optimization**: Runs `batch_post_optimizer.py` *only* on the selected top 8 ensemble pairs, optimizing strategy parameters (threshold, TP/SL, trailing, cooldown, hold bars) for the combined ensemble using Optuna.
 
 > [!NOTE]
 > Post-optimization runs **automatically** at the end of `run_sweep_batch.ps1`. You only need this workflow for manual re-runs or standalone optimization.
@@ -39,8 +42,10 @@ powershell -ExecutionPolicy Bypass -File .\gcp\gcp_deploy_optimizer.ps1 `
 
 The VM will:
 1. Download all experiment artifacts from GCS
-2. Run optimizations in parallel (targets × 2 metrics)
-3. **Generate correctly-formatted strategy configs** from optimization results
+2. Run `sweep_ensembles.py` to cross-pair all models and generate `batch_ensemble_pre_opt.md`
+3. Run `select_top_ensembles.py` to filter and rank the Top 8 models
+4. Run `batch_post_optimizer.py` on the top 8 pairs
+5. Upload results (`batch_ensemble_pre_opt.md`, `batch_summary_optimized.md`, `top_8_ensembles.json`) back to GCS
 4. Upload results + configs to `gs://cltrainer-optuna-results/batch_optimizer/<batch_id>/`
 5. Send Telegram notifications per-task with convergence info (best trial #)
 6. Self-shutdown on completion
@@ -48,9 +53,11 @@ The VM will:
 **Download results after VM terminates:**
 ```powershell
 $batchId = "batch_XXXXXXXX_XXXX"
-# Download optimization report + results
-gcloud storage cp "gs://cltrainer-optuna-results/batch_optimizer/$batchId/batch_summary_optimized.md" "reports\batch_runs\$batchId\"
-gcloud storage cp "gs://cltrainer-optuna-results/batch_optimizer/$batchId/optimization_results.json" "reports\batch_runs\$batchId\"
+# Download reports + results
+gcloud storage cp "gs://cltrainer-optuna-results/batch_optimizer/$batchId/batch_ensemble_pre_opt.md" "reports\batch_runs\$batchId\"
+gcloud storage cp "gs://cltrainer-optuna-results/batch_optimizer/$batchId/top_8_ensembles.json" "reports\batch_runs\$batchId\"
+gcloud storage cp "gs://cltrainer-optuna-results/batch_optimizer/$batchId/batch_summary_optimized_sharpe.md" "reports\batch_runs\$batchId\"
+gcloud storage cp "gs://cltrainer-optuna-results/batch_optimizer/$batchId/optimization_results_sharpe.json" "reports\batch_runs\$batchId\"
 # Download correctly-formatted strategy configs
 New-Item -ItemType Directory -Force -Path "reports\batch_runs\$batchId\configs"
 gcloud storage cp -r "gs://cltrainer-optuna-results/batch_optimizer/$batchId/batch_configs/*" "reports\batch_runs\$batchId\configs\"
