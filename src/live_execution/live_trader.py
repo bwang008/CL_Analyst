@@ -119,7 +119,16 @@ _POLL_INTERVAL = 5.0
 # Reconnection parameters
 _RECONNECT_BASE_DELAY = 5.0      # Initial delay before reconnect attempt (seconds)
 _RECONNECT_MAX_DELAY = 300.0     # Max backoff delay (5 minutes)
-_RECONNECT_MAX_ATTEMPTS = 50     # Max retry attempts (~2+ hours of retries)
+_RECONNECT_MAX_ATTEMPTS = 15     # Max retry attempts (~25 min at max backoff)
+
+# Data farm health check after reconnect:
+# IBKR fires 2103/2105 when data farms are broken, and 2104/2106 when OK.
+# After TCP connect, we wait this many seconds for data farm "OK" signals
+# before treating the connection as healthy.  If only "broken" signals arrive,
+# the attempt is failed immediately (no point trying to resubscribe).
+_DATA_FARM_BROKEN_CODES = {2103, 2105}     # Market data / HMDS farm broken
+_DATA_FARM_OK_CODES = {2104, 2106}         # Market data / HMDS farm OK
+_DATA_FARM_WAIT_SECONDS = 10.0             # How long to wait for farm OK after connect
 
 # Stale bar watchdog: force reconnect when bars stop arriving
 _STALE_BAR_THRESHOLD_MINUTES = 15  # Minutes without a bar before forcing reconnect
@@ -388,6 +397,8 @@ class LiveTrader:
         self._last_bar_time_1h: Optional[pd.Timestamp] = None
         self._subscriptions_lost = False  # Track connectivity drops
         self._resubscribe_pending = False  # Prevent duplicate resubscription scheduling
+        self._data_farm_ok = False         # Set True when 2104/2106 received
+        self._data_farm_broken_only = False # True if only 2103/2105 received (no OK)
         self._callbacks_registered = False
         self._last_decision_context_by_order_id: dict[int, dict] = {}
         self._position_entry_bar_time: Optional[pd.Timestamp] = None
@@ -2358,11 +2369,17 @@ class LiveTrader:
         if errorCode in (1100, 1101, 2103, 2105):
             log.warning("CONNECTIVITY/DATA FARM LOST (code %d: %s) — marking subscriptions as lost", errorCode, errorString)
             self._subscriptions_lost = True
+            if errorCode in _DATA_FARM_BROKEN_CODES:
+                self._data_farm_broken_only = True
 
         # Error 1102: connectivity restored, data maintained
         # Error 1101: connectivity restored, data lost
         # Warning 2104: Market data farm connection is OK
         # Warning 2106: HMDS data farm connection is OK
+        if errorCode in _DATA_FARM_OK_CODES:
+            self._data_farm_ok = True
+            self._data_farm_broken_only = False
+
         if errorCode in (1101, 1102, 2104, 2106) and self._subscriptions_lost:
             if self._resubscribe_pending:
                 log.info("CONNECTIVITY RESTORED (code %d) — resubscription already scheduled, skipping", errorCode)
@@ -3389,6 +3406,13 @@ class LiveTrader:
         """Reconnect to IB Gateway with exponential backoff.
 
         Returns True if reconnection + resubscription succeeded.
+
+        After establishing a TCP connection, waits up to
+        _DATA_FARM_WAIT_SECONDS for data farm "OK" signals (2104/2106).
+        If only "broken" signals (2103/2105) arrive, the attempt is
+        treated as failed immediately — there is no point trying to
+        resubscribe when the gateway has no upstream data connection
+        (e.g., IBKR data subscription lost to another session).
         """
         delay = _RECONNECT_BASE_DELAY
         for attempt in range(1, _RECONNECT_MAX_ATTEMPTS + 1):
@@ -3409,12 +3433,42 @@ class LiveTrader:
                     self.manager.ib.disconnect()
                 except Exception:
                     pass
+                # Reset data farm health flags before connecting
+                self._data_farm_ok = False
+                self._data_farm_broken_only = False
                 # Reconnect
                 self.manager.connect()
                 # Re-register error handler (lost on disconnect)
                 self.manager.ib.errorEvent += self._on_ib_error
                 self._callbacks_registered = False
                 self._register_execution_callbacks()
+
+                # ── Data farm health check ─────────────────────────
+                # IBKR fires 2103/2105 (broken) and/or 2104/2106 (OK)
+                # immediately after connect.  Wait briefly for the
+                # asyncio event loop to process these callbacks.
+                waited = 0.0
+                poll_step = 0.5
+                while waited < _DATA_FARM_WAIT_SECONDS:
+                    self.manager.ib.sleep(poll_step)
+                    waited += poll_step
+                    if self._data_farm_ok:
+                        break  # At least one data farm is healthy
+
+                if self._data_farm_broken_only and not self._data_farm_ok:
+                    log.warning(
+                        "Reconnect attempt %d: TCP connected but data farms "
+                        "still broken (no 2104/2106 received in %.0fs). "
+                        "Gateway has no upstream data — will retry.",
+                        attempt, _DATA_FARM_WAIT_SECONDS,
+                    )
+                    try:
+                        self.manager.ib.disconnect()
+                    except Exception:
+                        pass
+                    delay = min(delay * 2, _RECONNECT_MAX_DELAY)
+                    continue  # Skip resubscription — it would fail anyway
+
                 # Resubscribe + backfill gaps
                 self._subscriptions_lost = True
                 self._resubscribe_and_backfill()

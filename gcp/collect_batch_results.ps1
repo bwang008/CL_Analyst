@@ -159,7 +159,21 @@ $rows     = @()
 $failRows = @()
 
 foreach ($exp in $progress.experiments) {
-    $localDir     = Join-Path $BatchDir $exp.gcs_prefix
+    # Resolve the local directory: prefer local_dir from progress (the canonical download
+    # path written during the batch run), fall back to $BatchDir/<gcs_prefix>
+    $localDir = $null
+    if ($exp.local_dir -and (Test-Path $exp.local_dir)) {
+        $localDir = $exp.local_dir
+    } else {
+        $candidate = Join-Path $BatchDir $exp.gcs_prefix
+        if (Test-Path $candidate) {
+            $localDir = $candidate
+        } elseif ($exp.local_dir) {
+            $localDir = $exp.local_dir   # use even if missing — keeps the path in the report
+        } else {
+            $localDir = Join-Path $BatchDir $exp.gcs_prefix
+        }
+    }
     $summaryPath  = Join-Path $localDir "pipeline_summary.json"
 
     $row = [ordered]@{
@@ -167,6 +181,7 @@ foreach ($exp in $progress.experiments) {
         Status         = $exp.status
         WallTimeMin    = $exp.wall_time_min
         ArtifactOk     = $exp.artifact_verified
+        ExitCode       = $exp.exit_code
         # Per-model metrics (filled below)
         LongLL_Trades  = "-"; LongLL_WR  = "-"; LongLL_PF  = "-"; LongLL_PnL  = "-"
         LongAP_Trades  = "-"; LongAP_WR  = "-"; LongAP_PF  = "-"; LongAP_PnL  = "-"
@@ -178,7 +193,8 @@ foreach ($exp in $progress.experiments) {
         LocalDir       = $localDir
     }
 
-    if ($exp.status -eq "COMPLETED" -and (Test-Path $summaryPath)) {
+    # Try to parse pipeline_summary.json for backtest metrics
+    if (Test-Path $summaryPath) {
         try {
             $ps = Get-Content $summaryPath -Raw | ConvertFrom-Json
             $bt = $ps.backtest_results
@@ -198,10 +214,16 @@ foreach ($exp in $progress.experiments) {
         } catch {
             Write-Host "  WARNING: Could not parse $summaryPath : $_" -ForegroundColor Yellow
         }
-        $rows     += $row
     } else {
-        $row.LongLL_Trades = "FAILED"
+        Write-Host "  NOTE: pipeline_summary.json not found at $summaryPath" -ForegroundColor Yellow
+    }
+
+    # Classify as failed only if the experiment truly failed (not merely missing metrics)
+    $isFailed = ($exp.status -ne "COMPLETED") -or ($exp.exit_code -and $exp.exit_code -ne 0)
+    if ($isFailed) {
         $failRows += $row
+    } else {
+        $rows += $row
     }
 }
 
@@ -389,10 +411,15 @@ Write-Host ("-" * 100)
 
 $tgLines = @("*Experiment Ensemble Results:*")
 foreach ($row in $rows) {
-    $tgLines += "• *$($row.Label)*: LL PF=$($row.EnsLL_PF) PnL=`$$($row.EnsLL_PnL) | AP PF=$($row.EnsAP_PF) PnL=`$$($row.EnsAP_PnL)"
+    if ($row.EnsLL_PF -ne "-" -or $row.EnsAP_PF -ne "-") {
+        $tgLines += "✅ *$($row.Label)*: LL PF=$($row.EnsLL_PF) PnL=`$$($row.EnsLL_PnL) | AP PF=$($row.EnsAP_PF) PnL=`$$($row.EnsAP_PnL)"
+    } else {
+        $tgLines += "✅ *$($row.Label)*: COMPLETED (metrics pending)"
+    }
 }
 if ($failRows.Count -gt 0) {
-    $tgLines += "`n*Failed:* " + ($failRows | ForEach-Object { $_.Label }) -join ", "
+    $failLabels = ($failRows | ForEach-Object { $_.Label }) -join ", "
+    $tgLines += "`n❌ *Failed:* $failLabels"
 }
 $tgLines += "`n*Full report:* ``$ReportPath``"
 Send-TelegramMessage ($tgLines -join "`n")

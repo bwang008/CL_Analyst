@@ -26,6 +26,24 @@ cleanup() {
         echo "============================================================" | tee -a "$LOG"
         echo " TRAP TRIGGERED: Script exited with code $exit_code" | tee -a "$LOG"
         echo "============================================================" | tee -a "$LOG"
+
+        # Send Telegram alert
+        python3 -c "
+import os, sys, urllib.request, json
+try:
+    with open('/home/$(whoami)/project/.env') as f:
+        env = dict(line.strip().split('=', 1) for line in f if '=' in line and not line.startswith('#'))
+    token = env.get('TELEGRAM_BOT_TOKEN')
+    chat_id = env.get('TELEGRAM_CHAT_ID')
+    if token and chat_id:
+        msg = f'🚨 <b>[VM CRASH] {os.path.basename(sys.argv[1])}</b>\nExit Code: {sys.argv[2]}\n\n<b>Log Tail:</b>\n<pre>{sys.argv[3]}</pre>'
+        req = urllib.request.Request(f'https://api.telegram.org/bot{token}/sendMessage', 
+            data=json.dumps({'chat_id': chat_id, 'text': msg, 'parse_mode': 'HTML'}).encode('utf-8'),
+            headers={'Content-Type': 'application/json'})
+        urllib.request.urlopen(req, timeout=10)
+except Exception as e:
+    print('Failed to send telegram:', e)
+" "$0" "$exit_code" "$(tail -n 15 "$LOG" 2>/dev/null)" || true
     fi
     
     # Upload logs before dying

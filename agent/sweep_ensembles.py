@@ -75,6 +75,14 @@ def run_backtest(long_path, short_path, base_config, data_path, temp_config, lon
     
     result = subprocess.run(cmd, capture_output=True, text=True)
     out = result.stdout
+    err = result.stderr
+    
+    # Debug: print errors from subprocess
+    if result.returncode != 0 or (not out.strip()):
+        print(f"  [DEBUG] Backtest failed (rc={result.returncode}):")
+        if err:
+            for line in err.strip().splitlines()[-5:]:
+                print(f"    {line}")
     
     trades = re.search(r"Total Trades:\s+(\d+)", out)
     trades = trades.group(1) if trades else "0"
@@ -142,13 +150,18 @@ def main():
     
     def process_pair(lname, lpath, sname, spath):
         # Temp config needs to be unique for concurrent execution
-        thread_temp_cfg = temp_cfg.replace(".json", f"_{lname}_{sname}.json")
+        import hashlib
+        pair_hash = hashlib.md5(f"{lpath}_{spath}".encode()).hexdigest()[:8]
+        thread_temp_cfg = temp_cfg.replace(".json", f"_{pair_hash}.json")
         met = run_backtest(
             lpath, spath, args.base_config, args.data, thread_temp_cfg, 
             args.long_threshold, args.short_threshold
         )
-        if os.path.exists(thread_temp_cfg):
-            os.remove(thread_temp_cfg)
+        try:
+            if os.path.exists(thread_temp_cfg):
+                os.remove(thread_temp_cfg)
+        except OSError:
+            pass  # race condition with concurrent threads
         if not met: return None
         return {
             "Long Model": lname,

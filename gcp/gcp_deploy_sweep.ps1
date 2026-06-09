@@ -176,6 +176,12 @@ $codeFiles = @(
     @{ Local = "gcp\vm_e2e_pipeline.py";         Remote = "gcp/" }
 )
 
+# Upload .env for Telegram (if exists)
+$envFile = Join-Path $ProjectDir ".env"
+if (Test-Path $envFile) {
+    $codeFiles += @{ Local = ".env"; Remote = "" }
+}
+
 foreach ($file in $codeFiles) {
     $localPath = Join-Path $ProjectDir $file.Local
     $remotePath = "$RemoteProject/$($file.Remote)"
