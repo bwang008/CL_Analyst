@@ -111,7 +111,14 @@ sudo systemctl disable live-trader.service ibc-gateway.service
 #restart the service so it starts at startup
 sudo systemctl enable ibc-gateway.service live-trader.service
 sudo systemctl start live-trader.service
-
+===
+# Full restart (gateway + trader)
+sudo systemctl stop live-trader.service
+sudo systemctl restart ibc-gateway.service
+# Wait ~20s, verify gateway is healthy:
+journalctl -u ibc-gateway.service -o cat --since "1 min ago"
+# Look for "Market data farm connection is OK", then:
+sudo systemctl start live-trader.service
 ===
 # Start the headless IB Gateway (managed by IBC)
 sudo systemctl start ibc-gateway.service

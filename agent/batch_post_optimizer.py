@@ -33,6 +33,137 @@ from agent.backtest_engine import BacktestEngine, load_ohlcv, load_predictions
 from agent.strategy_optimizer import run_optimization, extract_metrics, send_telegram, suppress_telegram
 
 
+import re as _re
+
+def shorten_model_name(name: str) -> str:
+    """Shorten verbose model names for readability.
+    
+    'sweep_hs10_3x1_6h_20260609_0026_registry_E2E_HourSet_10_long_average_precision' -> 'HS10_AP_LONG'
+    'registry_E2E_HourSet_10_short_logloss' -> 'HS10_LL_SHORT'
+    """
+    # Strip experiment prefix (everything before 'registry_' or 'E2E_')
+    n = name
+    if "registry_E2E_" in n:
+        n = n[n.index("registry_E2E_"):]
+    elif "E2E_" in n:
+        n = n[n.index("E2E_"):]
+    n = n.replace("registry_", "").replace("E2E_", "")
+    
+    # Extract HourSet number
+    hs_match = _re.search(r'HourSet_(\d+)', n)
+    hs = f"HS{hs_match.group(1)}" if hs_match else ""
+    
+    # Extract direction
+    direction = ""
+    if "_long_" in n or n.endswith("_long"):
+        direction = "LONG"
+    elif "_short_" in n or n.endswith("_short"):
+        direction = "SHORT"
+    
+    # Extract metric
+    metric = ""
+    if "average_precision" in n or "average_pre" in n:
+        metric = "AP"
+    elif "logloss" in n:
+        metric = "LL"
+    
+    parts = [p for p in [hs, metric, direction] if p]
+    return "_".join(parts) if parts else name
+
+
+def shorten_model_side(name: str) -> str:
+    """Extract just the metric + direction from a model name for ensemble display.
+    
+    'sweep_hs10_3x1_6h_20260609_0026_registry_E2E_HourSet_10_long_average_precision' -> 'AP_LONG'
+    'registry_E2E_HourSet_10_short_logloss' -> 'LL_SHORT'
+    """
+    # Strip experiment prefix (everything before 'registry_' or 'E2E_')
+    n = name
+    if "registry_E2E_" in n:
+        n = n[n.index("registry_E2E_"):]
+    elif "E2E_" in n:
+        n = n[n.index("E2E_"):]
+    n = n.replace("registry_", "").replace("E2E_", "")
+    direction = ""
+    if "_long_" in n or n.endswith("_long"):
+        direction = "LONG"
+    elif "_short_" in n or n.endswith("_short"):
+        direction = "SHORT"
+    metric = ""
+    if "average_precision" in n or "average_pre" in n:
+        metric = "AP"
+    elif "logloss" in n:
+        metric = "LL"
+    parts = [p for p in [metric, direction] if p]
+    return "_".join(parts) if parts else name
+
+
+
+def _unique_model_name(model_path: str) -> str:
+    """Build a unique model name from a model directory path.
+    
+    Combines the experiment directory (e.g. 'sweep_hs10_3x1_6h_20260609_0026')
+    with the model basename (e.g. 'E2E_HourSet_10_long_logloss') to produce a
+    globally unique key. Skips intermediate 'registry' and 'canary_output' dirs.
+    
+    Must match the logic in sweep_ensembles.py._unique_model_name() exactly.
+    
+    Example:
+        'reports/sweep_hs10_3x1_6h_20260609_0026/registry/canary_output/registry/E2E_HourSet_10_long_logloss'
+        -> 'sweep_hs10_3x1_6h_20260609_0026_E2E_HourSet_10_long_logloss'
+    """
+    parts = model_path.replace("\\", "/").split("/")
+    basename = parts[-1]  # e.g. "E2E_HourSet_10_long_logloss"
+    
+    # Walk backwards from the model dir to find the experiment directory
+    # (skip 'registry', 'canary_output', 'reports' and similar generic names)
+    skip_dirs = {"registry", "canary_output", "reports", "batch_runs", ".", ""}
+    experiment_dir = ""
+    for part in reversed(parts[:-1]):
+        if part.lower() not in skip_dirs:
+            experiment_dir = part
+            break
+    
+    if experiment_dir:
+        return f"{experiment_dir}_{basename}"
+    return basename
+
+
+def _build_gcs_prefix_to_label(progress: dict) -> dict:
+    """Build a mapping from gcs_prefix -> experiment label from batch_progress.json.
+    
+    E.g. 'sweep_hs10_3x1_6h_20260608_2220' -> 'HS10 3x1 6H'
+    Also builds a stripped version without timestamp for fuzzy matching:
+    'sweep_hs10_3x1_6h' -> 'HS10 3x1 6H'
+    """
+    mapping = {}
+    for exp in progress.get("experiments", []):
+        gcs_prefix = exp.get("gcs_prefix", "")
+        label = exp.get("label", "")
+        if gcs_prefix and label:
+            mapping[gcs_prefix] = label
+            # Also store a version stripped of the trailing timestamp
+            # e.g. 'sweep_hs10_3x1_6h_20260608_2220' -> 'sweep_hs10_3x1_6h'
+            stripped = _re.sub(r'_\d{8}_\d{4}$', '', gcs_prefix)
+            if stripped != gcs_prefix:
+                mapping[stripped] = label
+    return mapping
+
+
+def _label_from_pred_path(pred_path: str, gcs_to_label: dict) -> str:
+    """Extract experiment label from a prediction path by matching directory names.
+    
+    Path like:
+      reports/sweep_hs10_3x1_6h_20260608_2220/registry/canary_output/E2E_.../oos_predictions.csv
+    Contains 'sweep_hs10_3x1_6h_20260608_2220' which maps to 'HS10 3x1 6H'.
+    """
+    parts = pred_path.replace("\\", "/").split("/")
+    for part in parts:
+        if part in gcs_to_label:
+            return gcs_to_label[part]
+    return ""
+
+
 def find_ohlcv_path(manifest_path: str) -> str:
     """Resolve the local OHLCV parquet from the batch manifest."""
     with open(manifest_path) as f:
@@ -155,6 +286,7 @@ def generate_optimized_report(
     n_trials: int = 0,
     n_workers: int = 1,
     objective_metric: str = "sharpe",
+    task_experiment_labels: dict | None = None,
 ) -> str:
     """Generate batch_summary_optimized_{objective}.md with pre/post comparison."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -171,29 +303,77 @@ def generate_optimized_report(
 
     has_ensembles = any(k.count('|') == 1 for k in all_results.keys())
 
+    # Resolve experiment labels for ensemble keys
+    exp_labels = task_experiment_labels or {}
+
     if has_ensembles:
-        lines.append("### Ensembles (Top 8)")
+        lines.append(f"### Ensembles (Top {len(all_results)})")
         lines.append("")
-        lines.append("| Long/Short Pair | Trades (opt) | PF (opt) | PnL (opt) | PnL (holdout) | Best Trial |")
-        lines.append("|---|---|---|---|---|---|")
-        for key, opt in all_results.items():
+        lines.append("| # | Experiment | Long Model | Short Model | Trades (pre) | Trades (opt) | Trades (ho) | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (holdout) | Opt Thr | Best Trial |")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+        for idx, (key, opt) in enumerate(all_results.items(), 1):
+            # Derive experiment + model display names
+            parts = key.split('|')
+            long_model = shorten_model_side(parts[0]) if len(parts) == 2 else key
+            short_model = shorten_model_side(parts[1]) if len(parts) == 2 else ""
+
+            # Get experiment labels from the threaded metadata
+            labels_info = exp_labels.get(key, {})
+            long_exp = labels_info.get("long_label", "")
+            short_exp = labels_info.get("short_label", "")
+            if long_exp and short_exp:
+                if long_exp == short_exp:
+                    experiment_col = long_exp
+                else:
+                    experiment_col = f"{long_exp} / {short_exp}"
+            elif long_exp:
+                experiment_col = long_exp
+            elif short_exp:
+                experiment_col = short_exp
+            else:
+                experiment_col = "-"
+
+            if long_exp:
+                long_model = f"{long_model} ({long_exp})"
+            if short_exp:
+                short_model = f"{short_model} ({short_exp})"
+
             if opt.get("status") == "OK":
                 om = opt.get("metrics", {})
                 opt_info = opt.get("optuna_info", opt.get("config", {}).get("optuna_info", {}))
                 ho_metrics = opt_info.get("holdout_metrics", {})
                 ho_pnl = f"${ho_metrics['total_pnl']:,.0f}" if ho_metrics else "-"
+                ho_trades = ho_metrics.get('trade_count', '-') if ho_metrics else "-"
                 trial_num = opt_info.get('trial_number', '-')
                 n_t = opt_info.get('n_trials', '?')
+                baseline = opt_info.get("baseline_metrics", {})
+
+                # Baseline metrics
+                base_trades = baseline.get('trade_count', '-')
+                base_pf = f"{baseline['profit_factor']:.2f}" if 'profit_factor' in baseline else '-'
+                base_pnl = f"${baseline['total_pnl']:,.0f}" if 'total_pnl' in baseline else '-'
+
+                # Optimized metrics
+                opt_trades = om.get('trade_count', 0)
+                opt_pf = f"{om.get('profit_factor', 0.0):.2f}"
+                opt_pnl = f"${om.get('total_pnl', 0.0):,.0f}"
                 
-                parts = key.split('|')
-                pair_label = f"{parts[0][:20]}... | {parts[1][:20]}..." if len(parts) == 2 else key
-                
+                long_params = opt_info.get("long_params", {})
+                short_params = opt_info.get("short_params", {})
+                lv = long_params.get('entry_threshold', '-')
+                sv = short_params.get('entry_threshold', '-')
+                if isinstance(lv, float): lv = round(lv, 2)
+                if isinstance(sv, float): sv = round(sv, 2)
+                opt_thr = f"{lv} / {sv}"
+
                 lines.append(
-                    f"| {pair_label} | {om.get('trade_count', 0)} | "
-                    f"{om.get('profit_factor', 0.0):.2f} | "
-                    f"${om.get('total_pnl', 0.0):,.0f} | "
-                    f"{ho_pnl} | "
+                    f"| {idx} | {experiment_col} | {long_model} | {short_model} | {base_trades} | {opt_trades} | {ho_trades} | "
+                    f"{base_pf} | {opt_pf} | {base_pnl} | {opt_pnl} | {ho_pnl} | {opt_thr} | "
                     f"#{trial_num}/{n_t} |"
+                )
+            elif opt.get("status") == "FAILED":
+                lines.append(
+                    f"| {idx} | {experiment_col} | {long_model} | {short_model} | - | FAILED | - | - | - | - | - | - | - | - |"
                 )
         lines.append("")
     else:
@@ -288,7 +468,22 @@ def generate_optimized_report(
         metrics = result.get("metrics", {})
         baseline = opt_info.get("baseline_metrics", {})
 
-        lines.append(f"### {key}")
+        # Build a readable heading with experiment label if available
+        labels_info = exp_labels.get(key, {})
+        long_exp = labels_info.get("long_label", "")
+        short_exp = labels_info.get("short_label", "")
+        if long_exp or short_exp:
+            exp_tag = long_exp if long_exp == short_exp else f"{long_exp or '?'} / {short_exp or '?'}"
+            parts = key.split('|')
+            if len(parts) == 2:
+                long_side = shorten_model_side(parts[0])
+                short_side = shorten_model_side(parts[1])
+                heading = f"{exp_tag} | {long_side} + {short_side}"
+            else:
+                heading = f"{exp_tag} | {key}"
+        else:
+            heading = key
+        lines.append(f"### {heading}")
         lines.append("")
         lines.append("| Parameter | Baseline | Optimized |")
         lines.append("|---|---|---|")
@@ -297,17 +492,43 @@ def generate_optimized_report(
         lines.append(f"| Win Rate | {baseline.get('win_rate', '-')} | {metrics.get('win_rate', '-')} |")
         lines.append(f"| PnL | ${baseline.get('total_pnl', 0):,.2f} | ${metrics.get('total_pnl', 0):,.2f} |")
         lines.append(f"| Max Drawdown | ${baseline.get('max_drawdown', 0):,.2f} | ${metrics.get('max_drawdown', 0):,.2f} |")
-        lines.append(f"| Threshold | - | {params.get('entry_threshold', '-')} |")
-        lines.append(f"| TP ATR Mult | - | {params.get('tp_atr_mult', '-')} |")
-        lines.append(f"| SL ATR Mult | - | {params.get('sl_atr_mult', '-')} |")
-        lines.append(f"| Trailing ATR | - | {params.get('trailing_atr_mult', '-')} |")
-        lines.append(f"| Cooldown Bars | - | {params.get('cooldown_bars', '-')} |")
-        lines.append(f"| Max Hold Bars | - | {params.get('max_hold_bars', '-')} |")
-        lines.append(f"| Consec Signal | - | {params.get('consecutive_signal_threshold', '-')} |")
+
+        # Ensemble mode stores suffixed param keys (entry_threshold_long, etc.) in params,
+        # but the un-suffixed keys are in long_params/short_params.
+        is_ensemble = '|' in key and len(key.split('|')) == 2
+        long_params = opt_info.get("long_params", {})
+        short_params = opt_info.get("short_params", {})
+
+        if is_ensemble and (long_params or short_params):
+            # Show per-side params as "L / S" values
+            param_keys = [
+                ("Threshold", "entry_threshold"),
+                ("TP ATR Mult", "tp_atr_mult"),
+                ("SL ATR Mult", "sl_atr_mult"),
+                ("Trailing ATR", "trailing_atr_mult"),
+                ("Cooldown Bars", "cooldown_bars"),
+                ("Max Hold Bars", "max_hold_bars"),
+                ("Consec Signal", "consecutive_signal_threshold"),
+                ("ATR Period", "atr_period"),
+            ]
+            for display_name, param_key in param_keys:
+                lv = long_params.get(param_key, '-')
+                sv = short_params.get(param_key, '-')
+                lines.append(f"| {display_name} | - | {lv} / {sv} |")
+        else:
+            lines.append(f"| Threshold | - | {params.get('entry_threshold', '-')} |")
+            lines.append(f"| TP ATR Mult | - | {params.get('tp_atr_mult', '-')} |")
+            lines.append(f"| SL ATR Mult | - | {params.get('sl_atr_mult', '-')} |")
+            lines.append(f"| Trailing ATR | - | {params.get('trailing_atr_mult', '-')} |")
+            lines.append(f"| Cooldown Bars | - | {params.get('cooldown_bars', '-')} |")
+            lines.append(f"| Max Hold Bars | - | {params.get('max_hold_bars', '-')} |")
+            lines.append(f"| Consec Signal | - | {params.get('consecutive_signal_threshold', '-')} |")
+
         trial_num = opt_info.get('trial_number', '-')
         lines.append(f"| Best Trial | - | #{trial_num}/{opt_info.get('n_trials', '-')} |")
         lines.append(f"| Wall Time | - | {opt_info.get('wall_time_seconds', '-')}s |")
         lines.append("")
+
 
     out_lines = []
     table_lines = []
@@ -333,6 +554,7 @@ def _run_for_objective(
     progress: dict,
     n_workers: int,
     total_start: float,
+    task_experiment_labels: dict | None = None,
 ):
     """Run all optimization tasks for a single objective (sharpe or sortino).
 
@@ -389,7 +611,7 @@ def _run_for_objective(
                     ohlcv_path=ohlcv_path,
                     n_trials=args.n_trials,
                     min_trades=args.min_trades,
-                    label=f"{label} {side.upper()} {metric}",
+                    label=f"{label} {(side or 'ensemble').upper()} {metric}",
                     holdout_months=args.holdout_months,
                     n_jobs=args.jobs,
                     quiet=True,
@@ -407,7 +629,7 @@ def _run_for_objective(
                     result = {"status": "FAILED", "error": str(e)}
                 all_results[task_key] = result
                 _completed_count += 1
-                _maybe_send_progress(_completed_count, _total_tasks, f"{label} {side} {metric}", result.get('status', '?'))
+                _maybe_send_progress(_completed_count, _total_tasks, f"{label} {side or 'ensemble'} {metric}", result.get('status', '?'))
     else:
         for task_key, ens_config, merged_path, label, metric, side in opt_tasks:
             result = run_single_optimization(
@@ -416,7 +638,7 @@ def _run_for_objective(
                 ohlcv_path=ohlcv_path,
                 n_trials=args.n_trials,
                 min_trades=args.min_trades,
-                label=f"{label} {side.upper()} {metric}",
+                label=f"{label} {(side or 'ensemble').upper()} {metric}",
                 holdout_months=args.holdout_months,
                 n_jobs=args.jobs,
                 quiet=(args.workers > 1),
@@ -425,7 +647,7 @@ def _run_for_objective(
             )
             all_results[task_key] = result
             _completed_count += 1
-            _maybe_send_progress(_completed_count, _total_tasks, f"{label} {side} {metric}", result.get('status', '?'))
+            _maybe_send_progress(_completed_count, _total_tasks, f"{label} {side or 'ensemble'} {metric}", result.get('status', '?'))
 
     obj_elapsed = time.perf_counter() - obj_start
 
@@ -448,6 +670,7 @@ def _run_for_objective(
         n_trials=args.n_trials,
         n_workers=args.workers,
         objective_metric=objective_metric,
+        task_experiment_labels=task_experiment_labels,
     )
     report_path = os.path.join(batch_dir, report_name)
     with open(report_path, "w", encoding="utf-8") as f:
@@ -538,6 +761,8 @@ def main():
     # Build list of PER-SIDE optimization tasks
     # Each task: (task_key, config_path, merged_path, label, metric, side)
     opt_tasks = []
+    # Map task_key -> {"long_label": ..., "short_label": ...} for experiment labelling
+    task_experiment_labels = {}
     
     if args.target_pairs_json and os.path.exists(args.target_pairs_json):
         print(f"Loading top target pairs from {args.target_pairs_json}")
@@ -549,24 +774,56 @@ def main():
         if not os.path.exists(base_config_path):
             print(f"ERROR: base config not found: {base_config_path}")
             sys.exit(1)
+        
+        # Build gcs_prefix -> experiment label mapping from batch_progress.json
+        gcs_to_label = _build_gcs_prefix_to_label(progress)
             
-        # Map filenames to their full paths in the batch directory
+        # Map model directory names to their oos_predictions.csv paths
+        # sweep_ensembles.py uses directory names like "registry_E2E_HourSet_10_long_logloss"
+        # and the predictions are at <dir>/oos_predictions.csv
         pred_map = {}
-        for root, dirs, files in os.walk(batch_dir):
-            for file in files:
-                if file.endswith(".csv") and "oos_predictions_" in file:
-                    pred_map[file.replace(".csv", "")] = os.path.join(root, file)
+        
+        # Build list of directories to search: batch_dir + all experiment local_dirs
+        search_dirs = [batch_dir]
+        for exp in progress.get("experiments", []):
+            local_dir = exp.get("local_dir", "")
+            if local_dir and os.path.isdir(local_dir) and local_dir not in search_dirs:
+                search_dirs.append(local_dir)
+        
+        for search_dir in search_dirs:
+            for root, dirs, files in os.walk(search_dir):
+                for file in files:
+                    if file == "oos_predictions.csv":
+                        # Key matches sweep_ensembles.py._unique_model_name()
+                        # e.g. "sweep_hs10_3x1_6h_20260609_0026_E2E_HourSet_10_long_logloss"
+                        key = _unique_model_name(root)
+                        pred_map[key] = os.path.join(root, file)
+                    # Also support flat CSV naming: oos_predictions_<prefix>.csv
+                    elif file.startswith("oos_predictions_") and file.endswith(".csv"):
+                        stem = file.replace(".csv", "")
+                        pred_map[stem] = os.path.join(root, file)
+        
+        print(f"  Discovered {len(pred_map)} prediction paths across {len(search_dirs)} directories")
                     
         for i, pair in enumerate(top_pairs):
             long_prefix = pair["target_long"]
             short_prefix = pair["target_short"]
             
-            long_pred_path = pred_map.get(long_prefix)
-            short_pred_path = pred_map.get(short_prefix)
+            # Try exact match first, then legacy fallback with "registry_" prefix stripped
+            long_pred_path = pred_map.get(long_prefix) or pred_map.get(long_prefix.replace("registry_", "", 1))
+            short_pred_path = pred_map.get(short_prefix) or pred_map.get(short_prefix.replace("registry_", "", 1))
             
             if not long_pred_path or not short_pred_path:
                 print(f"Skipping pair: missing pred path for {long_prefix} or {short_prefix}")
+                if not long_pred_path:
+                    print(f"  -> No match for long '{long_prefix}' in {len(pred_map)} discovered paths")
+                if not short_pred_path:
+                    print(f"  -> No match for short '{short_prefix}' in {len(pred_map)} discovered paths")
                 continue
+            
+            # Resolve experiment labels from prediction paths
+            long_exp_label = _label_from_pred_path(long_pred_path, gcs_to_label)
+            short_exp_label = _label_from_pred_path(short_pred_path, gcs_to_label)
                 
             merged_filename = f"_merged_ens_{long_prefix}_vs_{short_prefix}.csv"
             canary_dir = os.path.dirname(long_pred_path)
@@ -578,6 +835,12 @@ def main():
                 
             label = f"Ensemble_{i+1}"
             task_key = f"{long_prefix}|{short_prefix}"
+            
+            # Store experiment labels for this task_key
+            task_experiment_labels[task_key] = {
+                "long_label": long_exp_label,
+                "short_label": short_exp_label,
+            }
             
             # Side is None for full ensemble optimization
             opt_tasks.append((task_key, base_config_path, merged_path, label, "ensemble", None))
@@ -660,6 +923,7 @@ def main():
             progress=progress,
             n_workers=n_workers,
             total_start=total_start,
+            task_experiment_labels=task_experiment_labels,
         )
 
     total_elapsed = time.perf_counter() - total_start

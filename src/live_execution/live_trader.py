@@ -3422,6 +3422,15 @@ class LiveTrader:
                 "Reconnect attempt %d/%d (waiting %.0fs)...",
                 attempt, _RECONNECT_MAX_ATTEMPTS, delay,
             )
+            # Telegram alert on FIRST attempt only
+            if attempt == 1:
+                try:
+                    self._telegram.send(
+                        f"*RECONNECT* - Connection lost, "
+                        f"attempting recovery (max {_RECONNECT_MAX_ATTEMPTS} attempts)..."
+                    )
+                except Exception:
+                    pass  # Telegram failures must never block reconnection
             # Use _stop_event.wait() instead of time.sleep() so Ctrl+C
             # (which sets _stop_event) interrupts the wait immediately
             # instead of blocking for the full backoff delay.
@@ -3462,6 +3471,15 @@ class LiveTrader:
                         "Gateway has no upstream data — will retry.",
                         attempt, _DATA_FARM_WAIT_SECONDS,
                     )
+                    # Rate-limited Telegram: only every 3rd attempt to avoid spam
+                    if attempt % 3 == 0:
+                        try:
+                            self._telegram.send(
+                                f"*RECONNECT* - Attempt {attempt}/{_RECONNECT_MAX_ATTEMPTS}: "
+                                f"Gateway connected but data farms broken (no upstream data)"
+                            )
+                        except Exception:
+                            pass  # Telegram failures must never block reconnection
                     try:
                         self.manager.ib.disconnect()
                     except Exception:
@@ -3473,6 +3491,12 @@ class LiveTrader:
                 self._subscriptions_lost = True
                 self._resubscribe_and_backfill()
                 log.info("Reconnected successfully on attempt %d", attempt)
+                try:
+                    self._telegram.send(
+                        f"*RECONNECTED* - Recovery successful on attempt {attempt}/{_RECONNECT_MAX_ATTEMPTS}"
+                    )
+                except Exception:
+                    pass  # Telegram failures must never block reconnection
                 return True
             except Exception as exc:
                 log.warning("Reconnect attempt %d failed: %s", attempt, exc)
@@ -3512,6 +3536,13 @@ class LiveTrader:
                             "attempting full restart...",
                             _RECONNECT_MAX_ATTEMPTS,
                         )
+                        try:
+                            self._telegram.send(
+                                f"*RECONNECT FAILED* - All {_RECONNECT_MAX_ATTEMPTS} attempts exhausted. "
+                                f"Triggering full restart {self._restart_count + 1}/{_RESTART_MAX_ATTEMPTS}..."
+                            )
+                        except Exception:
+                            pass  # Telegram failures must never block reconnection
                         self._running = False
                         self._needs_restart = True
                         break
@@ -3538,6 +3569,13 @@ class LiveTrader:
                                 "attempting full restart...",
                                 _RECONNECT_MAX_ATTEMPTS,
                             )
+                            try:
+                                self._telegram.send(
+                                    f"\U0001f6a8 *RECONNECT FAILED* \u2014 All {_RECONNECT_MAX_ATTEMPTS} attempts exhausted. "
+                                    f"Triggering full restart {self._restart_count + 1}/{_RESTART_MAX_ATTEMPTS}\u2026"
+                                )
+                            except Exception:
+                                pass  # Telegram failures must never block reconnection
                             self._running = False
                             self._needs_restart = True
                             break
@@ -3552,6 +3590,13 @@ class LiveTrader:
                         "attempting full restart...",
                         _RECONNECT_MAX_ATTEMPTS,
                     )
+                    try:
+                        self._telegram.send(
+                            f"*RECONNECT FAILED* - All {_RECONNECT_MAX_ATTEMPTS} attempts exhausted. "
+                            f"Triggering full restart {self._restart_count + 1}/{_RESTART_MAX_ATTEMPTS}..."
+                        )
+                    except Exception:
+                        pass  # Telegram failures must never block reconnection
                     # Signal that we need a full restart
                     self._running = False
                     self._needs_restart = True
@@ -3712,6 +3757,13 @@ class LiveTrader:
             "— forcing disconnect + reconnect",
             minutes_stale, subs_flag,
         )
+        try:
+            self._telegram.send(
+                f"*STALE BAR WATCHDOG* - No bars received for {minutes_stale:.0f}m "
+                f"during market hours. Forcing reconnect..."
+            )
+        except Exception:
+            pass  # Telegram failures must never block reconnection
         # Mark subscriptions as lost so downstream recovery paths are consistent
         self._subscriptions_lost = True
         # Disconnect first so _reconnect() starts with a clean state.

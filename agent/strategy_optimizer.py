@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import sys
@@ -961,10 +962,11 @@ def run_optimization(
         objective_metric=objective_metric, optimize_side=optimize_side,
     )
 
+    db_hash = hashlib.md5(f"strategy_opt_{model_name}_{objective_metric}".encode()).hexdigest()[:8]
     study = optuna.create_study(
         direction="maximize",
-        study_name=f"strategy_opt_{model_name}",
-        storage="sqlite:///optuna_study.db",
+        study_name=f"strategy_opt_{model_name}_{objective_metric}",
+        storage=f"sqlite:///optuna_study_{db_hash}.db",
         load_if_exists=True,
     )
 
@@ -1317,10 +1319,11 @@ def run_hybrid_optimization(
         optimize_side=optimize_side,
     )
 
+    db_hash = hashlib.md5(f"hybrid_opt_{model_name}_{objective_metric}".encode()).hexdigest()[:8]
     study = optuna.create_study(
         direction="maximize",
-        study_name=f"hybrid_opt_{model_name}",
-        storage="sqlite:///optuna_study.db",
+        study_name=f"hybrid_opt_{model_name}_{objective_metric}",
+        storage=f"sqlite:///optuna_study_{db_hash}.db",
         load_if_exists=True,
     )
 

@@ -323,13 +323,22 @@ class IBKRConnectionManager:
                     keepUpToDate=False,
                 )
                 if self._last_error and self._last_error[0] in _PACING_ERROR_CODES:
-                    raise RuntimeError(f"IBKR pacing violation: {self._last_error[1]}")
+                    if _is_pacing_error(RuntimeError(self._last_error[1])):
+                        raise RuntimeError(f"IBKR pacing violation: {self._last_error[1]}")
+                    else:
+                        log.warning(
+                            "IBKR error %d (non-pacing): %s — retrying normally",
+                            self._last_error[0], self._last_error[1],
+                        )
+                        raise RuntimeError(f"IBKR historical data error: {self._last_error[1]}")
                 if throttle_seconds:
                     time.sleep(throttle_seconds)
                 return bars
             except Exception as exc:
                 is_pacing = _is_pacing_error(exc) or (
-                    self._last_error and self._last_error[0] in _PACING_ERROR_CODES
+                    self._last_error
+                    and self._last_error[0] in _PACING_ERROR_CODES
+                    and _is_pacing_error(RuntimeError(self._last_error[1]))
                 )
                 if attempt >= max_retries:
                     raise

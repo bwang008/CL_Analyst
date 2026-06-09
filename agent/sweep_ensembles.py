@@ -12,6 +12,7 @@ import json
 import subprocess
 import os
 import re
+import sys
 import argparse
 import pandas as pd
 
@@ -24,6 +25,35 @@ def get_models_from_dir(directory, prefix=""):
                 if prefix == "" or basename.startswith(prefix) or prefix in root:
                     models.append(root.replace("\\", "/"))
     return models
+
+
+def _unique_model_name(model_path: str) -> str:
+    """Build a unique model name from a model directory path.
+    
+    Combines the experiment directory (e.g. 'sweep_hs10_3x1_6h_20260609_0026')
+    with the model basename (e.g. 'E2E_HourSet_10_long_logloss') to produce a
+    globally unique key. Skips intermediate 'registry' and 'canary_output' dirs.
+    
+    Example:
+        'reports/sweep_hs10_3x1_6h_20260609_0026/registry/canary_output/registry/E2E_HourSet_10_long_logloss'
+        -> 'sweep_hs10_3x1_6h_20260609_0026_E2E_HourSet_10_long_logloss'
+    """
+    parts = model_path.replace("\\", "/").split("/")
+    basename = parts[-1]  # e.g. "E2E_HourSet_10_long_logloss"
+    
+    # Walk backwards from the model dir to find the experiment directory
+    # (skip 'registry', 'canary_output', 'reports' and similar generic names)
+    skip_dirs = {"registry", "canary_output", "reports", "batch_runs", ".", ""}
+    experiment_dir = ""
+    for part in reversed(parts[:-1]):
+        if part.lower() not in skip_dirs:
+            experiment_dir = part
+            break
+    
+    if experiment_dir:
+        return f"{experiment_dir}_{basename}"
+    return basename
+
 
 def run_backtest(long_path, short_path, base_config, data_path, temp_config, long_threshold=None, short_threshold=None):
     # Load base config fresh for each pair
@@ -67,7 +97,7 @@ def run_backtest(long_path, short_path, base_config, data_path, temp_config, lon
         json.dump(cfg, f, indent=4)
         
     cmd = [
-        "python", "agent/backtest_engine.py",
+        sys.executable, "agent/backtest_engine.py",
         "--config", temp_config,
         "--data", data_path,
         "--slippage-per-side", "0.01"
@@ -181,11 +211,9 @@ def main():
     futures = []
     with ThreadPoolExecutor(max_workers=8) as executor:
         for lpath in long_models:
-            lparts = lpath.split("/")
-            lname = f"{lparts[-2]}_{lparts[-1]}" if len(lparts) >= 2 else lparts[-1]
+            lname = _unique_model_name(lpath)
             for spath in short_models:
-                sparts = spath.split("/")
-                sname = f"{sparts[-2]}_{sparts[-1]}" if len(sparts) >= 2 else sparts[-1]
+                sname = _unique_model_name(spath)
                 futures.append(executor.submit(process_pair, lname, lpath, sname, spath))
                 
         for future in as_completed(futures):

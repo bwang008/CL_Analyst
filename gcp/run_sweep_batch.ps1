@@ -575,6 +575,9 @@ while (-not $allDone) {
                 break
             } else {
                 Write-Host "  Failed to deploy in zone $z (exit $deployExit)." -ForegroundColor Yellow
+                # Clean up zombie VM — it may have been created before the deploy step failed
+                Write-Host "  Cleaning up zombie VM in zone $z..." -ForegroundColor Yellow
+                gcloud compute instances delete $exp.VmName --zone=$z --quiet 2>$null
             }
         }
 

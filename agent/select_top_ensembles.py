@@ -57,7 +57,8 @@ def main():
         print("Error: Could not parse any data from the markdown table.")
         return
 
-    # Columns expected: 'Long Model', 'Short Model', 'Trds', 'WR%', 'PF', 'Net PnL', 'Max DD', 'Tail PnL'
+    # Columns from sweep_ensembles.py DataFrame: 'Long Model', 'Short Model', 'Trades', 'Win Rate', 'Profit Factor', 'Net PnL', 'Max DD', 'Tail PnL'
+    # Also handle legacy abbreviated names: 'Trds', 'WR%', 'PF'
     # Parse 'Trds' to int, 'Net PnL' to float
     
     parsed_data = []
@@ -66,11 +67,13 @@ def main():
         short_model = row['Short Model']
         
         try:
-            trades = int(row['Trds'])
-        except ValueError:
+            trades_col = 'Trades' if 'Trades' in row.index else 'Trds'
+            trades = int(row[trades_col])
+        except (ValueError, KeyError):
             trades = 0
-            
-        pnl_str = row['Net PnL'].replace(',', '').replace('$', '')
+
+        pnl_col = 'Net PnL' if 'Net PnL' in row.index else 'PnL'
+        pnl_str = str(row[pnl_col]).replace(',', '').replace('$', '')
         try:
             pnl = float(pnl_str)
         except ValueError:

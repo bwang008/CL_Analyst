@@ -138,7 +138,7 @@ if ($existingStatus) {
         "--boot-disk-size=${DiskSizeGB}GB",
         "--boot-disk-type=pd-ssd",
         "--metadata-from-file=startup-script=$startupScript",
-        "--scopes=storage-full",
+        "--scopes=compute-rw,storage-full",
         "--quiet"
     )
     
@@ -153,7 +153,7 @@ if ($existingStatus) {
 
 # Wait for startup script
 Write-Host "  Waiting for startup script to complete..."
-$maxWait = 300; $elapsed = 0
+$maxWait = 900; $elapsed = 0
 while ($elapsed -lt $maxWait) {
     Start-Sleep -Seconds 15; $elapsed += 15
     $vmStatus = gcloud compute instances describe $VmName --zone=$Zone --format="get(status)" 2>$null
@@ -199,6 +199,7 @@ $codeFiles = @(
     @{ Local = "src\data_paths.py";              Remote = "src/" },
     @{ Local = "src\live_execution\__init__.py";                   Remote = "src/live_execution/" },
     @{ Local = "src\live_execution\strategy_config.py";            Remote = "src/live_execution/" },
+    @{ Local = "src\live_execution\config_loader.py";              Remote = "src/live_execution/" },
     @{ Local = "src\live_execution\execution_guard.py";            Remote = "src/live_execution/" },
     @{ Local = "src\live_execution\strategies\__init__.py";        Remote = "src/live_execution/strategies/" },
     @{ Local = "src\live_execution\strategies\execution_models.py"; Remote = "src/live_execution/strategies/" },
@@ -254,7 +255,7 @@ Write-Host "  Optimizer launched!" -ForegroundColor Green
 
 # --- [6/7] Verify tmux session ---
 Write-Host "`n[6/7] Verifying tmux session..."
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 15
 $tmuxCheck = gcloud compute ssh $VmName --zone=$Zone `
     --command="tmux has-session -t optimizer 2>/dev/null && echo RUNNING || echo NOT_RUNNING" `
     --quiet 2>$null
@@ -263,9 +264,14 @@ if ($tmuxCheck -match "RUNNING") {
     Write-Host "  tmux session 'optimizer' is active!" -ForegroundColor Green
     Send-TelegramAlert "[STARTING] Post-Optimizer Deploy`nBatch: $BatchId`nTrials: $NTrials | Workers: $Workers | Objective: $Objective`nVM: $VmName"
 } else {
-    Write-Host "  WARNING: tmux session may not have started." -ForegroundColor Yellow
-    Write-Host "  Debug with: gcloud compute ssh $VmName --command='tmux attach -t optimizer'"
-    Send-TelegramAlert "[WARNING] Post-Optimizer Deploy Failed`nBatch: $BatchId`nVM: $VmName`ntmux session may not have started."
+    Write-Host "  WARNING: tmux session died! Checking VM log for errors..." -ForegroundColor Yellow
+    $errorLog = gcloud compute ssh $VmName --zone=$Zone `
+        --command="cat /home/*/project/post_optimize_*.log 2>/dev/null | tail -20 || echo 'No log file found'" `
+        --quiet 2>$null
+    Write-Host "  --- VM Log Tail ---" -ForegroundColor Yellow
+    Write-Host $errorLog -ForegroundColor Red
+    Write-Host "  --- End Log ---" -ForegroundColor Yellow
+    Send-TelegramAlert "[WARNING] Post-Optimizer Deploy Failed`nBatch: $BatchId`nVM: $VmName`ntmux session died immediately.`nLog: $errorLog"
 }
 
 # Note: The canary-style gcp_monitor.ps1 is NOT used for the optimizer VM.
@@ -353,16 +359,59 @@ while ($true) {
         exit 0
     }
 
-    # Not ready yet — show status
+    # Not ready yet -- show status
     $statusStr = "  [$pollCount] Waiting... (~${elapsed} min elapsed)"
 
     # Check if VM still exists
     $vmStatus = gcloud compute instances describe $VmName --zone=$Zone --format="value(status)" 2>$null
     if ($vmStatus) {
-        Write-Host "$statusStr | VM: $vmStatus" -ForegroundColor DarkGray
+        $vmStatusStr = $vmStatus.ToString().Trim()
+        if ($vmStatusStr -in @("TERMINATED", "STOPPED")) {
+            Write-Host "$statusStr | VM: $vmStatusStr -- downloading available results..." -ForegroundColor Yellow
+
+            # Try to download whatever results exist
+            if (!(Test-Path $LocalBatchDir)) { New-Item -ItemType Directory -Path $LocalBatchDir -Force | Out-Null }
+            gsutil -m cp "$Bucket/$GcsOptPrefix/batch_summary_optimized_*.md" "$LocalBatchDir\" 2>$null
+            gsutil -m cp "$Bucket/$GcsOptPrefix/optimization_results_*.json" "$LocalBatchDir\" 2>$null
+            gsutil -m cp "$Bucket/$GcsOptPrefix/batch_ensemble_pre_opt.md" "$LocalBatchDir\" 2>$null
+
+            # Download logs
+            $logsDir = Join-Path $LocalBatchDir "logs"
+            if (!(Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
+            gsutil -m cp "$Bucket/$GcsOptPrefix/logs/*" "$logsDir\" 2>$null
+
+            # Check if optimized report was produced
+            $hasReport = Test-Path (Join-Path $LocalBatchDir "batch_summary_optimized_*.md")
+
+            # Delete the VM to free resources
+            Write-Host "  Deleting $vmStatusStr VM: $VmName ..." -ForegroundColor Yellow
+            gcloud compute instances delete $VmName --zone=$Zone --quiet 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  VM deleted." -ForegroundColor Green
+            } else {
+                Write-Host "  VM delete returned non-zero (may already be gone)." -ForegroundColor Gray
+            }
+
+            if ($hasReport) {
+                Write-Host ""
+                Write-Host "  Downloaded to: $LocalBatchDir" -ForegroundColor Green
+                Send-TelegramAlert "[COMPLETE] Post-Optimizer Results Downloaded`nBatch: $BatchId`nLocal: $LocalBatchDir"
+                Write-Host "=====================================================" -ForegroundColor Green
+                Write-Host " RESULTS DOWNLOADED SUCCESSFULLY" -ForegroundColor Green
+                Write-Host "=====================================================" -ForegroundColor Green
+                exit 0
+            } else {
+                Write-Host ""
+                Write-Host "  ERROR: VM $vmStatusStr but no optimized report found on GCS!" -ForegroundColor Red
+                Send-TelegramAlert "[ERROR] Post-Optimizer VM $vmStatusStr but no reports found`nBatch: $BatchId`nGCS: $Bucket/$GcsOptPrefix/"
+                exit 1
+            }
+        } else {
+            Write-Host "$statusStr | VM: $vmStatusStr" -ForegroundColor DarkGray
+        }
     } else {
         Write-Host "$statusStr | VM deleted (checking GCS one more time...)" -ForegroundColor Yellow
-        # VM gone but no reports — give it one more check
+        # VM gone but no reports -- give it one more check
         Start-Sleep -Seconds 10
         $finalCheck = gsutil ls "$Bucket/$GcsOptPrefix/batch_summary_optimized_*.md" 2>$null
         if (!$finalCheck) {

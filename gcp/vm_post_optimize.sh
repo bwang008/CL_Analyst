@@ -18,7 +18,7 @@
 #   --shutdown             Auto-shutdown VM after completion
 # =============================================================================
 
-set -eo pipefail
+set -e
 
 export PYTHONIOENCODING=utf8
 
@@ -38,14 +38,15 @@ try:
     token = env.get('TELEGRAM_BOT_TOKEN')
     chat_id = env.get('TELEGRAM_CHAT_ID')
     if token and chat_id:
-        msg = f'🚨 <b>[VM CRASH] {os.path.basename(sys.argv[1])}</b>\nExit Code: {sys.argv[2]}\n\n<b>Log Tail:</b>\n<pre>{sys.argv[3]}</pre>'
+        batch = sys.argv[4] if len(sys.argv) > 4 else 'unknown'
+        msg = f'🚨 <b>[VM CRASH] Post-Optimizer</b>\nBatch: <code>{batch}</code>\nExit Code: {sys.argv[2]}\n\n<b>Log Tail:</b>\n<pre>{sys.argv[3]}</pre>'
         req = urllib.request.Request(f'https://api.telegram.org/bot{token}/sendMessage', 
             data=json.dumps({'chat_id': chat_id, 'text': msg, 'parse_mode': 'HTML'}).encode('utf-8'),
             headers={'Content-Type': 'application/json'})
         urllib.request.urlopen(req, timeout=10)
 except Exception as e:
     print('Failed to send telegram:', e)
-" "$0" "$exit_code" "$(tail -n 15 "$LOG" 2>/dev/null)" || true
+" "$0" "$exit_code" "$(tail -n 15 "$LOG" 2>/dev/null)" "$BATCH_ID" || true
     fi
     
     # Upload logs before dying
@@ -69,8 +70,19 @@ except Exception as e:
 }
 trap cleanup EXIT
 
-# Activate environment
+# Activate environment (guard against non-interactive shell issues with set -e)
+if [ ! -f /opt/optuna-env/bin/activate ]; then
+    echo "ERROR: /opt/optuna-env/bin/activate not found! Startup script may not have completed."
+    echo "Waiting 60s for startup to finish..."
+    sleep 60
+    if [ ! -f /opt/optuna-env/bin/activate ]; then
+        echo "FATAL: venv still not found after waiting. Exiting."
+        exit 1
+    fi
+fi
+set +e
 source /opt/optuna-env/bin/activate
+set -e
 
 PROJECT_DIR="/home/$(whoami)/project"
 cd "$PROJECT_DIR"
@@ -123,8 +135,8 @@ echo "" | tee -a "$LOG"
 echo "[1/5] Downloading batch metadata from GCS..." | tee -a "$LOG"
 BATCH_DIR="reports/batch_runs/$BATCH_ID"
 mkdir -p "$BATCH_DIR"
-gsutil cp "$BUCKET/$GCS_OPT_PREFIX/batch_progress.json" "$BATCH_DIR/batch_progress.json" 2>&1 | tee -a "$LOG"
-gsutil cp "$BUCKET/$GCS_OPT_PREFIX/manifest.json" "$BATCH_DIR/manifest.json" 2>&1 | tee -a "$LOG"
+gsutil cp "$BUCKET/$GCS_OPT_PREFIX/batch_progress.json" "$BATCH_DIR/batch_progress.json" 2>&1 | tee -a "$LOG" || { echo "  FATAL: batch_progress.json download failed!" | tee -a "$LOG"; exit 1; }
+gsutil cp "$BUCKET/$GCS_OPT_PREFIX/manifest.json" "$BATCH_DIR/manifest.json" 2>&1 | tee -a "$LOG" || { echo "  FATAL: manifest.json download failed!" | tee -a "$LOG"; exit 1; }
 
 # Extract OHLCV GCS path from manifest
 OHLCV_GCS=$(python3 -c "import json; m=json.load(open('$BATCH_DIR/manifest.json')); print(m.get('defaults',{}).get('gcs_data_path',''))")
@@ -230,7 +242,7 @@ echo "  Selecting Top 8 Ensembles..." | tee -a "$LOG"
 python agent/select_top_ensembles.py \
     --md-report "$BATCH_DIR/batch_ensemble_pre_opt.md" \
     --output-json "$BATCH_DIR/top_8_ensembles.json" \
-    --top-n 8 \
+    --top-n 4 \
     2>&1 | tee -a "$LOG"
 
 # --- [4/5] Run batch_post_optimizer ---
