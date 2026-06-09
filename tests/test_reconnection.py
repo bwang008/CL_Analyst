@@ -142,14 +142,22 @@ class TestReconnect:
     @patch.object(lt_module, "_RECONNECT_MAX_DELAY", 0.05)
     @patch.object(lt_module, "_RECONNECT_MAX_ATTEMPTS", 5)
     def test_reconnect_re_registers_error_handler(self):
-        """After reconnect, errorEvent handler is re-registered."""
+        """After reconnect, errorEvent handler is re-registered (without stacking)."""
         trader = _make_trader_stub()
-        # Use a real list-like to track += calls
+        # Use a real list-like to track += and -= calls
         registered_handlers = []
 
         class FakeEvent:
             def __iadd__(self, handler):
                 registered_handlers.append(handler)
+                return self
+
+            def __isub__(self, handler):
+                # Support -= for the de-duplication removal step
+                try:
+                    registered_handlers.remove(handler)
+                except ValueError:
+                    pass  # not registered yet — that's fine
                 return self
 
         trader.manager.ib.errorEvent = FakeEvent()

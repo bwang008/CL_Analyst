@@ -382,12 +382,13 @@ class MacroFeatureEngine:
                 )
 
         if stale:
+            stale_names = ", ".join(stale.keys())
             raise StaleDataException(
                 stale_series=stale,
                 repeat_count=max_threshold,
                 message=(
                     f"Derived features stuck at zero: "
-                    f"{", ".join(stale.keys())}. "
+                    f"{stale_names}. "
                     f"Raw FRED values may pass staleness check but "
                     f"publication lag produces zero CHG_1D features "
                     f"beyond per-feature thresholds "

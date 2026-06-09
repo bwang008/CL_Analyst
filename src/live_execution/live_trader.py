@@ -2382,7 +2382,7 @@ class LiveTrader:
 
         if errorCode in (1101, 1102, 2104, 2106) and self._subscriptions_lost:
             if self._resubscribe_pending:
-                log.info("CONNECTIVITY RESTORED (code %d) — resubscription already scheduled, skipping", errorCode)
+                log.debug("CONNECTIVITY RESTORED (code %d) — resubscription already scheduled, skipping", errorCode)
                 return
             log.info("CONNECTIVITY RESTORED (code %d) — scheduling resubscription...", errorCode)
             self._resubscribe_pending = True
@@ -3447,10 +3447,22 @@ class LiveTrader:
                 self._data_farm_broken_only = False
                 # Reconnect
                 self.manager.connect()
-                # Re-register error handler (lost on disconnect)
+                # Re-register error handler (lost on disconnect).
+                # Remove first to prevent stacking — ib_insync events
+                # are simple lists and += appends without dedup.
+                try:
+                    self.manager.ib.errorEvent -= self._on_ib_error
+                except ValueError:
+                    pass  # not registered (first connect or already removed)
                 self.manager.ib.errorEvent += self._on_ib_error
                 self._callbacks_registered = False
                 self._register_execution_callbacks()
+                # Block the async resubscription path (_deferred_resubscribe)
+                # during the data farm health check below.  Without this,
+                # 2104/2106 codes fire _on_ib_error → _deferred_resubscribe
+                # which races with the sync _resubscribe_and_backfill() call
+                # at the end of this method, causing double subscriptions.
+                self._resubscribe_pending = True
 
                 # ── Data farm health check ─────────────────────────
                 # IBKR fires 2103/2105 (broken) and/or 2104/2106 (OK)
