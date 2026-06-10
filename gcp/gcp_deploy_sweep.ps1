@@ -129,7 +129,7 @@ if (-not $SkipProvision) {
     
     # Wait for startup script
     Write-Host "  Waiting for startup script to complete..."
-    $maxWait = 300; $elapsed = 0
+    $maxWait = 600; $elapsed = 0
     while ($elapsed -lt $maxWait) {
         Start-Sleep -Seconds 15; $elapsed += 15
         try {
@@ -140,7 +140,11 @@ if (-not $SkipProvision) {
         } catch {}
         Write-Host "  Installing... (${elapsed}s elapsed)" -ForegroundColor Gray
     }
-    Write-Host "  VM is ready!" -ForegroundColor Green
+    if ($elapsed -ge $maxWait) {
+        Write-Host "  WARNING: Reached ${maxWait}s timeout. Proceeding anyway." -ForegroundColor Yellow
+    } else {
+        Write-Host "  VM is ready!" -ForegroundColor Green
+    }
 } else {
     Write-Host "`n[1/6] Skipping provision (-SkipProvision)" -ForegroundColor Yellow
 }

@@ -67,8 +67,25 @@ except Exception as e:
 }
 trap cleanup EXIT
 
-# Activate environment
+# Wait for startup script to finish if it hasn't already (guards against early SSH execution)
+if [ ! -f /tmp/startup_done ]; then
+    echo "Waiting for startup script to complete..." | tee -a "$LOG"
+    for i in {1..60}; do
+        if [ -f /tmp/startup_done ]; then
+            break
+        fi
+        sleep 10
+    done
+    if [ ! -f /tmp/startup_done ]; then
+        echo "FATAL: Startup script did not complete in time." | tee -a "$LOG"
+        exit 1
+    fi
+fi
+
+# Activate environment (guard against non-interactive shell issues with set -e)
+set +e
 source /opt/optuna-env/bin/activate
+set -e
 
 PROJECT_DIR="/home/$(whoami)/project"
 cd "$PROJECT_DIR"

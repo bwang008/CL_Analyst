@@ -33,7 +33,8 @@ param(
     [string]$Zone                = "us-central1-a",
     [switch]$DryRun,
     [switch]$DisableTelegram,
-    [int]$MaxConcurrentVcpus    = 0   # 0 = read from manifest defaults
+    [int]$MaxConcurrentVcpus    = 0,   # 0 = read from manifest defaults
+    [string]$SweepMode          = "backtest"  # 'frictionless' for Workflow C, 'backtest' for legacy
 )
 
 $ErrorActionPreference = "Continue"
@@ -867,7 +868,8 @@ if ($batchState.completed -gt 0) {
             "-HoldoutMonths", $postOptHoldout,
             "-MachineType", $optMachineType,
             "-Workers", $optWorkerCount,
-            "-Zone", $oz)
+            "-Zone", $oz,
+            "-SweepMode", $SweepMode)
         if ($DisableTelegram) { $optArgs += "-DisableTelegram" }
         Write-Host "  Trying optimizer deploy in zone $oz..." -ForegroundColor Yellow
         & powershell @optArgs

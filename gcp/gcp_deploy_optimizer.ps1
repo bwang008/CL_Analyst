@@ -25,7 +25,8 @@ param(
     [switch]$NoShutdown,
     [switch]$NoMonitor,
     [switch]$DisableTelegram,
-    [string]$Objective = "both"
+    [string]$Objective = "both",
+    [string]$SweepMode = "backtest"
 )
 
 # Add gcloud to PATH if not already there
@@ -190,6 +191,8 @@ $codeFiles = @(
     @{ Local = "agent\strategy_optimizer.py";    Remote = "agent/" },
     @{ Local = "agent\sweep_ensembles.py";       Remote = "agent/" },
     @{ Local = "agent\select_top_ensembles.py";  Remote = "agent/" },
+    @{ Local = "agent\forward_returns.py";       Remote = "agent/" },
+    @{ Local = "agent\alpha_evaluator.py";       Remote = "agent/" },
     @{ Local = "agent\backtest_engine.py";       Remote = "agent/" },
     @{ Local = "agent\__init__.py";              Remote = "agent/" },
     @{ Local = "src\util.py";                    Remote = "src/" },
@@ -248,7 +251,7 @@ Write-Host "  Line endings fixed." -ForegroundColor Green
 Write-Host "`n[5/7] Launching post-optimizer in tmux..."
 
 $shutdownFlag = if ($NoShutdown) { "" } else { "--shutdown" }
-$launchCmd = "tmux kill-session -t optimizer 2>/dev/null; tmux new-session -d -s optimizer 'bash $RemoteProject/gcp/vm_post_optimize.sh --batch-id=$BatchId --n-trials=$NTrials --holdout-months=$HoldoutMonths --workers=$Workers --objective=$Objective $shutdownFlag'"
+$launchCmd = "tmux kill-session -t optimizer 2>/dev/null; tmux new-session -d -s optimizer 'bash $RemoteProject/gcp/vm_post_optimize.sh --batch-id=$BatchId --n-trials=$NTrials --holdout-months=$HoldoutMonths --workers=$Workers --objective=$Objective --sweep-mode=$SweepMode $shutdownFlag'"
 gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd --quiet 2>$null
 
 Write-Host "  Optimizer launched!" -ForegroundColor Green

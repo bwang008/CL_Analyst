@@ -22,6 +22,8 @@ import sys
 import argparse
 import pandas as pd
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
 
 def get_models_from_dir(directory, prefix=""):
     models = []

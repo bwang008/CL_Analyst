@@ -70,16 +70,22 @@ except Exception as e:
 }
 trap cleanup EXIT
 
-# Activate environment (guard against non-interactive shell issues with set -e)
-if [ ! -f /opt/optuna-env/bin/activate ]; then
-    echo "ERROR: /opt/optuna-env/bin/activate not found! Startup script may not have completed."
-    echo "Waiting 60s for startup to finish..."
-    sleep 60
-    if [ ! -f /opt/optuna-env/bin/activate ]; then
-        echo "FATAL: venv still not found after waiting. Exiting."
+# Wait for startup script to finish if it hasn't already (guards against early SSH execution)
+if [ ! -f /tmp/startup_done ]; then
+    echo "Waiting for startup script to complete..." | tee -a "$LOG"
+    for i in {1..60}; do
+        if [ -f /tmp/startup_done ]; then
+            break
+        fi
+        sleep 10
+    done
+    if [ ! -f /tmp/startup_done ]; then
+        echo "FATAL: Startup script did not complete in time." | tee -a "$LOG"
         exit 1
     fi
 fi
+
+# Activate environment (guard against non-interactive shell issues with set -e)
 set +e
 source /opt/optuna-env/bin/activate
 set -e
@@ -94,6 +100,7 @@ HOLDOUT_MONTHS=4
 WORKERS=0
 SHUTDOWN=false
 OBJECTIVE="both"
+SWEEP_MODE="backtest"
 BUCKET="gs://cltrainer-optuna-results"
 LOG="post_optimize_$(date +%Y%m%d_%H%M%S).log"
 
@@ -105,6 +112,7 @@ for arg in "$@"; do
         --holdout-months=*) HOLDOUT_MONTHS="${arg#*=}" ;;
         --workers=*) WORKERS="${arg#*=}" ;;
         --objective=*) OBJECTIVE="${arg#*=}" ;;
+        --sweep-mode=*) SWEEP_MODE="${arg#*=}" ;;
         --shutdown) SHUTDOWN=true ;;
     esac
 done
@@ -126,6 +134,7 @@ echo "  N Trials:      $N_TRIALS" | tee -a "$LOG"
 echo "  Holdout:       $HOLDOUT_MONTHS months" | tee -a "$LOG"
 echo "  Workers:       $WORKERS" | tee -a "$LOG"
 echo "  Objective:     $OBJECTIVE" | tee -a "$LOG"
+echo "  Sweep Mode:    $SWEEP_MODE" | tee -a "$LOG"
 echo "  Bucket:        $BUCKET" | tee -a "$LOG"
 echo "  CPUs:          $(nproc)" | tee -a "$LOG"
 echo "============================================================" | tee -a "$LOG"
@@ -228,6 +237,16 @@ fi
 # --- [3b/5] Sweep Ensembles ---
 echo "" | tee -a "$LOG"
 echo "[3b/5] Sweeping Ensembles (Baseline Config)..." | tee -a "$LOG"
+SWEEP_ARGS="--base-config configs/strategies/$STRATEGY_CONFIG \
+    --data data/processed/$OHLCV_BASENAME \
+    --long-dir reports/ \
+    --short-dir reports/ \
+    --long-prefix _long_ \
+    --short-prefix _short_ \
+    --output-md $BATCH_DIR/batch_ensemble_pre_opt.md \
+    --mode $SWEEP_MODE \
+    --holdout-months $HOLDOUT_MONTHS"
+echo "  Sweep command: python agent/sweep_ensembles.py $SWEEP_ARGS" | tee -a "$LOG"
 python agent/sweep_ensembles.py \
     --base-config configs/strategies/$STRATEGY_CONFIG \
     --data data/processed/$OHLCV_BASENAME \
@@ -236,6 +255,8 @@ python agent/sweep_ensembles.py \
     --long-prefix "_long_" \
     --short-prefix "_short_" \
     --output-md "$BATCH_DIR/batch_ensemble_pre_opt.md" \
+    --mode "$SWEEP_MODE" \
+    --holdout-months "$HOLDOUT_MONTHS" \
     2>&1 | tee -a "$LOG"
 
 echo "  Selecting Top 8 Ensembles..." | tee -a "$LOG"
