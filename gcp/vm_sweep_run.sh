@@ -353,6 +353,7 @@ if [ $COMPLETED -gt 0 ]; then
         echo "  ✓ Vaulted to $BUCKET/$VAULT_PREFIX/" | tee -a "$LOG"
     else
         echo "  ✗ E2E pipeline failed (exit $E2E_EXIT)" | tee -a "$LOG"
+        exit $E2E_EXIT
     fi
 else
     echo "  ⚠ Skipping E2E pipeline — no searches completed." | tee -a "$LOG"

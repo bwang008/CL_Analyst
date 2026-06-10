@@ -696,8 +696,19 @@ while (-not $allDone) {
             $slot.Status       = "TIMEOUT"
             $slot.FailureReason = "Exceeded timeout ($($slot.TimeoutMins)min)"
             $batchState.failed++
-            $completed += $slot
-            continue
+            
+            Write-Host ""
+            Write-Host "  [FATAL] A VM timed out ($($slot.Label)). Fail-Fast triggered!" -ForegroundColor Red
+            foreach ($active in $activeSlots) {
+                if ($active.VmName -ne $slot.VmName) {
+                    Write-Host "  [CLEANUP] Stopping other active VM: $($active.VmName)" -ForegroundColor Yellow
+                    Stop-Job $active.Job -ErrorAction SilentlyContinue
+                    Remove-ExperimentVm -VmName $active.VmName -VmZone $active.ActualZone
+                }
+            }
+            $batchState["completed_at"] = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            Save-Progress $batchState
+            throw "Batch aborted due to timeout in experiment: $($slot.Label)"
         }
 
         if ($job.State -in @("Completed", "Failed", "Stopped")) {
@@ -749,6 +760,20 @@ while (-not $allDone) {
                     $slot.FailureReason = "E2E pipeline incomplete (exit $exitCode)"
                 }
                 $batchState.failed++
+                $slot.ExitCode = $exitCode
+
+                Write-Host ""
+                Write-Host "  [FATAL] A VM failed ($($slot.Label)). Fail-Fast triggered!" -ForegroundColor Red
+                foreach ($active in $activeSlots) {
+                    if ($active.VmName -ne $slot.VmName) {
+                        Write-Host "  [CLEANUP] Stopping other active VM: $($active.VmName)" -ForegroundColor Yellow
+                        Stop-Job $active.Job -ErrorAction SilentlyContinue
+                        Remove-ExperimentVm -VmName $active.VmName -VmZone $active.ActualZone
+                    }
+                }
+                $batchState["completed_at"] = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                Save-Progress $batchState
+                throw "Batch aborted due to critical failure in experiment: $($slot.Label). Reason: $($slot.FailureReason)"
             }
             $slot.ExitCode = $exitCode
             $completed    += $slot
@@ -894,15 +919,15 @@ if ($batchState.completed -gt 0) {
             Write-Host "  Downloading optimized results from GCS..." -ForegroundColor Cyan
             $gcsBucket = "gs://cltrainer-optuna-results/batch_optimizer/$BatchId"
             $localBatch = Join-Path $ProjectDir "reports\batch_runs\$BatchId"
-            gcloud storage cp "$gcsBucket/batch_summary_optimized.md" "$localBatch\batch_summary_optimized.md" 2>$null
-            gcloud storage cp "$gcsBucket/optimization_results.json" "$localBatch\optimization_results.json" 2>$null
+            gcloud storage cp "$gcsBucket/*.md" "$localBatch\" 2>$null
+            gcloud storage cp "$gcsBucket/*.json" "$localBatch\" 2>$null
 
-            if (Test-Path (Join-Path $localBatch "batch_summary_optimized.md")) {
-                Write-Host "  Optimized report downloaded to: $localBatch" -ForegroundColor Green
-                Send-BatchTelegram "[COMPLETE] Post-Optimization finished.`nResults downloaded to local batch directory.`nbatch_summary_optimized.md is ready."
+            if (Test-Path (Join-Path $localBatch "batch_summary_optimized_sharpe.md")) {
+                Write-Host "  Optimized reports downloaded to: $localBatch" -ForegroundColor Green
+                Send-BatchTelegram "[COMPLETE] Post-Optimization finished.`nResults downloaded to local batch directory.`nbatch_summary_optimized_sharpe.md is ready."
             } else {
-                Write-Host "  WARNING: Could not download optimized report." -ForegroundColor Yellow
-                Send-BatchTelegram "[WARNING] Post-Optimization may have failed.`nCould not download batch_summary_optimized.md from GCS."
+                Write-Host "  WARNING: Could not download optimized reports." -ForegroundColor Yellow
+                Send-BatchTelegram "[WARNING] Post-Optimization may have failed.`nCould not download optimized reports from GCS."
             }
 
             # Clean up optimizer VM

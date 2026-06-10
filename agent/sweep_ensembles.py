@@ -138,7 +138,26 @@ def run_backtest(long_path, short_path, base_config, data_path, temp_config, lon
                     val = match.group(1).replace(",", "")
                     tail_pnl += float(val)
 
-    return {"trades": trades, "pnl": pnl, "winrate": winrate, "pf": pf, "max_dd": max_dd, "tail_pnl": f"{tail_pnl:,.2f}"}
+    backtest_range = ""
+    match_range = re.search(r"Backtest Range:\s+(.+)", out)
+    if match_range:
+        backtest_range = match_range.group(1).strip()
+
+    yearly_summary = ""
+    summary_start = out.find("Yearly Summary:")
+    if summary_start != -1:
+        yearly_summary = out[summary_start:].strip()
+
+    return {
+        "trades": trades, 
+        "pnl": pnl, 
+        "winrate": winrate, 
+        "pf": pf, 
+        "max_dd": max_dd, 
+        "tail_pnl": f"{tail_pnl:,.2f}",
+        "backtest_range": backtest_range,
+        "yearly_summary": yearly_summary
+    }
 
 
 def main():
@@ -178,7 +197,7 @@ def main():
     
     from concurrent.futures import ThreadPoolExecutor, as_completed
     
-    def process_pair(lname, lpath, sname, spath):
+    def process_pair(ensemble_id, lname, lpath, sname, spath):
         # Temp config needs to be unique for concurrent execution
         import hashlib
         pair_hash = hashlib.md5(f"{lpath}_{spath}".encode()).hexdigest()[:8]
@@ -194,6 +213,7 @@ def main():
             pass  # race condition with concurrent threads
         if not met: return None
         return {
+            "Ensemble ID": ensemble_id,
             "Long Model": lname,
             "Short Model": sname,
             "Trades": int(met['trades']),
@@ -201,20 +221,25 @@ def main():
             "Profit Factor": float(met['pf']) if met['pf'] else 0.0,
             "Net PnL": float(met['pnl'].replace(",", "")) if met['pnl'] else 0.0,
             "Max DD": met['max_dd'],
-            "Tail PnL": met['tail_pnl'],
-            "print_str": f"{lname[:40]:<40} | {sname[:40]:<40} | {met['trades']:<4} | {met['winrate']:<5} | {met['pf']:<5} | {met['pnl']:<10} | {met['max_dd']:<10} | {met['tail_pnl']:<10}"
+            "Holdout PnL": met['tail_pnl'],
+            "print_str": f"{ensemble_id:<21} | {lname[:30]:<30} | {sname[:30]:<30} | {met['trades']:<4} | {met['winrate']:<5} | {met['pf']:<5} | {met['pnl']:<10} | {met['max_dd']:<10} | {met['tail_pnl']:<10}",
+            "backtest_range": met["backtest_range"],
+            "yearly_summary": met["yearly_summary"]
         }
 
-    print(f"{'Long Model':<40} | {'Short Model':<40} | {'Trds':<4} | {'WR%':<5} | {'PF':<5} | {'Net PnL':<10} | {'Max DD':<10} | {'Tail PnL':<10}")
-    print("-" * 145)
+    print(f"{'Ensemble ID':<21} | {'Long Model':<30} | {'Short Model':<30} | {'Trds':<4} | {'WR%':<5} | {'PF':<5} | {'Net PnL':<10} | {'Max DD':<10} | {'Holdout PnL':<10}")
+    print("-" * 155)
 
     futures = []
+    counter = 1
     with ThreadPoolExecutor(max_workers=8) as executor:
         for lpath in long_models:
             lname = _unique_model_name(lpath)
             for spath in short_models:
                 sname = _unique_model_name(spath)
-                futures.append(executor.submit(process_pair, lname, lpath, sname, spath))
+                ensemble_id = f"backtest_ensemble_{counter:03d}"
+                counter += 1
+                futures.append(executor.submit(process_pair, ensemble_id, lname, lpath, sname, spath))
                 
         for future in as_completed(futures):
             res = future.result()
@@ -233,15 +258,35 @@ def main():
             
         if hasattr(args, 'output_md') and args.output_md:
             os.makedirs(os.path.dirname(args.output_md), exist_ok=True)
+            
+            global_bt_range = "Unknown"
+            if results and results[0].get("backtest_range"):
+                global_bt_range = results[0]["backtest_range"]
+                
             with open(args.output_md, 'w') as f:
+                f.write(f"# Backtest Information\n")
+                f.write(f"- **Backtest Dates:** {global_bt_range}\n")
+                f.write(f"- **Holdout Dates:** 2025-01-01 to End of Data\n\n")
                 f.write(f"# Ensemble Sweep Results\n\n")
+                
+                df_table = df.drop(columns=["print_str", "backtest_range", "yearly_summary"], errors="ignore")
                 try:
-                    f.write(df.to_markdown(index=False))
+                    f.write(df_table.to_markdown(index=False))
                 except ImportError:
                     # tabulate not installed — fall back to plain text table
                     f.write("```\n")
-                    f.write(df.to_string(index=False))
+                    f.write(df_table.to_string(index=False))
                     f.write("\n```")
+                
+                f.write("\n\n# Monthly Breakdowns\n\n")
+                sorted_results = sorted(results, key=lambda x: x["Ensemble ID"])
+                for res in sorted_results:
+                    f.write(f"## {res['Ensemble ID']}\n\n")
+                    f.write(f"**Long Model:** {res['Long Model']}  \n")
+                    f.write(f"**Short Model:** {res['Short Model']}\n\n")
+                    f.write("```text\n")
+                    f.write(f"{res['yearly_summary']}\n")
+                    f.write("```\n\n")
             print(f"\nSaved Sorted MD Report to {args.output_md}")
 
 if __name__ == "__main__":
