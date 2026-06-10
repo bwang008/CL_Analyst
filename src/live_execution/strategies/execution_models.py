@@ -356,15 +356,17 @@ class ConservativeEnsembleStrategy(BaseExecutionStrategy):
         sell_ok = prob_sell >= self.short_threshold
 
         if buy_ok and sell_ok:
-            # Same-bar conflict: higher probability wins
-            if prob_buy >= prob_sell:
+            # Same-bar conflict: higher probability wins; exact tie → HOLD
+            if prob_buy > prob_sell:
                 lots = self._prob_to_lots(prob_buy)
                 return [Order(action="BUY", side=1, lots=lots,
-                              reason=f"ENSEMBLE_BUY (conflict: buy={prob_buy:.4f} >= sell={prob_sell:.4f})")]
-            else:
+                              reason=f"ENSEMBLE_BUY (conflict: buy={prob_buy:.4f} > sell={prob_sell:.4f})")]
+            elif prob_sell > prob_buy:
                 lots = self._prob_to_lots(prob_sell)
                 return [Order(action="SELL", side=-1, lots=lots,
                               reason=f"ENSEMBLE_SELL (conflict: sell={prob_sell:.4f} > buy={prob_buy:.4f})")]
+            else:
+                return HOLD
         elif buy_ok:
             lots = self._prob_to_lots(prob_buy)
             return [Order(action="BUY", side=1, lots=lots,
@@ -434,14 +436,16 @@ class AggressiveEnsembleStrategy(BaseExecutionStrategy):
 
         # FLAT — same logic as ConservativeEnsembleStrategy
         if buy_ok and sell_ok:
-            if prob_buy >= prob_sell:
+            if prob_buy > prob_sell:
                 lots = self._prob_to_lots(prob_buy)
                 return [Order(action="BUY", side=1, lots=lots,
-                              reason=f"ENSEMBLE_BUY (conflict: buy={prob_buy:.4f} >= sell={prob_sell:.4f})")]
-            else:
+                              reason=f"ENSEMBLE_BUY (conflict: buy={prob_buy:.4f} > sell={prob_sell:.4f})")]
+            elif prob_sell > prob_buy:
                 lots = self._prob_to_lots(prob_sell)
                 return [Order(action="SELL", side=-1, lots=lots,
                               reason=f"ENSEMBLE_SELL (conflict: sell={prob_sell:.4f} > buy={prob_buy:.4f})")]
+            else:
+                return HOLD
         elif buy_ok:
             lots = self._prob_to_lots(prob_buy)
             return [Order(action="BUY", side=1, lots=lots,
@@ -725,16 +729,19 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
         buy_ok = buy_tier is not None
         sell_ok = sell_tier is not None
 
-        # Track consecutive signals (only reset if model produced a prediction)
-        if buy_ok:
-            self._consecutive_long_signals += 1
-        elif prob_buy > 0:
-            self._consecutive_long_signals = 0
-            
-        if sell_ok:
-            self._consecutive_short_signals += 1
-        elif prob_sell > 0:
-            self._consecutive_short_signals = 0
+        # Track consecutive signals — only when FLAT and evaluating for entry.
+        # While IN_POSITION, freeze counters so the blocked side doesn't
+        # lose its accumulated consecutive count.
+        if state.position == 0:
+            if buy_ok:
+                self._consecutive_long_signals += 1
+            elif prob_buy > 0:
+                self._consecutive_long_signals = 0
+
+            if sell_ok:
+                self._consecutive_short_signals += 1
+            elif prob_sell > 0:
+                self._consecutive_short_signals = 0
             
         # Check consecutive threshold rules
         if self.long_consecutive_threshold > 0 and self._consecutive_long_signals < self.long_consecutive_threshold:
@@ -800,11 +807,13 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
 
         # ── FLAT ──
         if buy_ok and sell_ok:
-            # Same-bar conflict: higher probability wins
-            if prob_buy >= prob_sell:
+            # Same-bar conflict: higher probability wins; exact tie → HOLD
+            if prob_buy > prob_sell:
                 return [self._tier_to_order(buy_tier, "BUY", 1, prob_buy)]
-            else:
+            elif prob_sell > prob_buy:
                 return [self._tier_to_order(sell_tier, "SELL", -1, prob_sell)]
+            else:
+                return HOLD
         elif buy_ok:
             return [self._tier_to_order(buy_tier, "BUY", 1, prob_buy)]
         elif sell_ok:
@@ -998,10 +1007,11 @@ class IsolatedAsymmetricalStrategy(BaseExecutionStrategy):
         buy_tier = TieredEnsembleStrategy._match_tier(self, prob_buy, self.long_tiers)
         buy_ok = buy_tier is not None
 
-        if buy_ok:
-            self._consecutive_long_signals += 1
-        elif prob_buy > 0:
-            self._consecutive_long_signals = 0
+        if not self._long_is_open:
+            if buy_ok:
+                self._consecutive_long_signals += 1
+            elif prob_buy > 0:
+                self._consecutive_long_signals = 0
 
         if (self.long_consecutive_threshold > 0
                 and self._consecutive_long_signals < self.long_consecutive_threshold):
@@ -1020,10 +1030,11 @@ class IsolatedAsymmetricalStrategy(BaseExecutionStrategy):
         sell_tier = TieredEnsembleStrategy._match_tier(self, prob_sell, self.short_tiers)
         sell_ok = sell_tier is not None
 
-        if sell_ok:
-            self._consecutive_short_signals += 1
-        elif prob_sell > 0:
-            self._consecutive_short_signals = 0
+        if not self._short_is_open:
+            if sell_ok:
+                self._consecutive_short_signals += 1
+            elif prob_sell > 0:
+                self._consecutive_short_signals = 0
 
         if (self.short_consecutive_threshold > 0
                 and self._consecutive_short_signals < self.short_consecutive_threshold):
@@ -1187,15 +1198,18 @@ class JointPortfolioStrategy(BaseExecutionStrategy):
         buy_ok = buy_tier is not None
         sell_ok = sell_tier is not None
 
-        # Consecutive signal tracking (only reset if model produced a prediction)
-        if buy_ok:
-            self._consecutive_long_signals += 1
-        elif prob_buy > 0:
-            self._consecutive_long_signals = 0
-        if sell_ok:
-            self._consecutive_short_signals += 1
-        elif prob_sell > 0:
-            self._consecutive_short_signals = 0
+        # Consecutive signal tracking — only when this side is flat.
+        # Freeze counters while in position so the blocked side keeps its count.
+        if self._current_side != 1:
+            if buy_ok:
+                self._consecutive_long_signals += 1
+            elif prob_buy > 0:
+                self._consecutive_long_signals = 0
+        if self._current_side != -1:
+            if sell_ok:
+                self._consecutive_short_signals += 1
+            elif prob_sell > 0:
+                self._consecutive_short_signals = 0
 
         # Consecutive threshold filtering
         if (self.long_consecutive_threshold > 0
@@ -1263,16 +1277,18 @@ class JointPortfolioStrategy(BaseExecutionStrategy):
                 # Both fire while flat → abstain
                 return HOLD
             # Higher probability wins
-            if prob_buy >= prob_sell and buy_tier is not None:
+            if prob_buy > prob_sell and buy_tier is not None:
                 self._current_side = 1
                 return [TieredEnsembleStrategy._tier_to_order(
                     self, buy_tier, "BUY", 1, prob_buy
                 )]
-            elif sell_tier is not None:
+            elif prob_sell > prob_buy and sell_tier is not None:
                 self._current_side = -1
                 return [TieredEnsembleStrategy._tier_to_order(
                     self, sell_tier, "SELL", -1, prob_sell
                 )]
+            else:
+                return HOLD
 
         if buy_ok and buy_tier is not None:
             self._current_side = 1

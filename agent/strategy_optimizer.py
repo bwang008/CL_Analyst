@@ -460,7 +460,7 @@ def attach_atr_cache(
 _VBT_ENTRY_THRESHOLDS   = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80]
 _VBT_TP_MULTIPLIERS     = [1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0]
 _VBT_SL_MULTIPLIERS     = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 4.5]
-_VBT_MAX_HOLD_BARS_LIST = [24, 48, 96, 144, 192, 240]
+_VBT_MAX_HOLD_BARS_LIST = [6, 12, 18, 24, 30, 36]
 
 
 def run_vbt_prescreener(
@@ -652,6 +652,162 @@ def _load_ensemble_predictions(base_cfg: dict) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Warm-start + objective score helpers
+# ---------------------------------------------------------------------------
+
+
+# Parameter search ranges — single source of truth for _suggest_side_params
+# and _extract_warm_start_params.  Each entry: (low, high, step, type).
+_PARAM_RANGES = {
+    "tp_atr_mult":                    (1.5,  10.0, 0.25, "float"),
+    "sl_atr_mult":                    (0.5,   4.5, 0.25, "float"),
+    "trailing_atr_mult":              (0.5,   5.0, 0.25, "float"),
+    "trailing_sl_atr_offset":         (1.0,   5.0, 0.5,  "float"),
+    "cooldown_bars":                  (1,    21,   2,    "int"),
+    "max_hold_bars":                  (6,   36,   6,     "int"),
+    "consecutive_signal_threshold":   (0,     4,   1,    "int"),
+    "entry_threshold":                (0.50,  0.80, 0.01, "float"),
+    "atr_period":                     (10,   40,   2,    "int"),
+}
+
+
+def _snap_to_grid(value: float, low: float, high: float, step: float,
+                  dtype: str = "float") -> float | int:
+    """Clamp `value` to [low, high] and snap to the nearest grid point."""
+    clamped = max(low, min(high, value))
+    steps_from_low = round((clamped - low) / step)
+    snapped = low + steps_from_low * step
+    snapped = max(low, min(high, snapped))
+    if dtype == "int":
+        return int(round(snapped))
+    return round(snapped, 10)  # avoid float precision noise
+
+
+def _extract_warm_start_params(
+    base_cfg: dict,
+    is_tiered: bool,
+    optimize_side: str | None,
+) -> dict | None:
+    """Extract baseline config values as an Optuna-compatible param dict.
+
+    Maps per-side config blocks (cfg["long"], cfg["short"]) into the flat
+    suffixed key convention used by _suggest_side_params(), then snaps every
+    value to the Optuna search grid so enqueue_trial() accepts it.
+
+    Returns None if extraction fails (e.g. missing config keys).
+    """
+    def _extract_side(cfg: dict, side: str, suffix: str) -> dict:
+        """Extract params for one side from its config block."""
+        side_cfg = cfg.get(side, {})
+        params = {}
+
+        # Entry threshold from tiers[0].min_prob (tiered) or models.*.threshold
+        if is_tiered:
+            tiers = side_cfg.get("tiers", [])
+            if tiers:
+                raw_thr = tiers[0].get("min_prob", 0.55)
+            else:
+                raw_thr = cfg.get("models", {}).get(side, {}).get("threshold", 0.55)
+        else:
+            raw_thr = cfg.get("models", {}).get(side, {}).get(
+                "threshold", cfg.get("entry_threshold", 0.55)
+            )
+
+        raw_values = {
+            "entry_threshold": raw_thr,
+            "tp_atr_mult": side_cfg.get("tp_atr_mult", cfg.get("tp_atr_mult", 3.0)),
+            "sl_atr_mult": side_cfg.get("sl_atr_mult", cfg.get("sl_atr_mult", 1.5)),
+            "trailing_atr_mult": side_cfg.get("trailing_atr_mult", cfg.get("trailing_atr_mult", 2.0)),
+            "trailing_sl_atr_offset": side_cfg.get("trailing_sl_atr_offset", cfg.get("trailing_sl_atr_offset", 2.0)),
+            "cooldown_bars": side_cfg.get("cooldown_bars", cfg.get("cooldown_bars", 7)),
+            "max_hold_bars": side_cfg.get("max_hold_bars", cfg.get("max_hold_bars", 24)),
+            "consecutive_signal_threshold": side_cfg.get("consecutive_signal_threshold", cfg.get("consecutive_signal_threshold", 0)),
+            "atr_period": side_cfg.get("atr_period", cfg.get("atr_period", 14)),
+        }
+
+        for key, raw_val in raw_values.items():
+            low, high, step, dtype = _PARAM_RANGES[key]
+            snapped = _snap_to_grid(raw_val, low, high, step, dtype)
+            if snapped != raw_val:
+                print(f"  [WARM-START] {key}_{suffix}: {raw_val} -> {snapped} (snapped to grid)")
+            params[f"{key}_{suffix}"] = snapped
+
+        return params
+
+    try:
+        warm = {}
+        if is_tiered and optimize_side:
+            # Single-side mode
+            warm = _extract_side(base_cfg, optimize_side, optimize_side)
+        elif is_tiered:
+            # Simultaneous ensemble — both sides
+            warm.update(_extract_side(base_cfg, "long", "long"))
+            warm.update(_extract_side(base_cfg, "short", "short"))
+            warm["conflict_resolution"] = base_cfg.get("conflict_resolution", "hold")
+        else:
+            # Non-tiered — no suffix
+            side_cfg = base_cfg
+            for key in _PARAM_RANGES:
+                low, high, step, dtype = _PARAM_RANGES[key]
+                if key == "entry_threshold":
+                    raw_val = base_cfg.get("models", {}).get("long", {}).get(
+                        "threshold", base_cfg.get("entry_threshold", 0.55)
+                    )
+                else:
+                    raw_val = base_cfg.get(key, low)
+                snapped = _snap_to_grid(raw_val, low, high, step, dtype)
+                if snapped != raw_val:
+                    print(f"  [WARM-START] {key}: {raw_val} -> {snapped} (snapped to grid)")
+                warm[key] = snapped
+
+        return warm if warm else None
+    except Exception as e:
+        print(f"  [WARN] Failed to extract warm-start params: {e}")
+        return None
+
+
+def _compute_objective_score(
+    result: BacktestResult,
+    objective_metric: str,
+) -> float:
+    """Compute the same Sharpe/Sortino score used by the Optuna objective.
+
+    This mirrors the scoring logic in make_objective() so that baseline and
+    optimized results are comparable on the same scale.
+    """
+    if result.trade_count == 0 or not result.trades:
+        return -9999.0
+
+    trade_records = []
+    for t in result.trades:
+        trade_records.append({"exit_dt": t.exit_dt, "pnl": t.net_pnl_dollars})
+    trades_df = pd.DataFrame(trade_records)
+    trades_df["exit_dt"] = pd.to_datetime(trades_df["exit_dt"])
+    trades_df = trades_df.set_index("exit_dt").sort_index()
+
+    monthly_pnls = trades_df["pnl"].resample("M").sum().dropna()
+    monthly_pnl_vals = monthly_pnls.values
+
+    if len(monthly_pnl_vals) == 0:
+        return -9999.0
+
+    if objective_metric == "sortino":
+        neg_pnls = monthly_pnl_vals[monthly_pnl_vals < 0]
+        if len(neg_pnls) == 0 or float(np.std(neg_pnls)) < 1e-9:
+            return 10.0
+        return float(
+            (np.mean(monthly_pnl_vals) / np.std(neg_pnls)) * np.sqrt(12)
+        )
+    else:
+        std_pnl = float(np.std(monthly_pnl_vals))
+        if std_pnl < 1e-9:
+            return -9999.0
+        return float(
+            (np.mean(monthly_pnl_vals) / std_pnl) * np.sqrt(12)
+        )
+
+
+# ---------------------------------------------------------------------------
 # Optuna objective
 # ---------------------------------------------------------------------------
 
@@ -708,7 +864,7 @@ def make_objective(
             "trailing_atr_mult": trial.suggest_float(f"trailing_atr_mult_{suffix}", 0.5, 5.0, step=0.25),
             "trailing_sl_atr_offset": trial.suggest_float(f"trailing_sl_atr_offset_{suffix}", 1.0, 5.0, step=0.5),
             "cooldown_bars": trial.suggest_int(f"cooldown_bars_{suffix}", 1, 21, step=2),
-            "max_hold_bars": trial.suggest_int(f"max_hold_bars_{suffix}", 24, 240, step=24),
+            "max_hold_bars": trial.suggest_int(f"max_hold_bars_{suffix}", 6, 36, step=6),
             "consecutive_signal_threshold": trial.suggest_int(f"consecutive_signal_threshold_{suffix}", 0, 4, step=1),
             "entry_threshold": trial.suggest_float(f"entry_threshold_{suffix}", 0.50, 0.80, step=0.01),
             "atr_period": trial.suggest_int(f"atr_period_{suffix}", 10, 40, step=2),
@@ -756,7 +912,7 @@ def make_objective(
                 "trailing_atr_mult": trial.suggest_float("trailing_atr_mult", 0.5, 5.0, step=0.25),
                 "trailing_sl_atr_offset": trial.suggest_float("trailing_sl_atr_offset", 1.0, 5.0, step=0.5),
                 "cooldown_bars": trial.suggest_int("cooldown_bars", 1, 21, step=2),
-                "max_hold_bars": trial.suggest_int("max_hold_bars", 24, 240, step=24),
+                "max_hold_bars": trial.suggest_int("max_hold_bars", 6, 36, step=6),
                 "consecutive_signal_threshold": trial.suggest_int("consecutive_signal_threshold", 0, 4, step=1),
                 "entry_threshold": trial.suggest_float("entry_threshold", 0.50, 0.80, step=0.01),
                 "atr_period": trial.suggest_int("atr_period", 10, 40, step=2),
@@ -963,12 +1119,30 @@ def run_optimization(
     )
 
     db_hash = hashlib.md5(f"strategy_opt_{model_name}_{objective_metric}".encode()).hexdigest()[:8]
+    db_path = Path(f"optuna_study_{db_hash}.db")
+    db_path.unlink(missing_ok=True)  # fresh study each run — avoids trial number inflation
     study = optuna.create_study(
         direction="maximize",
         study_name=f"strategy_opt_{model_name}_{objective_metric}",
-        storage=f"sqlite:///optuna_study_{db_hash}.db",
-        load_if_exists=True,
+        storage=f"sqlite:///{db_path}",
     )
+
+    # ── Warm-start: inject baseline as trial #0 ───────────────────────
+    warm_params = _extract_warm_start_params(base_cfg, is_tiered, optimize_side)
+    _warm_start_ok = False
+    if warm_params:
+        try:
+            study.enqueue_trial(warm_params)
+            _warm_start_ok = True
+            print(f"  Enqueued baseline config as warm-start trial #0")
+        except Exception as e:
+            print(f"  [WARN] Failed to enqueue baseline warm-start: {e}")
+    if not _warm_start_ok:
+        print("  [WARN] NO WARM-START: Optimizer will cold-start from random sampling!")
+
+    # Compute baseline objective score for regression guard
+    baseline_obj_score = _compute_objective_score(baseline_result, objective_metric)
+    print(f"  Baseline {objective_metric}: {baseline_obj_score:.4f}")
 
     score_label = objective_metric.capitalize()
 
@@ -981,11 +1155,13 @@ def run_optimization(
             print(f"  Trial {completed}/{n_trials}  "
                   f"{score_label}={trial.value:.3f}  [{elapsed:.0f}s]")
 
-    print(f"\n--- OPTIMIZING ({n_trials} trials, n_jobs={n_jobs}) ---")
+    _warm_tag = "baseline-seeded" if _warm_start_ok else "[WARN] COLD-START (no baseline)"
+    print(f"\n--- OPTIMIZING ({n_trials} trials, n_jobs={n_jobs}) [{_warm_tag}] ---")
     send_telegram(
         f"[Strategy Optimizer] {model_name}\n"
         f"Started: {n_trials} trials (n_jobs={n_jobs})\n"
-        f"Objective: {objective_metric}"
+        f"Objective: {objective_metric}\n"
+        f"Warm-start: {'[OK] baseline injected' if _warm_start_ok else '[WARN] COLD-START -- no baseline config provided!'}"
     )
     try:
         study.optimize(
@@ -1069,52 +1245,68 @@ def run_optimization(
           f"Trades={baseline_metrics['trade_count']}  "
           f"DD=${baseline_metrics['max_drawdown']:,.2f}")
 
+    # ── Regression guard ──────────────────────────────────────────────
+    best_obj_score = _compute_objective_score(best_result, objective_metric)
+    _regression_triggered = False
+    if best_obj_score <= baseline_obj_score:
+        _regression_triggered = True
+        print(f"\n  [WARN] REGRESSION GUARD: Optuna best ({best_obj_score:.4f}) did not beat "
+              f"baseline ({baseline_obj_score:.4f}). Returning baseline config.")
+        send_telegram(
+            f"[Strategy Optimizer] {model_name}\n"
+            f"[WARN] REGRESSION GUARD TRIGGERED\n"
+            f"Optuna best {score_label}: {best_obj_score:.4f}\n"
+            f"Baseline {score_label}: {baseline_obj_score:.4f}\n"
+            f"Returning baseline config."
+        )
+        best_cfg = copy.deepcopy(base_cfg)
+        best_result = baseline_result
+        best_metrics = baseline_metrics
+    else:
+        print(f"\n  [OK] Optimizer improved over baseline: "
+              f"{best_obj_score:.4f} > {baseline_obj_score:.4f}")
+
     # Build optuna_info
+    # Build optuna_info — shared base fields
+    _optuna_base = {
+        "trial_number": best_trial.number,
+        "timestamp": pd.Timestamp.now().isoformat(timespec="seconds"),
+        "optimizer": "strategy_optimizer",
+        "objective": objective_metric,
+        "n_trials": n_trials,
+        "consistency_score": best_trial.value,
+        "baseline_metrics": baseline_metrics,
+        "baseline_obj_score": round(baseline_obj_score, 4),
+        "best_obj_score": round(best_obj_score, 4),
+        "regression_guard_triggered": _regression_triggered,
+        "warm_start_injected": _warm_start_ok,
+        "wall_time_seconds": round(elapsed, 1),
+    }
+
     if is_tiered and optimize_side:
         best_cfg["optuna_info"] = {
-            "trial_number": best_trial.number,
-            "timestamp": pd.Timestamp.now().isoformat(timespec="seconds"),
-            "optimizer": "strategy_optimizer",
+            **_optuna_base,
             "mode": f"single_side_{optimize_side}",
-            "objective": objective_metric,
             "optimize_side": optimize_side,
-            "n_trials": n_trials,
-            "params": side_params,
+            "params": side_params if not _regression_triggered else {},
             "all_trial_params": dict(best_trial.params),
-            "consistency_score": best_trial.value,
             "metrics": best_metrics,
-            "baseline_metrics": baseline_metrics,
-            "wall_time_seconds": round(elapsed, 1),
         }
     elif is_tiered:
         best_cfg["optuna_info"] = {
-            "trial_number": best_trial.number,
-            "timestamp": pd.Timestamp.now().isoformat(timespec="seconds"),
-            "optimizer": "strategy_optimizer",
+            **_optuna_base,
             "mode": "simultaneous_ensemble",
-            "objective": objective_metric,
-            "n_trials": n_trials,
-            "long_params": long_params,
-            "short_params": short_params,
+            "long_params": long_params if not _regression_triggered else {},
+            "short_params": short_params if not _regression_triggered else {},
             "params": dict(best_trial.params),
-            "consistency_score": best_trial.value,
             "ensemble_metrics": best_metrics,
-            "baseline_metrics": baseline_metrics,
-            "wall_time_seconds": round(elapsed, 1),
         }
     else:
         best_cfg["optuna_info"] = {
-            "trial_number": best_trial.number,
-            "timestamp": pd.Timestamp.now().isoformat(timespec="seconds"),
-            "optimizer": "strategy_optimizer",
+            **_optuna_base,
             "mode": "single_config",
-            "objective": objective_metric,
-            "n_trials": n_trials,
             "params": dict(best_trial.params),
-            "consistency_score": best_trial.value,
             "metrics": best_metrics,
-            "baseline_metrics": baseline_metrics,
-            "wall_time_seconds": round(elapsed, 1),
         }
 
     # ── Holdout backtest (unseen by Optuna) ────────────────────────────
@@ -1320,14 +1512,28 @@ def run_hybrid_optimization(
     )
 
     db_hash = hashlib.md5(f"hybrid_opt_{model_name}_{objective_metric}".encode()).hexdigest()[:8]
+    db_path = Path(f"optuna_study_{db_hash}.db")
+    db_path.unlink(missing_ok=True)  # fresh study each run — avoids trial number inflation
     study = optuna.create_study(
         direction="maximize",
         study_name=f"hybrid_opt_{model_name}_{objective_metric}",
-        storage=f"sqlite:///optuna_study_{db_hash}.db",
-        load_if_exists=True,
+        storage=f"sqlite:///{db_path}",
     )
 
-    # Inject Stage 1 warm-start configs
+    # ── Warm-start: inject baseline as first trial ────────────────────
+    warm_params = _extract_warm_start_params(base_cfg, is_tiered, optimize_side)
+    _warm_start_ok = False
+    if warm_params:
+        try:
+            study.enqueue_trial(warm_params)
+            _warm_start_ok = True
+            print(f"  Enqueued baseline config as warm-start trial #0")
+        except Exception as e:
+            print(f"  [WARN] Failed to enqueue baseline warm-start: {e}")
+    if not _warm_start_ok:
+        print("  [WARN] NO WARM-START: Optimizer will cold-start from random sampling!")
+
+    # Inject Stage 1 VBT warm-start configs (after baseline)
     for params in stage1_configs:
         try:
             study.enqueue_trial(params)
@@ -1335,6 +1541,10 @@ def run_hybrid_optimization(
             print(f"  [WARN] enqueue_trial failed for {params}: {e}")
     if stage1_configs:
         print(f"  Enqueued {len(stage1_configs)} Stage 1 warm-start trials")
+
+    # Compute baseline objective score for regression guard
+    baseline_obj_score = _compute_objective_score(baseline_result, objective_metric)
+    print(f"  Baseline {objective_metric}: {baseline_obj_score:.4f}")
 
     def trial_callback(study_: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
         if trial.state != optuna.trial.TrialState.COMPLETE:
@@ -1346,12 +1556,14 @@ def run_hybrid_optimization(
             print(f"  Trial {completed}/{total_effective}  "
                   f"{score_label}={trial.value:.3f}  [{elapsed:.0f}s]")
 
-    print(f"\n--- STAGE 2: OPTIMIZING ({n_trials} TPE trials, n_jobs={n_jobs}) ---")
+    _warm_tag = "baseline-seeded" if _warm_start_ok else "[WARN] COLD-START (no baseline)"
+    print(f"\n--- STAGE 2: OPTIMIZING ({n_trials} TPE trials, n_jobs={n_jobs}) [{_warm_tag}] ---")
     send_telegram(
         f"[Hybrid Optimizer] {model_name}\n"
         f"Stage 1: {len(stage1_configs)} warm-start configs\n"
         f"Stage 2: {n_trials} trials (n_jobs={n_jobs})\n"
-        f"Objective: {objective_metric}"
+        f"Objective: {objective_metric}\n"
+        f"Warm-start: {'[OK] baseline injected' if _warm_start_ok else '[WARN] COLD-START -- no baseline config provided!'}"
     )
     try:
         study.optimize(
@@ -1430,6 +1642,27 @@ def run_hybrid_optimization(
           f"Trades={baseline_metrics['trade_count']}  "
           f"DD=${baseline_metrics['max_drawdown']:,.2f}")
 
+    # ── Regression guard ──────────────────────────────────────────────
+    best_obj_score = _compute_objective_score(best_result, objective_metric)
+    _regression_triggered = False
+    if best_obj_score <= baseline_obj_score:
+        _regression_triggered = True
+        print(f"\n  [WARN] REGRESSION GUARD: Optuna best ({best_obj_score:.4f}) did not beat "
+              f"baseline ({baseline_obj_score:.4f}). Returning baseline config.")
+        send_telegram(
+            f"[Hybrid Optimizer] {model_name}\n"
+            f"[WARN] REGRESSION GUARD TRIGGERED\n"
+            f"Optuna best {score_label}: {best_obj_score:.4f}\n"
+            f"Baseline {score_label}: {baseline_obj_score:.4f}\n"
+            f"Returning baseline config."
+        )
+        best_cfg = copy.deepcopy(base_cfg)
+        best_result = baseline_result
+        best_metrics = baseline_metrics
+    else:
+        print(f"\n  [OK] Optimizer improved over baseline: "
+              f"{best_obj_score:.4f} > {baseline_obj_score:.4f}")
+
     # ── Build optuna_info (tagged as "hybrid") ───────────────────────────────
     _optuna_info_base = {
         "trial_number": best_trial.number,
@@ -1441,6 +1674,10 @@ def run_hybrid_optimization(
         "stage1_configs_count": len(stage1_configs),
         "consistency_score": best_trial.value,
         "baseline_metrics": baseline_metrics,
+        "baseline_obj_score": round(baseline_obj_score, 4),
+        "best_obj_score": round(best_obj_score, 4),
+        "regression_guard_triggered": _regression_triggered,
+        "warm_start_injected": _warm_start_ok,
         "wall_time_seconds": round(elapsed, 1),
     }
     if is_tiered and optimize_side:
@@ -1448,7 +1685,7 @@ def run_hybrid_optimization(
             **_optuna_info_base,
             "mode": f"hybrid_single_side_{optimize_side}",
             "optimize_side": optimize_side,
-            "params": side_params,
+            "params": side_params if not _regression_triggered else {},
             "all_trial_params": dict(best_trial.params),
             "metrics": best_metrics,
         }
@@ -1456,8 +1693,8 @@ def run_hybrid_optimization(
         best_cfg["optuna_info"] = {
             **_optuna_info_base,
             "mode": "hybrid_simultaneous_ensemble",
-            "long_params": long_params,
-            "short_params": short_params,
+            "long_params": long_params if not _regression_triggered else {},
+            "short_params": short_params if not _regression_triggered else {},
             "params": dict(best_trial.params),
             "ensemble_metrics": best_metrics,
         }
