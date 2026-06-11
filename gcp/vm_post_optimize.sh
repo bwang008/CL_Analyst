@@ -101,6 +101,7 @@ WORKERS=0
 SHUTDOWN=false
 OBJECTIVE="both"
 SWEEP_MODE="backtest"
+OPT_MODE="individual"
 BUCKET="gs://cltrainer-optuna-results"
 LOG="post_optimize_$(date +%Y%m%d_%H%M%S).log"
 
@@ -113,6 +114,7 @@ for arg in "$@"; do
         --workers=*) WORKERS="${arg#*=}" ;;
         --objective=*) OBJECTIVE="${arg#*=}" ;;
         --sweep-mode=*) SWEEP_MODE="${arg#*=}" ;;
+        --opt-mode=*) OPT_MODE="${arg#*=}" ;;
         --shutdown) SHUTDOWN=true ;;
     esac
 done
@@ -135,6 +137,7 @@ echo "  Holdout:       $HOLDOUT_MONTHS months" | tee -a "$LOG"
 echo "  Workers:       $WORKERS" | tee -a "$LOG"
 echo "  Objective:     $OBJECTIVE" | tee -a "$LOG"
 echo "  Sweep Mode:    $SWEEP_MODE" | tee -a "$LOG"
+echo "  Opt Mode:      $OPT_MODE" | tee -a "$LOG"
 echo "  Bucket:        $BUCKET" | tee -a "$LOG"
 echo "  CPUs:          $(nproc)" | tee -a "$LOG"
 echo "============================================================" | tee -a "$LOG"
@@ -234,52 +237,72 @@ if [ "$ARTIFACT_COUNT" -eq 0 ]; then
     exit 1
 fi
 
-# --- [3b/5] Sweep Ensembles ---
-echo "" | tee -a "$LOG"
-echo "[3b/5] Sweeping Ensembles (Baseline Config)..." | tee -a "$LOG"
-SWEEP_ARGS="--base-config configs/strategies/$STRATEGY_CONFIG \
-    --data data/processed/$OHLCV_BASENAME \
-    --long-dir reports/ \
-    --short-dir reports/ \
-    --long-prefix _long_ \
-    --short-prefix _short_ \
-    --output-md $BATCH_DIR/batch_ensemble_pre_opt.md \
-    --mode $SWEEP_MODE \
-    --holdout-months $HOLDOUT_MONTHS"
-echo "  Sweep command: python agent/sweep_ensembles.py $SWEEP_ARGS" | tee -a "$LOG"
-python agent/sweep_ensembles.py \
-    --base-config configs/strategies/$STRATEGY_CONFIG \
-    --data data/processed/$OHLCV_BASENAME \
-    --long-dir reports/ \
-    --short-dir reports/ \
-    --long-prefix "_long_" \
-    --short-prefix "_short_" \
-    --output-md "$BATCH_DIR/batch_ensemble_pre_opt.md" \
-    --mode "$SWEEP_MODE" \
-    --holdout-months "$HOLDOUT_MONTHS" \
-    2>&1 | tee -a "$LOG"
+if [ "$OPT_MODE" = "ensemble" ]; then
+    # --- [3b/5] Sweep Ensembles ---
+    echo "" | tee -a "$LOG"
+    echo "[3b/5] Sweeping Ensembles (Baseline Config)..." | tee -a "$LOG"
+    SWEEP_ARGS="--base-config configs/strategies/$STRATEGY_CONFIG \
+        --data data/processed/$OHLCV_BASENAME \
+        --long-dir reports/ \
+        --short-dir reports/ \
+        --long-prefix _long_ \
+        --short-prefix _short_ \
+        --output-md $BATCH_DIR/batch_ensemble_pre_opt.md \
+        --mode $SWEEP_MODE \
+        --holdout-months $HOLDOUT_MONTHS"
+    echo "  Sweep command: python agent/sweep_ensembles.py $SWEEP_ARGS" | tee -a "$LOG"
+    python agent/sweep_ensembles.py \
+        --base-config configs/strategies/$STRATEGY_CONFIG \
+        --data data/processed/$OHLCV_BASENAME \
+        --long-dir reports/ \
+        --short-dir reports/ \
+        --long-prefix "_long_" \
+        --short-prefix "_short_" \
+        --output-md "$BATCH_DIR/batch_ensemble_pre_opt.md" \
+        --mode "$SWEEP_MODE" \
+        --holdout-months "$HOLDOUT_MONTHS" \
+        2>&1 | tee -a "$LOG"
 
-echo "  Selecting Top 8 Ensembles..." | tee -a "$LOG"
-python agent/select_top_ensembles.py \
-    --md-report "$BATCH_DIR/batch_ensemble_pre_opt.md" \
-    --output-json "$BATCH_DIR/top_8_ensembles.json" \
-    --top-n 8 \
-    2>&1 | tee -a "$LOG"
+    echo "  Selecting Top 8 Ensembles..." | tee -a "$LOG"
+    python agent/select_top_ensembles.py \
+        --md-report "$BATCH_DIR/batch_ensemble_pre_opt.md" \
+        --output-json "$BATCH_DIR/top_8_ensembles.json" \
+        --top-n 8 \
+        2>&1 | tee -a "$LOG"
 
-# --- [4/5] Run batch_post_optimizer ---
-echo "" | tee -a "$LOG"
-echo "[4/5] Running batch post-optimizer on Top 8..." | tee -a "$LOG"
-echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --target-pairs-json $BATCH_DIR/top_8_ensembles.json --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter" | tee -a "$LOG"
+    # --- [4/5] Run batch_post_optimizer (ensemble mode) ---
+    echo "" | tee -a "$LOG"
+    echo "[4/5] Running batch post-optimizer on Top 8 (ensemble mode)..." | tee -a "$LOG"
+    echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --target-pairs-json $BATCH_DIR/top_8_ensembles.json --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter" | tee -a "$LOG"
 
-python agent/batch_post_optimizer.py \
-    --batch-dir "$BATCH_DIR" \
-    --target-pairs-json "$BATCH_DIR/top_8_ensembles.json" \
-    --n-trials "$N_TRIALS" \
-    --holdout-months "$HOLDOUT_MONTHS" \
-    --workers "$WORKERS" \
-    --objective "$OBJECTIVE" \
-    --no-filter \
-    2>&1 | tee -a "$LOG"
+    python agent/batch_post_optimizer.py \
+        --batch-dir "$BATCH_DIR" \
+        --target-pairs-json "$BATCH_DIR/top_8_ensembles.json" \
+        --n-trials "$N_TRIALS" \
+        --holdout-months "$HOLDOUT_MONTHS" \
+        --workers "$WORKERS" \
+        --objective "$OBJECTIVE" \
+        --no-filter \
+        2>&1 | tee -a "$LOG"
+else
+    # --- [3b/5] SKIPPED (individual mode) ---
+    echo "" | tee -a "$LOG"
+    echo "[3b/5] Skipped — individual mode (no ensemble sweep/selection)" | tee -a "$LOG"
+
+    # --- [4/5] Run batch_post_optimizer (individual mode — per-side Long/Short) ---
+    echo "" | tee -a "$LOG"
+    echo "[4/5] Running batch post-optimizer (individual mode — per-side Long/Short)..." | tee -a "$LOG"
+    echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter" | tee -a "$LOG"
+
+    python agent/batch_post_optimizer.py \
+        --batch-dir "$BATCH_DIR" \
+        --n-trials "$N_TRIALS" \
+        --holdout-months "$HOLDOUT_MONTHS" \
+        --workers "$WORKERS" \
+        --objective "$OBJECTIVE" \
+        --no-filter \
+        2>&1 | tee -a "$LOG"
+fi
 
 OPT_EXIT=$?
 

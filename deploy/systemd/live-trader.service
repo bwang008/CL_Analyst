@@ -16,7 +16,7 @@ ExecStartPre=/usr/bin/timeout 120 /bin/bash -c \
 # Run the live trader using the absolute Conda python path.
 # -m src.live_execution.live_trader delegates to cli.main().
 ExecStart=/home/bwang008/miniconda3/envs/trader/bin/python -m src.live_execution.live_trader \
-    --config configs/strategies/HourSet_08_Ensemble_03_05242026.json \
+    --config configs/strategies/HS09_Ensemble_E01_06032026.json \
     --host 127.0.0.1 \
     --port 4002
 
