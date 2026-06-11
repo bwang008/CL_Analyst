@@ -176,6 +176,9 @@ def find_ohlcv_path(manifest_path: str) -> str:
         os.path.join("data", "processed", basename),
         os.path.join("data", "processed", basename.replace("cl-1h_bk_", "CL_")),
         os.path.join("data", "processed", basename.replace("cl-5m_bk_", "CL_")),
+        # Cross-resolution fallback: 1h GCS name -> 5m local (or vice versa)
+        os.path.join("data", "processed", basename.replace("cl-1h_bk_", "cl-5m_bk_")),
+        os.path.join("data", "processed", basename.replace("cl-5m_bk_", "cl-1h_bk_")),
     ]
     for c in candidates:
         if os.path.exists(c):
@@ -309,7 +312,7 @@ def generate_optimized_report(
     if has_ensembles:
         lines.append(f"### Ensembles (Top {len(all_results)})")
         lines.append("")
-        lines.append("| # | Experiment | Long Model | Short Model | Trades (pre) | Trades (opt) | Trades (ho) | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (holdout) | Opt Thr | Best Trial |")
+        lines.append("| # | Experiment | Long Model | Short Model | Trades (pre) T/L/S | Trades (opt) T/L/S | Trades (ho) T/L/S | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (holdout) | Opt Thr | Best Trial |")
         lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for idx, (key, opt) in enumerate(all_results.items(), 1):
             # Derive experiment + model display names
@@ -322,10 +325,7 @@ def generate_optimized_report(
             long_exp = labels_info.get("long_label", "")
             short_exp = labels_info.get("short_label", "")
             if long_exp and short_exp:
-                if long_exp == short_exp:
-                    experiment_col = long_exp
-                else:
-                    experiment_col = f"{long_exp} / {short_exp}"
+                experiment_col = f"{long_exp} / {short_exp}"
             elif long_exp:
                 experiment_col = long_exp
             elif short_exp:
@@ -343,18 +343,30 @@ def generate_optimized_report(
                 opt_info = opt.get("optuna_info", opt.get("config", {}).get("optuna_info", {}))
                 ho_metrics = opt_info.get("holdout_metrics", {})
                 ho_pnl = f"${ho_metrics['total_pnl']:,.0f}" if ho_metrics else "-"
-                ho_trades = ho_metrics.get('trade_count', '-') if ho_metrics else "-"
+                if ho_metrics:
+                    ho_t = ho_metrics.get('trade_count', '-')
+                    ho_l = ho_metrics.get('buy_trades', '-')
+                    ho_s = ho_metrics.get('sell_trades', '-')
+                    ho_trades = f"{ho_t}/{ho_l}/{ho_s}"
+                else:
+                    ho_trades = "-"
                 trial_num = opt_info.get('trial_number', '-')
                 n_t = opt_info.get('n_trials', '?')
                 baseline = opt_info.get("baseline_metrics", {})
 
                 # Baseline metrics
-                base_trades = baseline.get('trade_count', '-')
+                base_t = baseline.get('trade_count', '-')
+                base_l = baseline.get('buy_trades', '-')
+                base_s = baseline.get('sell_trades', '-')
+                base_trades = f"{base_t}/{base_l}/{base_s}"
                 base_pf = f"{baseline['profit_factor']:.2f}" if 'profit_factor' in baseline else '-'
                 base_pnl = f"${baseline['total_pnl']:,.0f}" if 'total_pnl' in baseline else '-'
 
                 # Optimized metrics
-                opt_trades = om.get('trade_count', 0)
+                opt_t = om.get('trade_count', 0)
+                opt_l = om.get('buy_trades', 0)
+                opt_s = om.get('sell_trades', 0)
+                opt_trades = f"{opt_t}/{opt_l}/{opt_s}"
                 opt_pf = f"{om.get('profit_factor', 0.0):.2f}"
                 opt_pnl = f"${om.get('total_pnl', 0.0):,.0f}"
                 
@@ -385,7 +397,7 @@ def generate_optimized_report(
             for metric in ["logloss", "average_precision"]:
                 lines.append(f"### {section_name} ({metric.replace('_', ' ').title()})")
                 lines.append("")
-                lines.append("| Experiment | Trades (pre) | Trades (opt) | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (holdout) | Opt Thr | Opt TP | Opt SL | Opt Trail | Opt Cool | Opt Hold | Opt Consec | Best Trial |")
+                lines.append("| Experiment | Trades (pre) T/L/S | Trades (opt) T/L/S | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (holdout) | Opt Thr | Opt TP | Opt SL | Opt Trail | Opt Cool | Opt Hold | Opt Consec | Best Trial |")
                 lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 
                 for exp in progress.get("experiments", []):
@@ -404,7 +416,10 @@ def generate_optimized_report(
 
                     base_key = f"{direction_key}_{metric}"
                     base = bt.get(base_key, {})
-                    base_trades = base.get("trade_count", 0)
+                    base_t = base.get("trade_count", 0)
+                    base_l = base.get("buy_trades", 0)
+                    base_s = base.get("sell_trades", 0)
+                    base_trades = f"{base_t}/{base_l}/{base_s}"
                     base_pf = base.get("profit_factor", 0.0)
                     base_pnl = base.get("total_pnl", 0.0)
 
@@ -420,7 +435,10 @@ def generate_optimized_report(
                             opt_info = opt.get("config", {}).get("optuna_info", {})
 
                         params = opt_info.get("params", {})
-                        opt_trades = om.get("trade_count", 0)
+                        opt_t = om.get("trade_count", 0)
+                        opt_l = om.get("buy_trades", 0)
+                        opt_s = om.get("sell_trades", 0)
+                        opt_trades = f"{opt_t}/{opt_l}/{opt_s}"
                         opt_pf = om.get("profit_factor", 0.0)
                         opt_pnl = om.get("total_pnl", 0.0)
                         opt_thr = params.get("entry_threshold", "-")
@@ -467,13 +485,14 @@ def generate_optimized_report(
         params = opt_info.get("params", {})
         metrics = result.get("metrics", {})
         baseline = opt_info.get("baseline_metrics", {})
+        ho_metrics = opt_info.get("holdout_metrics", {})
 
         # Build a readable heading with experiment label if available
         labels_info = exp_labels.get(key, {})
         long_exp = labels_info.get("long_label", "")
         short_exp = labels_info.get("short_label", "")
         if long_exp or short_exp:
-            exp_tag = long_exp if long_exp == short_exp else f"{long_exp or '?'} / {short_exp or '?'}"
+            exp_tag = f"{long_exp or '?'} / {short_exp or '?'}"
             parts = key.split('|')
             if len(parts) == 2:
                 long_side = shorten_model_side(parts[0])
@@ -485,6 +504,25 @@ def generate_optimized_report(
             heading = key
         lines.append(f"### {heading}")
         lines.append("")
+        
+        b_buy = baseline.get("buy_trades", "-")
+        b_sell = baseline.get("sell_trades", "-")
+        b_tot = baseline.get("trade_count", "-")
+        
+        m_buy = metrics.get("buy_trades", "-")
+        m_sell = metrics.get("sell_trades", "-")
+        m_tot = metrics.get("trade_count", "-")
+        
+        h_buy = ho_metrics.get("buy_trades", "-") if ho_metrics else "-"
+        h_sell = ho_metrics.get("sell_trades", "-") if ho_metrics else "-"
+        h_tot = ho_metrics.get("trade_count", "-") if ho_metrics else "-"
+
+        lines.append(f"**Trade Breakdown (Long / Short)**:")
+        lines.append(f"- **Pre-Optimization**: {b_buy} / {b_sell} (Total: {b_tot})")
+        lines.append(f"- **Post-Optimization**: {m_buy} / {m_sell} (Total: {m_tot})")
+        lines.append(f"- **Holdout**: {h_buy} / {h_sell} (Total: {h_tot})")
+        lines.append("")
+
         lines.append("| Parameter | Baseline | Optimized |")
         lines.append("|---|---|---|")
         lines.append(f"| Trades | {baseline.get('trade_count', '-')} | {metrics.get('trade_count', '-')} |")
@@ -764,7 +802,11 @@ def main():
     # Map task_key -> {"long_label": ..., "short_label": ...} for experiment labelling
     task_experiment_labels = {}
     
-    if args.target_pairs_json and os.path.exists(args.target_pairs_json):
+    if args.target_pairs_json:
+        if not os.path.exists(args.target_pairs_json):
+            print(f"ERROR: Provided --target-pairs-json file does not exist: {args.target_pairs_json}")
+            sys.exit(1)
+        
         print(f"Loading top target pairs from {args.target_pairs_json}")
         with open(args.target_pairs_json, "r") as f:
             top_pairs = json.load(f)

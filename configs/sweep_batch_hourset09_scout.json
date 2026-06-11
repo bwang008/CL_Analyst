@@ -1,29 +1,30 @@
 {
-  "_comment": "HourSet_09 CANARY (8 targets) — 8 target pairs for fast pipeline validation (~20-30 min). Shallow search, low trial count.",
+  "_comment": "HourSet_09 SCOUT — 8 target pairs for moderate-depth exploration. Mid-range search space and trial count.",
   "defaults": {
     "machine_type": "c2-standard-16",
     "provisioning_model": "STANDARD",
     "gcs_data_path": "gs://cltrainer-optuna-results/data/cl-1h_bk_HourSet_09.parquet",
     "strategy_config": "HourSet_09_Ensemble_06022026.json",
     "metrics": "logloss,average_precision",
-    "timeout_minutes": 240,
+    "timeout_minutes": 360,
     "max_concurrent_vcpus": 288,
     "vcpus_per_vm": 16,
-    "n_trials": 20,
+    "max_concurrent_vms": 12,
+    "n_trials": 80,
     "max_depth_min": 3,
-    "max_depth_max": 6,
+    "max_depth_max": 8,
     "num_leaves_min": 15,
-    "num_leaves_max": 31,
-    "max_n_estimators": 500,
-    "early_stopping_rounds": 15,
-    "max_folds": 3,
-    "learning_rate_min": 0.005,
-    "learning_rate_max": 0.02,
-    "min_child_samples_min": 150,
-    "min_child_samples_max": 400,
+    "num_leaves_max": 64,
+    "max_n_estimators": 1500,
+    "early_stopping_rounds": 30,
+    "max_folds": 5,
+    "learning_rate_min": 0.001,
+    "learning_rate_max": 0.05,
+    "min_child_samples_min": 100,
+    "min_child_samples_max": 500,
     "feature_fraction_min": 0.4,
     "feature_fraction_max": 0.8,
-    "post_optimizer_trials": 20,
+    "post_optimizer_trials": 500,
     "post_optimizer_holdout_months": 6
   },
   "experiments": [
@@ -31,49 +32,49 @@
       "label": "HS09 3x1 6H",
       "target_long": "TARGET_TRIPLE_3x1_6H_LONG",
       "target_short": "TARGET_TRIPLE_3x1_6H_SHORT",
-      "gcs_prefix": "sweep_hs09c_3x1_6h"
+      "gcs_prefix": "sweep_hs09_3x1_6h_scout"
     },
     {
       "label": "HS09 3x1 12H",
       "target_long": "TARGET_TRIPLE_3x1_12H_LONG",
       "target_short": "TARGET_TRIPLE_3x1_12H_SHORT",
-      "gcs_prefix": "sweep_hs09c_3x1_12h"
+      "gcs_prefix": "sweep_hs09_3x1_12h_scout"
     },
     {
       "label": "HS09 3x1 24H",
       "target_long": "TARGET_TRIPLE_3x1_24H_LONG",
       "target_short": "TARGET_TRIPLE_3x1_24H_SHORT",
-      "gcs_prefix": "sweep_hs09c_3x1_24h"
+      "gcs_prefix": "sweep_hs09_3x1_24h_scout"
     },
     {
       "label": "HS09 4x1 6H",
       "target_long": "TARGET_TRIPLE_4x1_6H_LONG",
       "target_short": "TARGET_TRIPLE_4x1_6H_SHORT",
-      "gcs_prefix": "sweep_hs09c_4x1_6h"
+      "gcs_prefix": "sweep_hs09_4x1_6h_scout"
     },
     {
       "label": "HS09 4x1 12H",
       "target_long": "TARGET_TRIPLE_4x1_12H_LONG",
       "target_short": "TARGET_TRIPLE_4x1_12H_SHORT",
-      "gcs_prefix": "sweep_hs09c_4x1_12h"
+      "gcs_prefix": "sweep_hs09_4x1_12h_scout"
     },
     {
       "label": "HS09 4x1 24H",
       "target_long": "TARGET_TRIPLE_4x1_24H_LONG",
       "target_short": "TARGET_TRIPLE_4x1_24H_SHORT",
-      "gcs_prefix": "sweep_hs09c_4x1_24h"
+      "gcs_prefix": "sweep_hs09_4x1_24h_scout"
     },
     {
       "label": "HS09 5x1 12H",
       "target_long": "TARGET_TRIPLE_5x1_12H_LONG",
       "target_short": "TARGET_TRIPLE_5x1_12H_SHORT",
-      "gcs_prefix": "sweep_hs09c_5x1_12h"
+      "gcs_prefix": "sweep_hs09_5x1_12h_scout"
     },
     {
       "label": "HS09 5x1 24H",
       "target_long": "TARGET_TRIPLE_5x1_24H_LONG",
       "target_short": "TARGET_TRIPLE_5x1_24H_SHORT",
-      "gcs_prefix": "sweep_hs09c_5x1_24h"
+      "gcs_prefix": "sweep_hs09_5x1_24h_scout"
     }
   ]
 }

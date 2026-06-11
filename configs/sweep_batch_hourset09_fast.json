@@ -9,7 +9,7 @@
     "timeout_minutes": 240,
     "max_concurrent_vcpus": 288,
     "vcpus_per_vm": 16,
-    "n_trials": 50,
+    "n_trials": 20,
     "max_depth_min": 3,
     "max_depth_max": 6,
     "num_leaves_min": 15,
