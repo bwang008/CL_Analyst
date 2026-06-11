@@ -17,7 +17,7 @@
     "cooldown_bars": 7,
     "consecutive_signal_threshold": 2,
     "live_config": {
-        "client_id": 1010,
+        "client_id": 1020,
         "entry_mode": "marketable_limit",
         "exit_mode": "marketable_limit"
     },
