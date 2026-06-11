@@ -39,19 +39,24 @@ powershell -ExecutionPolicy Bypass -File .\gcp\run_sweep_batch.ps1 `
     -ManifestPath "configs\sweep_batch_hourset09_fast.json" `
     -Zone "us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f" `
     -SweepMode "frictionless" `
+    -OptMode "ensemble" `
     -DryRun
 
 # 2. Execute
 powershell -ExecutionPolicy Bypass -File .\gcp\run_sweep_batch.ps1 `
     -ManifestPath "configs\sweep_batch_hourset09_fast.json" `
     -Zone "us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f" `
-    -SweepMode "frictionless"
+    -SweepMode "frictionless" `
+    -OptMode "ensemble"
 ```
 
 > [!NOTE]
-> The **only** difference from `/run-cloud-batch` is adding `-SweepMode "frictionless"`.
-> This flag flows through the entire pipeline:
-> `run_sweep_batch.ps1` → `gcp_deploy_optimizer.ps1` → `vm_post_optimize.sh` → `sweep_ensembles.py --mode frictionless`
+> The **two** differences from `/run-cloud-batch` are:
+> 1. Adding `-SweepMode "frictionless"` — uses vectorized SNR evaluation instead of backtest subprocesses
+> 2. Adding `-OptMode "ensemble"` — jointly optimizes Long+Short thresholds (vs individual per-side optimization)
+>
+> These flags flow through the entire pipeline:
+> `run_sweep_batch.ps1` → `gcp_deploy_optimizer.ps1` → `vm_post_optimize.sh`
 
 ### Infrastructure
 
