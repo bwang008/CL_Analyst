@@ -893,9 +893,10 @@ class AlphaFactory:
 
                     # 2b) Log-Ratio (Normalized Magnitude for unbounded positive)
                     # We add this to the superset and let feature_buckets decide which to keep
-                    self.df[f"TS_{short_name}_LOG_RATIO_{tag}"] = (
-                        np.log(fast_series / denom)
-                    )
+                    with np.errstate(divide='ignore'):
+                        self.df[f"TS_{short_name}_LOG_RATIO_{tag}"] = (
+                            np.log(fast_series / denom)
+                        )
 
                     # 3) Inversion (Regime Shift)
                     self.df[f"TS_{short_name}_INVERT_{tag}"] = (
