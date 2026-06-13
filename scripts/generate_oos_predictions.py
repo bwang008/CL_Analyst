@@ -73,7 +73,10 @@ for cfg in models_to_run:
     print(f"Saving to {cfg['output_path']}")
     # Backup old file just in case
     if os.path.exists(cfg['output_path']):
-        os.rename(cfg['output_path'], cfg['output_path'] + ".bak")
-        
+        if not os.path.exists(cfg['output_path'] + ".bak"):
+            os.rename(cfg['output_path'], cfg['output_path'] + ".bak")
+        else:
+            # Just remove the current csv so we can write the new one
+            os.remove(cfg['output_path'])
     out_df.to_csv(cfg['output_path'])
     print(f"Successfully saved {cfg['output_path']}")
