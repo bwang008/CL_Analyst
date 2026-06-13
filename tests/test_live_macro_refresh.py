@@ -29,6 +29,8 @@ class TestLiveMacroRefresh:
         # Case 1: Strategy has macro features
         strategy_with_macro = DummyStrategy(feature_names=["MACD", "MACRO_VIX"])
         trader_1 = LiveTrader(
+            data_client=MagicMock(),
+            exec_client=MagicMock(),
             strategy=strategy_with_macro,
             dry_run=True,
         )
@@ -37,6 +39,8 @@ class TestLiveMacroRefresh:
         # Case 2: Strategy does not have macro features
         strategy_without_macro = DummyStrategy(feature_names=["MACD", "ATR_14"])
         trader_2 = LiveTrader(
+            data_client=MagicMock(),
+            exec_client=MagicMock(),
             strategy=strategy_without_macro,
             dry_run=True,
         )
@@ -61,6 +65,8 @@ class TestLiveMacroRefresh:
         """Heartbeat must invoke refresh_if_stale when needs_macro is True but rate-limit to once per hour."""
         strategy = DummyStrategy(feature_names=["MACRO_VIX"])
         trader = LiveTrader(
+            data_client=MagicMock(),
+            exec_client=MagicMock(),
             strategy=strategy,
             dry_run=True,
         )
@@ -68,7 +74,8 @@ class TestLiveMacroRefresh:
         assert trader._last_macro_check_time == 0.0
 
         # Trigger heartbeat log (mock dependencies so it doesn't try to touch live portfolios)
-        trader.manager = MagicMock()
+        trader.data_client = MagicMock()
+        trader.exec_client = MagicMock()
         trader._get_market_status = MagicMock(return_value="OPEN")
         trader._last_bar_time_5m = None
         trader._subscriptions_lost = False

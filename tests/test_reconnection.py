@@ -27,10 +27,14 @@ def _make_trader_stub():
     """
     trader = object.__new__(lt_module.LiveTrader)
 
-    # Mock the IBKRConnectionManager
-    trader.manager = MagicMock()
-    trader.manager.ib = MagicMock()
-    trader.manager.connect = MagicMock()
+    trader.data_client = MagicMock()
+    trader.data_client.connect = MagicMock()
+    trader.data_client.disconnect = MagicMock()
+    trader.data_client.cancel_subscription = MagicMock()
+
+    trader.exec_client = MagicMock()
+    trader.exec_client.connect = MagicMock()
+    trader.exec_client.disconnect = MagicMock()
 
     # Strategy (not used by reconnection tests, but must exist)
     trader.strategy = MagicMock()
@@ -43,8 +47,7 @@ def _make_trader_stub():
     trader._live_bars_5m = None
     trader._live_bars_1h = None
     trader._front_month_bars = None
-    trader._contract = MagicMock()
-    trader._front_month_contract = MagicMock()
+    trader._front_month_local_symbol = "CLN6"
     trader._front_month_str = "202604"
     trader._last_bar_time_5m = None
     trader._last_bar_time_1h = None
@@ -90,7 +93,8 @@ class TestReconnect:
         result = trader._reconnect()
 
         assert result is True
-        trader.manager.connect.assert_called_once()
+        trader.data_client.connect.assert_called_once()
+        trader.exec_client.connect.assert_called_once()
         trader._subscribe.assert_called_once()
 
     @patch.object(lt_module, "_RECONNECT_BASE_DELAY", 0.01)
@@ -100,7 +104,7 @@ class TestReconnect:
         """_reconnect retries when connect() fails, then succeeds."""
         trader = _make_trader_stub()
         # Fail twice, then succeed
-        trader.manager.connect.side_effect = [
+        trader.data_client.connect.side_effect = [
             ConnectionError("refused"),
             ConnectionError("refused"),
             None,  # success
@@ -109,7 +113,7 @@ class TestReconnect:
         result = trader._reconnect()
 
         assert result is True
-        assert trader.manager.connect.call_count == 3
+        assert trader.data_client.connect.call_count == 3
 
     @patch.object(lt_module, "_RECONNECT_BASE_DELAY", 0.01)
     @patch.object(lt_module, "_RECONNECT_MAX_DELAY", 0.05)
@@ -117,12 +121,12 @@ class TestReconnect:
     def test_reconnect_gives_up_after_max_attempts(self):
         """_reconnect returns False after exhausting all attempts."""
         trader = _make_trader_stub()
-        trader.manager.connect.side_effect = ConnectionError("refused")
+        trader.data_client.connect.side_effect = ConnectionError("refused")
 
         result = trader._reconnect()
 
         assert result is False
-        assert trader.manager.connect.call_count == 3
+        assert trader.data_client.connect.call_count == 3
 
     @patch.object(lt_module, "_RECONNECT_BASE_DELAY", 0.01)
     @patch.object(lt_module, "_RECONNECT_MAX_DELAY", 0.05)
@@ -143,28 +147,13 @@ class TestReconnect:
     @patch.object(lt_module, "_RECONNECT_MAX_ATTEMPTS", 5)
     def test_reconnect_re_registers_error_handler(self):
         """After reconnect, errorEvent handler is re-registered (without stacking)."""
-        trader = _make_trader_stub()
-        # Use a real list-like to track += and -= calls
-        registered_handlers = []
-
-        class FakeEvent:
-            def __iadd__(self, handler):
-                registered_handlers.append(handler)
-                return self
-
-            def __isub__(self, handler):
-                # Support -= for the de-duplication removal step
-                try:
-                    registered_handlers.remove(handler)
-                except ValueError:
-                    pass  # not registered yet — that's fine
-                return self
-
-        trader.manager.ib.errorEvent = FakeEvent()
+        trader.data_client.register_error_callback = MagicMock()
+        trader.exec_client.register_error_callback = MagicMock()
 
         trader._reconnect()
 
-        assert trader._on_ib_error in registered_handlers
+        trader.data_client.register_error_callback.assert_called_once_with(trader._on_ib_error)
+        trader.exec_client.register_error_callback.assert_called_once_with(trader._on_ib_error)
 
     @patch.object(lt_module, "_RECONNECT_BASE_DELAY", 0.01)
     @patch.object(lt_module, "_RECONNECT_MAX_DELAY", 0.05)
@@ -177,7 +166,7 @@ class TestReconnect:
         result = trader._reconnect()
 
         assert result is False
-        trader.manager.connect.assert_not_called()
+        trader.data_client.connect.assert_not_called()
 
     @patch.object(lt_module, "_RECONNECT_BASE_DELAY", 0.01)
     @patch.object(lt_module, "_RECONNECT_MAX_DELAY", 0.05)
@@ -188,11 +177,13 @@ class TestReconnect:
 
         trader._reconnect()
 
-        trader.manager.ib.disconnect.assert_called()
-        trader.manager.connect.assert_called_once()
+        trader.data_client.disconnect.assert_called()
+        trader.exec_client.disconnect.assert_called()
+        trader.data_client.connect.assert_called_once()
+        trader.exec_client.connect.assert_called_once()
         # disconnect should come before connect
-        disconnect_call = trader.manager.ib.disconnect.call_args_list[0]
-        connect_call = trader.manager.connect.call_args_list[0]
+        disconnect_call = trader.data_client.disconnect.call_args_list[0]
+        connect_call = trader.data_client.connect.call_args_list[0]
         # Both were called (order verified by mock call_args_list ordering)
         assert disconnect_call is not None
         assert connect_call is not None
@@ -211,8 +202,8 @@ class TestReconnect:
         trader._reconnect()
 
         # Stale subscriptions should be cancelled
-        trader.manager.cancel_subscription.assert_any_call(old_live_bars_5m)
-        trader.manager.cancel_subscription.assert_any_call(old_front_bars)
+        trader.data_client.cancel_subscription.assert_any_call(old_live_bars_5m)
+        trader.data_client.cancel_subscription.assert_any_call(old_front_bars)
         # New subscriptions should be created
         trader._subscribe.assert_called_once()
         trader._subscribe_front_month.assert_called_once()
@@ -238,7 +229,16 @@ class TestEventLoopReconnection:
             # After reconnect succeeds, stop the loop
             trader._running = False
 
-        trader.manager.ib.sleep.side_effect = sleep_side_effect
+        # Assuming event loop sleep is mocked elsewhere if needed, or we just mock sleep directly
+        import asyncio
+        async def sleep_side_effect(_):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ConnectionError("Socket disconnect")
+            trader._running = False
+
+        trader.exec_client.sleep = sleep_side_effect  # Replace ib.sleep usage with exec_client if relevant, or asyncio.sleep
 
         with patch.object(
             lt_module.LiveTrader, "_reconnect", return_value=True
@@ -249,7 +249,7 @@ class TestEventLoopReconnection:
     def test_event_loop_shuts_down_on_failed_reconnect(self):
         """_event_loop sets _running=False when _reconnect returns False."""
         trader = _make_trader_stub()
-        trader.manager.ib.sleep.side_effect = ConnectionError("Socket disconnect")
+        trader.exec_client.sleep = ConnectionError("Socket disconnect")
 
         with patch.object(
             lt_module.LiveTrader, "_reconnect", return_value=False
@@ -261,7 +261,7 @@ class TestEventLoopReconnection:
     def test_event_loop_sets_needs_restart_on_failed_reconnect(self):
         """_event_loop sets _needs_restart when reconnection is exhausted."""
         trader = _make_trader_stub()
-        trader.manager.ib.sleep.side_effect = ConnectionError("Socket disconnect")
+        trader.exec_client.sleep = ConnectionError("Socket disconnect")
 
         with patch.object(
             lt_module.LiveTrader, "_reconnect", return_value=False
@@ -297,7 +297,7 @@ class TestResubscribeAndBackfill:
     def test_skips_front_month_when_no_contract(self):
         """Skips front-month subscription when contract is None."""
         trader = _make_trader_stub()
-        trader._front_month_contract = None
+        trader._front_month_local_symbol = None
 
         trader._resubscribe_and_backfill()
 
@@ -319,7 +319,7 @@ class TestResubscribeAndBackfill:
 
         trader._resubscribe_and_backfill()
 
-        trader.manager.cancel_subscription.assert_any_call(old_live_5m)
-        trader.manager.cancel_subscription.assert_any_call(old_front)
+        trader.data_client.cancel_subscription.assert_any_call(old_live_5m)
+        trader.data_client.cancel_subscription.assert_any_call(old_front)
         # After cancel, the old references should be None before resubscribe
         # (the method sets them to None)

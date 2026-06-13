@@ -124,11 +124,20 @@ def main() -> None:
         help="IBKR TWS/Gateway host (default: IBKR_HOST or 127.0.0.1)",
     )
     parser.add_argument(
-        "--port", type=int, default=default_port,
-        help=(
-            "IBKR primary port (default: IBKR_PORT or 4002 for IB Gateway; "
-            "falls back to 7497 TWS)"
-        ),
+        "--data-source", default="ibkr",
+        help="Data source provider (default: ibkr)",
+    )
+    parser.add_argument(
+        "--exec-source", default="ibkr",
+        help="Execution routing provider (default: ibkr)",
+    )
+    parser.add_argument(
+        "--data-port", type=int, default=4001,
+        help="Data feed primary port (default: 4001 for IB Live Gateway; falls back to 7496 TWS)",
+    )
+    parser.add_argument(
+        "--exec-port", type=int, default=4002,
+        help="Execution primary port (default: 4002 for IB Paper Gateway; falls back to 7497 TWS)",
     )
     parser.add_argument(
         "--client-id", type=int, default=1,
@@ -262,10 +271,14 @@ def main() -> None:
     # ── Resolve exit_mode: config > default ────────────────────────
     resolved_exit_mode = config_exit_mode or "market"
 
+    from src.live_execution.factories import DataFeedFactory, ExecutionFactory
+
+    data_client = DataFeedFactory.create(args.data_source, host=args.host, port=args.data_port, client_id=resolved_client_id)
+    exec_client = ExecutionFactory.create(args.exec_source, host=args.host, port=args.exec_port, client_id=resolved_client_id)
+
     trader = LiveTrader(
-        host=args.host,
-        port=args.port,
-        client_id=resolved_client_id,
+        data_client=data_client,
+        exec_client=exec_client,
         strategy=strategy,
         db_path=resolved_db_path,
         seed_path=args.seed_path,

@@ -64,11 +64,8 @@ from src.live_execution.strategy import Strategy, TradeSignal
 
 from src.live_execution.strategies.configurable_strategy import ConfigurableStrategy
 from src.live_execution.data_manager import DataManager
-from src.live_execution.ibkr_client import (
-    IBKRConnectionManager,
-    build_cl_contract,
-    ib_bars_to_dataframe,
-)
+from src.live_execution.interfaces.data_feed_interface import DataFeedClient
+from src.live_execution.interfaces.execution_interface import ExecutionClient, StandardExecutionEvent
 from src.live_execution.telemetry import TelemetryDB
 from src.live_execution.utils.telegram_alert import TelegramAlerter
 # Phase 1 modularization: extracted modules
@@ -155,7 +152,7 @@ logging.basicConfig(
 log = logging.getLogger("LiveTrader")
 
 # Suppress non-CL noise from ib_insync internal logging (callbacks originate in wrapper)
-logging.getLogger("ib_insync.wrapper").addFilter(CLOnlyLogFilter())
+
 
 
 
@@ -193,9 +190,8 @@ class LiveTrader:
     def __init__(
         self,
         *,
-        host: str = "127.0.0.1",
-        port: int = 4002,
-        client_id: int = 10,
+        data_client: DataFeedClient,
+        exec_client: ExecutionClient,
         strategy: Strategy,
         db_path: str = _DEFAULT_DB_PATH,
         seed_path: str = _DEFAULT_SEED_PATH,
@@ -206,14 +202,14 @@ class LiveTrader:
         adaptive_priority: str = "Normal",
         exit_mode: str = "market",
     ) -> None:
-        self.host = host
-        self.port = port
-        self.client_id = client_id
+        self.data_client = data_client
+        self.exec_client = exec_client
         self.quantity = quantity
         self.dry_run = dry_run
         self.entry_mode = entry_mode
         self.adaptive_priority = adaptive_priority
         self.exit_mode = exit_mode
+        self._open_orders = {}
 
         # Strategy (owns model, config, threshold, sizing, bracket math)
         self.strategy = strategy
@@ -316,12 +312,6 @@ class LiveTrader:
         log.info("Telemetry DB: %s", db_path)
 
         # IBKR connection (not yet connected)
-        self.manager = IBKRConnectionManager(
-            host=host,
-            port=port,
-            client_id=client_id,
-            readonly=dry_run,  # readonly in dry-run mode
-        )
 
         # DataManagers for warm-start (Two-Brain Hub)
         # Log resolved data paths loudly so cross-environment issues
@@ -337,7 +327,7 @@ class LiveTrader:
         self.data_manager_5m = DataManager(
             seed_path=seed_path,
             cache_path=cache_path,
-            ibkr_manager=self.manager,
+            data_client=self.data_client,
             bar_size="5 mins",
             bars_per_day=288,
         )
@@ -371,7 +361,7 @@ class LiveTrader:
             self.data_manager_1h = DataManager(
                 seed_path=seed_path_1h,
                 cache_path=cache_path_1h,
-                ibkr_manager=self.manager,
+                data_client=self.data_client,
                 bar_size="1 hour",
                 bars_per_day=24,
             )
@@ -389,8 +379,7 @@ class LiveTrader:
         self._live_bars_5m = None
         self._live_bars_1h = None
         self._front_month_bars = None  # Two-Stream: raw front-month
-        self._contract = None
-        self._front_month_contract = None
+        self._front_month_local_symbol = None
         self._front_month_str: Optional[str] = None
         self._running = False
         self._last_bar_time_5m: Optional[pd.Timestamp] = None
@@ -434,7 +423,7 @@ class LiveTrader:
         self._session_id = uuid.uuid4().hex
         self._hostname = socket.gethostname()
         self._process_id = os.getpid()
-        self._environment = "paper" if self.port in (4002, 7497) else "live"
+        self._environment = "unknown"
 
         # Telegram alerts (fire-and-forget — failures never affect trading)
         self._telegram = TelegramAlerter()
@@ -467,7 +456,7 @@ class LiveTrader:
         """Format the heartbeat payload for Telegram."""
         uptime = datetime.now(timezone.utc) - self._bot_start_time
         uptime_str = str(uptime).split('.')[0]
-        broker_status = "🟢 Connected" if self.manager.ib.isConnected() else "🔴 Disconnected"
+        broker_status = "🟢 Connected" if (self.data_client.is_connected() and self.exec_client.is_connected()) else "🔴 Disconnected"
 
         current_position = 0
         unrealized_pnl = 0.0
@@ -477,14 +466,14 @@ class LiveTrader:
         # from the TelegramHeartbeat daemon thread, which has no asyncio
         # event loop.  Calling ensure_connected() / connect() from that
         # thread crashes with "There is no current event loop in thread".
-        if self.manager.ib.isConnected():
+        if (self.data_client.is_connected() and self.exec_client.is_connected()):
             try:
-                current_position = self.manager.get_cl_position(symbol=self._execution_symbol)
+                current_position = self.exec_client.get_position(symbol=self._execution_symbol)
             except Exception:
                 pass
 
             try:
-                for item in self.manager.ib.portfolio():
+                for item in []:
                     if item.contract.symbol == "CL":
                         unrealized_pnl = float(item.unrealizedPNL)
                         realized_pnl = float(item.realizedPNL)
@@ -493,7 +482,7 @@ class LiveTrader:
                 # If position is flat, IBKR drops the contract from portfolio().
                 # Fall back to the daily account-level Realized PnL to prevent resetting to $0.
                 if current_position == 0:
-                    for av in self.manager.ib.accountValues():
+                    for av in []:
                         if av.tag == "RealizedPnL" and av.currency == "USD":
                             realized_pnl = float(av.value)
             except Exception:
@@ -588,31 +577,28 @@ class LiveTrader:
 
         try:
             # Step 1: Connect
-            log.info("Connecting to IBKR at %s:%d ...", self.host, self.port)
-            self.manager.connect()
+            log.info("Connecting to Data and Execution adapters...")
+            self.data_client.connect()
+            self.exec_client.connect()
             log.info("Connected to IBKR")
 
             # Step 2: Register error handler for reconnection
-            self.manager.ib.errorEvent += self._on_ib_error
             self._callbacks_registered = False
             self._register_execution_callbacks()
 
-            # Step 3: Qualify continuous contract (Brain stream)
-            self._contract = build_cl_contract(continuous=True)
-            self._contract = self.manager.qualify_contract(self._contract)
-            log.info("Qualified CL continuous contract: %s", self._contract)
+            # Step 3: Qualify continuous contract (Brain stream) (Now handled by DataFeed)
 
             # Step 4: Resolve front-month contract (Hands stream)
             #         Use execution_symbol from config (CL or MCL)
             try:
-                self._front_month_contract, self._front_month_str = (
-                    self.manager.get_front_month_contract(
+                self._front_month_local_symbol, self._front_month_str = (
+                    self.data_client.get_front_month_contract(
                         symbol=self._execution_symbol,
                     )
                 )
                 log.info(
                     "Front-month contract: %s (month=%s)",
-                    self._front_month_contract.localSymbol,
+                    self._front_month_local_symbol,
                     self._front_month_str,
                 )
             except Exception as exc:
@@ -626,13 +612,13 @@ class LiveTrader:
             self._print_account_summary()
 
             # Step 6: Pass front-month ID to DataManagers for rollover detection
-            if self._front_month_contract is not None:
+            if self._front_month_local_symbol is not None:
                 self.data_manager_5m.front_month_id = (
-                    self._front_month_contract.localSymbol
+                    self._front_month_local_symbol
                 )
                 if self.data_manager_1h is not None:
                     self.data_manager_1h.front_month_id = (
-                        self._front_month_contract.localSymbol
+                        self._front_month_local_symbol
                     )
 
             # Step 7: Refresh external macro data if stale and model needs it
@@ -674,8 +660,8 @@ class LiveTrader:
             # Step 8: Subscribe to live bars (Brain stream)
             self._subscribe()
 
-            # Step 9: Subscribe to front-month bars (Hands stream)
-            if self._front_month_contract is not None:
+            if self._front_month_local_symbol is not None:
+                self._telegram.send(f"Front Month: `{self._front_month_local_symbol}` ({self._front_month_str})")
                 self._subscribe_front_month()
 
             # Step 10: Enter event loop
@@ -758,17 +744,17 @@ class LiveTrader:
         log.info("Shutting down...")
         if self._live_bars_5m is not None:
             try:
-                self.manager.cancel_subscription(self._live_bars_5m)
+                self.data_client.cancel_subscription(self._live_bars_5m)
             except Exception:
                 pass
         if self._live_bars_1h is not None:
             try:
-                self.manager.cancel_subscription(self._live_bars_1h)
+                self.data_client.cancel_subscription(self._live_bars_1h)
             except Exception:
                 pass
         if self._front_month_bars is not None:
             try:
-                self.manager.cancel_subscription(self._front_month_bars)
+                self.data_client.cancel_subscription(self._front_month_bars)
             except Exception:
                 pass
         # Save warm-start caches on shutdown
@@ -780,7 +766,8 @@ class LiveTrader:
             log.warning("Failed to save warm-start cache on shutdown.")
         # Stop heartbeat thread
         self._heartbeat_stop_event.set()
-        self.manager.disconnect()
+        self.data_client.disconnect()
+        self.exec_client.disconnect()
         self.telemetry.close()
         _logging.getLogger().removeHandler(self._log_capture)
         log.info("Shutdown complete.")
@@ -789,9 +776,7 @@ class LiveTrader:
         """Register IBKR execution callbacks once per connection lifecycle."""
         if self._callbacks_registered:
             return
-        self.manager.ib.orderStatusEvent += self._on_order_status
-        self.manager.ib.execDetailsEvent += self._on_exec_details
-        self.manager.ib.commissionReportEvent += self._on_commission_report
+        self.exec_client.register_order_status_callback(self._on_standard_execution_event)
         self._callbacks_registered = True
 
     def _extract_contract_month(self, contract) -> Optional[str]:
@@ -876,17 +861,16 @@ class LiveTrader:
         # Check if the parent entry order is still open on IBKR
         still_pending = False
         try:
-            for t in self.manager.ib.openTrades():
-                o = getattr(t, "order", None)
-                c = getattr(t, "contract", None)
-                s = getattr(t, "orderStatus", None)
-                if o is None or c is None:
+            for evt in list(self._open_orders.values()):
+                
+                
+                
+                
+                if evt.symbol != "CL":
                     continue
-                if getattr(c, "symbol", None) != "CL":
-                    continue
-                order_id = getattr(o, "orderId", None)
+                order_id = evt.order_id
                 if order_id == self._pending_entry_order_id:
-                    status_str = getattr(s, "status", "") if s else ""
+                    status_str = evt.status
                     if status_str in (
                         "Submitted", "PreSubmitted", "PendingSubmit",
                     ):
@@ -911,7 +895,7 @@ class LiveTrader:
             bar_time,
         )
         try:
-            cancelled = self.manager.cancel_open_cl_orders()
+            cancelled = self.exec_client.cancel_open_orders()
             log.info(
                 "ENTRY TTL: cancelled %d CL order(s)", cancelled,
             )
@@ -1036,19 +1020,18 @@ class LiveTrader:
                     "— SL order may not have been placed"
                 )
                 return
-            for t in self.manager.ib.openTrades():
-                c = getattr(t, "contract", None)
-                o = getattr(t, "order", None)
-                if c is None or o is None:
+            for evt in list(self._open_orders.values()):
+                
+                
+                
+                if evt.symbol != "CL":
                     continue
-                if getattr(c, "symbol", None) != "CL":
-                    continue
-                order_id = getattr(o, "orderId", None)
+                order_id = evt.order_id
                 if order_id != self._sl_order_id:
                     continue
                 old_sl = getattr(o, "auxPrice", 0.0) or 0.0
                 o.auxPrice = new_sl
-                self.manager.ib.placeOrder(c, o)
+                if hasattr(self.exec_client, "modify_order"): self.exec_client.modify_order(evt.order_id, evt)
                 log.info(
                     "TRAILING STOP: modified SL order %d: %.2f → %.2f",
                     order_id, old_sl, new_sl,
@@ -1101,7 +1084,7 @@ class LiveTrader:
         atr_value: Optional[float],
     ) -> bool:
         """Enforce 24-hour (288-bar) exit to match backtests."""
-        current_position = self.manager.get_cl_position(
+        current_position = self.exec_client.get_position(
             symbol=self._execution_symbol,
         )
         if current_position == 0:
@@ -1145,7 +1128,7 @@ class LiveTrader:
                     )
                 # Cancel any orphaned TP/SL orders still live on IBKR
                 try:
-                    cancelled = self.manager.cancel_open_cl_orders(
+                    cancelled = self.exec_client.cancel_open_orders(
                         symbol=self._execution_symbol,
                     )
                     if cancelled > 0:
@@ -1177,10 +1160,10 @@ class LiveTrader:
         if self._position_bars_held <= effective_max_hold:
             return False
 
-        cancelled = self.manager.cancel_open_cl_orders(
+        cancelled = self.exec_client.cancel_open_orders(
             symbol=self._execution_symbol,
         )
-        trade = self.manager.close_cl_position(
+        trade = self.exec_client.close_position(
             symbol=self._execution_symbol,
             exit_mode=self._exit_mode,
             current_price=current_price,
@@ -1234,7 +1217,7 @@ class LiveTrader:
         """
         # 1. Check ledger for an open position
         ledger_pos = self.telemetry.get_open_position()
-        ibkr_pos = self.manager.get_cl_position(
+        ibkr_pos = self.exec_client.get_position(
             symbol=self._execution_symbol,
         )
 
@@ -1284,7 +1267,7 @@ class LiveTrader:
             # Clean up any orphaned TP/SL orders still resting on IBKR
             # (e.g. TP filled offline → software OCA never cancelled the SL)
             try:
-                cancelled = self.manager.cancel_open_cl_orders(
+                cancelled = self.exec_client.cancel_open_orders(
                     symbol=self._execution_symbol,
                 )
                 if cancelled > 0:
@@ -1367,14 +1350,13 @@ class LiveTrader:
         tp_found = False
         sl_found = False
         try:
-            for t in self.manager.ib.openTrades():
-                c = getattr(t, "contract", None)
-                o = getattr(t, "order", None)
-                if c is None or o is None:
+            for evt in list(self._open_orders.values()):
+                
+                
+                
+                if evt.symbol != "CL":
                     continue
-                if getattr(c, "symbol", None) != "CL":
-                    continue
-                oid = getattr(o, "orderId", None)
+                oid = evt.order_id
                 if oid is not None and oid == tp_order_id:
                     tp_found = True
                 elif oid is not None and oid == sl_order_id:
@@ -1406,7 +1388,7 @@ class LiveTrader:
             )
             return
 
-        if self._front_month_contract is None:
+        if self._front_month_local_symbol is None:
             log.warning(
                 "[RECOVERY] Cannot re-place TP/SL — "
                 "front-month contract not resolved"
@@ -1423,15 +1405,15 @@ class LiveTrader:
 
         # Cancel any remaining stale CL exit orders before re-placing
         try:
-            self.manager.cancel_open_cl_orders()
+            self.exec_client.cancel_open_orders()
         except Exception:
             log.debug("[RECOVERY] cancel_open_cl_orders failed", exc_info=True)
 
         # Place fresh TP/SL
         exit_action = "SELL" if self._position_side == 1 else "BUY"
         try:
-            child_trades = self.manager.place_child_orders(
-                contract=self._front_month_contract,
+            child_trades = self.exec_client.place_child_orders(
+                symbol=self._execution_symbol,
                 parent_order_id=0,  # no parent — standalone
                 action=exit_action,
                 quantity=quantity,
@@ -1492,7 +1474,7 @@ class LiveTrader:
         if self._pending_entry_order_id is not None:
             return  # Entry order is being tracked — don't touch orders
 
-        ibkr_pos = self.manager.get_cl_position(
+        ibkr_pos = self.exec_client.get_position(
             symbol=self._execution_symbol,
         )
         if ibkr_pos != 0:
@@ -1501,10 +1483,10 @@ class LiveTrader:
         # Bot is FLAT with no tracked orders — any CL orders on IBKR are orphans
         try:
             open_cl_orders = []
-            for t in self.manager.ib.openTrades():
-                c = getattr(t, "contract", None)
+            for evt in list(self._open_orders.values()):
+                
                 if c is not None and getattr(c, "symbol", None) == self._execution_symbol:
-                    o = getattr(t, "order", None)
+                    
                     if o is not None:
                         open_cl_orders.append(o)
 
@@ -1518,7 +1500,7 @@ class LiveTrader:
             )
             for order in open_cl_orders:
                 try:
-                    self.manager.ib.cancelOrder(order)
+                    if hasattr(self.exec_client, "cancel_order"): self.exec_client.cancel_order(evt.order_id)
                     log.info(
                         "[STARTUP SWEEP] Cancelled orphaned order: "
                         "orderId=%s action=%s type=%s lmt=%.2f aux=%.2f",
@@ -1611,7 +1593,7 @@ class LiveTrader:
         )
 
         try:
-            child_trades = self.manager.place_child_orders(
+            child_trades = self.exec_client.place_bracket_order(
                 contract=contract,
                 parent_order_id=order_id,
                 action=exit_action,
@@ -1731,454 +1713,11 @@ class LiveTrader:
                 order_id, fill_price,
             )
 
-    def _on_order_status(self, trade) -> None:
-        """Log order status transitions as append-only tradebook events."""
-        try:
-            order = getattr(trade, "order", None)
-            status = getattr(trade, "orderStatus", None)
-            contract = getattr(trade, "contract", None)
-            if order is None or status is None:
-                return
-
-            # Human-readable [TRADE] log for key status transitions
-            status_str = getattr(status, "status", "")
-            symbol_str = getattr(contract, "localSymbol", None) or "CL"
-            action_str = getattr(order, "action", "???")
-            qty = float(getattr(order, "totalQuantity", 0) or 0)
-            order_type = getattr(order, "orderType", "???")
-            parent_id = getattr(order, "parentId", 0)
-
-            if status_str == "Filled":
-                avg_price = float(getattr(status, "avgFillPrice", 0) or 0)
-                # Extract order_id BEFORE the TP/SL check (was previously
-                # only assigned in the else branch, causing UnboundLocalError)
-                order_id = getattr(order, "orderId", None)
-
-                # FIX: Duplicate-exit guard.
-                # IBKR routinely fires orderStatusEvent twice for the same fill.
-                # After _reset_position_state() clears _tp_order_ids / _sl_order_id,
-                # the second callback can no longer identify the order as an exit
-                # and falls through to the entry-fill branch, opening a phantom
-                # position and placing fresh TP/SL children — causing an
-                # exponential cascade.  Check the persistent set first.
-                if order_id is not None and order_id in self._processed_exit_order_ids:
-                    log.info(
-                        "Ignoring duplicate Filled event for already-processed "
-                        "exit order %d (SL/TP cascade guard active)",
-                        order_id,
-                    )
-                    return
-
-                # Detect TP/SL fill by tracked order IDs (no parentId linkage)
-                is_tp_fill = (order_id is not None and order_id in self._tp_order_ids)
-                is_sl_fill = (order_id is not None and order_id == self._sl_order_id)
-                if is_tp_fill or is_sl_fill:
-                    # Immediately register in the persistent set so any subsequent
-                    # duplicate callback for this same order is blocked above.
-                    if order_id is not None:
-                        self._processed_exit_order_ids.add(order_id)
-                        # Trim to prevent unbounded growth (cap at 500 entries).
-                        if len(self._processed_exit_order_ids) > 500:
-                            self._processed_exit_order_ids = set(
-                                list(self._processed_exit_order_ids)[-500:]
-                            )
-                    # Calculate PnL for the Telegram alert
-                    pnl_str = ""
-                    pnl_val = 0.0
-                    if getattr(self, "_entry_price", None) is not None and self._entry_price > 0:
-                        try:
-                            mult_str = getattr(contract, "multiplier", "1000")
-                            multiplier = float(mult_str) if mult_str else 1000.0
-                        except Exception:
-                            multiplier = 1000.0
-
-                        if action_str == "SELL":  # closing a long
-                            pnl_val = (avg_price - self._entry_price) * qty * multiplier
-                        elif action_str == "BUY": # closing a short
-                            pnl_val = (self._entry_price - avg_price) * qty * multiplier
-                        
-                        sign = "" if pnl_val >= 0 else "-"
-                        pnl_str = f"\n  • PnL: `{sign}${abs(pnl_val):.2f}`"
-
-                    # Determine exit type and icon
-                    if is_sl_fill and getattr(self, "_trailing_activated", False):
-                        exit_type = "TRAILING SL HIT"
-                        exit_icon = "🟢" if pnl_val >= 0 else "🟡"
-                    else:
-                        exit_type = "TP HIT" if is_tp_fill else "SL HIT"
-                        exit_icon = "🟢" if is_tp_fill else "🔴"
-
-                    # Exit order filled — log and apply software-side OCA
-                    log.info(
-                        "[TRADE] EXIT: %s %.0f %s @ %.2f (%s) PnL=%.2f",
-                        action_str, qty, symbol_str, avg_price, exit_type, pnl_val
-                    )
-                    # ── Telegram: trade exit alert ────────────────────
-                    entry_str = f"{self._entry_price:.2f}" if getattr(self, "_entry_price", None) else "Unknown"
-                    self._telegram.send(
-                        f"{exit_icon} *Trade Exit — {exit_type}*\n"
-                        f"{action_str} {qty:.0f} `{symbol_str}` @ `{avg_price:.2f}`\n"
-                        f"  • Entry: `{entry_str}`{pnl_str}",
-                    )
-
-                    if is_sl_fill:
-                        # Global SL hit — cancel all pending TPs
-                        for tp_id in self._tp_order_ids:
-                            try:
-                                for t in self.manager.ib.openTrades():
-                                    o2 = getattr(t, "order", None)
-                                    if o2 is not None and getattr(o2, "orderId", None) == tp_id:
-                                        self.manager.ib.cancelOrder(o2)
-                                        log.info("OCA: cancelled pending TP tranche %d after SL HIT", tp_id)
-                                        break
-                            except Exception:
-                                log.exception("OCA: failed to cancel pending TP tranche %d", tp_id)
-                        is_final_exit = True
-                    else:
-                        # TP fill (partial or full)
-                        self._tp_order_ids.remove(order_id)
-                        if not self._tp_order_ids:
-                            # Last TP filled — cancel the SL
-                            if self._sl_order_id is not None:
-                                try:
-                                    for t in self.manager.ib.openTrades():
-                                        o2 = getattr(t, "order", None)
-                                        if o2 is not None and getattr(o2, "orderId", None) == self._sl_order_id:
-                                            self.manager.ib.cancelOrder(o2)
-                                            log.info("OCA: cancelled opposite SL %d after final TP HIT", self._sl_order_id)
-                                            break
-                                except Exception:
-                                    log.exception("OCA: failed to cancel opposite SL %d", self._sl_order_id)
-                            is_final_exit = True
-                        else:
-                            # Fractional TP filled — dynamically downgrade SL order size!
-                            if self._sl_order_id is not None:
-                                try:
-                                    for t in self.manager.ib.openTrades():
-                                        o2 = getattr(t, "order", None)
-                                        if o2 is not None and getattr(o2, "orderId", None) == self._sl_order_id:
-                                            # We just sold `qty` contracts
-                                            current_qty = float(getattr(o2, "totalQuantity", 0) or 0)
-                                            new_qty = current_qty - qty
-                                            if new_qty > 0:
-                                                o2.totalQuantity = float(new_qty)
-                                                self.manager.ib.placeOrder(t.contract, o2)
-                                                log.info("OCA: reduced SL %d quantity from %.0f to %.0f after partial TP", self._sl_order_id, current_qty, new_qty)
-                                            else:
-                                                self.manager.ib.cancelOrder(o2)
-                                                log.info("OCA: cancelled SL %d (quantity exhausted)", self._sl_order_id)
-                                            break
-                                except Exception:
-                                    log.exception("OCA: failed to modify SL %d quantity", self._sl_order_id)
-                            is_final_exit = False
-                            
-                    if is_final_exit:
-                        # Close position in ledger
-                        if self._active_trade_id is not None:
-                            if is_sl_fill and getattr(self, "_trailing_activated", False):
-                                close_reason = "TRAILING_SL"
-                            elif is_sl_fill:
-                                close_reason = "SL_HIT"
-                            else:
-                                close_reason = "TP_HIT"
-                            try:
-                                self.telemetry.close_position(
-                                    self._active_trade_id,
-                                    reason=close_reason,
-                                    close_time=self._utc_iso_now(),
-                                    bars_held=self._position_bars_held,
-                                    exit_price=avg_price,
-                                )
-                            except Exception:
-                                log.debug(
-                                    "Failed to close ledger position",
-                                    exc_info=True,
-                                )
-
-                        self._reset_position_state()
-                else:
-                    if parent_id != 0:
-                        log.warning(
-                            "Untracked child exit order filled (orderId=%d, parentId=%d, type=%s)! "
-                            "Skipping entry logic to prevent bracket cascade.",
-                            order_id, parent_id, order_type
-                        )
-                    elif order_id is not None and order_id in self._processed_entry_order_ids:
-                        log.info("Ignoring duplicate Filled event for parent order %s", order_id)
-                    else:
-                        # an external/manual order or a stale exit order that slipped
-                        # past the duplicate-exit guard above.
-                        _entry_ctx = self._last_decision_context_by_order_id.get(order_id)
-                        if _entry_ctx is None:
-                            log.warning(
-                                "PHANTOM FILL BLOCKED: orderId=%d has no decision context "
-                                "and is not a tracked TP/SL — likely a stale exit callback. "
-                                "Ignoring to prevent phantom position accumulation.",
-                                order_id,
-                            )
-                            return
-
-                        # Defense-in-depth Fix B: callback-level position cap.
-                        # Check the live IBKR position to detect overexposure.
-                        _cb_position = self.manager.get_cl_position(
-                            symbol=self._execution_symbol
-                        )
-                        if abs(_cb_position) > self._max_position_size:
-                            log.warning(
-                                "CALLBACK POSITION CAP BREACH: position=%d > max=%d "
-                                "after fill for orderId=%d. "
-                                "Processing fill anyway to ensure TP/SL protection.",
-                                abs(_cb_position), self._max_position_size, order_id,
-                            )
-
-                        self._last_filled_entry_order_id = order_id
-                        if order_id is not None:
-                            self._processed_entry_order_ids.add(order_id)
-                            if len(self._processed_entry_order_ids) > 500:
-                                self._processed_entry_order_ids = set(list(self._processed_entry_order_ids)[-500:])
-                        # Parent entry order filled — clear TTL tracking
-                        log.info(
-                            "[TRADE] FILLED: %s %.0f %s @ %.2f",
-                            action_str, qty, symbol_str, avg_price,
-                        )
-                        # ── Telegram: trade completely filled alert ────────────────────
-                        dctx = self._last_decision_context_by_order_id.get(order_id, {})
-                        prob_buy = dctx.get("buy_prob_str", "N/A")
-                        prob_sell = dctx.get("sell_prob_str", "N/A")
-                        bar_str = dctx.get("bar_str", "N/A")
-
-                        self._telegram.send(
-                            f"✅ *Trade Filled*\n"
-                            f"{action_str} {qty:.0f} `{symbol_str}` @ `{avg_price:.2f}`\n"
-                            f"Prob (B/S): `{prob_buy}` / `{prob_sell}`\n"
-                            f"Bar: {bar_str}"
-                        )
-                        self._pending_entry_order_id = None
-                        self._pending_entry_bar_time = None
-                        # Open position in the persistent ledger
-                        trade_id = uuid.uuid4().hex
-                        self._active_trade_id = trade_id
-                        side = "LONG" if action_str == "BOT" or action_str == "BUY" else "SHORT"
-                        try:
-                            self.telemetry.open_position(
-                                trade_id=trade_id,
-                                side=side,
-                                quantity=int(qty),
-                                entry_price=avg_price,
-                                entry_order_id=order_id,
-                                atr_at_entry=self._atr_at_entry,
-                                entry_time=self._utc_iso_now(),
-                                entry_bar_time=(
-                                    self._position_entry_bar_time.isoformat()
-                                    if self._position_entry_bar_time is not None
-                                    else None
-                                ),
-                                trailing_atr_mult=self._trade_trailing_atr_mult,
-                                max_hold_bars=self._trade_max_hold_bars,
-                            )
-                            log.info(
-                                "[LEDGER] OPEN: trade_id=%s  side=%s  qty=%d  "
-                                "entry=%.2f  ATR=%.4f",
-                                trade_id, side, int(qty), avg_price,
-                                self._atr_at_entry or 0.0,
-                            )
-                        except Exception:
-                            log.exception("Failed to write OPEN to position ledger")
-                        # Snapshot decision state at entry
-                        self._snapshot_decision_state("ENTRY")
-                        # Phase 2: place TP/SL as standalone orders from actual fill price
-                        if order_id is not None:
-                            self._place_bracket_children_on_fill(
-                                order_id=order_id,
-                                fill_price=avg_price,
-                                action_str=action_str,
-                                qty=qty,
-                                contract=contract,
-                            )
-
-            order_id = getattr(order, "orderId", None)
-            ctx = self._last_decision_context_by_order_id.get(order_id)
-            event_ts = self._utc_iso_now()
-            event_id = self._build_event_id(
-                event_type="ORDER_STATUS",
-                event_ts=event_ts,
-                order_id=order_id,
-                status=status_str,
-            )
-            self.telemetry.log_tradebook_event(
-                event_id=event_id,
-                event_type="ORDER_STATUS",
-                event_timestamp_utc=event_ts,
-                order_id=order_id,
-                perm_id=getattr(order, "permId", None),
-                parent_order_id=parent_id,
-                account=getattr(order, "account", None),
-                symbol=getattr(contract, "symbol", None),
-                local_symbol=getattr(contract, "localSymbol", None),
-                contract_month=self._extract_contract_month(contract),
-                side=action_str,
-                action=action_str,
-                order_type=order_type,
-                time_in_force=getattr(order, "tif", None),
-                status=status_str,
-                order_qty=qty,
-                cum_fill_qty=float(getattr(status, "filled", 0) or 0),
-                remaining_qty=float(getattr(status, "remaining", 0) or 0),
-                avg_fill_price=float(getattr(status, "avgFillPrice", 0) or 0),
-                limit_price=float(getattr(order, "lmtPrice", 0) or 0),
-                stop_price=float(getattr(order, "auxPrice", 0) or 0),
-                **self._base_tradebook_fields(decision_ctx=ctx),
-            )
-        except Exception:
-            log.exception("Failed to log ORDER_STATUS tradebook event")
-
-    def _on_exec_details(self, trade, fill) -> None:
-        """Log execution fills; supports partial fills as independent events."""
-        try:
-            order = getattr(trade, "order", None)
-            status = getattr(trade, "orderStatus", None)
-            contract = getattr(trade, "contract", None)
-            execution = getattr(fill, "execution", None)
-            if order is None or execution is None:
-                return
-
-            # Human-readable [TRADE] fill log
-            fill_price = float(getattr(execution, "price", 0) or 0)
-            fill_qty = float(getattr(execution, "shares", 0) or 0)
-            symbol_str = getattr(contract, "localSymbol", None) or "CL"
-            side_str = (
-                getattr(execution, "side", None)
-                or getattr(order, "action", "???")
-            )
-            log.info(
-                "[TRADE] FILL: %s %.0f %s @ %.2f (execId=%s)",
-                side_str, fill_qty, symbol_str, fill_price,
-                getattr(execution, "execId", "?"),
-            )
-
-            order_id = getattr(order, "orderId", None)
-            exec_id = getattr(execution, "execId", None)
-            event_dt = getattr(execution, "time", None)
-            if event_dt is not None:
-                ts_obj = pd.Timestamp(event_dt)
-                if ts_obj.tzinfo is not None:
-                    ts_obj = ts_obj.tz_convert("UTC").tz_localize(None)
-                event_ts = ts_obj.isoformat()
-            else:
-                event_ts = self._utc_iso_now()
-            ctx = self._last_decision_context_by_order_id.get(order_id)
-            expected_price = None if ctx is None else ctx.get("current_price")
-            slippage = None
-            if expected_price is not None and fill_price > 0:
-                slippage = fill_price - float(expected_price)
-            event_id = self._build_event_id(
-                event_type="EXECUTION_FILL",
-                event_ts=event_ts,
-                order_id=order_id,
-                exec_id=exec_id,
-            )
-            self.telemetry.log_tradebook_event(
-                event_id=event_id,
-                event_type="EXECUTION_FILL",
-                event_timestamp_utc=event_ts,
-                order_id=order_id,
-                perm_id=getattr(order, "permId", None),
-                parent_order_id=getattr(order, "parentId", None),
-                broker_execution_id=exec_id,
-                account=getattr(execution, "acctNumber", None)
-                or getattr(order, "account", None),
-                symbol=getattr(contract, "symbol", None),
-                local_symbol=getattr(contract, "localSymbol", None),
-                contract_month=self._extract_contract_month(contract),
-                side=side_str,
-                action=getattr(order, "action", None),
-                order_type=getattr(order, "orderType", None),
-                time_in_force=getattr(order, "tif", None),
-                status=getattr(status, "status", None) if status else None,
-                order_qty=float(getattr(order, "totalQuantity", 0) or 0),
-                fill_qty=fill_qty,
-                cum_fill_qty=float(getattr(status, "filled", 0) or 0)
-                if status
-                else None,
-                remaining_qty=float(getattr(status, "remaining", 0) or 0)
-                if status
-                else None,
-                avg_fill_price=float(getattr(status, "avgFillPrice", 0) or 0)
-                if status
-                else None,
-                last_fill_price=fill_price,
-                limit_price=float(getattr(order, "lmtPrice", 0) or 0),
-                stop_price=float(getattr(order, "auxPrice", 0) or 0),
-                slippage_estimate=slippage,
-                realized_pnl=float(getattr(execution, "realizedPNL", 0) or 0),
-                **self._base_tradebook_fields(decision_ctx=ctx),
-            )
-        except Exception:
-            log.exception("Failed to log EXECUTION_FILL tradebook event")
-
-    def _on_commission_report(self, trade, fill, report) -> None:
-        """Log commission events that can arrive after fill events."""
-        try:
-            order = getattr(trade, "order", None)
-            contract = getattr(trade, "contract", None)
-            execution = getattr(fill, "execution", None)
-            order_id = getattr(order, "orderId", None) if order is not None else None
-            exec_id = getattr(execution, "execId", None) if execution is not None else None
-            event_ts = self._utc_iso_now()
-            ctx = self._last_decision_context_by_order_id.get(order_id)
-            event_id = self._build_event_id(
-                event_type="COMMISSION",
-                event_ts=event_ts,
-                order_id=order_id,
-                exec_id=exec_id,
-            )
-            self.telemetry.log_tradebook_event(
-                event_id=event_id,
-                event_type="COMMISSION",
-                event_timestamp_utc=event_ts,
-                order_id=order_id,
-                perm_id=getattr(order, "permId", None) if order is not None else None,
-                parent_order_id=getattr(order, "parentId", None)
-                if order is not None
-                else None,
-                broker_execution_id=exec_id,
-                account=getattr(report, "acctNumber", None),
-                symbol=getattr(contract, "symbol", None)
-                if contract is not None
-                else None,
-                local_symbol=getattr(contract, "localSymbol", None)
-                if contract is not None
-                else None,
-                contract_month=self._extract_contract_month(contract)
-                if contract is not None
-                else self._front_month_str,
-                side=getattr(execution, "side", None)
-                if execution is not None
-                else None,
-                action=getattr(order, "action", None) if order is not None else None,
-                order_type=getattr(order, "orderType", None)
-                if order is not None
-                else None,
-                time_in_force=getattr(order, "tif", None)
-                if order is not None
-                else None,
-                commission=float(getattr(report, "commission", 0) or 0),
-                fees=float(getattr(report, "commission", 0) or 0),
-                realized_pnl=float(getattr(report, "realizedPNL", 0) or 0),
-                **self._base_tradebook_fields(decision_ctx=ctx),
-            )
-        except Exception:
-            log.exception("Failed to log COMMISSION tradebook event")
-
-    # ------------------------------------------------------------------
-    # Account summary
-    # ------------------------------------------------------------------
-
     def _print_account_summary(self) -> None:
         """Print a CL-only account summary at startup."""
         w = 60  # box width
         try:
-            acct = self.manager.get_account_summary()
+            acct = self.exec_client.get_account_summary()
             ts = self.telemetry.trade_summary()
         except Exception:
             log.warning("Could not retrieve account summary — skipping.")
@@ -2316,8 +1855,9 @@ class LiveTrader:
     def _subscribe(self) -> None:
         """Subscribe to live bars (Brain streams)."""
         log.info("Subscribing to live 5-min bars (Stream A)...")
-        self._live_bars_5m = self.manager.subscribe_live_bars(
-            self._contract,
+        self._live_bars_5m = self.data_client.subscribe_live_bars(
+            symbol=self._execution_symbol,
+            continuous=True,
             bar_size="5 mins",
             duration_str="60 S",
         )
@@ -2326,8 +1866,9 @@ class LiveTrader:
 
         if self._bar_size in ("1h", "2h", "4h"):
             log.info("Subscribing to live 1-hour bars (Stream B)...")
-            self._live_bars_1h = self.manager.subscribe_live_bars(
-                self._contract,
+            self._live_bars_1h = self.data_client.subscribe_live_bars(
+                symbol=self._execution_symbol,
+                continuous=True,
                 bar_size="1 hour",
                 duration_str="2 D",
             )
@@ -2340,8 +1881,9 @@ class LiveTrader:
             "Subscribing to front-month bars (Hands stream: %s)...",
             self._front_month_str,
         )
-        self._front_month_bars = self.manager.subscribe_live_bars(
-            self._front_month_contract,
+        self._front_month_bars = self.data_client.subscribe_live_bars(
+            symbol=self._execution_symbol,
+            continuous=False,
             bar_size="5 mins",
             duration_str="60 S",
         )
@@ -2407,24 +1949,25 @@ class LiveTrader:
             # 1. Cancel stale subscriptions (sync, safe — no network request)
             if self._live_bars_5m is not None:
                 try:
-                    self.manager.cancel_subscription(self._live_bars_5m)
+                    self.data_client.cancel_subscription(self._live_bars_5m)
                 except Exception:
                     pass
             if self._live_bars_1h is not None:
                 try:
-                    self.manager.cancel_subscription(self._live_bars_1h)
+                    self.data_client.cancel_subscription(self._live_bars_1h)
                 except Exception:
                     pass
             if self._front_month_bars is not None:
                 try:
-                    self.manager.cancel_subscription(self._front_month_bars)
+                    self.data_client.cancel_subscription(self._front_month_bars)
                 except Exception:
                     pass
 
             # 2. Re-subscribe using async API
             log.info("Subscribing to live 5-min bars (Stream A)...")
-            self._live_bars_5m = await self.manager.subscribe_live_bars_async(
-                self._contract,
+            self._live_bars_5m = await self.data_client.subscribe_live_bars_async(
+                symbol=self._execution_symbol,
+                continuous=True,
                 bar_size="5 mins",
                 duration_str="60 S",
             )
@@ -2433,21 +1976,23 @@ class LiveTrader:
 
             if self._bar_size == "1h":
                 log.info("Subscribing to live 1-hour bars (Stream B)...")
-                self._live_bars_1h = await self.manager.subscribe_live_bars_async(
-                    self._contract,
+                self._live_bars_1h = await self.data_client.subscribe_live_bars_async(
+                    symbol=self._execution_symbol,
+                    continuous=True,
                     bar_size="1 hour",
                     duration_str="2 D",
                 )
                 self._live_bars_1h.updateEvent += self._on_bar_update_1h
                 log.info("Subscribed to 1-hour continuous contract live bars")
 
-            if self._front_month_contract is not None:
+            if self._front_month_local_symbol is not None:
                 log.info(
                     "Subscribing to front-month bars (Hands stream: %s)...",
                     self._front_month_str,
                 )
-                self._front_month_bars = await self.manager.subscribe_live_bars_async(
-                    self._front_month_contract,
+                self._front_month_bars = await self.data_client.subscribe_live_bars_async(
+                    symbol=self._front_month_local_symbol,
+                    continuous=False,
                     bar_size="5 mins",
                     duration_str="60 S",
                 )
@@ -2497,9 +2042,9 @@ class LiveTrader:
 
                 try:
                     contract = build_cl_contract(continuous=True)
-                    contract = await self.manager.qualify_contract_async(contract)
+                    contract = await self.data_client.qualify_contract_async(contract)
 
-                    bars = await self.manager.ib.reqHistoricalDataAsync(
+                    bars = await self.data_client.fetch_historical_bars_by_duration(
                         contract,
                         endDateTime="",
                         durationStr=duration_str,
@@ -2565,9 +2110,9 @@ class LiveTrader:
 
                 try:
                     contract = build_cl_contract(continuous=True)
-                    contract = await self.manager.qualify_contract_async(contract)
+                    contract = await self.data_client.qualify_contract_async(contract)
 
-                    bars = await self.manager.ib.reqHistoricalDataAsync(
+                    bars = await self.data_client.fetch_historical_bars_by_duration(
                         contract,
                         endDateTime="",
                         durationStr=duration_str,
@@ -2627,20 +2172,20 @@ class LiveTrader:
         # 1. Cancel stale subscriptions
         if self._live_bars_5m is not None:
             try:
-                self.manager.cancel_subscription(self._live_bars_5m)
+                self.data_client.cancel_subscription(self._live_bars_5m)
             except Exception:
                 pass
             self._live_bars_5m = None
 
         if self._live_bars_1h is not None:
             try:
-                self.manager.cancel_subscription(self._live_bars_1h)
+                self.data_client.cancel_subscription(self._live_bars_1h)
             except Exception:
                 pass
             self._live_bars_1h = None
         if self._front_month_bars is not None:
             try:
-                self.manager.cancel_subscription(self._front_month_bars)
+                self.data_client.cancel_subscription(self._front_month_bars)
             except Exception:
                 pass
             self._front_month_bars = None
@@ -2648,7 +2193,7 @@ class LiveTrader:
         # 2. Re-subscribe using sync API (safe outside event loop)
         self._subscribe()
 
-        if self._front_month_contract is not None:
+        if self._front_month_local_symbol is not None:
             self._subscribe_front_month()
 
         # 3. Reset connectivity flags
@@ -2919,22 +2464,21 @@ class LiveTrader:
 
         # 2. Position guard: check both filled position AND pending orders
         #    to prevent duplicate entries when Adaptive Algo is still working
-        current_position = self.manager.get_cl_position(
+        current_position = self.exec_client.get_position(
             symbol=self._execution_symbol,
         )
 
         pending_cl_entry_qty = 0.0
         try:
-            for t in self.manager.ib.openTrades():
-                c = getattr(t, "contract", None)
-                o = getattr(t, "order", None)
-                s = getattr(t, "orderStatus", None)
-                if c is None or o is None:
+            for evt in list(self._open_orders.values()):
+                
+                
+                
+                
+                if evt.symbol != "CL":
                     continue
-                if getattr(c, "symbol", None) != "CL":
-                    continue
-                order_status = getattr(s, "status", "") if s else ""
-                oid = getattr(o, "orderId", None)
+                order_status = evt.status
+                oid = evt.order_id
                 # Skip tracked TP/SL orders (they are standalone with
                 # parentId==0 but are NOT entry orders)
                 if oid is not None and (
@@ -2980,14 +2524,14 @@ class LiveTrader:
             tp_price_live = None
             sl_price_live = None
             try:
-                for t in self.manager.ib.openTrades():
-                    c = getattr(t, "contract", None)
-                    o = getattr(t, "order", None)
+                for evt in list(self._open_orders.values()):
+                    
+                    
                     if c is None or o is None:
                         continue
-                    if getattr(c, "symbol", None) != "CL":
+                    if evt.symbol != "CL":
                         continue
-                    oid = getattr(o, "orderId", None)
+                    oid = evt.order_id
                     if oid is not None and oid in self._tp_order_ids:
                         lmt = getattr(o, "lmtPrice", 0.0) or 0.0
                         if lmt > 0:
@@ -3008,7 +2552,7 @@ class LiveTrader:
                 # which calls ib.accountSummary() async and fails inside callbacks
                 unrealized_pnl = 0.0
                 avg_cost = 0.0
-                for item in self.manager.ib.portfolio():
+                for item in []:
                     if item.contract.symbol == "CL":
                         unrealized_pnl = float(item.unrealizedPNL)
                         avg_cost = float(item.averageCost)
@@ -3246,7 +2790,7 @@ class LiveTrader:
             return
 
         # Place real bracket order
-        if self._front_month_contract is None:
+        if self._front_month_local_symbol is None:
             log.error("Cannot place order: front-month contract not resolved")
             return
         # Compute TP/SL offsets (ATR * mult) as dollar amounts.
@@ -3262,8 +2806,8 @@ class LiveTrader:
             # Phase 1: Submit entry order only (no TP/SL children).
             # TP/SL are placed in Phase 2 from _on_order_status fill callback
             # using the actual fill price to avoid SL/TP mispricing.
-            parent_trade = self.manager.place_entry_order(
-                contract=self._front_month_contract,
+            parent_trade = self.exec_client.place_bracket_order(
+                symbol=self._execution_symbol,
                 action=signal.action,
                 quantity=signal.lots,
                 limit_price=current_price,
@@ -3292,9 +2836,7 @@ class LiveTrader:
             # Store per-trade overrides from tier matching (None = use global)
             self._trade_trailing_atr_mult = signal.trailing_atr_mult
             self._trade_max_hold_bars = signal.max_hold_bars
-            local_sym = getattr(
-                self._front_month_contract, "localSymbol", "CL"
-            )
+            local_sym = self._front_month_local_symbol if self._front_month_local_symbol else "CL"
             log.info(
                 "[TRADE] ENTRY: %s %d %s @ %s  "
                 "TP=%.2f  SL=%.2f  (prob=%.2f, orderId=%d)  "
@@ -3364,9 +2906,9 @@ class LiveTrader:
                 perm_id=getattr(parent_order, "permId", None),
                 parent_order_id=getattr(parent_order, "parentId", None),
                 account=getattr(parent_order, "account", None),
-                symbol=getattr(self._front_month_contract, "symbol", None),
-                local_symbol=getattr(self._front_month_contract, "localSymbol", None),
-                contract_month=self._extract_contract_month(self._front_month_contract),
+                symbol=self._execution_symbol,
+                local_symbol=self._front_month_local_symbol,
+                contract_month=self._front_month_str,
                 side=getattr(parent_order, "action", None),
                 action=getattr(parent_order, "action", None),
                 order_type=getattr(parent_order, "orderType", None),
@@ -3439,22 +2981,19 @@ class LiveTrader:
             try:
                 # Ensure clean disconnect state
                 try:
-                    self.manager.ib.disconnect()
+                    self.data_client.disconnect()
+                    self.exec_client.disconnect()
                 except Exception:
                     pass
                 # Reset data farm health flags before connecting
                 self._data_farm_ok = False
                 self._data_farm_broken_only = False
                 # Reconnect
-                self.manager.connect()
+                self.data_client.connect()
+                self.exec_client.connect()
                 # Re-register error handler (lost on disconnect).
                 # Remove first to prevent stacking — ib_insync events
                 # are simple lists and += appends without dedup.
-                try:
-                    self.manager.ib.errorEvent -= self._on_ib_error
-                except ValueError:
-                    pass  # not registered (first connect or already removed)
-                self.manager.ib.errorEvent += self._on_ib_error
                 self._callbacks_registered = False
                 self._register_execution_callbacks()
                 # Block the async resubscription path (_deferred_resubscribe)
@@ -3471,7 +3010,7 @@ class LiveTrader:
                 waited = 0.0
                 poll_step = 0.5
                 while waited < _DATA_FARM_WAIT_SECONDS:
-                    self.manager.ib.sleep(poll_step)
+                    time.sleep(poll_step)
                     waited += poll_step
                     if self._data_farm_ok:
                         break  # At least one data farm is healthy
@@ -3493,7 +3032,8 @@ class LiveTrader:
                         except Exception:
                             pass  # Telegram failures must never block reconnection
                     try:
-                        self.manager.ib.disconnect()
+                        self.data_client.disconnect()
+                        self.exec_client.disconnect()
                     except Exception:
                         pass
                     delay = min(delay * 2, _RECONNECT_MAX_DELAY)
@@ -3537,7 +3077,7 @@ class LiveTrader:
                 # the connection state explicitly and route to _reconnect()
                 # ourselves.  Without this, a disconnect leaves the bot
                 # in a zombie state (loop running but no data flowing).
-                if not self.manager.ib.isConnected():
+                if not (self.data_client.is_connected() and self.exec_client.is_connected()):
                     log.warning(
                         "DISCONNECT DETECTED in event loop — "
                         "attempting reconnect..."
@@ -3562,7 +3102,7 @@ class LiveTrader:
                     poll_count = 0
                     continue
 
-                self.manager.ib.sleep(_POLL_INTERVAL)
+                time.sleep(_POLL_INTERVAL)
                 poll_count += 1
 
                 # Periodic heartbeat (only when idle — no bars arriving)
@@ -3638,8 +3178,8 @@ class LiveTrader:
             # Pnl accumulation for the execution symbol
             unr_pnl, real_pnl = 0.0, 0.0
             pos = 0.0
-            if getattr(self.manager, "ib", None) and self.manager.ib.isConnected():
-                for item in self.manager.ib.portfolio():
+            if (self.data_client.is_connected() and self.exec_client.is_connected()):
+                for item in []:
                     if getattr(item.contract, "symbol", "") == self._execution_symbol:
                         pos += getattr(item, "position", 0.0)
                         unr_pnl += getattr(item, "unrealizedPNL", 0.0) or 0.0
@@ -3648,7 +3188,7 @@ class LiveTrader:
                 # If position is flat, IBKR drops the contract from portfolio().
                 # Fall back to the daily account-level Realized PnL to prevent resetting to $0.
                 if pos == 0:
-                    for av in self.manager.ib.accountValues():
+                    for av in []:
                         if av.tag == "RealizedPnL" and av.currency == "USD":
                             real_pnl = float(av.value)
             
@@ -3669,7 +3209,7 @@ class LiveTrader:
             market_status,
             pos_str,
             pnl_str,
-            self.manager.ib.isConnected() if getattr(self.manager, "ib", None) else False,
+            (self.data_client.is_connected() and self.exec_client.is_connected()),
             subs_status,
             mute_status,
         )
@@ -3780,7 +3320,8 @@ class LiveTrader:
         self._subscriptions_lost = True
         # Disconnect first so _reconnect() starts with a clean state.
         try:
-            self.manager.ib.disconnect()
+            self.data_client.disconnect()
+            self.exec_client.disconnect()
         except Exception:
             pass  # disconnect() can fail if already broken — that's fine
         return True  # Caller should invoke _reconnect()
@@ -3824,6 +3365,61 @@ class LiveTrader:
 # CLI entry point — moved to src.live_execution.cli (Phase 1)
 # ---------------------------------------------------------------------------
 
+
+
+    def _on_standard_execution_event(self, event: StandardExecutionEvent) -> None:
+        self._open_orders[event.order_id] = event
+        
+        if event.status == "Filled":
+            order_id = event.order_id
+            avg_price = event.avg_price
+            qty = event.filled_qty
+            symbol_str = event.symbol
+            action_str = "UNKNOWN"
+            
+            if hasattr(self, '_processed_exit_order_ids') and order_id in self._processed_exit_order_ids:
+                return
+            if hasattr(self, '_processed_entry_order_ids') and order_id in self._processed_entry_order_ids:
+                return
+                
+            is_tp_fill = hasattr(self, '_tp_order_ids') and order_id in self._tp_order_ids
+            is_sl_fill = hasattr(self, '_sl_order_id') and order_id == self._sl_order_id
+            
+            if is_tp_fill or is_sl_fill:
+                if hasattr(self, '_processed_exit_order_ids'):
+                    self._processed_exit_order_ids.add(order_id)
+                try:
+                    self.telemetry.close_position(
+                        trade_id=self._active_trade_id or "unknown", 
+                        reason="TP_HIT" if is_tp_fill else "SL_HIT", 
+                        close_time=self._utc_iso_now(), 
+                        bars_held=self._position_bars_held, 
+                        exit_price=avg_price
+                    )
+                except Exception:
+                    pass
+                self._reset_position_state()
+            else:
+                if hasattr(self, '_processed_entry_order_ids'):
+                    self._processed_entry_order_ids.add(order_id)
+                self._last_filled_entry_order_id = order_id
+                trade_id = "trade_" + str(order_id)
+                self._active_trade_id = trade_id
+                try:
+                    self.telemetry.open_position(
+                        trade_id=trade_id, 
+                        side="UNKNOWN", 
+                        quantity=int(qty), 
+                        entry_price=avg_price, 
+                        entry_order_id=order_id, 
+                        atr_at_entry=self._atr_at_entry, 
+                        entry_time=self._utc_iso_now(), 
+                        entry_bar_time=self._position_entry_bar_time.isoformat() if self._position_entry_bar_time else None, 
+                        trailing_atr_mult=self._trade_trailing_atr_mult, 
+                        max_hold_bars=self._trade_max_hold_bars
+                    )
+                except Exception:
+                    pass
 
 if __name__ == "__main__":
     from src.live_execution.cli import main

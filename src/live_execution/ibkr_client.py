@@ -545,7 +545,7 @@ class IBKRConnectionManager:
 
     def get_front_month_contract(
         self, symbol: str = "CL",
-    ) -> tuple[Contract, str]:
+    ) -> tuple[str, str]:
         """Resolve the current front-month futures contract.
 
         Supports both CL (WTI Crude Oil) and MCL (Micro WTI).
@@ -606,7 +606,7 @@ class IBKRConnectionManager:
             contract.lastTradeDateOrContractMonth,
             self._EXPIRY_BUFFER_DAYS,
         )
-        return contract, month_str
+        return contract.localSymbol, month_str
 
     def fetch_historical_bars_by_duration(
         self,

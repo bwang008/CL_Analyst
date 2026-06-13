@@ -167,8 +167,8 @@ class TestPrintAccountSummary:
         from src.live_execution import live_trader as lt_module
 
         trader = object.__new__(lt_module.LiveTrader)
-        trader.manager = MagicMock()
-        trader.manager.get_account_summary.return_value = acct_data
+        trader.exec_client = MagicMock()
+        trader.exec_client.get_account_summary.return_value = acct_data
         trader.telemetry = MagicMock()
         trader.telemetry.trade_summary.return_value = trade_data
         return trader

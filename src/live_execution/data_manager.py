@@ -36,8 +36,7 @@ from src.live_execution.utils.time_utils import (
     timedelta_to_ib_duration,
 )
 
-if TYPE_CHECKING:
-    from src.live_execution.ibkr_client import IBKRConnectionManager
+from src.live_execution.interfaces.data_feed_interface import DataFeedClient
 
 log = logging.getLogger(__name__)
 
@@ -112,7 +111,7 @@ class DataManager:
         seed_path: str = _DEFAULT_SEED_PATH,
         cache_path: str = _DEFAULT_CACHE_PATH,
         master_ledger_path: str = _DEFAULT_MASTER_LEDGER_PATH,
-        ibkr_manager: Optional["IBKRConnectionManager"] = None,
+        data_client: Optional["DataFeedClient"] = None,
         front_month_id: Optional[str] = None,
         bar_size: str = "5 mins",
         bars_per_day: int = 288,
@@ -120,7 +119,7 @@ class DataManager:
         self.seed_path = Path(seed_path)
         self.cache_path = Path(cache_path)
         self.master_ledger_path = Path(master_ledger_path)
-        self.ibkr_manager = ibkr_manager
+        self.data_client = data_client
         self.front_month_id = front_month_id  # e.g. "CLJ6"
         self.bar_size = bar_size
         self.bars_per_day = bars_per_day
@@ -182,7 +181,7 @@ class DataManager:
                 )
 
         # Step 2: Detect rollover and apply Panama Canal back-adjustment
-        if self.ibkr_manager is not None and self.front_month_id is not None:
+        if self.data_client is not None and self.front_month_id is not None:
             self._roll_detected = self._detect_rollover()
             if self._roll_detected:
                 log.warning(
@@ -199,7 +198,7 @@ class DataManager:
                     )
 
         # Step 3: Backfill any gap from IBKR (recent bars only, not cold-start seeding)
-        if self.ibkr_manager is not None:
+        if self.data_client is not None:
             self._backfill()
         else:
             log.warning(
@@ -208,7 +207,7 @@ class DataManager:
             )
 
         # Step 4: Update master training ledger
-        if self.ibkr_manager is not None:
+        if self.data_client is not None:
             self._update_training_ledger()
 
         # Step 5: Save rollover metadata
@@ -477,40 +476,25 @@ class DataManager:
             chunks[0],
         )
 
-        from src.live_execution.ibkr_client import build_cl_contract
-
-        contract = build_cl_contract(continuous=True)
-        contract = self.ibkr_manager.qualify_contract(contract)
-
         total_stitched = 0
         for i, duration_str in enumerate(chunks):
-            # Keep endDateTime blank for continuous futures (required by IBKR).
-            end_dt_str = ""
-
             log.info(
-                "Backfill chunk %d/%d: requesting %s ending %s ...",
-                i + 1, len(chunks), duration_str, end_dt_str if end_dt_str else "NOW"
+                "Backfill chunk %d/%d: requesting %s ending NOW ...",
+                i + 1, len(chunks), duration_str
             )
 
-            bars = self.ibkr_manager._request_historical_data(
-                contract=contract,
+            chunk_df = self.data_client.fetch_historical_bars_by_duration(
                 duration_str=duration_str,
+                continuous=True,
                 bar_size=self.bar_size,
                 what_to_show="TRADES",
                 use_rth=False,
-                end_datetime=end_dt_str,
-                max_retries=5,
-                backoff_seconds=2.0,
-                throttle_seconds=0.5,
             )
             
-            if not bars:
+            if chunk_df.empty:
                 log.warning("Backfill chunk %d: no bars returned.", i + 1)
                 continue
 
-            from src.live_execution.ibkr_client import ib_bars_to_dataframe
-
-            chunk_df = ib_bars_to_dataframe(bars)
             n_before = len(self._df)
             self._df = pd.concat([self._df, chunk_df])
             self._dedup_and_sort()
@@ -669,34 +653,20 @@ class DataManager:
             log.warning("Cannot compute roll delta — empty cache.")
             return None
 
-        from src.live_execution.ibkr_client import (
-            build_cl_contract,
-            ib_bars_to_dataframe,
-        )
-
-        contract = build_cl_contract(continuous=True)
-        contract = self.ibkr_manager.qualify_contract(contract)
-
         # Request recent bars from IBKR
-        bars = self.ibkr_manager._request_historical_data(
-            contract=contract,
+        ibkr_df = self.data_client.fetch_historical_bars_by_duration(
             duration_str="3 D",
+            continuous=True,
             bar_size=self.bar_size,
             what_to_show="TRADES",
             use_rth=False,
-            end_datetime="",
-            max_retries=3,
-            backoff_seconds=2.0,
-            throttle_seconds=0.5,
         )
-        if not bars:
+        if ibkr_df.empty:
             log.warning(
                 "No bars returned from IBKR for roll delta — "
                 "cannot compute delta."
             )
             return None
-
-        ibkr_df = ib_bars_to_dataframe(bars)
 
         # Find overlapping timestamps
         overlap = self._df.index.intersection(ibkr_df.index)
@@ -950,11 +920,6 @@ class DataManager:
 
         Handles chunking for requests longer than _MAX_IB_REQUEST_DAYS.
         """
-        from src.live_execution.ibkr_client import (
-            build_cl_contract,
-            ib_bars_to_dataframe,
-        )
-
         now = pd.Timestamp.now()
         gap = now - start_ts
         if gap.total_seconds() < 600:
@@ -967,32 +932,22 @@ class DataManager:
         gap_days = max(1, int((gap_td.total_seconds() + 86_399) // 86_400))
         chunks = [f"{gap_days} D"]
 
-        contract = build_cl_contract(continuous=True)
-        contract = self.ibkr_manager.qualify_contract(contract)
-
         all_dfs = []
         for i, duration_str in enumerate(chunks):
-            # Keep endDateTime blank for continuous futures (required by IBKR).
-            end_dt_str = ""
-
             log.info(
-                "Ledger fetch chunk %d/%d: %s ending %s",
-                i + 1, len(chunks), duration_str, end_dt_str if end_dt_str else "NOW"
+                "Ledger fetch chunk %d/%d: %s ending NOW",
+                i + 1, len(chunks), duration_str
             )
-            bars = self.ibkr_manager._request_historical_data(
-                contract=contract,
+            df = self.data_client.fetch_historical_bars_by_duration(
                 duration_str=duration_str,
+                continuous=True,
                 bar_size=self.bar_size,
                 what_to_show="TRADES",
                 use_rth=False,
-                end_datetime=end_dt_str,
-                max_retries=5,
-                backoff_seconds=2.0,
-                throttle_seconds=0.5,
             )
             
-            if bars:
-                all_dfs.append(ib_bars_to_dataframe(bars))
+            if not df.empty:
+                all_dfs.append(df)
 
         if not all_dfs:
             return None
