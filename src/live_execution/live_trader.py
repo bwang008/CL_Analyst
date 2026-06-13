@@ -2497,7 +2497,7 @@ class LiveTrader:
 
                 try:
                     contract = build_cl_contract(continuous=True)
-                    contract = self.manager.qualify_contract(contract)
+                    contract = await self.manager.qualify_contract_async(contract)
 
                     bars = await self.manager.ib.reqHistoricalDataAsync(
                         contract,
@@ -2565,7 +2565,7 @@ class LiveTrader:
 
                 try:
                     contract = build_cl_contract(continuous=True)
-                    contract = self.manager.qualify_contract(contract)
+                    contract = await self.manager.qualify_contract_async(contract)
 
                     bars = await self.manager.ib.reqHistoricalDataAsync(
                         contract,
