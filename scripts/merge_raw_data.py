@@ -1,5 +1,4 @@
 import pandas as pd
-import numpy as np
 import os
 import shutil
 
@@ -25,41 +24,48 @@ new_df['datetime'] = pd.to_datetime(new_df['Date'] + ' ' + new_df['Time'], forma
 if new_df['datetime'].isnull().all():
     new_df['datetime'] = pd.to_datetime(new_df['Date'] + ' ' + new_df['Time'], format="%d/%m/%Y %H:%M", errors='coerce')
 
-first_new_time = new_df['datetime'].iloc[0]
-print(f"New data starts at: {first_new_time}")
+overlap_time = old_df['datetime'].iloc[-1]
+print(f"Overlap time (end of old data): {overlap_time}")
 
-old_prior_df = old_df[old_df['datetime'] < first_new_time].copy()
-print(f"Isolated {len(old_prior_df)} rows from old data to append.")
+overlap_old = old_df[old_df['datetime'] == overlap_time]
+overlap_new = new_df[new_df['datetime'] == overlap_time]
 
-overlap_old = old_df[old_df['datetime'] == first_new_time]
-if not overlap_old.empty:
-    old_close = overlap_old['Close'].iloc[0]
-    new_close = new_df['Close'].iloc[0]
-    shift = new_close - old_close
-    print(f"Applying price shift of: {shift:.5f}")
+if not overlap_old.empty and not overlap_new.empty:
+    old_close = overlap_old['Close'].iloc[-1]
+    new_close = overlap_new['Close'].iloc[-1]
+    
+    # RATIO ADJUSTMENT: Scale old history to match new baseline
+    factor = new_close / old_close
+    print(f"Old Close: {old_close}, New Close: {new_close}")
+    print(f"Applying ratio factor of: {factor:.8f} to old data")
+    
     for col in ['Open', 'High', 'Low', 'Close']:
-        old_prior_df[col] = old_prior_df[col] + shift
+        old_df[col] = old_df[col] * factor
+else:
+    print("Warning: Could not find exact overlap timestamp.")
 
-# Standardize Date and Time to match the %d/%m/%Y and %H:%M format exactly
+# Take old_df up to overlap_time, and new_df after overlap_time
+old_prior_df = old_df.copy()
+new_post_df = new_df[new_df['datetime'] > overlap_time].copy()
+
+# Standardize Date and Time format
 old_prior_df['Date'] = old_prior_df['datetime'].dt.strftime('%d/%m/%Y')
 old_prior_df['Time'] = old_prior_df['datetime'].dt.strftime('%H:%M')
-new_df['Date'] = new_df['datetime'].dt.strftime('%d/%m/%Y')
-new_df['Time'] = new_df['datetime'].dt.strftime('%H:%M')
+new_post_df['Date'] = new_post_df['datetime'].dt.strftime('%d/%m/%Y')
+new_post_df['Time'] = new_post_df['datetime'].dt.strftime('%H:%M')
 
 old_prior_df = old_prior_df.drop(columns=['datetime'])
-new_df_to_save = new_df.drop(columns=['datetime'])
+new_post_df = new_post_df.drop(columns=['datetime'])
 
 old_prior_df['Volume'] = old_prior_df['Volume'].astype(int).astype(str)
-new_df_to_save['Volume'] = new_df_to_save['Volume'].astype(int).astype(str)
+new_post_df['Volume'] = new_post_df['Volume'].astype(int).astype(str)
 
 for col in ['Open', 'High', 'Low', 'Close']:
     old_prior_df[col] = old_prior_df[col].apply(lambda x: f"{x:.6f}")
-    new_df_to_save[col] = new_df_to_save[col].apply(lambda x: f"{x:.6f}")
+    new_post_df[col] = new_post_df[col].apply(lambda x: f"{x:.6f}")
 
 print("Concatenating data...")
-merged_df = pd.concat([old_prior_df, new_df_to_save], ignore_index=True)
-
-# Important: ensure column order matches expectations
+merged_df = pd.concat([old_prior_df, new_post_df], ignore_index=True)
 merged_df = merged_df[["Date", "Time", "Open", "High", "Low", "Close", "Volume"]]
 
 print(f"Saving merged data to {output_file_path}...")
@@ -68,4 +74,4 @@ print("Done saving.")
 
 print(f"Creating a copy as {cl_csv_path}...")
 shutil.copy2(output_file_path, cl_csv_path)
-print("Merge and copy completed successfully.")
+print("Ratio Merge and copy completed successfully.")
