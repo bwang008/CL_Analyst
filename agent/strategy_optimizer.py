@@ -816,6 +816,7 @@ def make_objective(
     base_cfg: dict,
     predictions_df: pd.DataFrame,
     ohlcv_df: pd.DataFrame,
+    ohlcv_exec_df: pd.DataFrame | None = None,
     best_tracker: BestResultTracker | None = None,
     tracker: "TopKTracker | None" = None,
     objective_metric: str = "sharpe",
@@ -922,7 +923,7 @@ def make_objective(
             strategy.apply_trial_params(cfg, params)
 
         engine = BacktestEngine.from_config(cfg)
-        result = engine.run(predictions_df, ohlcv_df)
+        result = engine.run(predictions_df, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df)
 
         # --- Scoring ---
         if result.trade_count == 0 or not result.trades:
@@ -1001,6 +1002,7 @@ def run_optimization(
     label: str = "",
     objective_metric: str = "sharpe",
     optimize_side: str | None = None,
+    exec_ohlcv_path: str | None = None,
 ) -> tuple[dict, BacktestResult]:
     """Run strategy parameter optimization.
 
@@ -1068,9 +1070,14 @@ def run_optimization(
 
     print(f"  Predictions: {predictions_path}")
     print(f"  OHLCV data: {ohlcv_path}")
+    if exec_ohlcv_path:
+        print(f"  EXEC data: {exec_ohlcv_path}")
 
     print("\nLoading data...")
-    ohlcv_df = load_ohlcv(ohlcv_path)
+    ohlcv_df, ohlcv_exec_df = load_ohlcv_dual(ohlcv_path) if exec_ohlcv_path is None else load_ohlcv_dual(ohlcv_path)
+    if exec_ohlcv_path:
+        _, ohlcv_exec_df = load_ohlcv_dual(exec_ohlcv_path)
+        
     ohlcv_df = attach_atr_cache(ohlcv_df)   # stamp ATR_{period} cols once; BacktestEngine skips recomputation per trial
     print(f"  Predictions: {len(predictions_df):,} rows  cols={list(predictions_df.columns)}")
     print(f"  OHLCV: {len(ohlcv_df):,} rows")
@@ -1102,7 +1109,7 @@ def run_optimization(
             for tier in baseline_cfg[other_side]["tiers"]:
                 tier["min_prob"] = 1.0
     baseline_engine = BacktestEngine.from_config(baseline_cfg)
-    baseline_result = baseline_engine.run(predictions_df, ohlcv_df, label="Baseline")
+    baseline_result = baseline_engine.run(predictions_df, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df, label="Baseline")
     baseline_metrics = extract_metrics(baseline_result)
     print(f"  PnL: ${baseline_metrics['total_pnl']:,.2f}  "
           f"PF: {baseline_metrics['profit_factor']:.2f}  "
@@ -1114,7 +1121,7 @@ def run_optimization(
     best_result_tracker = BestResultTracker()
     tracker = TopKTracker(k=5, save_dir="configs/strategies/candidates")
     objective = make_objective(
-        base_cfg, predictions_df, ohlcv_df, best_result_tracker, tracker=tracker,
+        base_cfg, predictions_df, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df, best_tracker=best_result_tracker, tracker=tracker,
         objective_metric=objective_metric, optimize_side=optimize_side,
     )
 
@@ -1313,7 +1320,7 @@ def run_optimization(
     if holdout_preds is not None and len(holdout_preds) > 0:
         print(f"\n--- HOLDOUT BACKTEST ({_holdout_months} months, unseen by optimizer) ---")
         holdout_engine = BacktestEngine.from_config(best_cfg)
-        holdout_result = holdout_engine.run(holdout_preds, ohlcv_df, label="Holdout")
+        holdout_result = holdout_engine.run(holdout_preds, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df, label="Holdout")
         holdout_metrics = extract_metrics(holdout_result)
         best_cfg["optuna_info"]["holdout_metrics"] = holdout_metrics
         best_cfg["optuna_info"]["holdout_months"] = _holdout_months
@@ -1710,7 +1717,7 @@ def run_hybrid_optimization(
     if holdout_preds is not None and len(holdout_preds) > 0:
         print(f"\n--- HOLDOUT BACKTEST ({_holdout_months} months, unseen by optimizer) ---")
         holdout_engine = BacktestEngine.from_config(best_cfg)
-        holdout_result = holdout_engine.run(holdout_preds, ohlcv_df, label="Holdout")
+        holdout_result = holdout_engine.run(holdout_preds, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df, label="Holdout")
         holdout_metrics = extract_metrics(holdout_result)
         best_cfg["optuna_info"]["holdout_metrics"] = holdout_metrics
         best_cfg["optuna_info"]["holdout_months"] = _holdout_months
@@ -1768,6 +1775,10 @@ def main() -> None:
         help="Override: path to OHLCV parquet"
     )
     parser.add_argument(
+        "--exec-data", default=None,
+        help="Optional: path to raw unadjusted execution data"
+    )
+    parser.add_argument(
         "--holdout-months", type=int, default=None,
         help="Reserve last N months of predictions as unseen holdout "
              "(overrides config holdout_months)"
@@ -1797,6 +1808,7 @@ def main() -> None:
         n_jobs=args.jobs,
         objective_metric=args.objective,
         optimize_side=_side,
+        exec_ohlcv_path=args.exec_data,
     )
 
 

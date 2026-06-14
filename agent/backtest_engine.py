@@ -646,7 +646,7 @@ class BacktestEngine:
 
         self._state = TradeState.IN_POSITION
         self._entry_dt = dt
-        self._entry_price = order.override_entry_price if (order is not None and order.override_entry_price is not None) else bar.Close
+        self._entry_price = order.override_entry_price if (order is not None and order.override_entry_price is not None) else bar.exec_Close
         self._atr_at_entry = atr
         self._side = signal_side
         self._lots = lots
@@ -659,13 +659,13 @@ class BacktestEngine:
         if signal_side == 1:
             self._tp_price = self._entry_price + tp_mult * atr
             self._sl_price = self._entry_price - sl_mult * atr
-            self._highest_high = bar.High
-            self._lowest_low = bar.Low
+            self._highest_high = bar.exec_High
+            self._lowest_low = bar.exec_Low
         else:
             self._tp_price = self._entry_price - tp_mult * atr
             self._sl_price = self._entry_price + sl_mult * atr
-            self._highest_high = bar.High
-            self._lowest_low = bar.Low
+            self._highest_high = bar.exec_High
+            self._lowest_low = bar.exec_Low
 
         self._original_sl_price = self._sl_price
 
@@ -760,7 +760,7 @@ class BacktestEngine:
         order: Optional[Order] = None,
     ) -> None:
         """Open a new position and add it to the open-positions list."""
-        entry_price = order.override_entry_price if (order is not None and order.override_entry_price is not None) else bar.Close
+        entry_price = order.override_entry_price if (order is not None and order.override_entry_price is not None) else bar.exec_Close
         entry_order_side = "Buy" if signal_side == 1 else "Sell"
         entry_fill = self._apply_slippage(entry_price, entry_order_side)
 
@@ -795,8 +795,8 @@ class BacktestEngine:
             tp_price=tp_price,
             sl_price=sl_price,
             original_sl_price=sl_price,
-            highest_high=bar.High,
-            lowest_low=bar.Low,
+            highest_high=bar.exec_High,
+            lowest_low=bar.exec_Low,
             lots=lots,
             pos_max_horizon=pos_max_horizon,
             pos_trailing_atr_mult=pos_trailing_atr_mult,
@@ -925,6 +925,7 @@ class BacktestEngine:
         self,
         signals_df: pd.DataFrame,
         ohlcv_df: pd.DataFrame,
+        ohlcv_exec_df: pd.DataFrame | None = None,
         *,
         label: str = "",
     ) -> BacktestResult:
@@ -972,6 +973,35 @@ class BacktestEngine:
         ohlcv["atr_short_"] = ohlcv_df[short_col].values if short_cached else tr.rolling(self.atr_period_short).mean()
         # Legacy column: used by legacy loop methods and as default
         ohlcv["atr_"] = ohlcv["atr_short_"]
+
+        # Stamp execution columns for the trade wallet
+        if ohlcv_exec_df is not None:
+            exec_aligned = ohlcv_exec_df.reindex(ohlcv.index)
+            ohlcv["exec_Open"]  = exec_aligned["Open"].values
+            ohlcv["exec_High"]  = exec_aligned["High"].values
+            ohlcv["exec_Low"]   = exec_aligned["Low"].values
+            ohlcv["exec_Close"] = exec_aligned["Close"].values
+
+            # Compute execution ATR from raw prices for TP/SL sizing
+            exec_tr = np.maximum(
+                exec_aligned["High"] - exec_aligned["Low"],
+                np.maximum(
+                    (exec_aligned["High"] - exec_aligned["Close"].shift(1)).abs(),
+                    (exec_aligned["Low"]  - exec_aligned["Close"].shift(1)).abs(),
+                ),
+            )
+            ohlcv["exec_atr_"] = exec_tr.rolling(self.atr_period).mean().values
+            ohlcv["exec_atr_long_"]  = exec_tr.rolling(self.atr_period_long).mean().values
+            ohlcv["exec_atr_short_"] = exec_tr.rolling(self.atr_period_short).mean().values
+        else:
+            # Fallback: use same OHLCV for both brain and wallet
+            ohlcv["exec_Open"]  = ohlcv["Open"].values
+            ohlcv["exec_High"]  = ohlcv["High"].values
+            ohlcv["exec_Low"]   = ohlcv["Low"].values
+            ohlcv["exec_Close"] = ohlcv["Close"].values
+            ohlcv["exec_atr_"]       = ohlcv["atr_"].values
+            ohlcv["exec_atr_long_"]  = ohlcv["atr_long_"].values
+            ohlcv["exec_atr_short_"] = ohlcv["atr_short_"].values
 
         # Build signal lookup — which bars have a trade signal
         #
@@ -1080,19 +1110,19 @@ class BacktestEngine:
                 sig = signal_sides.get(ts)
                 # Legacy path: select ATR by signal side
                 if sig == 1:
-                    side_atr = row.atr_long_
+                    side_atr = row.exec_atr_long_
                 elif sig == -1:
-                    side_atr = row.atr_short_
+                    side_atr = row.exec_atr_short_
                 else:
-                    side_atr = atr
+                    side_atr = row.exec_atr_
                 self._on_flat(ts, row, sig, side_atr)
 
             elif self._state == TradeState.IN_POSITION:
-                self._on_in_position(ts, row.Open, row.High, row.Low)
+                self._on_in_position(ts, row.exec_Open, row.exec_High, row.exec_Low)
 
             # Record equity: realized + floating
             self._equity_curve.append(
-                self._realized_pnl + self._floating_pnl_single(row.Close)
+                self._realized_pnl + self._floating_pnl_single(row.exec_Close)
             )
 
     def _run_concurrent(
@@ -1118,7 +1148,7 @@ class BacktestEngine:
             # 1. Check existing positions for exits
             surviving: list[_OpenPosition] = []
             for pos in self._open_positions:
-                record = self._check_position(pos, ts, row.Open, row.High, row.Low)
+                record = self._check_position(pos, ts, row.exec_Open, row.exec_High, row.exec_Low)
                 if record is not None:
                     self._trades.append(record)
                     self._realized_pnl += record.net_pnl_dollars
@@ -1133,13 +1163,13 @@ class BacktestEngine:
                 and len(self._open_positions) < self.max_concurrent
             ):
                 # Select ATR by signal side
-                side_atr = row.atr_long_ if sig == 1 else row.atr_short_
+                side_atr = row.exec_atr_long_ if sig == 1 else row.exec_atr_short_
                 if not (np.isnan(side_atr) if isinstance(side_atr, float) else False) and side_atr > 0:
                     self._open_new_position(ts, row, sig, side_atr)
 
             # 3. Record equity: realized + floating
             self._equity_curve.append(
-                self._realized_pnl + self._floating_pnl_concurrent(row.Close)
+                self._realized_pnl + self._floating_pnl_concurrent(row.exec_Close)
             )
 
     # -------------------------------------------------------------------
@@ -1179,7 +1209,7 @@ class BacktestEngine:
             self._engine_state.last_exit_bars_ago_short += 1
 
             if self._state == TradeState.IN_POSITION:
-                self._on_in_position(ts, row.Open, row.High, row.Low)
+                self._on_in_position(ts, row.exec_Open, row.exec_High, row.exec_Low)
 
             # Update engine state for strategy
             self._update_engine_state()
@@ -1194,10 +1224,9 @@ class BacktestEngine:
                 atr, pb, ps, self._engine_state,
             )
 
-            # Handle EXIT orders from strategy (e.g., JointPortfolioStrategy conflict resolution)
             for order in orders:
                 if order.action == "EXIT" and self._state == TradeState.IN_POSITION:
-                    self._close_trade(ts, row.Close, ExitReason.SIGNAL_EXIT)
+                    self._close_trade(ts, row.exec_Close, ExitReason.SIGNAL_EXIT)
                     self._update_engine_state()
                     break
 
@@ -1218,13 +1247,13 @@ class BacktestEngine:
                         if order.action in ("BUY", "SELL"):
                             sig = order.side
                             # Select ATR by trade side
-                            side_atr = atr_long if sig == 1 else atr_short
+                            side_atr = row.exec_atr_long_ if sig == 1 else row.exec_atr_short_
                             self._on_flat(ts, row, sig, side_atr, lots=order.lots, order=order)
                             break  # single-position: only one entry per bar
 
             # Record equity: realized + floating
             self._equity_curve.append(
-                self._realized_pnl + self._floating_pnl_single(row.Close)
+                self._realized_pnl + self._floating_pnl_single(row.exec_Close)
             )
 
     def _run_concurrent_strategy(
@@ -1246,7 +1275,7 @@ class BacktestEngine:
             # 1. Check existing positions for exits
             surviving: list[_OpenPosition] = []
             for pos in self._open_positions:
-                record = self._check_position(pos, ts, row.Open, row.High, row.Low)
+                record = self._check_position(pos, ts, row.exec_Open, row.exec_High, row.exec_Low)
                 if record is not None:
                     self._trades.append(record)
                     self._realized_pnl += record.net_pnl_dollars
@@ -1284,7 +1313,7 @@ class BacktestEngine:
                             self._blocked_trades_count += 1
                         continue
                     # Select ATR by trade side
-                    side_atr = atr_long if order.side == 1 else atr_short
+                    side_atr = row.exec_atr_long_ if order.side == 1 else row.exec_atr_short_
                     if (
                         not (np.isnan(side_atr) if isinstance(side_atr, float) else False)
                         and side_atr > 0
@@ -1294,7 +1323,7 @@ class BacktestEngine:
 
             # 5. Record equity: realized + floating
             self._equity_curve.append(
-                self._realized_pnl + self._floating_pnl_concurrent(row.Close)
+                self._realized_pnl + self._floating_pnl_concurrent(row.exec_Close)
             )
 
 
@@ -1732,6 +1761,32 @@ def load_ohlcv(path: str) -> pd.DataFrame:
     return df
 
 
+def load_ohlcv_dual(path: str) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    """Load OHLCV, extracting separate execution DataFrame if EXEC_ columns exist.
+
+    Returns:
+        (ohlcv_features, ohlcv_exec):
+            ohlcv_features — ratio-adjusted OHLCV (for brain/features/ATR)
+            ohlcv_exec — raw unadjusted OHLCV (for wallet/fills/PnL), or None
+    """
+    df = load_ohlcv(path)  # existing function, handles RAW_ overwrite etc.
+
+    if "EXEC_Close" in df.columns:
+        exec_cols = {"Open": "EXEC_Open", "High": "EXEC_High",
+                     "Low": "EXEC_Low", "Close": "EXEC_Close"}
+        ohlcv_exec = pd.DataFrame(index=df.index)
+        for std_col, exec_col in exec_cols.items():
+            if exec_col in df.columns:
+                ohlcv_exec[std_col] = df[exec_col]
+            else:
+                ohlcv_exec[std_col] = df[std_col]  # fallback
+        if "Volume" in df.columns:
+            ohlcv_exec["Volume"] = df["Volume"]
+        return df, ohlcv_exec
+    else:
+        return df, None
+
+
 # ---------------------------------------------------------------------------
 # CLI Entry Point
 # ---------------------------------------------------------------------------
@@ -1761,6 +1816,11 @@ def main() -> None:
         "--data",
         default="data/processed/CL_set_06.parquet",
         help="Path to OHLCV parquet for Run A (historical)",
+    )
+    parser.add_argument(
+        "--exec-data",
+        default=None,
+        help="Optional path to raw unadjusted execution data for wallet/fills",
     )
     parser.add_argument(
         "--live-data",
@@ -1864,7 +1924,9 @@ def main() -> None:
 
     # Load historical data
     print(f"Loading historical OHLCV from {args.data}...")
-    ohlcv_a = load_ohlcv(args.data)
+    ohlcv_a, ohlcv_exec_a = load_ohlcv_dual(args.data)
+    if args.exec_data:
+        _, ohlcv_exec_a = load_ohlcv_dual(args.exec_data)
 
     if args.retrain_every is not None:
         if not args.oos_start:
@@ -2044,7 +2106,7 @@ def main() -> None:
             preds = load_predictions(args.predictions)
 
     print("Running backtest on historical data...")
-    result_a = bt.run(preds, ohlcv_a, label="Historical")
+    result_a = bt.run(preds, ohlcv_a, ohlcv_exec_df=ohlcv_exec_a, label="Historical")
     strategy_cfg_for_report = strategy_cfg if args.config else None
     report_text = format_report(
         result_a,
@@ -2105,7 +2167,7 @@ def main() -> None:
                 slippage_per_side=args.slippage_per_side,
                 contract_multiplier=args.contract_multiplier,
             ) if strategy_cfg else bt
-            result_opt = bt_opt.run(optimizer_preds, ohlcv_a, label="Optimizer Window")
+            result_opt = bt_opt.run(optimizer_preds, ohlcv_a, ohlcv_exec_df=ohlcv_exec_a, label="Optimizer Window")
 
             # Run on holdout only
             bt_ho = BacktestEngine.from_config(
@@ -2114,7 +2176,7 @@ def main() -> None:
                 slippage_per_side=args.slippage_per_side,
                 contract_multiplier=args.contract_multiplier,
             ) if strategy_cfg else bt
-            result_ho = bt_ho.run(holdout_preds, ohlcv_a, label="Holdout (Unseen)")
+            result_ho = bt_ho.run(holdout_preds, ohlcv_a, ohlcv_exec_df=ohlcv_exec_a, label="Holdout (Unseen)")
 
             ho_report = format_report(
                 result_ho,

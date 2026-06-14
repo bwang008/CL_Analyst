@@ -348,6 +348,7 @@ def evaluate_fold_sharpe(
     ohlcv_df: pd.DataFrame,
     strategy_cfg: dict,
     prob_col: str,
+    ohlcv_exec_df: pd.DataFrame | None = None,
 ) -> float:
     """Run BacktestEngine on the fold's validation predictions → Sharpe."""
     from agent.backtest_engine import BacktestEngine
@@ -364,9 +365,13 @@ def evaluate_fold_sharpe(
     if len(ohlcv_slice) < 100:
         return 0.0
 
+    ohlcv_exec_slice = None
+    if ohlcv_exec_df is not None:
+        ohlcv_exec_slice = ohlcv_exec_df[(ohlcv_exec_df.index >= fold_start) & (ohlcv_exec_df.index <= fold_end)]
+
     try:
         engine = BacktestEngine.from_config(strategy_cfg)
-        result = engine.run(signals, ohlcv_slice)
+        result = engine.run(signals, ohlcv_slice, ohlcv_exec_df=ohlcv_exec_slice)
         sharpe = compute_sharpe(result.equity_curve)
         # Reject if too few trades for statistical significance
         if result.trade_count < 10:
@@ -399,6 +404,7 @@ def make_objective(
     target_name: str,
     balance_mode: str = "downsample",
     ohlcv_gym: pd.DataFrame | None = None,
+    ohlcv_exec_gym: pd.DataFrame | None = None,
     strategy_cfg: dict | None = None,
     n_jobs: int = 1,
     num_threads: int = 8,
@@ -553,7 +559,7 @@ def make_objective(
             if ml_metric == "sharpe":
                 fold_test_df = df_gym.iloc[test_start:test_end]
                 score = evaluate_fold_sharpe(
-                    probs, fold_test_df, ohlcv_gym, strategy_cfg, prob_col
+                    probs, fold_test_df, ohlcv_gym, strategy_cfg, prob_col, ohlcv_exec_df=ohlcv_exec_gym
                 )
             else:
                 evaluator = METRIC_EVALUATORS[ml_metric]
@@ -668,6 +674,7 @@ def run_search(
     learning_rate_range: tuple[float, float] = (0.005, 0.02),
     min_child_samples_range: tuple[int, int] = (150, 400),
     feature_fraction_range: tuple[float, float] = (0.3, 1.0),
+    exec_ohlcv_path: str | None = None,
 ):
     """Run the Walk-Forward Optuna search (Phase 1: Brain Optimization).
 
@@ -798,14 +805,22 @@ def run_search(
 
     # ---- Load OHLCV if sharpe mode ----
     ohlcv_gym = None
+    ohlcv_exec_gym = None
     if ml_metric == "sharpe":
         print("\n[2b/4] Loading OHLCV + strategy config for sharpe evaluation...")
-        from agent.backtest_engine import load_ohlcv
-        ohlcv_full = load_ohlcv(data_path)
+        from agent.backtest_engine import load_ohlcv_dual
+        ohlcv_full, ohlcv_exec_full = load_ohlcv_dual(data_path) if exec_ohlcv_path is None else load_ohlcv_dual(data_path)
+        if exec_ohlcv_path:
+            _, ohlcv_exec_full = load_ohlcv_dual(exec_ohlcv_path)
+            
         if train_cutoff_date:
             ohlcv_gym = ohlcv_full[ohlcv_full.index < cutoff].copy()
+            if ohlcv_exec_full is not None:
+                ohlcv_exec_gym = ohlcv_exec_full[ohlcv_exec_full.index < cutoff].copy()
         else:
             ohlcv_gym = ohlcv_full.iloc[:n_gym].copy()
+            if ohlcv_exec_full is not None:
+                ohlcv_exec_gym = ohlcv_exec_full.iloc[:n_gym].copy()
         print(f"  OHLCV gym: {len(ohlcv_gym):,} bars")
 
         if not strategy_cfg:
@@ -842,6 +857,7 @@ def run_search(
         target_name=target_name,
         balance_mode=balance_mode,
         ohlcv_gym=ohlcv_gym,
+        ohlcv_exec_gym=ohlcv_exec_gym,
         strategy_cfg=strategy_cfg,
         n_jobs=n_jobs,
         num_threads=num_threads,
@@ -1169,6 +1185,10 @@ def main():
              "(volatility, momentum, macro, etc.) as categorical hyperparameters. "
              "Automatically enforces minimum 150 trials for TPE convergence.",
     )
+    parser.add_argument(
+        "--exec-data", default=None,
+        help="Optional: path to raw unadjusted execution data for wallet/fills",
+    )
     args = parser.parse_args()
 
     # Set global worker ID and total trials for logging
@@ -1199,6 +1219,7 @@ def main():
         learning_rate_range=tuple(args.learning_rate_range),
         min_child_samples_range=tuple(args.min_child_samples_range),
         feature_fraction_range=tuple(args.feature_fraction_range),
+        exec_ohlcv_path=args.exec_data,
     )
 
 

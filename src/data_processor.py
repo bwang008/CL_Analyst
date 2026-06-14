@@ -660,9 +660,8 @@ class DataProcessor:
         5. Drop rows with any NaN values
         6. Convert TARGET_ columns to integer type
         
-        Note: RAW_ prefixed columns (RAW_Close, RAW_Future_High, RAW_Future_Low) are 
-        preserved for evaluation. They are filtered out by get_feature_columns() 
-        and never used as ML features.
+        Note: RAW_ and EXEC_ prefixed columns are preserved for evaluation/execution. 
+        They are filtered out by get_feature_columns() and never used as ML features.
         
         Args:
             df: DataFrame after normalization
@@ -2328,7 +2327,18 @@ class DataProcessor:
         self.df = df
         return df
 
-    def process_hourset_09(self) -> pd.DataFrame:
+    def _load_and_resample_exec(self, exec_ohlcv_path: str) -> pd.DataFrame:
+        """Helper to load and resample raw execution data."""
+        orig_path = self.input_path
+        self.input_path = exec_ohlcv_path
+        try:
+            raw_df = self.load_data()
+            raw_1h = self.resample_to_hourly(raw_df)
+            return raw_1h
+        finally:
+            self.input_path = orig_path
+
+    def process_hourset_09(self, exec_ohlcv_path: Optional[str] = None) -> pd.DataFrame:
         """HourSet_08 + Term Structure Shape features (Diff/Ratio/Inversion).
 
         Identical pipeline to HourSet_08 with `include_term_structure=True`
@@ -2390,20 +2400,48 @@ class DataProcessor:
 
         # ── Step 5: RAW columns for evaluation (120H forward window) ──
         raw_horizon = 120
-        future_high = (
-            df["High"].iloc[::-1]
-            .rolling(window=raw_horizon, min_periods=1)
-            .max().iloc[::-1].shift(-1)
-        )
-        future_low = (
-            df["Low"].iloc[::-1]
-            .rolling(window=raw_horizon, min_periods=1)
-            .min().iloc[::-1].shift(-1)
-        )
-        df["RAW_Close"] = df["Close"].copy()
-        df["RAW_Future_High"] = future_high
-        df["RAW_Future_Low"] = future_low
-        print("  - Added RAW_Close, RAW_Future_High, RAW_Future_Low")
+        
+        if exec_ohlcv_path:
+            print(f"  - Loading raw execution data from {exec_ohlcv_path}...")
+            raw_1h = self._load_and_resample_exec(exec_ohlcv_path)
+            raw_1h = raw_1h.reindex(df.index)
+            
+            df["EXEC_Open"] = raw_1h["Open"]
+            df["EXEC_High"] = raw_1h["High"]
+            df["EXEC_Low"] = raw_1h["Low"]
+            df["EXEC_Close"] = raw_1h["Close"]
+            
+            exec_tr = np.maximum(
+                raw_1h["High"] - raw_1h["Low"],
+                np.maximum(
+                    (raw_1h["High"] - raw_1h["Close"].shift(1)).abs(),
+                    (raw_1h["Low"] - raw_1h["Close"].shift(1)).abs(),
+                ),
+            )
+            df["EXEC_ATR_14"] = exec_tr.rolling(14).mean()
+            
+            future_high = raw_1h["High"].iloc[::-1].rolling(window=raw_horizon, min_periods=1).max().iloc[::-1].shift(-1)
+            future_low = raw_1h["Low"].iloc[::-1].rolling(window=raw_horizon, min_periods=1).min().iloc[::-1].shift(-1)
+            
+            df["RAW_Close"] = raw_1h["Close"].copy()
+            df["RAW_Future_High"] = future_high
+            df["RAW_Future_Low"] = future_low
+            print("  - Added EXEC_* columns and updated RAW_ columns from raw data")
+        else:
+            future_high = (
+                df["High"].iloc[::-1]
+                .rolling(window=raw_horizon, min_periods=1)
+                .max().iloc[::-1].shift(-1)
+            )
+            future_low = (
+                df["Low"].iloc[::-1]
+                .rolling(window=raw_horizon, min_periods=1)
+                .min().iloc[::-1].shift(-1)
+            )
+            df["RAW_Close"] = df["Close"].copy()
+            df["RAW_Future_High"] = future_high
+            df["RAW_Future_Low"] = future_low
+            print("  - Added RAW_Close, RAW_Future_High, RAW_Future_Low")
 
         # ── Step 6: Precision Target Suite ────────────────────────────
         target_multipliers = [2.0, 3.0, 4.0, 5.0]
@@ -2458,7 +2496,7 @@ class DataProcessor:
         self.df = df
         return df
 
-    def process_hourset_10(self) -> pd.DataFrame:
+    def process_hourset_10(self, exec_ohlcv_path: Optional[str] = None) -> pd.DataFrame:
         """HourSet_10: Superset feature generation with rigid filtering.
         
         Applies AlphaFactory with include_term_structure=True to generate 
@@ -2504,11 +2542,40 @@ class DataProcessor:
 
         # ── Step 5: RAW columns for evaluation (120H forward window) ──
         raw_horizon = 120
-        future_high = df["High"].iloc[::-1].rolling(window=raw_horizon, min_periods=1).max().iloc[::-1].shift(-1)
-        future_low = df["Low"].iloc[::-1].rolling(window=raw_horizon, min_periods=1).min().iloc[::-1].shift(-1)
-        df["RAW_Close"] = df["Close"].copy()
-        df["RAW_Future_High"] = future_high
-        df["RAW_Future_Low"] = future_low
+        
+        if exec_ohlcv_path:
+            print(f"  - Loading raw execution data from {exec_ohlcv_path}...")
+            raw_1h = self._load_and_resample_exec(exec_ohlcv_path)
+            raw_1h = raw_1h.reindex(df.index)
+            
+            df["EXEC_Open"] = raw_1h["Open"]
+            df["EXEC_High"] = raw_1h["High"]
+            df["EXEC_Low"] = raw_1h["Low"]
+            df["EXEC_Close"] = raw_1h["Close"]
+            
+            exec_tr = np.maximum(
+                raw_1h["High"] - raw_1h["Low"],
+                np.maximum(
+                    (raw_1h["High"] - raw_1h["Close"].shift(1)).abs(),
+                    (raw_1h["Low"] - raw_1h["Close"].shift(1)).abs(),
+                ),
+            )
+            df["EXEC_ATR_14"] = exec_tr.rolling(14).mean()
+            
+            future_high = raw_1h["High"].iloc[::-1].rolling(window=raw_horizon, min_periods=1).max().iloc[::-1].shift(-1)
+            future_low = raw_1h["Low"].iloc[::-1].rolling(window=raw_horizon, min_periods=1).min().iloc[::-1].shift(-1)
+            
+            df["RAW_Close"] = raw_1h["Close"].copy()
+            df["RAW_Future_High"] = future_high
+            df["RAW_Future_Low"] = future_low
+            print("  - Added EXEC_* columns and updated RAW_ columns from raw data")
+        else:
+            future_high = df["High"].iloc[::-1].rolling(window=raw_horizon, min_periods=1).max().iloc[::-1].shift(-1)
+            future_low = df["Low"].iloc[::-1].rolling(window=raw_horizon, min_periods=1).min().iloc[::-1].shift(-1)
+            df["RAW_Close"] = df["Close"].copy()
+            df["RAW_Future_High"] = future_high
+            df["RAW_Future_Low"] = future_low
+            print("  - Added RAW_Close, RAW_Future_High, RAW_Future_Low")
 
         # ── Step 6: Precision Target Suite ────────────────────────────
         target_multipliers = [2.0, 3.0, 4.0, 5.0]
@@ -2568,13 +2635,13 @@ class DataProcessor:
         self.df = df
         return df
 
-    def process_hourset_11(self) -> pd.DataFrame:
+    def process_hourset_11(self, exec_ohlcv_path: Optional[str] = None) -> pd.DataFrame:
         """Alias for process_hourset_09 logic."""
-        return self.process_hourset_09()
+        return self.process_hourset_09(exec_ohlcv_path=exec_ohlcv_path)
 
-    def process_hourset_12(self) -> pd.DataFrame:
+    def process_hourset_12(self, exec_ohlcv_path: Optional[str] = None) -> pd.DataFrame:
         """Alias for process_hourset_10 logic."""
-        return self.process_hourset_10()
+        return self.process_hourset_10(exec_ohlcv_path=exec_ohlcv_path)
 
     def process_hour4set_01(self) -> pd.DataFrame:
         """4-Hour bar dataset for multi-day swing trading.

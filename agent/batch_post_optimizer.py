@@ -29,7 +29,7 @@ sys.path.insert(0, PROJECT_ROOT)
 os.chdir(PROJECT_ROOT)
 
 import pandas as pd
-from agent.backtest_engine import BacktestEngine, load_ohlcv, load_predictions
+from agent.backtest_engine import BacktestEngine, load_ohlcv, load_ohlcv_dual, load_predictions
 from agent.strategy_optimizer import run_optimization, extract_metrics, send_telegram, suppress_telegram
 
 
@@ -214,6 +214,7 @@ def run_single_optimization(
     quiet: bool = False,
     objective_metric: str = "sharpe",
     optimize_side: str | None = None,
+    exec_ohlcv_path: str | None = None,
 ) -> dict:
     """Run strategy_optimizer on a single config and return results."""
     # Suppress per-worker Telegram notifications — the batch orchestrator
@@ -238,6 +239,7 @@ def run_single_optimization(
             label=label,
             objective_metric=objective_metric,
             optimize_side=optimize_side,
+            exec_ohlcv_path=exec_ohlcv_path,
         )
         best_metrics = extract_metrics(best_result)
         return {
@@ -655,6 +657,7 @@ def _run_for_objective(
                     quiet=True,
                     objective_metric=objective_metric,
                     optimize_side=side,
+                    exec_ohlcv_path=args.exec_data,
                 )
                 futures[future] = (task_key, merged_path, label, metric, side)
 
@@ -740,6 +743,7 @@ def main():
     parser.add_argument("--target-pairs-json", type=str, default=None, help="JSON file with top N pairs to optimize")
     parser.add_argument("--n-trials", type=int, default=500, help="Optuna trials per optimization")
     parser.add_argument("--min-trades", type=int, default=10, help="Min trades for valid trial")
+    parser.add_argument("--exec-data", default=None, help="Optional: path to raw unadjusted execution data")
     parser.add_argument(
         "--holdout-months", type=int, default=4,
         help="Reserve last N months of predictions as unseen holdout (default: 4)"
@@ -793,7 +797,12 @@ def main():
             return original_save_best(self, min_sharpe=-99999.0)
         so.TopKTracker.save_best = patched_save_best
 
-    ohlcv_df = load_ohlcv(ohlcv_path)
+    if args.exec_data:
+        ohlcv_df, ohlcv_exec_df = load_ohlcv_dual(ohlcv_path) if args.exec_data is None else load_ohlcv_dual(ohlcv_path)
+        _, ohlcv_exec_df = load_ohlcv_dual(args.exec_data)
+    else:
+        ohlcv_df, ohlcv_exec_df = load_ohlcv_dual(ohlcv_path)
+    
     total_start = time.perf_counter()
 
     # Build list of PER-SIDE optimization tasks
