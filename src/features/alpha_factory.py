@@ -413,15 +413,27 @@ class AlphaFactory:
         else:
             obv_slope = ta.linreg(obv, length=window, slope=True)
             price_slope = ta.linreg(self.close, length=window, slope=True)
-            self.df[f"VOLFLOW_OBV_SLOPE{suffix}"] = (
-                obv_slope if isinstance(obv_slope, pd.Series) else obv_slope.iloc[:, 0]
-            )
-            price_slope_series = (
-                price_slope if isinstance(price_slope, pd.Series) else price_slope.iloc[:, 0]
-            )
-            self.df[f"VOLFLOW_DIVERGENCE{suffix}"] = (
-                self.df[f"VOLFLOW_OBV_SLOPE{suffix}"] - price_slope_series
-            )
+            
+            if obv_slope is None or price_slope is None:
+                self.df[f"VOLFLOW_OBV_SLOPE{suffix}"] = np.nan
+                self.df[f"VOLFLOW_DIVERGENCE{suffix}"] = np.nan
+            else:
+                obv_slope_series = (
+                    obv_slope if isinstance(obv_slope, pd.Series) else obv_slope.iloc[:, 0]
+                )
+                price_slope_series = (
+                    price_slope if isinstance(price_slope, pd.Series) else price_slope.iloc[:, 0]
+                )
+
+                # Normalise slopes by rolling std before subtracting to ensure scale-invariance
+                obv_std = obv_slope_series.rolling(window).std().replace(0, np.nan)
+                price_std = price_slope_series.rolling(window).std().replace(0, np.nan)
+                
+                norm_obv_slope = (obv_slope_series / obv_std).fillna(0.0)
+                norm_price_slope = (price_slope_series / price_std).fillna(0.0)
+
+                self.df[f"VOLFLOW_OBV_SLOPE{suffix}"] = obv_slope_series
+                self.df[f"VOLFLOW_DIVERGENCE{suffix}"] = norm_obv_slope - norm_price_slope
 
         vol_sum = self.volume.rolling(window).sum().clip(lower=1e-8)
         vwap = (self.close * self.volume).rolling(window).sum() / vol_sum
@@ -606,11 +618,11 @@ class AlphaFactory:
         self.df[f"EXHAUST_CUM_RET{suffix}"] = cum_ret
 
         # 2) Cumulative return normalised by ATR (scale-invariant)
-        atr_col = "ATR_14"
-        if atr_col not in self.df.columns:
+        if "ATR_14" in self.df.columns:
+            atr = self.df["ATR_14"].replace(0, np.nan)
+        else:
             import pandas_ta as _ta  # noqa: F811
-            self.df[atr_col] = self.df.ta.atr(length=14)
-        atr = self.df[atr_col].replace(0, np.nan)
+            atr = self.df.ta.atr(length=14).replace(0, np.nan)
         # Convert cum log-return to price-space move, then /ATR
         price_move = cum_ret * self.close  # approx price change
         self.df[f"EXHAUST_CUM_ATR{suffix}"] = price_move / atr
@@ -695,10 +707,11 @@ class AlphaFactory:
         relative_volume = self.volume / vol_sma
 
         candle_range = (self.high - self.low).clip(lower=1e-8)
-        atr_col = "ATR_14"
-        if atr_col not in self.df.columns:
-            self.df[atr_col] = self.df.ta.atr(length=14)
-        atr_sma = self.df[atr_col].rolling(window).mean().clip(lower=1e-8)
+        if "ATR_14" in self.df.columns:
+            atr_series = self.df["ATR_14"]
+        else:
+            atr_series = self.df.ta.atr(length=14)
+        atr_sma = atr_series.rolling(window).mean().clip(lower=1e-8)
         relative_candle = candle_range / atr_sma
 
         self.df[f"EXHDIV_EFFORT_REWARD{suffix}"] = (

@@ -13,6 +13,10 @@ def back_adjust_continuous_data(df: pd.DataFrame) -> pd.DataFrame:
         
     df_adj = df.copy()
     
+    # Convert Unix nanosecond timestamps to human-readable datetime
+    if 'ts_event' in df_adj.columns:
+        df_adj['ts_event'] = pd.to_datetime(df_adj['ts_event'], unit='ns', utc=True)
+    
     # 1. Convert fixed-precision Databento integers to standard dollar decimals (divide by 1e9)
     ohlc_cols = ['open', 'high', 'low', 'close']
     for col in ohlc_cols:
@@ -55,16 +59,22 @@ def main():
     """
     client = db.Historical("db-rn44nxsG5jfyNvhWrebEhHyQCsRed")
     
-    print("Submitting Databento batch job for CL.v.0...")
+    # Fetch the earliest available start date from metadata
+    dataset_range = client.metadata.get_dataset_range(dataset="GLBX.MDP3")
+    earliest_start = dataset_range['start'][:10]
+    today_date = pd.Timestamp.today().strftime('%Y-%m-%d')
+    
+    print(f"Requesting full history from {earliest_start} to {today_date}...")
     
     try:
+        # Submit batch job according to exact specifications
         job = client.batch.submit_job(
             dataset="GLBX.MDP3",
             symbols="CL.v.0",
             stype_in="continuous",
             schema="ohlcv-1h",
-            start="2010-01-01",  # Adjust to your desired 15-year start date
-            end="2026-06-13",
+            start=earliest_start,
+            end=today_date,
             encoding="csv",
             split_duration="none",
             compression="none"
