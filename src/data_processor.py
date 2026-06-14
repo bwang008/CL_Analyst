@@ -74,6 +74,12 @@ DATASET_VERSIONS = {
         'Topology-Aware TS & Pruned Base Features (process_hourset_10): '
         'Orthogonalized 214 feature subset removing collinearity.'
     ),
+    'HourSet_11': (
+        'Alias for process_hourset_09.'
+    ),
+    'HourSet_12': (
+        'Alias for process_hourset_10.'
+    ),
 }
 
 
@@ -868,6 +874,10 @@ class DataProcessor:
             return self.process_hourset_09()
         elif self.dataset_version == "HourSet_10":
             return self.process_hourset_10()
+        elif self.dataset_version == "HourSet_11":
+            return self.process_hourset_11()
+        elif self.dataset_version == "HourSet_12":
+            return self.process_hourset_12()
         elif self.dataset_version == "Hour4Set_01":
             return self.process_hour4set_01()
         else:
@@ -2557,6 +2567,14 @@ class DataProcessor:
 
         self.df = df
         return df
+
+    def process_hourset_11(self) -> pd.DataFrame:
+        """Alias for process_hourset_09 logic."""
+        return self.process_hourset_09()
+
+    def process_hourset_12(self) -> pd.DataFrame:
+        """Alias for process_hourset_10 logic."""
+        return self.process_hourset_10()
 
     def process_hour4set_01(self) -> pd.DataFrame:
         """4-Hour bar dataset for multi-day swing trading.
