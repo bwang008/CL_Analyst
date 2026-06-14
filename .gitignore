@@ -29,12 +29,22 @@ reports/
 !models/production/feature_importance.csv
 # Project config files
 !experiments.json
+!experiment_tracker.json
+!research_backlog.json
 !data/DATASETS.json
 !.cursor/worktrees.json
 # Strategy configs (JSON definitions for config-driven strategies)
 !configs/*.json
 !configs/strategies/**
 configs/strategies/candidates/**
+
+# ----- Disaster recovery: track prediction & artifact files -----
+# Prediction CSVs used by backtest configs (typically < 3 MB each)
+!data/predictions/*.csv
+!data/predictions/*.csv.bak
+# Pipeline artifact summaries (small text/JSON outputs)
+!data/final_artifacts/**
+!data/new_artifacts/**
 
 # Runtime artifacts (live execution)
 .env
