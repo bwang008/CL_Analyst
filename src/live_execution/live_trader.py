@@ -668,12 +668,16 @@ class LiveTrader:
             self._running = True
 
             # ── Telegram: startup confirmation ────────────────────────
+            data_port = getattr(self.data_client, "port", "N/A")
+            exec_port = getattr(self.exec_client, "port", "N/A")
             startup_msg = (
                 f"🚀 *LiveTrader Online*\n"
                 f"Strategy: `{self.strategy.name}`\n"
                 f"Environment: `{self._environment}`\n"
                 f"Host: `{self._hostname}`\n"
-                f"Dry-run: `{self.dry_run}`\n\n"
+                f"Dry-run: `{self.dry_run}`\n"
+                f"Data Port: `{data_port}`\n"
+                f"Exec Port: `{exec_port}`\n\n"
             )
             startup_msg += self._build_heartbeat_payload()
             self._telegram.send(startup_msg)
