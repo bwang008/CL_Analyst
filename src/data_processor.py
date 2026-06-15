@@ -2796,9 +2796,10 @@ def main():
     parser = argparse.ArgumentParser(description="Data Processor")
     parser.add_argument("dataset_version", nargs="?", default="set_03", help="Dataset version to build (default: set_03)")
     parser.add_argument("--exec-data", default=None, help="Path to raw execution data for dual-data sets")
+    parser.add_argument("--input", default="C:/CL_Analyst_Data/data/raw/CL.csv", help="Path to base data CSV")
     args = parser.parse_args()
     
-    input_path = "C:/CL_Analyst_Data/data/raw/CL.csv"
+    input_path = args.input
     if not os.path.exists(input_path):
         alt_path = "data/test100k.csv"
         if os.path.exists(alt_path):
