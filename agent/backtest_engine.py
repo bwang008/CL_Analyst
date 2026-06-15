@@ -1717,16 +1717,6 @@ def load_ohlcv(path: str) -> pd.DataFrame:
     }
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
-    # If RAW_ columns exist (from processed parquets), use those for OHLC
-    if "RAW_Close" in df.columns:
-        if "RAW_Open" in df.columns:
-            df["Open"] = df["RAW_Open"]
-        if "RAW_High" in df.columns:
-            df["High"] = df["RAW_High"]
-        if "RAW_Low" in df.columns:
-            df["Low"] = df["RAW_Low"]
-        df["Close"] = df["RAW_Close"]
-
     required = {"Open", "High", "Low", "Close", "Volume"}
     missing = required - set(df.columns)
     if missing:

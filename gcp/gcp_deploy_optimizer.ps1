@@ -192,6 +192,7 @@ $codeFiles = @(
     @{ Local = "agent\strategy_optimizer.py";    Remote = "agent/" },
     @{ Local = "agent\sweep_ensembles.py";       Remote = "agent/" },
     @{ Local = "agent\select_top_ensembles.py";  Remote = "agent/" },
+    @{ Local = "agent\unified_pair_optimizer.py";Remote = "agent/" },
     @{ Local = "agent\forward_returns.py";       Remote = "agent/" },
     @{ Local = "agent\alpha_evaluator.py";       Remote = "agent/" },
     @{ Local = "agent\backtest_engine.py";       Remote = "agent/" },

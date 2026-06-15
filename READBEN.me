@@ -65,6 +65,10 @@ python src/live_execution/live_trader.py --config configs/strategies/HS09_Ensemb
 #CURRENT 
 python src/live_execution/live_trader.py --config configs/strategies/HourSet_08_Ensemble_03_05242026.json
 
+#PAPER TESTING
+python -m src.live_execution.cli --config configs/strategies/HS09_Ensemble_E01_06032026.json --data-port 4002 --exec-port 4002
+
+
 Step 3.5: Validate Parity (run before deploying to live)
 python -m pytest tests/test_config_parity.py tests/test_pipeline_parity.py tests/test_per_side_atr.py tests/test_execution_parity.py -v
 python scripts/validate_parity.py

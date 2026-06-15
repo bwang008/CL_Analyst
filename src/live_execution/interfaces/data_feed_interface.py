@@ -78,3 +78,11 @@ class DataFeedClient(ABC):
     @abstractmethod
     def qualify_contract(self, contract: Any) -> Any:
         pass
+
+    @abstractmethod
+    def register_error_callback(self, callback: Any) -> None:
+        pass
+
+    @abstractmethod
+    def sleep(self, seconds: float) -> None:
+        pass

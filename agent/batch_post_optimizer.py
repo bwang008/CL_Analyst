@@ -408,24 +408,7 @@ def generate_optimized_report(
                     label = exp["label"]
                     local_dir = exp.get("local_dir", os.path.join(batch_dir, exp.get("gcs_prefix", "")))
 
-                    # Load baseline from pipeline_summary.json
-                    summary_path = os.path.join(local_dir, "pipeline_summary.json")
-                    if not os.path.exists(summary_path):
-                        continue
-                    with open(summary_path, encoding="utf-8-sig") as f:
-                        summary = json.load(f)
-                    bt = summary.get("backtest_results", {})
-
-                    base_key = f"{direction_key}_{metric}"
-                    base = bt.get(base_key, {})
-                    base_t = base.get("trade_count", 0)
-                    base_l = base.get("buy_trades", 0)
-                    base_s = base.get("sell_trades", 0)
-                    base_trades = f"{base_t}/{base_l}/{base_s}"
-                    base_pf = base.get("profit_factor", 0.0)
-                    base_pnl = base.get("total_pnl", 0.0)
-
-                    # Look up optimized result
+                    # Look up optimized result first
                     opt_key = f"{label}|{direction_key}|{metric}"
                     opt = all_results.get(opt_key, {})
 
@@ -436,7 +419,23 @@ def generate_optimized_report(
                         else:
                             opt_info = opt.get("config", {}).get("optuna_info", {})
 
+                        # Use the optimizer's internal baseline to ensure apples-to-apples comparison
+                        baseline = opt_info.get("baseline_metrics", {})
+                        base_t = baseline.get("trade_count", 0)
+                        base_l = baseline.get("buy_trades", 0)
+                        base_s = baseline.get("sell_trades", 0)
+                        base_trades = f"{base_t}/{base_l}/{base_s}"
+                        base_pf = baseline.get("profit_factor", 0.0)
+                        base_pnl = baseline.get("total_pnl", 0.0)
+
                         params = opt_info.get("params", {})
+                        if not params and "all_trial_params" in opt_info:
+                            suffix = f"_{direction_key}"
+                            params = {
+                                k.replace(suffix, ""): v
+                                for k, v in opt_info["all_trial_params"].items()
+                                if k.endswith(suffix)
+                            }
                         opt_t = om.get("trade_count", 0)
                         opt_l = om.get("buy_trades", 0)
                         opt_s = om.get("sell_trades", 0)
@@ -463,6 +462,25 @@ def generate_optimized_report(
                             f"{opt_thr} | {opt_tp} | {opt_sl} | {opt_trail} | {opt_cool} | {opt_hold} | {opt_consec} | {best_trial_str} |"
                         )
                     else:
+                        # Fallback to pipeline_summary.json if optimization didn't complete
+                        summary_path = os.path.join(local_dir, "pipeline_summary.json")
+                        if os.path.exists(summary_path):
+                            with open(summary_path, encoding="utf-8-sig") as f:
+                                summary = json.load(f)
+                            bt = summary.get("backtest_results", {})
+                            base_key = f"{direction_key}_{metric}"
+                            base = bt.get(base_key, {})
+                            base_t = base.get("trade_count", 0)
+                            base_l = base.get("buy_trades", 0)
+                            base_s = base.get("sell_trades", 0)
+                            base_trades = f"{base_t}/{base_l}/{base_s}"
+                            base_pf = base.get("profit_factor", 0.0)
+                            base_pnl = base.get("total_pnl", 0.0)
+                        else:
+                            base_trades = "-/-/-"
+                            base_pf = 0.0
+                            base_pnl = 0.0
+                            
                         reason = opt.get("error", "not run") if opt else "not run"
                         lines.append(
                             f"| {label} | {base_trades} | - | "
@@ -485,6 +503,16 @@ def generate_optimized_report(
             opt_info = result.get("config", {}).get("optuna_info", {})
 
         params = opt_info.get("params", {})
+        is_ensemble = '|' in key and len(key.split('|')) == 2
+        if not params and "all_trial_params" in opt_info and not is_ensemble:
+            direction_key = key.split('|')[1] if len(key.split('|')) > 1 else ""
+            if direction_key:
+                suffix = f"_{direction_key}"
+                params = {
+                    k.replace(suffix, ""): v
+                    for k, v in opt_info["all_trial_params"].items()
+                    if k.endswith(suffix)
+                }
         metrics = result.get("metrics", {})
         baseline = opt_info.get("baseline_metrics", {})
         ho_metrics = opt_info.get("holdout_metrics", {})
@@ -535,7 +563,6 @@ def generate_optimized_report(
 
         # Ensemble mode stores suffixed param keys (entry_threshold_long, etc.) in params,
         # but the un-suffixed keys are in long_params/short_params.
-        is_ensemble = '|' in key and len(key.split('|')) == 2
         long_params = opt_info.get("long_params", {})
         short_params = opt_info.get("short_params", {})
 
@@ -695,7 +722,10 @@ def _run_for_objective(
     # Final batch-level summary
     ok_count = sum(1 for v in all_results.values() if v.get('status') == 'OK')
     fail_count = sum(1 for v in all_results.values() if v.get('status') == 'FAILED')
-    report_name = f"batch_summary_optimized_{objective_metric}.md"
+    
+    prefix = "ensembles_" if args.target_pairs_json else ""
+    report_name = f"batch_summary_optimized_{prefix}{objective_metric}.md"
+    
     send_telegram(
         f"[Batch Post-Optimizer] COMPLETE ({objective_metric})\n"
         f"Batch: {os.path.basename(batch_dir)}\n"
@@ -719,7 +749,7 @@ def _run_for_objective(
     print(f"\nOptimized report saved: {report_path}")
 
     # Save raw results JSON
-    results_json_path = os.path.join(batch_dir, f"optimization_results_{objective_metric}.json")
+    results_json_path = os.path.join(batch_dir, f"optimization_results_{prefix}{objective_metric}.json")
     serializable = {}
     for k, v in all_results.items():
         sv = {"status": v["status"]}

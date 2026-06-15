@@ -781,6 +781,10 @@ class LiveTrader:
         if self._callbacks_registered:
             return
         self.exec_client.register_order_status_callback(self._on_standard_execution_event)
+        if hasattr(self.data_client, "register_error_callback"):
+            self.data_client.register_error_callback(self._on_ib_error)
+        if hasattr(self.exec_client, "register_error_callback"):
+            self.exec_client.register_error_callback(self._on_ib_error)
         self._callbacks_registered = True
 
     def _extract_contract_month(self, contract) -> Optional[str]:
@@ -2234,10 +2238,12 @@ class LiveTrader:
 
     def _on_bar_update_5m(self, bars, has_new_bar=False) -> None:
         """Callback fired by ib_insync when continuous 5m bars are updated."""
-        if not has_new_bar or not bars:
+        if not has_new_bar or len(bars) < 2:
             return
 
-        new_bar = bars[-1]
+        # bars[-1] is the new incomplete bar that just opened.
+        # bars[-2] is the fully completed bar that just closed.
+        new_bar = bars[-2]
         raw_ts = pd.Timestamp(new_bar.date)
         if raw_ts.tzinfo is not None:
             raw_ts = raw_ts.tz_convert("UTC").tz_localize(None)
@@ -2284,10 +2290,12 @@ class LiveTrader:
 
     def _on_bar_update_1h(self, bars, has_new_bar=False) -> None:
         """Callback fired by ib_insync when continuous 1h bars are updated."""
-        if not has_new_bar or not bars:
+        if not has_new_bar or len(bars) < 2:
             return
 
-        new_bar = bars[-1]
+        # bars[-1] is the new incomplete bar that just opened.
+        # bars[-2] is the fully completed bar that just closed.
+        new_bar = bars[-2]
         raw_ts = pd.Timestamp(new_bar.date)
         if raw_ts.tzinfo is not None:
             raw_ts = raw_ts.tz_convert("UTC").tz_localize(None)
@@ -2483,18 +2491,23 @@ class LiveTrader:
                     continue
                 order_status = evt.status
                 oid = evt.order_id
+                
+                # Try to extract the raw order object if available
+                o = getattr(getattr(evt, "raw_event", None), "order", None)
+                
                 # Skip tracked TP/SL orders (they are standalone with
                 # parentId==0 but are NOT entry orders)
                 if oid is not None and (
                     oid in self._tp_order_ids or oid == self._sl_order_id
                 ):
                     continue
-                parent_id = getattr(o, "parentId", 0) or 0
+                parent_id = getattr(o, "parentId", 0) if o else 0
                 # Only count parent entry orders (parentId==0)
                 if parent_id == 0 and order_status in (
                     "Submitted", "PreSubmitted", "PendingSubmit",
                 ):
-                    pending_cl_entry_qty += float(getattr(o, "totalQuantity", 0) or 0)
+                    qty = float(getattr(o, "totalQuantity", 0) if o else evt.remaining_qty)
+                    pending_cl_entry_qty += qty
         except Exception:
             log.debug("Failed to check pending orders", exc_info=True)
 
@@ -3014,7 +3027,10 @@ class LiveTrader:
                 waited = 0.0
                 poll_step = 0.5
                 while waited < _DATA_FARM_WAIT_SECONDS:
-                    time.sleep(poll_step)
+                    if hasattr(self.data_client, "sleep"):
+                        self.data_client.sleep(poll_step)
+                    else:
+                        time.sleep(poll_step)
                     waited += poll_step
                     if self._data_farm_ok:
                         break  # At least one data farm is healthy
@@ -3106,7 +3122,10 @@ class LiveTrader:
                     poll_count = 0
                     continue
 
-                time.sleep(_POLL_INTERVAL)
+                if hasattr(self.data_client, "sleep"):
+                    self.data_client.sleep(_POLL_INTERVAL)
+                else:
+                    time.sleep(_POLL_INTERVAL)
                 poll_count += 1
 
                 # Periodic heartbeat (only when idle — no bars arriving)
@@ -3158,7 +3177,10 @@ class LiveTrader:
                     self._needs_restart = True
             except Exception:
                 log.exception("Error in event loop iteration")
-                time.sleep(_POLL_INTERVAL)
+                if hasattr(self.data_client, "sleep"):
+                    self.data_client.sleep(_POLL_INTERVAL)
+                else:
+                    time.sleep(_POLL_INTERVAL)
 
         log.info("Event loop exited.")
 
@@ -3202,9 +3224,9 @@ class LiveTrader:
             pos_str = "unknown"
             pnl_str = ""
 
-        subs_status = " | subs_lost=True ⚠️" if self._subscriptions_lost else ""
+        subs_status = " | subs_lost=True" if self._subscriptions_lost else ""
         mute_status = (
-            f" | DATA_MUTE={int((time.time() - self._data_mute_since) / 60)}min ⚠️"
+            f" | DATA_MUTE={int((time.time() - self._data_mute_since) / 60)}min"
             if self._data_mute else ""
         )
         log.info(

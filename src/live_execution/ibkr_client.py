@@ -608,6 +608,53 @@ class IBKRConnectionManager:
         )
         return contract.localSymbol, month_str
 
+    async def get_front_month_contract_async(
+        self, symbol: str = "CL",
+    ) -> tuple[str, str]:
+        """Async version of get_front_month_contract."""
+        from datetime import datetime, timedelta
+
+        self.ensure_connected()
+        search = Future(symbol=symbol, exchange="NYMEX", currency="USD")
+        details = await self.ib.reqContractDetailsAsync(search)
+
+        if not details:
+            raise RuntimeError(
+                f"Could not retrieve {symbol} contract details from IBKR."
+            )
+
+        details.sort(key=lambda d: d.contract.lastTradeDateOrContractMonth)
+
+        cutoff = datetime.utcnow() + timedelta(days=self._EXPIRY_BUFFER_DAYS)
+        cutoff_str = cutoff.strftime("%Y%m%d")
+
+        tradable = [
+            d for d in details
+            if d.contract.lastTradeDateOrContractMonth >= cutoff_str
+        ]
+
+        if tradable:
+            front = tradable[0]
+        else:
+            log.warning(
+                "All %s contracts expire within %d days — "
+                "using nearest available",
+                symbol, self._EXPIRY_BUFFER_DAYS,
+            )
+            front = details[0]
+
+        contract = front.contract
+        month_str = contract.lastTradeDateOrContractMonth[:6]
+
+        log.info(
+            "Front-month %s contract: %s (conId=%d, month=%s, "
+            "expiry=%s, buffer=%dd)",
+            symbol, contract.localSymbol, contract.conId, month_str,
+            contract.lastTradeDateOrContractMonth,
+            self._EXPIRY_BUFFER_DAYS,
+        )
+        return contract.localSymbol, month_str
+
     def fetch_historical_bars_by_duration(
         self,
         *,

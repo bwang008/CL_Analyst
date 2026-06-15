@@ -91,3 +91,6 @@ class IBKRExecutionClient(ExecutionClient):
 
     def close_position(self, symbol: str, exit_mode: str, current_price: float) -> Any:
         return self.manager.close_cl_position(symbol=symbol, exit_mode=exit_mode, current_price=current_price)
+
+    def register_error_callback(self, callback: Any) -> None:
+        self.manager.ib.errorEvent += callback

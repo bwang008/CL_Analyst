@@ -101,7 +101,7 @@ class IBKRDataFeedClient(DataFeedClient):
             else:
                 contract = build_cl_contract(continuous=True)
         else:
-            local_sym, _ = self.manager.get_front_month_contract(symbol=symbol)
+            local_sym, _ = await self.manager.get_front_month_contract_async(symbol=symbol)
             contract = Future(symbol=symbol, localSymbol=local_sym, exchange="NYMEX")
         contract = await self.manager.qualify_contract_async(contract)
 
@@ -124,3 +124,9 @@ class IBKRDataFeedClient(DataFeedClient):
 
     def qualify_contract(self, contract: Any) -> Any:
         return self.manager.qualify_contract(contract)
+
+    def register_error_callback(self, callback: Any) -> None:
+        self.manager.ib.errorEvent += callback
+
+    def sleep(self, seconds: float) -> None:
+        self.manager.ib.sleep(seconds)

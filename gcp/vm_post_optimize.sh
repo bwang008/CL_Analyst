@@ -302,6 +302,25 @@ else
         --objective "$OBJECTIVE" \
         --no-filter \
         2>&1 | tee -a "$LOG"
+
+    # --- [4b/5] Unified Selection & Pairing Engine ---
+    echo "" | tee -a "$LOG"
+    echo "[4b/5] Running Unified Selection & Pairing Engine..." | tee -a "$LOG"
+    python agent/unified_pair_optimizer.py --batch-dir "$BATCH_DIR" 2>&1 | tee -a "$LOG"
+
+    if [ -f "$BATCH_DIR/top_pairs.json" ]; then
+        echo "" | tee -a "$LOG"
+        echo "[4c/5] Running batch post-optimizer on unified pairs (ensemble mode)..." | tee -a "$LOG"
+        python agent/batch_post_optimizer.py \
+            --batch-dir "$BATCH_DIR" \
+            --target-pairs-json "$BATCH_DIR/top_pairs.json" \
+            --n-trials "$N_TRIALS" \
+            --holdout-months "$HOLDOUT_MONTHS" \
+            --workers "$WORKERS" \
+            --objective "both" \
+            --no-filter \
+            2>&1 | tee -a "$LOG"
+    fi
 fi
 
 OPT_EXIT=$?
@@ -329,6 +348,7 @@ for f in "$BATCH_DIR"/optimization_results_*.json; do
 done
 [ -f "$BATCH_DIR/batch_ensemble_pre_opt.md" ] && gsutil cp "$BATCH_DIR/batch_ensemble_pre_opt.md" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
 [ -f "$BATCH_DIR/top_8_ensembles.json" ] && gsutil cp "$BATCH_DIR/top_8_ensembles.json" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+[ -f "$BATCH_DIR/top_pairs.json" ] && gsutil cp "$BATCH_DIR/top_pairs.json" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
 
 # Legacy fallback uploads
 [ -f "$BATCH_DIR/batch_summary_optimized.md" ] && gsutil cp "$BATCH_DIR/batch_summary_optimized.md" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true

@@ -816,7 +816,7 @@ class DataProcessor:
         except (ValueError, OSError) as exc:
             print(f"  -> Mirror failed: {exc}")
     
-    def process(self, threshold: float = 0.08, horizon: int = None) -> pd.DataFrame:
+    def process(self, threshold: float = 0.08, horizon: int = None, **kwargs) -> pd.DataFrame:
         """
         Run the complete data processing pipeline based on dataset_version.
         
@@ -874,7 +874,7 @@ class DataProcessor:
         elif self.dataset_version == "HourSet_10":
             return self.process_hourset_10()
         elif self.dataset_version == "HourSet_11":
-            return self.process_hourset_11()
+            return self.process_hourset_11(exec_ohlcv_path=kwargs.get("exec_ohlcv_path"))
         elif self.dataset_version == "HourSet_12":
             return self.process_hourset_12()
         elif self.dataset_version == "Hour4Set_01":
@@ -2438,10 +2438,13 @@ class DataProcessor:
                 .rolling(window=raw_horizon, min_periods=1)
                 .min().iloc[::-1].shift(-1)
             )
+            df["RAW_Open"] = df["Open"].copy()
+            df["RAW_High"] = df["High"].copy()
+            df["RAW_Low"] = df["Low"].copy()
             df["RAW_Close"] = df["Close"].copy()
             df["RAW_Future_High"] = future_high
             df["RAW_Future_Low"] = future_low
-            print("  - Added RAW_Close, RAW_Future_High, RAW_Future_Low")
+            print("  - Added RAW_Open, RAW_High, RAW_Low, RAW_Close, RAW_Future_High, RAW_Future_Low")
 
         # ── Step 6: Precision Target Suite ────────────────────────────
         target_multipliers = [2.0, 3.0, 4.0, 5.0]
@@ -2783,36 +2786,33 @@ class DataProcessor:
         return df
 
 
-def main(dataset_version: str = "set_01"):
+def main():
     """
     Main entry point for running the data processor.
     
-    Processes test100k.csv from data/raw/ and outputs to data/processed/.
-    
-    Args:
-        dataset_version: Which dataset configuration to use (default: 'set_01')
+    Processes CL.csv from C:/CL_Analyst_Data/data/raw/ and outputs to data/processed/.
     """
-    # Check if input file exists in data/raw/, if not try data/
-    #input_path = "data/raw/test100k.csv"
+    import argparse
+    parser = argparse.ArgumentParser(description="Data Processor")
+    parser.add_argument("dataset_version", nargs="?", default="set_03", help="Dataset version to build (default: set_03)")
+    parser.add_argument("--exec-data", default=None, help="Path to raw execution data for dual-data sets")
+    args = parser.parse_args()
+    
     input_path = "C:/CL_Analyst_Data/data/raw/CL.csv"
     if not os.path.exists(input_path):
-        # Try the main data folder as fallback
         alt_path = "data/test100k.csv"
         if os.path.exists(alt_path):
             print(f"Note: {input_path} not found, using {alt_path}")
             input_path = alt_path
         else:
             print(f"Error: Could not find input file at {input_path} or {alt_path}")
-            print("Please ensure test100k.csv is in the data/raw/ folder.")
             return
     
-    # Create processor and run pipeline
-    processor = DataProcessor(input_path=input_path, dataset_version=dataset_version)
+    processor = DataProcessor(input_path=input_path, dataset_version=args.dataset_version)
     
     try:
-        df = processor.process(threshold=0.08, horizon=576)
+        df = processor.process(threshold=0.08, horizon=576, exec_ohlcv_path=args.exec_data)
         
-        # Print summary statistics
         print("\nFeature Summary:")
         print("-" * 40)
         print(df.describe().T)
@@ -2829,7 +2829,4 @@ def main(dataset_version: str = "set_01"):
 
 
 if __name__ == "__main__":
-    import sys
-    # Allow passing dataset version as command line argument
-    version = sys.argv[1] if len(sys.argv) > 1 else "set_03"
-    main(dataset_version=version)
+    main()

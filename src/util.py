@@ -162,7 +162,7 @@ def get_cl_data(data_file=None):
 # =============================================================================
 
 # Column prefixes that should be excluded from ML features
-EXCLUDED_PREFIXES = ('RAW_', 'TARGET_', 'META_')
+EXCLUDED_PREFIXES = ('RAW_', 'TARGET_', 'META_', 'EXEC_')
 
 # Explicit column names to exclude from ML features (legacy or non-feature cols)
 EXCLUDED_COLUMNS = {'Target', 'Open', 'High', 'Low', 'Close', 'Volume', 'DateTime'}

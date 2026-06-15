@@ -47,7 +47,7 @@ sys.path.insert(0, PROJECT_ROOT)
 os.chdir(PROJECT_ROOT)
 
 import optuna
-from agent.backtest_engine import BacktestEngine, BacktestResult, load_ohlcv, load_predictions
+from agent.backtest_engine import BacktestEngine, BacktestResult, load_ohlcv, load_ohlcv_dual, load_predictions
 from src.live_execution.strategies.execution_models import create_execution_strategy
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -1126,7 +1126,9 @@ def run_optimization(
     )
 
     db_hash = hashlib.md5(f"strategy_opt_{model_name}_{objective_metric}".encode()).hexdigest()[:8]
-    db_path = Path(f"optuna_study_{db_hash}.db")
+    db_dir = Path("reports/optuna_db")
+    db_dir.mkdir(parents=True, exist_ok=True)
+    db_path = db_dir / f"optuna_study_{db_hash}.db"
     db_path.unlink(missing_ok=True)  # fresh study each run — avoids trial number inflation
     study = optuna.create_study(
         direction="maximize",
@@ -1519,7 +1521,9 @@ def run_hybrid_optimization(
     )
 
     db_hash = hashlib.md5(f"hybrid_opt_{model_name}_{objective_metric}".encode()).hexdigest()[:8]
-    db_path = Path(f"optuna_study_{db_hash}.db")
+    db_dir = Path("reports/optuna_db")
+    db_dir.mkdir(parents=True, exist_ok=True)
+    db_path = db_dir / f"optuna_study_{db_hash}.db"
     db_path.unlink(missing_ok=True)  # fresh study each run — avoids trial number inflation
     study = optuna.create_study(
         direction="maximize",

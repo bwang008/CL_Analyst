@@ -66,3 +66,7 @@ class ExecutionClient(ABC):
     @abstractmethod
     def close_position(self, symbol: str, exit_mode: str, current_price: float) -> Any:
         pass
+
+    @abstractmethod
+    def register_error_callback(self, callback: Any) -> None:
+        pass
