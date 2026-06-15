@@ -1916,7 +1916,7 @@ def main() -> None:
     print(f"Loading historical OHLCV from {args.data}...")
     ohlcv_a, ohlcv_exec_a = load_ohlcv_dual(args.data)
     if args.exec_data:
-        _, ohlcv_exec_a = load_ohlcv_dual(args.exec_data)
+        ohlcv_exec_a = load_ohlcv(args.exec_data)
 
     if args.retrain_every is not None:
         if not args.oos_start:
