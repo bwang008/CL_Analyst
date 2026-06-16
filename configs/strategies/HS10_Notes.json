@@ -1,7 +1,5 @@
 {
-    "Notes":
-
-    "No HS10 config was ever created because the HS10 models all did worse than the HS09 models
+    "Notes":"No HS10 config was ever created because the HS10 models all did worse than the HS09 models
 
 I didn't feel any need to deploy them to production, however
 

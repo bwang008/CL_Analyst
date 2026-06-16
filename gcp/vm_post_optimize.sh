@@ -154,6 +154,8 @@ gsutil cp "$BUCKET/$GCS_OPT_PREFIX/manifest.json" "$BATCH_DIR/manifest.json" 2>&
 OHLCV_GCS=$(python3 -c "import json; m=json.load(open('$BATCH_DIR/manifest.json')); print(m.get('defaults',{}).get('gcs_data_path',''))")
 OHLCV_BASENAME=$(basename "$OHLCV_GCS")
 STRATEGY_CONFIG=$(python3 -c "import json; m=json.load(open('$BATCH_DIR/manifest.json')); print(m.get('defaults',{}).get('strategy_config','hourly_ensemble_010.json'))")
+EXEC_DATA_GCS=$(python3 -c "import json; m=json.load(open('$BATCH_DIR/manifest.json')); print(m.get('defaults',{}).get('exec_data',''))")
+SLIPPAGE_PER_SIDE=$(python3 -c "import json; m=json.load(open('$BATCH_DIR/manifest.json')); print(m.get('defaults',{}).get('slippage_per_side','0'))")
 echo "  OHLCV GCS path: $OHLCV_GCS" | tee -a "$LOG"
 echo "  Strategy config: $STRATEGY_CONFIG" | tee -a "$LOG"
 
@@ -168,6 +170,24 @@ echo "[2/5] Downloading OHLCV data from GCS..." | tee -a "$LOG"
 mkdir -p data/processed
 gsutil cp "$OHLCV_GCS" "data/processed/$OHLCV_BASENAME" 2>&1 | tee -a "$LOG"
 echo "  OHLCV data ready ($(du -h data/processed/$OHLCV_BASENAME | cut -f1))" | tee -a "$LOG"
+
+EXEC_DATA_PATH=""
+if [ -n "$EXEC_DATA_GCS" ] && [[ "$EXEC_DATA_GCS" == gs://* ]]; then
+    EXEC_DATA_BASENAME=$(basename "$EXEC_DATA_GCS")
+    gsutil cp "$EXEC_DATA_GCS" "data/processed/$EXEC_DATA_BASENAME" 2>&1 | tee -a "$LOG"
+    EXEC_DATA_PATH="data/processed/$EXEC_DATA_BASENAME"
+    echo "  EXEC_DATA ready ($(du -h $EXEC_DATA_PATH | cut -f1))" | tee -a "$LOG"
+elif [ -n "$EXEC_DATA_GCS" ]; then
+    EXEC_DATA_PATH="$EXEC_DATA_GCS"
+fi
+
+OPT_ARGS=""
+if [ -n "$EXEC_DATA_PATH" ]; then
+    OPT_ARGS="--exec-data $EXEC_DATA_PATH"
+fi
+if (( $(echo "$SLIPPAGE_PER_SIDE > 0" | bc -l) )); then
+    OPT_ARGS="$OPT_ARGS --slippage-per-side $SLIPPAGE_PER_SIDE"
+fi
 
 # --- [3/5] Download all experiment artifacts from GCS ---
 echo "" | tee -a "$LOG"
@@ -273,7 +293,7 @@ if [ "$OPT_MODE" = "ensemble" ]; then
     # --- [4/5] Run batch_post_optimizer (ensemble mode) ---
     echo "" | tee -a "$LOG"
     echo "[4/5] Running batch post-optimizer on Top 8 (ensemble mode)..." | tee -a "$LOG"
-    echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --target-pairs-json $BATCH_DIR/top_8_ensembles.json --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter" | tee -a "$LOG"
+    echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --target-pairs-json $BATCH_DIR/top_8_ensembles.json --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter $OPT_ARGS" | tee -a "$LOG"
 
     python agent/batch_post_optimizer.py \
         --batch-dir "$BATCH_DIR" \
@@ -283,6 +303,7 @@ if [ "$OPT_MODE" = "ensemble" ]; then
         --workers "$WORKERS" \
         --objective "$OBJECTIVE" \
         --no-filter \
+        $OPT_ARGS \
         2>&1 | tee -a "$LOG"
 else
     # --- [3b/5] SKIPPED (individual mode) ---
@@ -292,7 +313,7 @@ else
     # --- [4/5] Run batch_post_optimizer (individual mode — per-side Long/Short) ---
     echo "" | tee -a "$LOG"
     echo "[4/5] Running batch post-optimizer (individual mode — per-side Long/Short)..." | tee -a "$LOG"
-    echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter" | tee -a "$LOG"
+    echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter $OPT_ARGS" | tee -a "$LOG"
 
     python agent/batch_post_optimizer.py \
         --batch-dir "$BATCH_DIR" \
@@ -301,6 +322,7 @@ else
         --workers "$WORKERS" \
         --objective "$OBJECTIVE" \
         --no-filter \
+        $OPT_ARGS \
         2>&1 | tee -a "$LOG"
 
     # --- [4b/5] Unified Selection & Pairing Engine ---
@@ -308,19 +330,8 @@ else
     echo "[4b/5] Running Unified Selection & Pairing Engine..." | tee -a "$LOG"
     python agent/unified_pair_optimizer.py --batch-dir "$BATCH_DIR" 2>&1 | tee -a "$LOG"
 
-    if [ -f "$BATCH_DIR/top_pairs.json" ]; then
-        echo "" | tee -a "$LOG"
-        echo "[4c/5] Running batch post-optimizer on unified pairs (ensemble mode)..." | tee -a "$LOG"
-        python agent/batch_post_optimizer.py \
-            --batch-dir "$BATCH_DIR" \
-            --target-pairs-json "$BATCH_DIR/top_pairs.json" \
-            --n-trials "$N_TRIALS" \
-            --holdout-months "$HOLDOUT_MONTHS" \
-            --workers "$WORKERS" \
-            --objective "both" \
-            --no-filter \
-            2>&1 | tee -a "$LOG"
-    fi
+    # Note: Ensemble optimization (step 4c) runs locally after VM shutdown
+    # to avoid paying for a large VM during a lightweight job (4 pairs)
 fi
 
 OPT_EXIT=$?

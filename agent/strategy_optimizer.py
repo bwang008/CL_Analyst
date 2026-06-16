@@ -821,6 +821,7 @@ def make_objective(
     tracker: "TopKTracker | None" = None,
     objective_metric: str = "sharpe",
     optimize_side: str | None = None,
+    slippage_per_side: float | None = None,
 ):
     """Create a closure that Optuna can call with trial params.
 
@@ -922,7 +923,11 @@ def make_objective(
                 params["breakout_window"] = trial.suggest_int("breakout_window", 2, 24, step=2)
             strategy.apply_trial_params(cfg, params)
 
-        engine = BacktestEngine.from_config(cfg)
+        overrides = {}
+        if slippage_per_side is not None:
+            overrides["slippage_per_side"] = slippage_per_side
+            
+        engine = BacktestEngine.from_config(cfg, **overrides)
         result = engine.run(predictions_df, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df)
 
         # --- Scoring ---
@@ -1003,6 +1008,7 @@ def run_optimization(
     objective_metric: str = "sharpe",
     optimize_side: str | None = None,
     exec_ohlcv_path: str | None = None,
+    slippage_per_side: float | None = None,
 ) -> tuple[dict, BacktestResult]:
     """Run strategy parameter optimization.
 
@@ -1108,7 +1114,12 @@ def run_optimization(
         if other_side in baseline_cfg and "tiers" in baseline_cfg[other_side]:
             for tier in baseline_cfg[other_side]["tiers"]:
                 tier["min_prob"] = 1.0
-    baseline_engine = BacktestEngine.from_config(baseline_cfg)
+                
+    overrides = {}
+    if slippage_per_side is not None:
+        overrides["slippage_per_side"] = slippage_per_side
+        
+    baseline_engine = BacktestEngine.from_config(baseline_cfg, **overrides)
     baseline_result = baseline_engine.run(predictions_df, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df, label="Baseline")
     baseline_metrics = extract_metrics(baseline_result)
     print(f"  PnL: ${baseline_metrics['total_pnl']:,.2f}  "
@@ -1122,7 +1133,7 @@ def run_optimization(
     tracker = TopKTracker(k=5, save_dir="configs/strategies/candidates")
     objective = make_objective(
         base_cfg, predictions_df, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df, best_tracker=best_result_tracker, tracker=tracker,
-        objective_metric=objective_metric, optimize_side=optimize_side,
+        objective_metric=objective_metric, optimize_side=optimize_side, slippage_per_side=slippage_per_side
     )
 
     db_hash = hashlib.md5(f"strategy_opt_{model_name}_{objective_metric}".encode()).hexdigest()[:8]
@@ -1239,8 +1250,8 @@ def run_optimization(
 
     # Final backtest with best params
     opt_label = f"Optimized_{optimize_side}" if optimize_side else "Optimized_Ensemble"
-    best_engine = BacktestEngine.from_config(best_cfg)
-    best_result = best_engine.run(predictions_df, ohlcv_df, label=opt_label)
+    best_engine = BacktestEngine.from_config(best_cfg, **overrides)
+    best_result = best_engine.run(predictions_df, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df, label=opt_label)
     best_metrics = extract_metrics(best_result)
 
     print(f"\n  OPTIMIZED: PnL=${best_metrics['total_pnl']:,.2f}  "
@@ -1321,7 +1332,7 @@ def run_optimization(
     # ── Holdout backtest (unseen by Optuna) ────────────────────────────
     if holdout_preds is not None and len(holdout_preds) > 0:
         print(f"\n--- HOLDOUT BACKTEST ({_holdout_months} months, unseen by optimizer) ---")
-        holdout_engine = BacktestEngine.from_config(best_cfg)
+        holdout_engine = BacktestEngine.from_config(best_cfg, **overrides)
         holdout_result = holdout_engine.run(holdout_preds, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df, label="Holdout")
         holdout_metrics = extract_metrics(holdout_result)
         best_cfg["optuna_info"]["holdout_metrics"] = holdout_metrics

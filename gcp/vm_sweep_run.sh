@@ -107,6 +107,8 @@ LOG="sweep_run_$(date +%Y%m%d_%H%M%S).log"
 SHUTDOWN=false
 USE_BUCKETS=false
 AGENT_ID="${AGENT_ID:-sweep_bot}"
+EXEC_DATA=""
+SLIPPAGE_PER_SIDE="0"
 
 # Search space constraints (defaults — overridden by manifest via CLI)
 MAX_DEPTH_MIN=3
@@ -149,6 +151,8 @@ for arg in "$@"; do
         --min-child-samples-max=*) MIN_CHILD_SAMPLES_MAX="${arg#*=}" ;;
         --feature-fraction-min=*) FEATURE_FRACTION_MIN="${arg#*=}" ;;
         --feature-fraction-max=*) FEATURE_FRACTION_MAX="${arg#*=}" ;;
+        --exec-data=*) EXEC_DATA="${arg#*=}" ;;
+        --slippage-per-side=*) SLIPPAGE_PER_SIDE="${arg#*=}" ;;
     esac
 done
 
@@ -349,6 +353,13 @@ if [ $COMPLETED -gt 0 ]; then
         --study-prefix "$JOB_NAME"
         --targets "$TARGET_LONG" "$TARGET_SHORT"
     )
+
+    if [ -n "$EXEC_DATA" ]; then
+        E2E_ARGS+=(--exec-data "$EXEC_DATA")
+    fi
+    if (( $(echo "$SLIPPAGE_PER_SIDE > 0" | bc -l) )); then
+        E2E_ARGS+=(--slippage-per-side "$SLIPPAGE_PER_SIDE")
+    fi
 
     python gcp/vm_e2e_pipeline.py "${E2E_ARGS[@]}" 2>&1 | tee -a "$LOG" || true
     E2E_EXIT=${PIPESTATUS[0]}

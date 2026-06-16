@@ -1,27 +1,30 @@
 ## To-do
-Development:
--Change the timeframe of the training. It seems like we are seeing alpha decay
-If we try to train on more recent data, we might find that the alpha holds better
-We can try to create a system that constantly retrains on the latest information
-Easier said than done, but worth checking out
-I noticed alpha is best in the backtest on the oldest data right after training ends
-So the hope is that if we make the cutoff closer to actual live system, we can get good alpha
-We know that our targets and training method is good, so maybe we can cut down backtest and holdout time. 
+We just created ratio-adjusted data models, good backtest results
 
+Even tho the model only buys, let's spin it up and see how it runs. 
 
-Training:
--Review the canary runs for the most recent 2x1,3x1,4x1,5x1 in C:\Users\bwang\Documents\GitHub\CL_Analyst_Development\reports\batch_runs\batch_20260512_2133
-	-Select the best targets that show promise of high number of trades, and decent PnL, then we will do a batch optimization of them, and do a production run as well if they are doing good. 
-	-Note: Expect the 3x1_12H to perform as well as the current best model we have.
-	
--Backtest the 3x1_12H model against the full dataset including its training to see how it performs in the backtest.
-    # We explored this and it's a waste of time because the past data it trained on it will certainly excel so no need to even check this it is fake PNL.
+---
 
-Major next steps:
--Production run on hourly model
--Maybe we can try to train a 5m model again? Or maybe we just move onto another ticker/future like NG or gold, copper, PL, etc.
--OBSERVE THE MODEL. LET IT COOK. Expect minimum 10 trades a month. Let's see the performance, and identify bugs. This is our chance to make sure the order execution is rock solid. 
-##
+IDea was brought up for meta model strategy and using separate buy/sell prob to find a threshold
+
+I like this idea, at least:
+
+examine the buy/sell prob for ensemble.
+measure the delta between buy/sell, and examine if there is correlation between
+the size of the gap between buy/sell and the performance of a trade.
+
+so when a trade happens, record the buy/sell probability gap in backtest
+after backtest, measure performance into buckets, see if there's a relationship or pattern.
+
+This is simple enough to test and implement if it works.
+
+---
+
+Bigger rework here is trying to split the features so one model scans rsi and other scans probability rsi model is right or wrong
+
+I'm more skeptical about this, not to mention it's a massive rework so we sideboard for now
+
+but the prompt is in the research folder for more information from the agent.
 
 ========================================================================
 
@@ -51,11 +54,14 @@ python agent/backtest_engine.py --config configs/strategies/HS09_Ensemble_E01_06
 python agent/backtest_engine.py --config configs/strategies/HS09_Ensemble_E08_L3_S2_opt_sharpe.json --data "C:\CL_Analyst_Data\data\processed\cl-5m_bk_HourSet_09.parquet" --slippage-per-side 0.01
 python agent/backtest_engine.py --config configs/strategies/HS09_Ensemble_E02_L1_S2_opt_sharpe.json --data "C:\CL_Analyst_Data\data\processed\cl-5m_bk_HourSet_09.parquet" --slippage-per-side 0.01
 
-#HS11
+#HS11 Canary
 python agent/backtest_engine.py --config configs/strategies/HS11_Ensemble_E01_06152026.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_11.parquet" --slippage-per-side 0.01
 python agent/backtest_engine.py --config configs/strategies/HS11_Ensemble_E01_06152026.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_11.parquet" --exec-data "C:\CL_Analyst_Data\data\raw\DataBentoSample\CL_raw.csv" --slippage-per-side 0.01
-
-
+#HS11 Production   
+(moderate)
+python agent/backtest_engine.py --config configs/strategies/HS11_Prod_Ensemble_E01_06162026.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_11.parquet" --exec-data "C:\CL_Analyst_Data\data\raw\DataBentoSample\CL_raw.csv" --slippage-per-side 0.01
+(conservative)
+python agent/backtest_engine.py --config configs/strategies/HS11_Prod_Ensemble_E02_06162026.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_11.parquet" --exec-data "C:\CL_Analyst_Data\data\raw\DataBentoSample\CL_raw.csv" --slippage-per-side 0.01
 
 Step 4: Run live_trader
 python -m src.live_execution.live_trader --config configs/strategies/HourSet_08_Ensemble_01_opt.json

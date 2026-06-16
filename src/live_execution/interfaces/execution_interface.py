@@ -70,3 +70,26 @@ class ExecutionClient(ABC):
     @abstractmethod
     def register_error_callback(self, callback: Any) -> None:
         pass
+
+    def get_open_trades(self, symbol: str) -> list:
+        """Return open/pending trades for a symbol as StandardExecutionEvent list.
+
+        Used during startup recovery to verify TP/SL orders exist on
+        the broker *before* subscription callbacks have populated the
+        in-memory order cache.
+
+        Default implementation returns an empty list for non-IBKR adapters.
+        """
+        return []
+
+    def resolve_contract(self, symbol: str) -> None:
+        """Pre-resolve and cache the qualified contract for a symbol.
+
+        Must be called during startup (outside the asyncio event loop)
+        so that order placement methods can use the cached contract
+        without making async IBKR API calls that would cause
+        'This event loop is already running' errors.
+
+        Default implementation is a no-op for non-IBKR adapters.
+        """
+        pass

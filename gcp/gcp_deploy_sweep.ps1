@@ -27,6 +27,8 @@ param(
     [string]$TargetLong = "",
     [string]$TargetShort = "",
     [string]$JobName = "",
+    [string]$ExecData = "",
+    [double]$Slippage = 0,
     [int]$NTrials = 0,
     [int]$MaxDepthMin = 0,
     [int]$MaxDepthMax = 0,
@@ -240,6 +242,8 @@ $targetFlags = ""
 if ($TargetLong) { $targetFlags += " --target-long=$TargetLong" }
 if ($TargetShort) { $targetFlags += " --target-short=$TargetShort" }
 $bucketFlag = if ($UseBuckets) { " --use-buckets" } else { "" }
+$execDataFlag = if ($ExecData) { " --exec-data=$ExecData" } else { "" }
+$slippageFlag = if ($Slippage -gt 0) { " --slippage-per-side=$Slippage" } else { "" }
 # Derive a unique job name from the dataset to prevent GCS collisions between parallel VMs
 if ($JobName) {
     $jobName = $JobName
@@ -263,7 +267,7 @@ if ($MinChildSamplesMin -gt 0) { $searchFlags += " --min-child-samples-min=$MinC
 if ($MinChildSamplesMax -gt 0) { $searchFlags += " --min-child-samples-max=$MinChildSamplesMax" }
 if ($FeatureFractionMin -gt 0) { $searchFlags += " --feature-fraction-min=$FeatureFractionMin" }
 if ($FeatureFractionMax -gt 0) { $searchFlags += " --feature-fraction-max=$FeatureFractionMax" }
-$launchCmd = "tmux kill-session -t sweep 2>/dev/null; tmux new-session -d -s sweep 'bash $RemoteProject/gcp/vm_sweep_run.sh $shutdownFlag --dataset=$datasetName --strategy=$StrategyConfig --metrics=$Metrics --job-name=$jobName$targetFlags$bucketFlag$searchFlags'"
+$launchCmd = "tmux kill-session -t sweep 2>/dev/null; tmux new-session -d -s sweep 'bash $RemoteProject/gcp/vm_sweep_run.sh $shutdownFlag --dataset=$datasetName --strategy=$StrategyConfig --metrics=$Metrics --job-name=$jobName$targetFlags$bucketFlag$execDataFlag$slippageFlag$searchFlags'"
 
 # Execute and capture both streams with explicit exit code handling
 $launchOutput = gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd 2>&1

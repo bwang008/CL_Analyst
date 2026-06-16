@@ -245,16 +245,27 @@ def run_backtest(
     strategy_cfg: dict,
     direction: str,
     report_path: str,
+    exec_data_path: str | None = None,
+    overrides: dict | None = None,
 ) -> dict:
     """Run BacktestEngine on OOS predictions and save report."""
     from agent.backtest_engine import BacktestEngine
 
-    engine = BacktestEngine.from_config(strategy_cfg)
+    overrides = overrides or {}
+    engine = BacktestEngine.from_config(strategy_cfg, **overrides)
 
     # Build signal columns for the engine
     signals = predictions_df.copy()
 
-    result = engine.run(signals, predictions_df)
+    if exec_data_path:
+        if str(exec_data_path).endswith('.parquet'):
+            exec_df = pd.read_parquet(exec_data_path)
+        else:
+            exec_df = pd.read_csv(exec_data_path, index_col=0, parse_dates=True)
+    else:
+        exec_df = predictions_df
+
+    result = engine.run(signals, exec_df)
 
     # Compile report
     report = {
@@ -408,6 +419,8 @@ def run_pipeline(
     study_prefix: str | None = None,
     holdout_cutoff_date: str | None = None,
     opt_trials: int = 100,
+    exec_data_path: str | None = None,
+    slippage_per_side: float | None = None,
 ):
     """Run the full E2E pipeline."""
 
@@ -612,11 +625,17 @@ def run_pipeline(
             # Step 4b: Run backtest
             print(f"\n[4b/5] Running backtest for {combo_name}...")
             bt_report_path = os.path.join(output_dir, f"backtest_report_{combo_name}.txt")
+            overrides = {}
+            if slippage_per_side is not None:
+                overrides["slippage_per_side"] = slippage_per_side
+
             report = run_backtest(
                 predictions_df=preds_df,
                 strategy_cfg=strategy_cfg,
                 direction=direction,
                 report_path=bt_report_path,
+                exec_data_path=exec_data_path,
+                overrides=overrides,
             )
             all_reports[combo_name] = report
 
@@ -761,7 +780,9 @@ def run_pipeline(
                 config_path=ensemble_cfg_path,
                 n_trials=opt_trials,
                 predictions_path=val_merged_path,
-                ohlcv_path=data_path
+                ohlcv_path=data_path,
+                exec_ohlcv_path=exec_data_path,
+                slippage_per_side=slippage_per_side
             )
 
             long_preds_rel = f"data/predictions/{os.path.basename(direction_paths['long'])}"
@@ -830,7 +851,11 @@ def run_pipeline(
         try:
             from agent.backtest_engine import BacktestEngine, format_report
 
-            bt = BacktestEngine.from_config(ensemble_cfg)
+            overrides = {}
+            if slippage_per_side is not None:
+                overrides["slippage_per_side"] = slippage_per_side
+
+            bt = BacktestEngine.from_config(ensemble_cfg, **overrides)
 
             # Load and merge long/short OOS predictions directly from CSVs
             long_df = pd.read_csv(direction_paths["long"], index_col=0, parse_dates=True)
@@ -848,7 +873,15 @@ def run_pipeline(
             print(f"    Merged: {len(preds):,} rows ({preds['prob_Buy'].gt(0).sum():,} buy, {preds['prob_Sell'].gt(0).sum():,} sell)")
 
             # Run backtest
-            result = bt.run(preds, ohlcv, label=f"Ensemble ({metric_name})")
+            if exec_data_path:
+                if str(exec_data_path).endswith('.parquet'):
+                    exec_ohlcv = pd.read_parquet(exec_data_path)
+                else:
+                    exec_ohlcv = pd.read_csv(exec_data_path, index_col=0, parse_dates=True)
+            else:
+                exec_ohlcv = ohlcv
+                
+            result = bt.run(preds, exec_ohlcv, label=f"Ensemble ({metric_name})")
 
             # Generate report
             ensemble_report_path = os.path.join(output_dir, f"ensemble_backtest_{metric_name}.txt")
@@ -1018,6 +1051,14 @@ def main():
         "--opt-trials", type=int, default=100,
         help="Optuna trials for execution param optimization (0 to skip)",
     )
+    parser.add_argument(
+        "--exec-data", default=None,
+        help="High-resolution OHLCV data for execution simulation",
+    )
+    parser.add_argument(
+        "--slippage-per-side", type=float, default=None,
+        help="Slippage to apply per side in points",
+    )
 
     args = parser.parse_args()
 
@@ -1035,6 +1076,8 @@ def main():
         study_prefix=args.study_prefix,
         holdout_cutoff_date=args.holdout_cutoff_date,
         opt_trials=args.opt_trials,
+        exec_data_path=args.exec_data,
+        slippage_per_side=args.slippage_per_side,
     )
 
 

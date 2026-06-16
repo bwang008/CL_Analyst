@@ -465,6 +465,8 @@ foreach ($exp in $expList) {
         TargetLong   = if ($exp.target_long)         { $exp.target_long         } else { ""                           }
         TargetShort  = if ($exp.target_short)        { $exp.target_short        } else { ""                           }
         UseBuckets   = if ($exp.use_buckets -ne $null) { $exp.use_buckets       } else { $defaults.use_buckets        }
+        ExecData     = if ($exp.exec_data)           { $exp.exec_data           } elseif ($defaults.exec_data)           { $defaults.exec_data           } else { "" }
+        Slippage     = if ($exp.slippage_per_side)   { [double]$exp.slippage_per_side } elseif ($defaults.slippage_per_side) { [double]$defaults.slippage_per_side } else { 0 }
         TimeoutMins  = if ($exp.timeout_minutes)     { [int]$exp.timeout_minutes } else { $timeoutMins                }
         # Search space params (0 = use shell script defaults)
         NTrials              = if ($exp.n_trials)              { [int]$exp.n_trials              } elseif ($defaults.n_trials)              { [int]$defaults.n_trials              } else { 0 }
@@ -552,6 +554,8 @@ while (-not $allDone) {
             if ($exp.TargetLong)  { $deployArgs += @("-TargetLong",  $exp.TargetLong)  }
             if ($exp.TargetShort) { $deployArgs += @("-TargetShort", $exp.TargetShort) }
             if ($exp.UseBuckets)  { $deployArgs += @("-UseBuckets") }
+            if ($exp.ExecData)    { $deployArgs += @("-ExecData", $exp.ExecData) }
+            if ($exp.Slippage -gt 0) { $deployArgs += @("-Slippage", $exp.Slippage) }
             # Search space overrides from manifest
             if ($exp.NTrials -gt 0)             { $deployArgs += @("-NTrials",             $exp.NTrials) }
             if ($exp.MaxDepthMin -gt 0)         { $deployArgs += @("-MaxDepthMin",         $exp.MaxDepthMin) }
@@ -577,7 +581,7 @@ while (-not $allDone) {
                 break
             } else {
                 Write-Host "  Failed to deploy in zone $z (exit $deployExit)." -ForegroundColor Yellow
-                # Clean up zombie VM — it may have been created before the deploy step failed
+                # Clean up zombie VM - it may have been created before the deploy step failed
                 Write-Host "  Cleaning up zombie VM in zone $z..." -ForegroundColor Yellow
                 gcloud compute instances delete $exp.VmName --zone=$z --quiet 2>$null
             }
@@ -591,7 +595,7 @@ while (-not $allDone) {
                 "VM: ``$($exp.VmName)```n" +
                 "Exit code: $deployExit`n" +
                 "``````$errText``````")
-            # Always attempt to delete the VM — it may have been created before the
+            # Always attempt to delete the VM - it may have been created before the
             # verification step failed (e.g. tmux race condition). Prevents VM leaks.
             Remove-ExperimentVm -VmName $exp.VmName -VmZone $actualZone
             $exp.Status       = "DEPLOY_FAILED"
@@ -682,7 +686,7 @@ while (-not $allDone) {
                     if ($serialOut) { $serialOut | Out-File -FilePath (Join-Path $diagDir "serial_console.log") -Encoding utf8 }
                 } -ArgumentList $slot.LocalDir, $slot.GcsPrefix, $slot.VmName, $slot.ActualZone
 
-                # Wait maximum 2 minutes for salvage — then forcibly stop it
+                # Wait maximum 2 minutes for salvage - then forcibly stop it
                 Wait-Job $salvageJob -Timeout 120 | Out-Null
                 Stop-Job $salvageJob -ErrorAction SilentlyContinue
                 Remove-Job $salvageJob -Force -ErrorAction SilentlyContinue
@@ -851,16 +855,17 @@ if ($batchState.completed -gt 0) {
     $optDeployExit = 1
     $optActualZone = $optZoneList[0]  # fallback default
 
-    # Dynamically size the optimizer VM based on completed experiment count
-    # Each experiment has 2 metrics (logloss, average_precision) = 2 optimization tasks
-    $optTaskCount = $batchState.completed * 2
+    # Dynamically size the optimizer VM based on total concurrent task count
+    # Each experiment: 2 metrics × 2 sides = 4 tasks/objective
+    # Both sharpe+sortino run concurrently = ×2 → completed * 8 total
+    $optTaskCount = $batchState.completed * 8
     $optMachineType = if ($optTaskCount -le 8) { "n2-standard-8" }
                       elseif ($optTaskCount -le 16) { "n2-standard-16" }
                       elseif ($optTaskCount -le 32) { "n2-standard-32" }
                       else { "n2-standard-48" }
-    # Derive worker count from the dynamically-sized machine (match nproc on VM)
-    $optWorkerCount = if ($optMachineType -match '-(\d+)$') { [int]$Matches[1] } else { 8 }
-    Write-Host "  Optimizer sizing: $($batchState.completed) experiments × 2 metrics = $optTaskCount tasks → $optMachineType ($optWorkerCount workers)" -ForegroundColor Cyan
+    # Let Python auto-size workers (1 per task, memory-capped)
+    $optWorkerCount = 0
+    Write-Host "  Optimizer sizing: $($batchState.completed) experiments × 8 (2 metrics × 2 sides × 2 objectives) = $optTaskCount tasks → $optMachineType (workers=auto)" -ForegroundColor Cyan
 
     foreach ($oz in $optZoneList) {
         $optArgs = @("-ExecutionPolicy", "Bypass", "-File", ".\gcp\gcp_deploy_optimizer.ps1",
@@ -936,6 +941,34 @@ if ($batchState.completed -gt 0) {
 
             # Clean up optimizer VM
             gcloud compute instances delete $optVmName --zone=$optActualZone --quiet 2>$null
+
+            # --- Local Ensemble Optimization ---
+            # After individual optimizations finish on VM, run ensemble optimization locally
+            # Top 2 long × top 2 short = 4 pairs - lightweight enough for local machine
+            $topPairsPath = Join-Path $localBatch "top_pairs.json"
+            if (Test-Path $topPairsPath) {
+                Write-Host ""
+                Write-Host "Running ensemble optimization locally (4 pairs)..." -ForegroundColor Cyan
+                Send-BatchTelegram "[Ensemble] Starting local ensemble optimization (4 pairs)."
+                $ensWorkers = 4
+                & python agent/batch_post_optimizer.py `
+                    --batch-dir $localBatch `
+                    --target-pairs-json $topPairsPath `
+                    --n-trials $postOptTrials `
+                    --holdout-months $postOptHoldout `
+                    --workers $ensWorkers `
+                    --objective "both" `
+                    --no-filter
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "  Ensemble optimization complete." -ForegroundColor Green
+                    Send-BatchTelegram "[COMPLETE] Local ensemble optimization finished."
+                } else {
+                    Write-Host "  WARNING: Ensemble optimization failed (exit $LASTEXITCODE)." -ForegroundColor Yellow
+                    Send-BatchTelegram "[WARNING] Local ensemble optimization failed (exit $LASTEXITCODE)."
+                }
+            } else {
+                Write-Host "  No top_pairs.json found - skipping ensemble optimization." -ForegroundColor Yellow
+            }
         }
     }
 } else {

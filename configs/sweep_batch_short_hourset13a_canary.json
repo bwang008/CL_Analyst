@@ -1,0 +1,122 @@
+{
+  "_comment": "HourSet_13A CANARY - Short Targets Only. Excludes previously tested HS11 targets.",
+  "defaults": {
+    "machine_type": "c2-standard-16",
+    "provisioning_model": "STANDARD",
+    "gcs_data_path": "gs://cltrainer-optuna-results/data/cl-1h_bk_HourSet_13A.parquet",
+    "strategy_config": "hourly_ensemble_010.json",
+    "metrics": "logloss,average_precision",
+    "timeout_minutes": 240,
+    "max_concurrent_vcpus": 288,
+    "vcpus_per_vm": 16,
+    "max_concurrent_vms": 12,
+    "n_trials": 20,
+    "max_depth_min": 3,
+    "max_depth_max": 6,
+    "num_leaves_min": 15,
+    "num_leaves_max": 31,
+    "max_n_estimators": 500,
+    "early_stopping_rounds": 15,
+    "max_folds": 3,
+    "learning_rate_min": 0.005,
+    "learning_rate_max": 0.02,
+    "min_child_samples_min": 150,
+    "min_child_samples_max": 400,
+    "feature_fraction_min": 0.4,
+    "feature_fraction_max": 0.8,
+    "post_optimizer_trials": 20,
+    "post_optimizer_holdout_months": 6
+  },
+  "experiments": [
+    {
+      "label": "HS13A 2x1 3H",
+      "target_long": "TARGET_TRIPLE_2x1_3H_LONG",
+      "target_short": "TARGET_TRIPLE_2x1_3H_SHORT",
+      "gcs_prefix": "sweep_hs13a_2x1_3h"
+    },
+    {
+      "label": "HS13A 4x1 36H",
+      "target_long": "TARGET_TRIPLE_4x1_36H_LONG",
+      "target_short": "TARGET_TRIPLE_4x1_36H_SHORT",
+      "gcs_prefix": "sweep_hs13a_4x1_36h"
+    },
+    {
+      "label": "HS13A 5x1 36H",
+      "target_long": "TARGET_TRIPLE_5x1_36H_LONG",
+      "target_short": "TARGET_TRIPLE_5x1_36H_SHORT",
+      "gcs_prefix": "sweep_hs13a_5x1_36h"
+    },
+    {
+      "label": "HS13A 6x2 36H",
+      "target_long": "TARGET_TRIPLE_6x2_36H_LONG",
+      "target_short": "TARGET_TRIPLE_6x2_36H_SHORT",
+      "gcs_prefix": "sweep_hs13a_6x2_36h"
+    },
+    {
+      "label": "HS13A 8x2 36H",
+      "target_long": "TARGET_TRIPLE_8x2_36H_LONG",
+      "target_short": "TARGET_TRIPLE_8x2_36H_SHORT",
+      "gcs_prefix": "sweep_hs13a_8x2_36h"
+    },
+    {
+      "label": "HS13A 4x1 48H",
+      "target_long": "TARGET_TRIPLE_4x1_48H_LONG",
+      "target_short": "TARGET_TRIPLE_4x1_48H_SHORT",
+      "gcs_prefix": "sweep_hs13a_4x1_48h"
+    },
+    {
+      "label": "HS13A 5x1 48H",
+      "target_long": "TARGET_TRIPLE_5x1_48H_LONG",
+      "target_short": "TARGET_TRIPLE_5x1_48H_SHORT",
+      "gcs_prefix": "sweep_hs13a_5x1_48h"
+    },
+    {
+      "label": "HS13A 6x2 48H",
+      "target_long": "TARGET_TRIPLE_6x2_48H_LONG",
+      "target_short": "TARGET_TRIPLE_6x2_48H_SHORT",
+      "gcs_prefix": "sweep_hs13a_6x2_48h"
+    },
+    {
+      "label": "HS13A 8x2 48H",
+      "target_long": "TARGET_TRIPLE_8x2_48H_LONG",
+      "target_short": "TARGET_TRIPLE_8x2_48H_SHORT",
+      "gcs_prefix": "sweep_hs13a_8x2_48h"
+    },
+    {
+      "label": "HS13A 2x1 6H",
+      "target_long": "TARGET_TRIPLE_2x1_6H_LONG",
+      "target_short": "TARGET_TRIPLE_2x1_6H_SHORT",
+      "gcs_prefix": "sweep_hs13a_2x1_6h"
+    },
+    {
+      "label": "HS13A 2x1 12H",
+      "target_long": "TARGET_TRIPLE_2x1_12H_LONG",
+      "target_short": "TARGET_TRIPLE_2x1_12H_SHORT",
+      "gcs_prefix": "sweep_hs13a_2x1_12h"
+    },
+    {
+      "label": "HS13A 2x1 24H",
+      "target_long": "TARGET_TRIPLE_2x1_24H_LONG",
+      "target_short": "TARGET_TRIPLE_2x1_24H_SHORT",
+      "gcs_prefix": "sweep_hs13a_2x1_24h"
+    },
+    {
+      "label": "HS13A 5x1 6H",
+      "target_long": "TARGET_TRIPLE_5x1_6H_LONG",
+      "target_short": "TARGET_TRIPLE_5x1_6H_SHORT",
+      "gcs_prefix": "sweep_hs13a_5x1_6h"
+    },
+    {
+      "label": "HS13A 5x1 12H",
+      "target_long": "TARGET_TRIPLE_5x1_12H_LONG",
+      "target_short": "TARGET_TRIPLE_5x1_12H_SHORT",
+      "gcs_prefix": "sweep_hs13a_5x1_12h"
+    },
+    {
+      "label": "HS13A 5x1 24H",
+      "target_long": "TARGET_TRIPLE_5x1_24H_LONG",
+      "target_short": "TARGET_TRIPLE_5x1_24H_SHORT",
+      "gcs_prefix": "sweep_hs13a_5x1_24h"
+    }
+  ]
+}

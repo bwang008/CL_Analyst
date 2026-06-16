@@ -1,6 +1,6 @@
 {
     "nickname": "HS10_Ensemble_06152026",
-    "description": "Optimized ensemble from batch_20260614_2331 Sortino Trial #0 (Warm-start grid snapped)",
+    "description": "Canary Optimized ensemble from batch_20260614_2331 Sortino Trial #0 (Warm-start grid snapped)",
     "execution_class": "TieredEnsembleStrategy",
     "exit_mode": "TIERED",
     "conflict_resolution": "hold",

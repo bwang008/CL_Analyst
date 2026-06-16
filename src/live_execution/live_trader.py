@@ -468,23 +468,12 @@ class LiveTrader:
         # thread crashes with "There is no current event loop in thread".
         if (self.data_client.is_connected() and self.exec_client.is_connected()):
             try:
-                current_position = self.exec_client.get_position(symbol=self._execution_symbol)
-            except Exception:
-                pass
-
-            try:
-                for item in []:
-                    if item.contract.symbol == "CL":
-                        unrealized_pnl = float(item.unrealizedPNL)
-                        realized_pnl = float(item.realizedPNL)
-                        break
-
-                # If position is flat, IBKR drops the contract from portfolio().
-                # Fall back to the daily account-level Realized PnL to prevent resetting to $0.
-                if current_position == 0:
-                    for av in []:
-                        if av.tag == "RealizedPnL" and av.currency == "USD":
-                            realized_pnl = float(av.value)
+                acct = self.exec_client.get_account_summary(
+                    symbol=self._execution_symbol,
+                )
+                current_position = acct["cl_position"]
+                unrealized_pnl = acct["cl_unrealized_pnl"]
+                realized_pnl = acct["cl_realized_pnl"]
             except Exception:
                 pass
 
@@ -605,6 +594,18 @@ class LiveTrader:
                 log.warning(
                     "Could not resolve front-month contract: %s. "
                     "Raw front-month logging will be disabled.",
+                    exc,
+                )
+
+            # Step 4b: Pre-resolve the execution contract on the exec adapter.
+            # This caches the qualified contract outside the event loop so
+            # order placement from bar-update callbacks won't trigger async
+            # IBKR calls that crash with "event loop already running".
+            try:
+                self.exec_client.resolve_contract(self._execution_symbol)
+            except Exception as exc:
+                log.warning(
+                    "Could not pre-resolve execution contract: %s",
                     exc,
                 )
 
@@ -903,7 +904,9 @@ class LiveTrader:
             bar_time,
         )
         try:
-            cancelled = self.exec_client.cancel_open_orders()
+            cancelled = self.exec_client.cancel_open_orders(
+                symbol=self._execution_symbol,
+            )
             log.info(
                 "ENTRY TTL: cancelled %d CL order(s)", cancelled,
             )
@@ -1029,16 +1032,16 @@ class LiveTrader:
                 )
                 return
             for evt in list(self._open_orders.values()):
-                
-                
-                
                 if evt.symbol != "CL":
                     continue
                 order_id = evt.order_id
                 if order_id != self._sl_order_id:
                     continue
-                old_sl = getattr(o, "auxPrice", 0.0) or 0.0
-                o.auxPrice = new_sl
+                # Extract raw ib_insync order to read/modify auxPrice
+                raw_order = getattr(getattr(evt, "raw_event", None), "order", None)
+                old_sl = getattr(raw_order, "auxPrice", 0.0) or 0.0 if raw_order else 0.0
+                if raw_order is not None:
+                    raw_order.auxPrice = new_sl
                 if hasattr(self.exec_client, "modify_order"): self.exec_client.modify_order(evt.order_id, evt)
                 log.info(
                     "TRAILING STOP: modified SL order %d: %.2f → %.2f",
@@ -1354,20 +1357,19 @@ class LiveTrader:
             self._highest_high = float(self.rolling_df_5m["High"].iloc[-1])
             self._lowest_low = float(self.rolling_df_5m["Low"].iloc[-1])
 
-        # 4. Verify TP/SL orders on IBKR
+        # 4. Verify TP/SL orders on IBKR (query directly — self._open_orders
+        #    is empty at startup before subscriptions begin)
         tp_found = False
         sl_found = False
         try:
-            for evt in list(self._open_orders.values()):
-                
-                
-                
-                if evt.symbol != "CL":
-                    continue
+            open_trades = self.exec_client.get_open_trades(
+                symbol=self._execution_symbol,
+            )
+            for evt in open_trades:
                 oid = evt.order_id
-                if oid is not None and oid == tp_order_id:
+                if oid is not None and str(oid) == str(tp_order_id):
                     tp_found = True
-                elif oid is not None and oid == sl_order_id:
+                elif oid is not None and str(oid) == str(sl_order_id):
                     sl_found = True
         except Exception:
             log.warning(
@@ -1413,7 +1415,9 @@ class LiveTrader:
 
         # Cancel any remaining stale CL exit orders before re-placing
         try:
-            self.exec_client.cancel_open_orders()
+            self.exec_client.cancel_open_orders(
+                symbol=self._execution_symbol,
+            )
         except Exception:
             log.debug("[RECOVERY] cancel_open_cl_orders failed", exc_info=True)
 
@@ -1490,39 +1494,32 @@ class LiveTrader:
 
         # Bot is FLAT with no tracked orders — any CL orders on IBKR are orphans
         try:
-            open_cl_orders = []
+            orphaned_evts = []
             for evt in list(self._open_orders.values()):
-                
-                if c is not None and getattr(c, "symbol", None) == self._execution_symbol:
-                    
-                    if o is not None:
-                        open_cl_orders.append(o)
+                if evt.symbol == self._execution_symbol:
+                    orphaned_evts.append(evt)
 
-            if not open_cl_orders:
+            if not orphaned_evts:
                 return
 
             log.warning(
                 "[STARTUP SWEEP] Bot is FLAT but found %d orphaned CL order(s) "
                 "on IBKR — cancelling to prevent phantom fills",
-                len(open_cl_orders),
+                len(orphaned_evts),
             )
-            for order in open_cl_orders:
-                try:
-                    if hasattr(self.exec_client, "cancel_order"): self.exec_client.cancel_order(evt.order_id)
-                    log.info(
-                        "[STARTUP SWEEP] Cancelled orphaned order: "
-                        "orderId=%s action=%s type=%s lmt=%.2f aux=%.2f",
-                        getattr(order, "orderId", "?"),
-                        getattr(order, "action", "?"),
-                        getattr(order, "orderType", "?"),
-                        float(getattr(order, "lmtPrice", 0) or 0),
-                        float(getattr(order, "auxPrice", 0) or 0),
-                    )
-                except Exception:
-                    log.exception(
-                        "[STARTUP SWEEP] Failed to cancel orderId=%s",
-                        getattr(order, "orderId", "?"),
-                    )
+            # Use the adapter's cancel_open_orders to cancel all CL orders
+            try:
+                cancelled = self.exec_client.cancel_open_orders(
+                    symbol=self._execution_symbol,
+                )
+                log.info(
+                    "[STARTUP SWEEP] Cancelled %d orphaned order(s)",
+                    cancelled,
+                )
+            except Exception:
+                log.exception(
+                    "[STARTUP SWEEP] Failed to cancel orphaned orders"
+                )
         except Exception:
             log.exception("[STARTUP SWEEP] Failed to scan for orphaned orders")
 
@@ -1601,8 +1598,8 @@ class LiveTrader:
         )
 
         try:
-            child_trades = self.exec_client.place_bracket_order(
-                contract=contract,
+            child_trades = self.exec_client.place_child_orders(
+                symbol=self._execution_symbol,
                 parent_order_id=order_id,
                 action=exit_action,
                 quantity=lots,
@@ -2542,19 +2539,17 @@ class LiveTrader:
             sl_price_live = None
             try:
                 for evt in list(self._open_orders.values()):
-                    
-                    
-                    if c is None or o is None:
-                        continue
                     if evt.symbol != "CL":
                         continue
                     oid = evt.order_id
+                    # Extract raw ib_insync order to read limit/stop prices
+                    raw_order = getattr(getattr(evt, "raw_event", None), "order", None)
                     if oid is not None and oid in self._tp_order_ids:
-                        lmt = getattr(o, "lmtPrice", 0.0) or 0.0
+                        lmt = getattr(raw_order, "lmtPrice", 0.0) or 0.0 if raw_order else 0.0
                         if lmt > 0:
                             tp_price_live = lmt
                     elif oid is not None and oid == self._sl_order_id:
-                        aux = getattr(o, "auxPrice", 0.0) or 0.0
+                        aux = getattr(raw_order, "auxPrice", 0.0) or 0.0 if raw_order else 0.0
                         if aux > 0:
                             sl_price_live = aux
             except Exception:
@@ -3201,23 +3196,16 @@ class LiveTrader:
 
         # Position and PNL lookup
         try:
-            # Pnl accumulation for the execution symbol
             unr_pnl, real_pnl = 0.0, 0.0
-            pos = 0.0
+            pos = 0
             if (self.data_client.is_connected() and self.exec_client.is_connected()):
-                for item in []:
-                    if getattr(item.contract, "symbol", "") == self._execution_symbol:
-                        pos += getattr(item, "position", 0.0)
-                        unr_pnl += getattr(item, "unrealizedPNL", 0.0) or 0.0
-                        real_pnl += getattr(item, "realizedPNL", 0.0) or 0.0
-                
-                # If position is flat, IBKR drops the contract from portfolio().
-                # Fall back to the daily account-level Realized PnL to prevent resetting to $0.
-                if pos == 0:
-                    for av in []:
-                        if av.tag == "RealizedPnL" and av.currency == "USD":
-                            real_pnl = float(av.value)
-            
+                acct = self.exec_client.get_account_summary(
+                    symbol=self._execution_symbol,
+                )
+                pos = acct["cl_position"]
+                unr_pnl = acct["cl_unrealized_pnl"]
+                real_pnl = acct["cl_realized_pnl"]
+
             pos_str = f"{pos:g} contracts" if pos != 0 else "FLAT"
             pnl_str = f" | unr_pnl=${unr_pnl:,.2f} | real_pnl=${real_pnl:,.2f}"
         except Exception:

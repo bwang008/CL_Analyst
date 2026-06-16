@@ -1,6 +1,9 @@
 from typing import Callable, Any, Optional
 from src.live_execution.interfaces.execution_interface import ExecutionClient, StandardExecutionEvent
 from src.live_execution.ibkr_client import IBKRConnectionManager, build_cl_contract
+import logging
+
+log = logging.getLogger("IBKRExecAdapter")
 
 class IBKRExecutionClient(ExecutionClient):
     def __init__(self, host: str = "127.0.0.1", port: int = 4002, client_id: int = 10, fallback_ports: list[int] = None):
@@ -8,7 +11,22 @@ class IBKRExecutionClient(ExecutionClient):
             fallback_ports = [7497]
         self.manager = IBKRConnectionManager(host=host, port=port, client_id=client_id, readonly=False, fallback_ports=fallback_ports)
         self._order_callbacks = []
+        # Contract cache: symbol -> qualified Contract.
+        # Populated by resolve_contract() at startup (outside the event loop).
+        # Used by place_bracket_order / place_child_orders to avoid async
+        # IBKR API calls (reqContractDetails, qualifyContracts) that would
+        # crash with "This event loop is already running" when invoked from
+        # an ib_insync bar-update callback.
+        self._cached_contracts: dict[str, Any] = {}
         
+        # Suppress ib_insync internal wrapper logging on the execution client.
+        # Both data_client and exec_client have separate IB connections that each
+        # receive updatePortfolio/position/commissionReport events from IBKR.
+        # Without this, every portfolio update is logged twice (identical lines).
+        # The data_client's connection already provides these logs.
+        _wrapper_logger = logging.getLogger("ib_insync.wrapper")
+        _wrapper_logger.setLevel(logging.WARNING)
+
         # Attach event handlers to bridge events
         self.manager.ib.orderStatusEvent += self._on_order_status
 
@@ -43,6 +61,38 @@ class IBKRExecutionClient(ExecutionClient):
     def get_account_summary(self, symbol: str) -> dict:
         return self.manager.get_account_summary(symbol=symbol)
 
+    def resolve_contract(self, symbol: str) -> None:
+        """Pre-resolve and cache the qualified contract for a symbol.
+
+        Called during startup (outside the asyncio event loop) so that
+        order placement methods can use the cached contract without
+        making async IBKR calls that crash inside event loop callbacks.
+        """
+        from ib_insync import Future
+        local_sym, _ = self.manager.get_front_month_contract(symbol=symbol)
+        contract = Future(symbol=symbol, localSymbol=local_sym, exchange="NYMEX")
+        contract = self.manager.qualify_contract(contract)
+        self._cached_contracts[symbol] = contract
+        log.info(
+            "Cached qualified contract for %s: %s (conId=%d)",
+            symbol, contract.localSymbol, contract.conId,
+        )
+
+    def _get_contract(self, symbol: str) -> Any:
+        """Return the cached qualified contract for a symbol.
+
+        Raises RuntimeError if the contract was not pre-resolved via
+        resolve_contract() — this is intentional to catch call-ordering
+        bugs early rather than silently re-entering the event loop.
+        """
+        if symbol not in self._cached_contracts:
+            raise RuntimeError(
+                f"No cached contract for '{symbol}'. "
+                f"Call resolve_contract('{symbol}') during startup "
+                f"before the event loop starts."
+            )
+        return self._cached_contracts[symbol]
+
     def place_bracket_order(
         self,
         symbol: str,
@@ -50,18 +100,28 @@ class IBKRExecutionClient(ExecutionClient):
         quantity: int,
         **kwargs
     ) -> list:
-        # Resolve the contract
-        from ib_insync import Future
-        local_sym, _ = self.manager.get_front_month_contract(symbol=symbol)
-        contract = Future(symbol=symbol, localSymbol=local_sym, exchange="NYMEX")
-        contract = self.manager.qualify_contract(contract)
-        
-        return self.manager.place_bracket_order(
-            contract=contract,
-            action=action,
-            quantity=quantity,
-            **kwargs
-        )
+        contract = self._get_contract(symbol)
+
+        # Two-phase order placement support:
+        # Phase 1 (entry-only): live_trader calls without tp_price/sl_price,
+        #   children are placed separately via place_child_orders after fill.
+        # Full bracket: tp_price and sl_price are provided for a complete
+        #   bracket order (parent + TP + SL).
+        if "tp_price" in kwargs and "sl_price" in kwargs:
+            return self.manager.place_bracket_order(
+                contract=contract,
+                action=action,
+                quantity=quantity,
+                **kwargs
+            )
+        else:
+            # Entry-only: route to place_entry_order (returns single Trade)
+            return self.manager.place_entry_order(
+                contract=contract,
+                action=action,
+                quantity=quantity,
+                **kwargs
+            )
 
     def place_child_orders(
         self,
@@ -72,10 +132,7 @@ class IBKRExecutionClient(ExecutionClient):
         tp_price: float,
         sl_price: float,
     ) -> list:
-        from ib_insync import Future
-        local_sym, _ = self.manager.get_front_month_contract(symbol=symbol)
-        contract = Future(symbol=symbol, localSymbol=local_sym, exchange="NYMEX")
-        contract = self.manager.qualify_contract(contract)
+        contract = self._get_contract(symbol)
 
         return self.manager.place_child_orders(
             contract=contract,
@@ -94,3 +151,31 @@ class IBKRExecutionClient(ExecutionClient):
 
     def register_error_callback(self, callback: Any) -> None:
         self.manager.ib.errorEvent += callback
+
+    def get_open_trades(self, symbol: str) -> list:
+        """Query IBKR for all open/pending trades for a given symbol.
+
+        Returns a list of StandardExecutionEvent objects built from
+        ib_insync's openTrades(), enabling position recovery to verify
+        TP/SL orders without relying on subscription callbacks.
+        """
+        if not self.is_connected():
+            return []
+        events = []
+        for trade in self.manager.ib.openTrades():
+            contract = getattr(trade, "contract", None)
+            order = getattr(trade, "order", None)
+            if contract is None or order is None:
+                continue
+            if getattr(contract, "symbol", None) != symbol:
+                continue
+            events.append(StandardExecutionEvent(
+                order_id=str(order.orderId),
+                symbol=contract.symbol,
+                status=trade.orderStatus.status if trade.orderStatus else "Unknown",
+                filled_qty=int(trade.orderStatus.filled) if trade.orderStatus else 0,
+                remaining_qty=int(trade.orderStatus.remaining) if trade.orderStatus else 0,
+                avg_price=float(trade.orderStatus.avgFillPrice) if trade.orderStatus else 0.0,
+                raw_event=trade,
+            ))
+        return events

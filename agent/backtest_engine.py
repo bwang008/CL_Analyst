@@ -1450,6 +1450,19 @@ def format_report(
     # Group trades by month
     from collections import defaultdict
     monthly: dict[str, list[TradeRecord]] = defaultdict(list)
+
+    if result.start_dt and result.end_dt:
+        start_month = result.start_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        dt_range = pd.date_range(start=start_month, end=result.end_dt, freq='MS')
+        for dt in dt_range:
+            monthly[dt.strftime("%Y-%m")] = []
+    elif result.trades:
+        start_month = min(t.entry_dt for t in result.trades).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        end_month = max(t.entry_dt for t in result.trades)
+        dt_range = pd.date_range(start=start_month, end=end_month, freq='MS')
+        for dt in dt_range:
+            monthly[dt.strftime("%Y-%m")] = []
+
     for t in result.trades:
         key = t.entry_dt.strftime("%Y-%m")
         monthly[key].append(t)
@@ -1720,32 +1733,26 @@ def load_ohlcv(path: str) -> pd.DataFrame:
     required = {"Open", "High", "Low", "Close", "Volume"}
     missing = required - set(df.columns)
     if missing:
-        # Fall back to loading raw CSV directly
-        from src.data_paths import get_data_path as _gdp
-        raw_candidates = [
-            str(_gdp("raw/cl-5m_bk.csv")),
-            str(_gdp("raw/CL.csv")),
-        ]
-        loaded = False
-        for raw_path in raw_candidates:
-            if os.path.exists(raw_path):
-                print(f"  Falling back to raw CSV: {raw_path}")
-                df = pd.read_csv(
-                    raw_path,
-                    sep=";",
-                    header=None,
-                    names=["Date", "Time", "Open", "High", "Low", "Close", "Volume"],
-                )
-                df["DateTime"] = pd.to_datetime(
-                    df["Date"] + " " + df["Time"], dayfirst=True
-                )
-                df = df.set_index("DateTime")
-                df = df.drop(columns=["Date", "Time"])
-                loaded = True
-                break
-        if not loaded:
+        # Try parsing as headerless semicolon-separated CSV (Databento pipeline format)
+        try:
+            df = pd.read_csv(
+                path,
+                sep=";",
+                header=None,
+                names=["Date", "Time", "Open", "High", "Low", "Close", "Volume"],
+            )
+            df["DateTime"] = pd.to_datetime(
+                df["Date"] + " " + df["Time"], dayfirst=True
+            )
+            df = df.set_index("DateTime")
+            df = df.drop(columns=["Date", "Time"])
+            for col in ["Open", "High", "Low", "Close", "Volume"]:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            print(f"  Parsed as headerless semicolon CSV: {len(df):,} rows")
+        except Exception:
             raise FileNotFoundError(
-                f"OHLCV data missing columns {missing} and no raw CSV found."
+                f"OHLCV data at {path} is missing columns {missing} "
+                f"and could not be parsed as a headerless semicolon CSV."
             )
 
     return df

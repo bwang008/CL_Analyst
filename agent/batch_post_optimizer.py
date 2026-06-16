@@ -215,6 +215,7 @@ def run_single_optimization(
     objective_metric: str = "sharpe",
     optimize_side: str | None = None,
     exec_ohlcv_path: str | None = None,
+    slippage_per_side: float | None = None,
 ) -> dict:
     """Run strategy_optimizer on a single config and return results."""
     # Suppress per-worker Telegram notifications — the batch orchestrator
@@ -240,6 +241,7 @@ def run_single_optimization(
             objective_metric=objective_metric,
             optimize_side=optimize_side,
             exec_ohlcv_path=exec_ohlcv_path,
+            slippage_per_side=slippage_per_side,
         )
         best_metrics = extract_metrics(best_result)
         return {
@@ -612,120 +614,23 @@ def generate_optimized_report(
     return "\n".join(out_lines)
 
 
-def _run_for_objective(
+def _finalize_objective_results(
     objective_metric: str,
-    opt_tasks: list,
+    all_results: dict,
     args,
     ohlcv_path: str,
     batch_dir: str,
     progress: dict,
-    n_workers: int,
-    total_start: float,
+    obj_elapsed: float,
     task_experiment_labels: dict | None = None,
 ):
-    """Run all optimization tasks for a single objective (sharpe or sortino).
-
-    Returns the wall time for this objective's run.
-    """
-    obj_start = time.perf_counter()
-    all_results = {}
-
-    print(f"\n{'='*60}")
-    print(f"RUNNING {len(opt_tasks)} OPTIMIZATIONS — {objective_metric.upper()} (workers={n_workers})")
-    print(f"{'='*60}")
-
-    # Telegram batch-level progress tracking
-    _total_tasks = len(opt_tasks)
-    _completed_count = 0
-    _last_tg_time = time.perf_counter()
-    _TG_INTERVAL_SECS = 30 * 60
-    _milestone_pcts = {25, 50, 75, 100}
-    _milestones_sent = set()
-
-    def _maybe_send_progress(completed, total, label, status):
-        nonlocal _last_tg_time, _milestones_sent
-        now = time.perf_counter()
-        pct = int(100 * completed / total) if total > 0 else 0
-        elapsed_min = (now - total_start) / 60
-        is_milestone = pct in _milestone_pcts and pct not in _milestones_sent
-        is_time_update = (now - _last_tg_time) >= _TG_INTERVAL_SECS
-        if is_milestone or is_time_update:
-            if is_milestone:
-                _milestones_sent.add(pct)
-            _last_tg_time = now
-            send_telegram(
-                f"[Batch Post-Optimizer] Progress ({objective_metric})\n"
-                f"{completed}/{total} optimizations done ({pct}%)\n"
-                f"Latest: {label} -> {status}\n"
-                f"Elapsed: {elapsed_min:.0f} min"
-            )
-
-    send_telegram(
-        f"[Batch Post-Optimizer] STARTING ({objective_metric})\n"
-        f"Batch: {os.path.basename(batch_dir)}\n"
-        f"{_total_tasks} optimizations, {n_workers} workers\n"
-        f"{args.n_trials} trials/optimization, {args.holdout_months}mo holdout"
-    )
-
-    if n_workers > 1:
-        futures = {}
-        with ProcessPoolExecutor(max_workers=n_workers) as pool:
-            for task_key, ens_config, merged_path, label, metric, side in opt_tasks:
-                future = pool.submit(
-                    run_single_optimization,
-                    config_path=ens_config,
-                    predictions_path=merged_path,
-                    ohlcv_path=ohlcv_path,
-                    n_trials=args.n_trials,
-                    min_trades=args.min_trades,
-                    label=f"{label} {(side or 'ensemble').upper()} {metric}",
-                    holdout_months=args.holdout_months,
-                    n_jobs=args.jobs,
-                    quiet=True,
-                    objective_metric=objective_metric,
-                    optimize_side=side,
-                    exec_ohlcv_path=args.exec_data,
-                )
-                futures[future] = (task_key, merged_path, label, metric, side)
-
-            for future in as_completed(futures):
-                task_key, merged_path, label, metric, side = futures[future]
-                try:
-                    result = future.result()
-                except Exception as e:
-                    print(f"  ERROR in {task_key}: {e}")
-                    result = {"status": "FAILED", "error": str(e)}
-                all_results[task_key] = result
-                _completed_count += 1
-                _maybe_send_progress(_completed_count, _total_tasks, f"{label} {side or 'ensemble'} {metric}", result.get('status', '?'))
-    else:
-        for task_key, ens_config, merged_path, label, metric, side in opt_tasks:
-            result = run_single_optimization(
-                config_path=ens_config,
-                predictions_path=merged_path,
-                ohlcv_path=ohlcv_path,
-                n_trials=args.n_trials,
-                min_trades=args.min_trades,
-                label=f"{label} {(side or 'ensemble').upper()} {metric}",
-                holdout_months=args.holdout_months,
-                n_jobs=args.jobs,
-                quiet=(args.workers > 1),
-                objective_metric=objective_metric,
-                optimize_side=side,
-            )
-            all_results[task_key] = result
-            _completed_count += 1
-            _maybe_send_progress(_completed_count, _total_tasks, f"{label} {side or 'ensemble'} {metric}", result.get('status', '?'))
-
-    obj_elapsed = time.perf_counter() - obj_start
-
-    # Final batch-level summary
+    """Generate report and save results JSON for a single objective."""
     ok_count = sum(1 for v in all_results.values() if v.get('status') == 'OK')
     fail_count = sum(1 for v in all_results.values() if v.get('status') == 'FAILED')
-    
+
     prefix = "ensembles_" if args.target_pairs_json else ""
     report_name = f"batch_summary_optimized_{prefix}{objective_metric}.md"
-    
+
     send_telegram(
         f"[Batch Post-Optimizer] COMPLETE ({objective_metric})\n"
         f"Batch: {os.path.basename(batch_dir)}\n"
@@ -764,6 +669,151 @@ def _run_for_objective(
         json.dump(serializable, f, indent=2, default=str)
     print(f"Raw results: {results_json_path}")
 
+
+def _run_all_objectives_concurrent(
+    objectives: list[str],
+    opt_tasks: list,
+    args,
+    ohlcv_path: str,
+    batch_dir: str,
+    progress: dict,
+    n_workers: int,
+    total_start: float,
+    task_experiment_labels: dict | None = None,
+):
+    """Run all optimization tasks for all objectives concurrently in a single pool.
+
+    Tasks for each objective are dispatched together into one ProcessPoolExecutor.
+    Results are bucketed by objective for separate report generation.
+    """
+    obj_start = time.perf_counter()
+
+    # Expand tasks: each (task, objective) pair becomes a dispatchable unit
+    # Format: (task_key, ens_config, merged_path, label, metric, side, objective_metric)
+    expanded_tasks = []
+    for obj in objectives:
+        for task in opt_tasks:
+            expanded_tasks.append((*task, obj))
+
+    total_task_count = len(expanded_tasks)
+
+    print(f"\n{'='*60}")
+    print(f"RUNNING {total_task_count} OPTIMIZATIONS — {', '.join(o.upper() for o in objectives)} CONCURRENT (workers={n_workers})")
+    print(f"{'='*60}")
+
+    # Telegram progress tracking (unified across all objectives)
+    _completed_count = 0
+    _last_tg_time = time.perf_counter()
+    _TG_INTERVAL_SECS = 30 * 60
+    _milestone_pcts = {25, 50, 75, 100}
+    _milestones_sent = set()
+
+    def _maybe_send_progress(completed, total, label, status, obj_metric):
+        nonlocal _last_tg_time, _milestones_sent
+        now = time.perf_counter()
+        pct = int(100 * completed / total) if total > 0 else 0
+        elapsed_min = (now - total_start) / 60
+        is_milestone = pct in _milestone_pcts and pct not in _milestones_sent
+        is_time_update = (now - _last_tg_time) >= _TG_INTERVAL_SECS
+        if is_milestone or is_time_update:
+            if is_milestone:
+                _milestones_sent.add(pct)
+            _last_tg_time = now
+            obj_label = "/".join(o.upper() for o in objectives)
+            send_telegram(
+                f"[Batch Post-Optimizer] Progress ({obj_label})\n"
+                f"{completed}/{total} optimizations done ({pct}%)\n"
+                f"Latest: [{obj_metric}] {label} -> {status}\n"
+                f"Elapsed: {elapsed_min:.0f} min"
+            )
+
+    obj_label = "/".join(o.upper() for o in objectives)
+    send_telegram(
+        f"[Batch Post-Optimizer] STARTING ({obj_label})\n"
+        f"Batch: {os.path.basename(batch_dir)}\n"
+        f"{total_task_count} optimizations ({len(opt_tasks)}/objective × {len(objectives)} objectives), {n_workers} workers\n"
+        f"{args.n_trials} trials/optimization, {args.holdout_months}mo holdout"
+    )
+
+    # Results bucketed by objective: {"sharpe": {task_key: result, ...}, "sortino": {...}}
+    results_by_objective = {obj: {} for obj in objectives}
+
+    if n_workers > 1:
+        futures = {}
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            for task_key, ens_config, merged_path, label, metric, side, obj_metric in expanded_tasks:
+                future = pool.submit(
+                    run_single_optimization,
+                    config_path=ens_config,
+                    predictions_path=merged_path,
+                    ohlcv_path=ohlcv_path,
+                    n_trials=args.n_trials,
+                    min_trades=args.min_trades,
+                    label=f"{label} {(side or 'ensemble').upper()} {metric}",
+                    holdout_months=args.holdout_months,
+                    n_jobs=args.jobs,
+                    quiet=True,
+                    objective_metric=obj_metric,
+                    optimize_side=side,
+                    exec_ohlcv_path=args.exec_data,
+                    slippage_per_side=args.slippage_per_side,
+                )
+                futures[future] = (task_key, merged_path, label, metric, side, obj_metric)
+
+            for future in as_completed(futures):
+                task_key, merged_path, label, metric, side, obj_metric = futures[future]
+                try:
+                    result = future.result()
+                except Exception as e:
+                    print(f"  ERROR in {task_key} ({obj_metric}): {e}")
+                    result = {"status": "FAILED", "error": str(e)}
+                results_by_objective[obj_metric][task_key] = result
+                _completed_count += 1
+                _maybe_send_progress(
+                    _completed_count, total_task_count,
+                    f"{label} {side or 'ensemble'} {metric}",
+                    result.get('status', '?'), obj_metric,
+                )
+    else:
+        for task_key, ens_config, merged_path, label, metric, side, obj_metric in expanded_tasks:
+            result = run_single_optimization(
+                config_path=ens_config,
+                predictions_path=merged_path,
+                ohlcv_path=ohlcv_path,
+                n_trials=args.n_trials,
+                min_trades=args.min_trades,
+                label=f"{label} {(side or 'ensemble').upper()} {metric}",
+                holdout_months=args.holdout_months,
+                n_jobs=args.jobs,
+                quiet=False,
+                objective_metric=obj_metric,
+                optimize_side=side,
+                exec_ohlcv_path=args.exec_data,
+                slippage_per_side=args.slippage_per_side,
+            )
+            results_by_objective[obj_metric][task_key] = result
+            _completed_count += 1
+            _maybe_send_progress(
+                _completed_count, total_task_count,
+                f"{label} {side or 'ensemble'} {metric}",
+                result.get('status', '?'), obj_metric,
+            )
+
+    obj_elapsed = time.perf_counter() - obj_start
+
+    # Generate per-objective reports and results JSONs
+    for obj in objectives:
+        _finalize_objective_results(
+            objective_metric=obj,
+            all_results=results_by_objective[obj],
+            args=args,
+            ohlcv_path=ohlcv_path,
+            batch_dir=batch_dir,
+            progress=progress,
+            obj_elapsed=obj_elapsed,
+            task_experiment_labels=task_experiment_labels,
+        )
+
     return obj_elapsed
 
 
@@ -774,6 +824,7 @@ def main():
     parser.add_argument("--n-trials", type=int, default=500, help="Optuna trials per optimization")
     parser.add_argument("--min-trades", type=int, default=10, help="Min trades for valid trial")
     parser.add_argument("--exec-data", default=None, help="Optional: path to raw unadjusted execution data")
+    parser.add_argument("--slippage-per-side", type=float, default=None, help="Slippage to apply per side in points")
     parser.add_argument(
         "--holdout-months", type=int, default=4,
         help="Reserve last N months of predictions as unseen holdout (default: 4)"
@@ -828,7 +879,7 @@ def main():
         so.TopKTracker.save_best = patched_save_best
 
     if args.exec_data:
-        ohlcv_df, ohlcv_exec_df = load_ohlcv_dual(ohlcv_path) if args.exec_data is None else load_ohlcv_dual(ohlcv_path)
+        ohlcv_df, _ = load_ohlcv_dual(ohlcv_path)
         _, ohlcv_exec_df = load_ohlcv_dual(args.exec_data)
     else:
         ohlcv_df, ohlcv_exec_df = load_ohlcv_dual(ohlcv_path)
@@ -973,11 +1024,17 @@ def main():
         print("CRITICAL: No optimization tasks generated! This usually indicates 0 trades in backtest or missing artifacts.")
         sys.exit(1)
 
+    # Determine which objectives to run
+    objectives = ["sharpe", "sortino"] if args.objective == "both" else [args.objective]
+
+    # Total tasks = per-objective tasks × number of objectives (all run concurrently)
+    total_tasks = len(opt_tasks) * len(objectives)
+
     if args.workers <= 0:
-        n_workers = len(opt_tasks) if opt_tasks else 1
-        print(f"  Auto workers: {n_workers} (one per task)")
+        n_workers = total_tasks
+        print(f"  Auto workers: {n_workers} (one per task, {len(opt_tasks)} tasks × {len(objectives)} objectives)")
     else:
-        n_workers = min(args.workers, len(opt_tasks)) if opt_tasks else 1
+        n_workers = min(args.workers, total_tasks)
 
     # Memory-based safety cap — prevents OOM regardless of requested workers
     try:
@@ -991,21 +1048,18 @@ def main():
     except (ValueError, AttributeError, OSError):
         pass  # Windows or unavailable — skip memory check
 
-    # Determine which objectives to run
-    objectives = ["sharpe", "sortino"] if args.objective == "both" else [args.objective]
-
-    for obj in objectives:
-        _run_for_objective(
-            objective_metric=obj,
-            opt_tasks=opt_tasks,
-            args=args,
-            ohlcv_path=ohlcv_path,
-            batch_dir=batch_dir,
-            progress=progress,
-            n_workers=n_workers,
-            total_start=total_start,
-            task_experiment_labels=task_experiment_labels,
-        )
+    # Run all objectives concurrently in a single process pool
+    _run_all_objectives_concurrent(
+        objectives=objectives,
+        opt_tasks=opt_tasks,
+        args=args,
+        ohlcv_path=ohlcv_path,
+        batch_dir=batch_dir,
+        progress=progress,
+        n_workers=n_workers,
+        total_start=total_start,
+        task_experiment_labels=task_experiment_labels,
+    )
 
     total_elapsed = time.perf_counter() - total_start
     print(f"\n{'='*60}")
