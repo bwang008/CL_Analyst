@@ -540,7 +540,7 @@ while (-not $allDone) {
         foreach ($z in $zoneList) {
             $z = $z.Trim()
             $deployArgs = @(
-                "-ExecutionPolicy", "Bypass",
+                "-NoProfile", "-ExecutionPolicy", "Bypass",
                 "-File", (Join-Path $ScriptDir "gcp_deploy_sweep.ps1"),
                 "-VmName",      $exp.VmName,
                 "-MachineType", $exp.MachineType,
@@ -629,7 +629,7 @@ while (-not $allDone) {
             Set-Location $projDir
             # Build args array - cannot pass [switch] through -ArgumentList, so conditionally add -DisableTelegram
             $monArgs = @(
-                "-ExecutionPolicy", "Bypass",
+                "-NoProfile", "-ExecutionPolicy", "Bypass",
                 "-File", $monScript,
                 "-VmName", $vmName,
                 "-Zone", $vmZone,
@@ -839,7 +839,7 @@ Send-BatchTelegram ("$(if ($batchState.failed -eq 0) { '[COMPLETE]' } else { '[W
 
 Write-Host ""
 Write-Host "Generating the consolidated report..." -ForegroundColor Cyan
-$collectArgs = @("-ExecutionPolicy", "Bypass", "-File", ".\gcp\collect_batch_results.ps1", "-BatchId", $BatchId)
+$collectArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\gcp\collect_batch_results.ps1", "-BatchId", $BatchId)
 if ($DisableTelegram) { $collectArgs += "-DisableTelegram" }
 & powershell @collectArgs
 
@@ -868,7 +868,7 @@ if ($batchState.completed -gt 0) {
     Write-Host "  Optimizer sizing: $($batchState.completed) experiments × 8 (2 metrics × 2 sides × 2 objectives) = $optTaskCount tasks → $optMachineType (workers=auto)" -ForegroundColor Cyan
 
     foreach ($oz in $optZoneList) {
-        $optArgs = @("-ExecutionPolicy", "Bypass", "-File", ".\gcp\gcp_deploy_optimizer.ps1",
+        $optArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\gcp\gcp_deploy_optimizer.ps1",
             "-BatchId", $BatchId,
             "-NTrials", $postOptTrials,
             "-HoldoutMonths", $postOptHoldout,
