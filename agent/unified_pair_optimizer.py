@@ -83,9 +83,8 @@ def parse_markdown_table(filepath, direction, metric, objective, progress_data):
                             gcs_prefix = exp["gcs_prefix"]
                             break
                     if gcs_prefix:
-                        match = re.search(r'HS(\d+)', exp_label)
-                        hs_num = match.group(1) if match else "00"
-                        unique_target = f"{gcs_prefix}_E2E_HourSet_{hs_num}_{direction}_{metric}"
+                        # Use the flat CSV naming convention from new orchestrator
+                        unique_target = f"oos_predictions_{gcs_prefix}_{direction}_{metric}"
                         
                         models.append({
                             "experiment": exp_label,
