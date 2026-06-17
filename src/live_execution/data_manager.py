@@ -127,7 +127,8 @@ class DataManager:
         self._df: Optional[pd.DataFrame] = None
         self._bars_since_flush: int = 0
         self._roll_detected: bool = False
-        self._roll_delta: float = 0.0  # Panama Canal shift applied this session
+        self._roll_ratios: list[float] = []      # multiplicative rollover ratios
+        self._roll_timestamps: list[pd.Timestamp] = []  # when each rollover happened
 
     # ------------------------------------------------------------------
     # Public API
@@ -141,6 +142,14 @@ class DataManager:
             pd.DataFrame: Rolling OHLCV DataFrame with DateTime index,
                 columns [DateTime, Open, High, Low, Close, Volume].
         """
+        # Step 0: Restore roll ratios from saved metadata
+        meta = self._load_roll_metadata()
+        for entry in meta.get("roll_history", []):
+            if "ratio" in entry:
+                self._roll_ratios.append(entry["ratio"])
+                ts = pd.Timestamp(entry.get("timestamp_cutoff", entry.get("timestamp")))
+                self._roll_timestamps.append(ts)
+
         # Step 1: Load or create the cache
         if self.cache_path.exists():
             log.info("Loading warm-start cache from %s", self.cache_path)
@@ -180,21 +189,21 @@ class DataManager:
                     f"and verify the file is present at the expected path."
                 )
 
-        # Step 2: Detect rollover and apply Panama Canal back-adjustment
+        # Step 2: Detect rollover and record ratio (cache stays RAW)
         if self.data_client is not None and self.front_month_id is not None:
             self._roll_detected = self._detect_rollover()
             if self._roll_detected:
                 log.warning(
-                    "CONTRACT ROLLOVER DETECTED — computing roll delta..."
+                    "CONTRACT ROLLOVER DETECTED — computing roll ratio..."
                 )
-                roll_delta = self._compute_roll_delta()
-                if roll_delta is not None and abs(roll_delta) > _ROLL_PRICE_TOLERANCE:
-                    self._back_adjust_cache(roll_delta)
+                roll_ratio = self._compute_roll_ratio()
+                if roll_ratio is not None and abs(roll_ratio - 1.0) > _ROLL_PRICE_TOLERANCE:
+                    self._apply_roll_to_cache(roll_ratio)
                 else:
                     log.info(
-                        "Roll detected but delta within tolerance "
-                        "($%.4f) — no adjustment needed.",
-                        roll_delta if roll_delta is not None else 0.0,
+                        "Roll detected but ratio within tolerance "
+                        "(%.6f) — no adjustment needed.",
+                        roll_ratio if roll_ratio is not None else 1.0,
                     )
 
         # Step 3: Backfill any gap from IBKR (recent bars only, not cold-start seeding)
@@ -541,31 +550,35 @@ class DataManager:
         # Load existing metadata to preserve roll history
         existing = self._load_roll_metadata()
         roll_history = existing.get("roll_history", [])
-        cumulative_delta = existing.get("cumulative_delta", 0.0)
+        import math
+        cumulative_ratio = existing.get("cumulative_ratio", 1.0)
 
-        # Append this roll event if a delta was applied
-        if self._roll_detected and abs(self._roll_delta) > _ROLL_PRICE_TOLERANCE:
+        # Append this roll event if a ratio was applied
+        current_ratio = self._roll_ratios[-1] if self._roll_ratios else 1.0
+        if self._roll_detected and abs(current_ratio - 1.0) > _ROLL_PRICE_TOLERANCE:
             old_fm = existing.get("last_front_month", "unknown")
+            roll_ts = self._roll_timestamps[-1] if self._roll_timestamps else None
             roll_history.append({
                 "from": old_fm,
                 "to": self.front_month_id,
-                "delta": round(self._roll_delta, 6),
+                "ratio": round(current_ratio, 6),
                 "timestamp": datetime.now().isoformat(),
+                "timestamp_cutoff": roll_ts.isoformat() if roll_ts is not None else None,
             })
-            cumulative_delta += self._roll_delta
+            cumulative_ratio *= current_ratio
 
         meta = {
             "last_front_month": self.front_month_id,
             "updated_at": datetime.now().isoformat(),
             "roll_history": roll_history,
-            "cumulative_delta": round(cumulative_delta, 6),
+            "cumulative_ratio": round(cumulative_ratio, 6),
         }
         try:
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(meta, f, indent=2)
             log.info(
-                "Roll metadata saved: front_month=%s  cumulative_delta=$%.4f",
-                self.front_month_id, cumulative_delta,
+                "Roll metadata saved: front_month=%s  cumulative_ratio=%.6f",
+                self.front_month_id, cumulative_ratio,
             )
         except OSError as exc:
             log.warning("Could not save roll metadata: %s", exc)
@@ -635,25 +648,23 @@ class DataManager:
         )
         return True
 
-    def _compute_roll_delta(self) -> Optional[float]:
-        """
-        Compute the Panama Canal roll delta between cached and IBKR prices.
+    def _compute_roll_ratio(self) -> Optional[float]:
+        """Compute the multiplicative rollover ratio between cached and IBKR prices.
 
-        Fetches recent bars from IBKR's continuous contract (which is now
-        back-adjusted to the new front month) and compares Close prices
-        with our cache (still on the old back-adjustment basis).
+        Fetches recent bars from IBKR's continuous contract (now ratio-adjusted
+        to the new front month) and compares Close prices with our cache
+        (still on the old contract basis).
 
         Returns:
-            The median price delta (ibkr - cache), or None if comparison
-            is not possible.
+            The median price ratio (ibkr_close / cache_close), or None if
+            comparison is not possible.
         """
         import numpy as np
 
         if self._df is None or len(self._df) == 0:
-            log.warning("Cannot compute roll delta — empty cache.")
+            log.warning("Cannot compute roll ratio — empty cache.")
             return None
 
-        # Request recent bars from IBKR
         ibkr_df = self.data_client.fetch_historical_bars_by_duration(
             duration_str="3 D",
             continuous=True,
@@ -662,70 +673,63 @@ class DataManager:
             use_rth=False,
         )
         if ibkr_df.empty:
-            log.warning(
-                "No bars returned from IBKR for roll delta — "
-                "cannot compute delta."
-            )
+            log.warning("No bars returned from IBKR for roll ratio.")
             return None
 
-        # Find overlapping timestamps
         overlap = self._df.index.intersection(ibkr_df.index)
         if len(overlap) == 0:
-            log.warning(
-                "No overlapping timestamps between cache and IBKR — "
-                "cannot compute roll delta."
-            )
+            log.warning("No overlapping timestamps — cannot compute roll ratio.")
             return None
 
-        # Use the most recent overlapping bars for a robust delta
         sample = overlap[-_ROLL_VALIDATION_BARS:]
         cache_close = self._df.loc[sample, "Close"].values
         ibkr_close = ibkr_df.loc[sample, "Close"].values
 
-        deltas = ibkr_close - cache_close
-        median_delta = float(np.median(deltas))
-        mean_delta = float(np.mean(deltas))
-        max_spread = float(np.max(np.abs(deltas - median_delta)))
+        # Avoid division by zero
+        valid = cache_close > 0
+        if not valid.any():
+            log.warning("All cache close prices are zero — cannot compute ratio.")
+            return None
+
+        ratios = ibkr_close[valid] / cache_close[valid]
+        median_ratio = float(np.median(ratios))
+        mean_ratio = float(np.mean(ratios))
+        max_spread = float(np.max(np.abs(ratios - median_ratio)))
 
         log.info(
-            "Roll delta: compared %d bars — "
-            "median=$%.4f  mean=$%.4f  max_spread=$%.4f",
-            len(sample), median_delta, mean_delta, max_spread,
+            "Roll ratio: compared %d bars — "
+            "median=%.6f  mean=%.6f  max_spread=%.6f",
+            len(sample), median_ratio, mean_ratio, max_spread,
         )
 
-        # Store the IBKR data for use by _back_adjust_cache
         self._ibkr_overlap_df = ibkr_df
+        return median_ratio
 
-        return median_delta
+    def _apply_roll_to_cache(self, ratio: float) -> None:
+        """Record a rollover ratio and stitch IBKR overlap data into the cache.
 
-    def _back_adjust_cache(self, delta: float) -> None:
-        """
-        Apply Panama Canal back-adjustment to the entire cache.
-
-        Shifts all OHLC prices by `delta` to align with the new
-        continuous contract. Volume is untouched. Then overwrites
-        any overlapping bars with fresh IBKR data for a clean seam.
+        Does NOT multiply the cache — the cache stays 100% RAW.
+        The ratio is stored and applied JIT by get_ratio_adjusted_df().
 
         Args:
-            delta: The price shift to apply (ibkr_price - cache_price).
+            ratio: The multiplicative ratio (ibkr_price / cache_price).
         """
         if self._df is None or len(self._df) == 0:
-            log.warning("Cannot back-adjust — empty cache.")
+            log.warning("Cannot apply roll — empty cache.")
             return
 
-        n_bars = len(self._df)
+        # Record the ratio and the timestamp boundary
+        roll_ts = self._df.index.max()
+        self._roll_ratios.append(ratio)
+        self._roll_timestamps.append(roll_ts)
+
         log.info(
-            "PANAMA CANAL BACK-ADJUSTMENT: shifting %d bars by $%.4f",
-            n_bars, delta,
+            "ROLLOVER RECORDED: ratio=%.6f at %s  "
+            "(total rollovers: %d)",
+            ratio, roll_ts, len(self._roll_ratios),
         )
 
-        # Step 1: Shift all OHLC columns by delta
-        for col in ("Open", "High", "Low", "Close"):
-            if col in self._df.columns:
-                self._df[col] = self._df[col] + delta
-
-        # Step 2: Overwrite overlapping bars with fresh IBKR data
-        # for a perfectly clean seam at the transition
+        # Overwrite overlapping bars with fresh IBKR data for a clean seam
         ibkr_df = getattr(self, "_ibkr_overlap_df", None)
         if ibkr_df is not None and len(ibkr_df) > 0:
             overlap = self._df.index.intersection(ibkr_df.index)
@@ -737,22 +741,33 @@ class DataManager:
                     "Overwrote %d overlapping bars with fresh IBKR data.",
                     len(overlap),
                 )
-            # Clean up temporary reference
             del self._ibkr_overlap_df
 
-        # Step 3: Store delta for training ledger update and metadata
-        self._roll_delta = delta
-
-        # Step 4: Save the adjusted cache
         self.save_cache()
 
-        log.info(
-            "Back-adjustment complete: %d bars shifted by $%.4f. "
-            "Range: %s → %s",
-            n_bars, delta,
-            self._df.index.min(),
-            self._df.index.max(),
-        )
+    def get_ratio_adjusted_df(self) -> pd.DataFrame:
+        """Return a COPY of the cache with cumulative ratio adjustment applied.
+
+        The raw cache contains unadjusted prices across multiple contract months.
+        This method applies all accumulated rollover ratios to historical bars,
+        producing a ratio-adjusted series where features are continuous.
+
+        The most recent bar is always == raw price (ratio adjusts history only).
+        """
+        if self._df is None:
+            raise RuntimeError("DataManager not initialized.")
+
+        df = self._df.copy()
+        if not self._roll_ratios:
+            return df
+
+        for ratio, roll_ts in zip(self._roll_ratios, self._roll_timestamps):
+            mask = df.index < roll_ts
+            for col in ("Open", "High", "Low", "Close"):
+                if col in df.columns:
+                    df.loc[mask, col] = df.loc[mask, col] * ratio
+
+        return df
 
     def _full_rebuild_cache(self) -> None:
         """
@@ -762,7 +777,7 @@ class DataManager:
         bridge the gap from the seed CSV to present.  IBKR's 5-min bar
         limit is ~60 days. If the gap exceeds this, the rebuild will fail.
 
-        Prefer _back_adjust_cache() for rollovers.
+        Full rebuilds reset all accumulated roll ratios.
         """
         log.warning(
             "FULL REBUILD (FALLBACK): deleting cache and re-seeding. "
@@ -780,6 +795,10 @@ class DataManager:
                 )
                 raise
             log.info("Deleted stale cache: %s", self.cache_path)
+
+        # Full rebuild resets all roll ratios
+        self._roll_ratios = []
+        self._roll_timestamps = []
 
         self._df = self._seed_from_csv()
         self.save_cache()
@@ -833,23 +852,23 @@ class DataManager:
                 len(ledger), ledger.index.min(), ledger.index.max(),
             )
 
-        if self._roll_detected and abs(self._roll_delta) > _ROLL_PRICE_TOLERANCE:
-            # After rollover: apply Panama Canal shift to ENTIRE ledger.
-            # Every single row (back to 2008) gets the delta applied.
-            # This is the institutional standard — negative absolute
-            # prices in deep history are expected and harmless because
-            # the model uses relative features (ATR, MACD, returns).
+        current_ratio = self._roll_ratios[-1] if self._roll_ratios else 1.0
+        if self._roll_detected and abs(current_ratio - 1.0) > _ROLL_PRICE_TOLERANCE:
+            # After rollover: apply ratio adjustment to ENTIRE ledger.
+            # Every single row (back to 2008) gets the ratio applied.
+            # This is the institutional standard — the model uses
+            # relative features (ATR, MACD, returns).
             log.warning(
-                "PANAMA CANAL: shifting ENTIRE ledger (%d bars) by $%.4f",
-                len(ledger), self._roll_delta,
+                "RATIO ADJUSTMENT: scaling ENTIRE ledger (%d bars) by %.6f",
+                len(ledger), current_ratio,
             )
             for col in ("Open", "High", "Low", "Close"):
                 if col in ledger.columns:
-                    ledger[col] = ledger[col] + self._roll_delta
+                    ledger[col] = ledger[col] * current_ratio
             log.info(
-                "Ledger shifted: %d bars by $%.4f. "
+                "Ledger scaled: %d bars by %.6f. "
                 "New range: $%.2f → $%.2f",
-                len(ledger), self._roll_delta,
+                len(ledger), current_ratio,
                 ledger["Close"].min(), ledger["Close"].max(),
             )
 

@@ -1,0 +1,128 @@
+{
+  "_comment": "HourSet_13A SCOUT - Based on canary targets with scout defaults",
+  "defaults": {
+    "machine_type": "c2-standard-16",
+    "provisioning_model": "STANDARD",
+    "gcs_data_path": "gs://cltrainer-optuna-results/data/cl-1h_bk_HourSet_13A.parquet",
+    "strategy_config": "hourly_ensemble_010.json",
+    "metrics": "logloss,average_precision",
+    "timeout_minutes": 360,
+    "max_concurrent_vcpus": 288,
+    "vcpus_per_vm": 16,
+    "max_concurrent_vms": 12,
+    "n_trials": 100,
+    "max_depth_min": 3,
+    "max_depth_max": 8,
+    "num_leaves_min": 15,
+    "num_leaves_max": 64,
+    "max_n_estimators": 1500,
+    "early_stopping_rounds": 30,
+    "max_folds": 5,
+    "learning_rate_min": 0.001,
+    "learning_rate_max": 0.05,
+    "min_child_samples_min": 100,
+    "min_child_samples_max": 500,
+    "feature_fraction_min": 0.4,
+    "feature_fraction_max": 0.8,
+    "post_optimizer_trials": 200,
+    "post_optimizer_holdout_months": 6
+  },
+  "experiments": [
+    {
+      "label": "HS13A 2x1 3H",
+      "target_long": "TARGET_TRIPLE_2x1_3H_LONG",
+      "target_short": "TARGET_TRIPLE_2x1_3H_SHORT",
+      "gcs_prefix": "sweep_hs13a_2x1_3h_scout"
+    },
+    {
+      "label": "HS13A 4x1 36H",
+      "target_long": "TARGET_TRIPLE_4x1_36H_LONG",
+      "target_short": "TARGET_TRIPLE_4x1_36H_SHORT",
+      "gcs_prefix": "sweep_hs13a_4x1_36h_scout"
+    },
+    {
+      "label": "HS13A 5x1 36H",
+      "target_long": "TARGET_TRIPLE_5x1_36H_LONG",
+      "target_short": "TARGET_TRIPLE_5x1_36H_SHORT",
+      "gcs_prefix": "sweep_hs13a_5x1_36h_scout"
+    },
+    {
+      "label": "HS13A 6x2 36H",
+      "target_long": "TARGET_TRIPLE_6x2_36H_LONG",
+      "target_short": "TARGET_TRIPLE_6x2_36H_SHORT",
+      "gcs_prefix": "sweep_hs13a_6x2_36h_scout"
+    },
+    {
+      "label": "HS13A 8x2 36H",
+      "target_long": "TARGET_TRIPLE_8x2_36H_LONG",
+      "target_short": "TARGET_TRIPLE_8x2_36H_SHORT",
+      "gcs_prefix": "sweep_hs13a_8x2_36h_scout"
+    },
+    {
+      "label": "HS13A 6x2 48H",
+      "target_long": "TARGET_TRIPLE_6x2_48H_LONG",
+      "target_short": "TARGET_TRIPLE_6x2_48H_SHORT",
+      "gcs_prefix": "sweep_hs13a_6x2_48h_scout"
+    },
+    {
+      "label": "HS13A 8x2 48H",
+      "target_long": "TARGET_TRIPLE_8x2_48H_LONG",
+      "target_short": "TARGET_TRIPLE_8x2_48H_SHORT",
+      "gcs_prefix": "sweep_hs13a_8x2_48h_scout"
+    },
+    {
+      "label": "HS13A 2x1 6H",
+      "target_long": "TARGET_TRIPLE_2x1_6H_LONG",
+      "target_short": "TARGET_TRIPLE_2x1_6H_SHORT",
+      "gcs_prefix": "sweep_hs13a_2x1_6h_scout"
+    },
+    {
+      "label": "HS13A 2x1 12H",
+      "target_long": "TARGET_TRIPLE_2x1_12H_LONG",
+      "target_short": "TARGET_TRIPLE_2x1_12H_SHORT",
+      "gcs_prefix": "sweep_hs13a_2x1_12h_scout"
+    },
+    {
+      "label": "HS13A 2x1 24H",
+      "target_long": "TARGET_TRIPLE_2x1_24H_LONG",
+      "target_short": "TARGET_TRIPLE_2x1_24H_SHORT",
+      "gcs_prefix": "sweep_hs13a_2x1_24h_scout"
+    },
+    {
+      "label": "HS13A 5x1 6H",
+      "target_long": "TARGET_TRIPLE_5x1_6H_LONG",
+      "target_short": "TARGET_TRIPLE_5x1_6H_SHORT",
+      "gcs_prefix": "sweep_hs13a_5x1_6h_scout"
+    },
+    {
+      "label": "HS13A 5x1 12H",
+      "target_long": "TARGET_TRIPLE_5x1_12H_LONG",
+      "target_short": "TARGET_TRIPLE_5x1_12H_SHORT",
+      "gcs_prefix": "sweep_hs13a_5x1_12h_scout"
+    },
+    {
+      "label": "HS13A 5x1 24H",
+      "target_long": "TARGET_TRIPLE_5x1_24H_LONG",
+      "target_short": "TARGET_TRIPLE_5x1_24H_SHORT",
+      "gcs_prefix": "sweep_hs13a_5x1_24h_scout"
+    },
+    {
+      "label": "HS13A 3x1 12H",
+      "target_long": "TARGET_TRIPLE_3x1_12H_LONG",
+      "target_short": "TARGET_TRIPLE_3x1_12H_SHORT",
+      "gcs_prefix": "sweep_hs13a_3x1_12h_scout"
+    },
+    {
+      "label": "HS13A 3x1 24H",
+      "target_long": "TARGET_TRIPLE_3x1_24H_LONG",
+      "target_short": "TARGET_TRIPLE_3x1_24H_SHORT",
+      "gcs_prefix": "sweep_hs13a_3x1_24h_scout"
+    },
+    {
+      "label": "HS13A 3x1 6H",
+      "target_long": "TARGET_TRIPLE_3x1_6H_LONG",
+      "target_short": "TARGET_TRIPLE_3x1_6H_SHORT",
+      "gcs_prefix": "sweep_hs13a_3x1_6h_scout"
+    }
+  ]
+}

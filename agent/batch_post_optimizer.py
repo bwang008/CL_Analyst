@@ -318,7 +318,16 @@ def generate_optimized_report(
         lines.append("")
         lines.append("| # | Experiment | Long Model | Short Model | Trades (pre) T/L/S | Trades (opt) T/L/S | Trades (ho) T/L/S | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (holdout) | Opt Thr | Best Trial |")
         lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
-        for idx, (key, opt) in enumerate(all_results.items(), 1):
+        def get_ensemble_sort_key(item):
+            key, opt = item
+            labels_info = exp_labels.get(key, {})
+            long_exp = labels_info.get("long_label", "")
+            short_exp = labels_info.get("short_label", "")
+            exp_col = f"{long_exp} / {short_exp}" if long_exp and short_exp else (long_exp or short_exp or "-")
+            return [int(text) if text.isdigit() else text.lower() for text in _re.split(r'(\d+)', exp_col)]
+            
+        sorted_ensembles = sorted(all_results.items(), key=get_ensemble_sort_key)
+        for idx, (key, opt) in enumerate(sorted_ensembles, 1):
             # Derive experiment + model display names
             parts = key.split('|')
             long_model = shorten_model_side(parts[0]) if len(parts) == 2 else key
@@ -404,7 +413,13 @@ def generate_optimized_report(
                 lines.append("| Experiment | Trades (pre) T/L/S | Trades (opt) T/L/S | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (holdout) | Opt Thr | Opt TP | Opt SL | Opt Trail | Opt Cool | Opt Hold | Opt Consec | Best Trial |")
                 lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 
-                for exp in progress.get("experiments", []):
+                # Sort experiments naturally by label for readability
+                def natural_sort_key(s):
+                    return [int(text) if text.isdigit() else text.lower() for text in _re.split(r'(\d+)', str(s))]
+                
+                experiments_sorted = sorted(progress.get("experiments", []), key=lambda x: natural_sort_key(x.get("label", "")))
+
+                for exp in experiments_sorted:
                     if exp.get("status") != "COMPLETED":
                         continue
                     label = exp["label"]

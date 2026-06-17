@@ -339,7 +339,17 @@ class LiveTrader:
             # which lives alongside the processed datasets in CL_DATA_ROOT/data/processed/.
             _data_root = _get_data_root()
             cache_path_1h = str(_data_root / "processed" / "warm_start_cache_1h.parquet")
-            seed_path_1h = str(_data_root / "processed" / "CL_HourSet_08.parquet")
+            # Allow strategy config to override the seed path
+            _live_cfg = strategy.config.get("live_config", {}) if getattr(strategy, "config", None) else {}
+            _seed_override = _live_cfg.get("seed_path_1h")
+            if _seed_override:
+                # Resolve relative paths against data root
+                _seed_p = Path(_seed_override)
+                if not _seed_p.is_absolute():
+                    _seed_p = _data_root / _seed_override
+                seed_path_1h = str(_seed_p)
+            else:
+                seed_path_1h = str(_data_root / "processed" / "CL_raw_1h.parquet")
             log.info("DATA PATHS: 1h seed=%s  cache=%s", seed_path_1h, cache_path_1h)
 
             # Hard validation: the 1H seed must exist. If it doesn't, the
@@ -2387,10 +2397,15 @@ class LiveTrader:
 
 
         # 1. Generate features (always — needed for INFERENCE display)
-        # Use stream for bar_size to inform feature engineering scale
+        # SPLIT-BRAIN: Use ratio-adjusted data for features (model was trained
+        # on ratio-adjusted continuous series). Raw data is used for execution.
         try:
+            if self.data_manager_1h is not None:
+                ratio_adjusted_df = self.data_manager_1h.get_ratio_adjusted_df()
+            else:
+                ratio_adjusted_df = rolling_df  # fallback for non-1h modes
             features = build_live_features(
-                rolling_df, self.feature_names, lean=self._lean_features, bar_size=stream
+                ratio_adjusted_df, self.feature_names, lean=self._lean_features, bar_size=stream
             )
         except StaleDataException as exc:
             if not self._data_mute:
@@ -2421,19 +2436,18 @@ class LiveTrader:
             log.info("Feature generation skipped (insufficient data or NaN)")
             return
 
+        # WALLET: current_price comes from RAW rolling_df (real market price)
         current_price = float(rolling_df["Close"].iloc[-1])
 
         # Get per-side ATR for bracket sizing (parity with BacktestEngine).
-        # ATR_14 is always computed inside build_live_features() as a MODEL
-        # FEATURE (LightGBM was trained with it).  For bracket placement
-        # (TP/SL/trailing), we use the config's per-side atr_period which may
-        # differ (e.g. optimizer found atr_period_long=18, atr_period_short=26).
-        # This keeps model parity while allowing independent bracket ATR tuning.
+        # CRITICAL: Bracket ATR must use RAW prices, NOT ratio-adjusted.
+        # Using ratio-adjusted ATR would inflate historical volatility by the
+        # cumulative rollover ratio multiplier, producing incorrect TP/SL levels.
+        # The model's ATR_14 feature is on the ratio-adjusted price basis and
+        # must NOT be used as a fallback for bracket sizing.
 
         def _compute_bracket_atr(period: int) -> float | None:
-            """Compute a single rolling ATR value for a given period."""
-            if period == 14 and "ATR_14" in features.columns:
-                return float(features["ATR_14"].iloc[0])
+            """Compute bracket ATR from RAW rolling_df prices."""
             if len(rolling_df) >= period + 1:
                 import pandas_ta as _ta  # noqa: F811
                 _series = rolling_df.ta.atr(length=period)
@@ -2441,13 +2455,6 @@ class LiveTrader:
                     _last = _series.iloc[-1]
                     if not np.isnan(_last):
                         return float(_last)
-            # Fallback: use ATR_14 if available
-            if "ATR_14" in features.columns:
-                log.warning(
-                    "Bracket ATR(%d) computation failed — falling back to ATR_14",
-                    period,
-                )
-                return float(features["ATR_14"].iloc[0])
             return None
 
         if self._atr_period_long == self._atr_period_short:

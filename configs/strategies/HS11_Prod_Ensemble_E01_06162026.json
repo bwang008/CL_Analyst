@@ -19,16 +19,19 @@
     "live_config": {
         "client_id": 1010,
         "entry_mode": "marketable_limit",
-        "exit_mode": "marketable_limit"
+        "exit_mode": "marketable_limit",
+        "seed_path_1h": "processed/CL_raw_1h.parquet"
     },
     "models": {
         "long": {
-            "path": "E2E_HourSet_11_long_average_precision",
+            "experiment_id": "E2E_HourSet_11_long_average_precision",
+            "model_path": "reports/sweep_hs11_3x1_24h_20260615_0622/registry/canary_output/registry/E2E_HourSet_11_long_average_precision/final_model.pkl",
             "predictions_path": "reports/sweep_hs11_3x1_24h_20260615_0622/registry/canary_output/extended_predictions_long_ap.csv",
             "threshold": 0.5
         },
         "short": {
-            "path": "E2E_HourSet_11_short_logloss",
+            "experiment_id": "E2E_HourSet_11_short_logloss",
+            "model_path": "reports/sweep_hs11_3x1_6h_20260615_0622/registry/canary_output/registry/E2E_HourSet_11_short_logloss/final_model.pkl",
             "predictions_path": "reports/sweep_hs11_3x1_6h_20260615_0622/registry/canary_output/extended_predictions_short_ll.csv",
             "threshold": 0.79
         }

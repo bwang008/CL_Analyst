@@ -518,7 +518,9 @@ class IBKRConnectionManager:
         }
 
         # Account summary tags
-        acct_values = self.ib.accountSummary()
+        # Use accountValues() which is a cached property, avoiding cross-thread asyncio issues
+        # that occur with the blocking accountSummary() network request.
+        acct_values = self.ib.accountValues()
         for av in acct_values:
             if av.tag == "NetLiquidation" and av.currency == "USD":
                 summary["net_liquidation"] = float(av.value)

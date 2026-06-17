@@ -227,6 +227,10 @@ foreach ($exp in $progress.experiments) {
     }
 }
 
+# Natural sort by padding numbers with zeros
+$rows = $rows | Sort-Object { [regex]::Replace($_.Label, '\d+', { $args[0].Value.PadLeft(10, '0') }) }
+$failRows = $failRows | Sort-Object { [regex]::Replace($_.Label, '\d+', { $args[0].Value.PadLeft(10, '0') }) }
+
 $allRows = $rows + $failRows
 
 # ============================================================
