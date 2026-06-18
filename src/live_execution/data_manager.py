@@ -453,6 +453,27 @@ class DataManager:
     # Private: IBKR backfill
     # ------------------------------------------------------------------
 
+    def _drop_incomplete_bar(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Drop the final bar from the DataFrame if it has not yet completed.
+        IBKR historical requests return the currently forming bar, which would
+        contaminate the cache with partial volume and a mid-bar close price.
+        """
+        if df.empty:
+            return df
+            
+        now_utc = pd.Timestamp.now(tz="UTC").tz_localize(None)
+        try:
+            bar_duration = pd.Timedelta(self.bar_size.replace("mins", "min"))
+            is_complete = (df.index + bar_duration) <= now_utc
+            if not is_complete.iloc[-1]:
+                log.info("Dropping incomplete current bar at %s", df.index[-1])
+                return df[is_complete]
+        except Exception as e:
+            log.warning("Could not filter incomplete bars: %s", e)
+            
+        return df
+
     def _backfill(self) -> None:
         """
         Fetch missing bars from IBKR to bridge the gap between the
@@ -504,6 +525,10 @@ class DataManager:
             
             if chunk_df.empty:
                 log.warning("Backfill chunk %d: no bars returned.", i + 1)
+                continue
+
+            chunk_df = self._drop_incomplete_bar(chunk_df)
+            if chunk_df.empty:
                 continue
 
             n_before = len(self._df)
@@ -968,7 +993,9 @@ class DataManager:
             )
             
             if not df.empty:
-                all_dfs.append(df)
+                df = self._drop_incomplete_bar(df)
+                if not df.empty:
+                    all_dfs.append(df)
 
         if not all_dfs:
             return None
