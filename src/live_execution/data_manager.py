@@ -466,7 +466,7 @@ class DataManager:
         try:
             bar_duration = pd.Timedelta(self.bar_size.replace("mins", "min"))
             is_complete = (df.index + bar_duration) <= now_utc
-            if not is_complete.iloc[-1]:
+            if not is_complete[-1]:
                 log.info("Dropping incomplete current bar at %s", df.index[-1])
                 return df[is_complete]
         except Exception as e:
@@ -484,7 +484,7 @@ class DataManager:
             return
 
         last_ts = self._df.index.max()
-        now = pd.Timestamp.now()
+        now = pd.Timestamp.now(tz="UTC").tz_localize(None)
         gap = now - last_ts
 
         log.info(
@@ -956,7 +956,8 @@ class DataManager:
             return seed_df.index.max()
         except Exception:
             # Fallback: assume seed ends 2 years ago (IBKR's max range)
-            return pd.Timestamp.now() - timedelta(days=730)
+            now_utc = pd.Timestamp.now(tz="UTC").tz_localize(None)
+            return now_utc - timedelta(days=730)
 
     def _fetch_ibkr_range(
         self, start_ts: pd.Timestamp
@@ -966,7 +967,7 @@ class DataManager:
 
         Handles chunking for requests longer than _MAX_IB_REQUEST_DAYS.
         """
-        now = pd.Timestamp.now()
+        now = pd.Timestamp.now(tz="UTC").tz_localize(None)
         gap = now - start_ts
         if gap.total_seconds() < 600:
             log.info("Ledger gap < 10 minutes — no IBKR fetch needed.")
