@@ -310,4 +310,10 @@ def build_live_features(
     except Exception:
         pass  # Never let monitoring crash inference
 
+    # 8. Downcast to float32 to match the precision of parquet-stored
+    #    training features.  LightGBM tree splits are exact comparisons;
+    #    float64 values near split thresholds may route to different leaves
+    #    than the float32 values the model was trained on.
+    last_row = last_row.astype(np.float32)
+
     return last_row

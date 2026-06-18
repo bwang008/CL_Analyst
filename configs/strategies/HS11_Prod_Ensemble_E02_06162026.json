@@ -85,22 +85,6 @@
             }
         ]
     },
-    "features": [
-        "ICHIMOKU_*",
-        "TREND_DMA_*",
-        "ATR_14",
-        "VOL_ROC_12",
-        "VOL_ROC_24",
-        "VOL_ROC_72",
-        "DIST_KURT_12",
-        "DIST_KURT_24",
-        "DIST_KURT_72",
-        "DIST_SKEW_12",
-        "DIST_SKEW_24",
-        "DIST_SKEW_72",
-        "TS_*",
-        "log_ret"
-    ],
     "consecutive_signal_threshold": 1,
     "atr_period": 22,
     "trailing_sl_atr_offset": 1.0

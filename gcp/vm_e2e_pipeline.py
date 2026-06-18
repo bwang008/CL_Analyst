@@ -460,15 +460,7 @@ def run_pipeline(
     df = pd.read_parquet(data_path)
     feature_cols = util.get_feature_columns(df)
     
-    if strategy_cfg.get("features"):
-        import fnmatch
-        filtered_cols = []
-        for col in feature_cols:
-            if any(fnmatch.fnmatch(col, pat) for pat in strategy_cfg["features"]):
-                filtered_cols.append(col)
-        print(f"  [ISOLATION STUDY] Filtering from {len(feature_cols)} to {len(set(filtered_cols))} features based on strategy config.")
-        feature_cols = list(set(filtered_cols))
-        
+    
     cutoff = pd.Timestamp(train_cutoff_date)
 
     if holdout_cutoff_date is None:

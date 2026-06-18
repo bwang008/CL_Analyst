@@ -79,13 +79,6 @@
         "cooldown_bars": 9,
         "consecutive_signal_threshold": 2
     },
-    "features": [
-        "ICHIMOKU_*",
-        "TREND_DMA_*",
-        "ATR_14",
-        "VOL_ROC_24",
-        "log_ret"
-    ],
     "cooldown_bars": 9,
     "consecutive_signal_threshold": 2,
     "entry_threshold": 0.7,

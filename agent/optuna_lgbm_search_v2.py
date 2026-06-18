@@ -748,20 +748,11 @@ def run_search(
     target_col = util.get_target_column(df, target_name)
     df = df.dropna(subset=[target_col])
 
-    # ---- Filter Features if Strategy Config provided ----
+    # ---- Load Strategy Config (if provided) ----
     strategy_cfg = None
     if strategy_config_path:
-        import fnmatch
         with open(strategy_config_path) as f:
             strategy_cfg = json.load(f)
-        
-        if strategy_cfg.get("features"):
-            filtered_cols = []
-            for col in feature_cols:
-                if any(fnmatch.fnmatch(col, pat) for pat in strategy_cfg["features"]):
-                    filtered_cols.append(col)
-            print(f"  [ISOLATION STUDY] Filtering from {len(feature_cols)} to {len(set(filtered_cols))} features based on strategy config.")
-            feature_cols = list(set(filtered_cols))
 
     # Split into gym (for WF folds) and vault (untouched holdout)
     if train_cutoff_date:
