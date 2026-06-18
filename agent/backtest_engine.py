@@ -1075,8 +1075,8 @@ class BacktestEngine:
             trades=self._trades,
             equity_curve=self._equity_curve,
             label=label,
-            start_dt=ohlcv.index.min() if not ohlcv.empty else None,
-            end_dt=ohlcv.index.max() if not ohlcv.empty else None,
+            start_dt=signals_df.index.min() if not signals_df.empty else (ohlcv.index.min() if not ohlcv.empty else None),
+            end_dt=signals_df.index.max() if not signals_df.empty else (ohlcv.index.max() if not ohlcv.empty else None),
             blocked_trades_count=self._blocked_trades_count,
         )
 

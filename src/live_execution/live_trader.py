@@ -1732,7 +1732,7 @@ class LiveTrader:
         """Print a CL-only account summary at startup."""
         w = 60  # box width
         try:
-            acct = self.exec_client.get_account_summary()
+            acct = self.exec_client.get_account_summary(symbol=self._execution_symbol)
             ts = self.telemetry.trade_summary()
         except Exception:
             log.warning("Could not retrieve account summary — skipping.")
@@ -1851,12 +1851,13 @@ class LiveTrader:
             )
             
             # Post-load validation: ensure 1H cache meets minimum requirements
-            _min_required = {"1h": 840, "2h": 840, "4h": 840}
+            # MACRO_6M needs 4320 hourly bars — enforce this at startup.
+            _min_required = {"1h": 4320, "2h": 4320, "4h": 4320}
             _required = _min_required.get(self._bar_size, 0)
             if len(self.rolling_df_1h) < _required:
                 err_msg = (
                     f"1H cache has only {len(self.rolling_df_1h)} bars — "
-                    f"need {_required} for {self._bar_size} inference. "
+                    f"need {_required} for {self._bar_size} MACRO_6M feature warmup. "
                     f"Delete warm_start_cache_1h.parquet to trigger reseed."
                 )
                 log.error("CACHE VALIDATION FAILED: %s", err_msg)

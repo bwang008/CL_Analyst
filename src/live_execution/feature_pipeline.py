@@ -272,30 +272,12 @@ def build_live_features(
     # 4. Add Volume_Log (from normalize_features in training pipeline)
     work["Volume_Log"] = np.log1p(work["Volume"])
 
-    # 5. Replace inf with NaN, then forward-fill (covers normal timeseries NaN)
-    #    and backfill (covers warm-up NaN from large-window features like
-    #    VOL_ROC_10080 or MACRO_3M that need more history than available).
-    #    Final fillna(0) catches features that are all-NaN during cold start
-    #    (e.g., VOL_VOLVOL_10080 needs 2×10080 bars, MACRO_3M needs ~25K bars).
+    # 5. Replace inf with NaN, then forward-fill only.
+    #    ffill is standard for timeseries gaps (carries last valid value forward).
+    #    bfill and fillna(0) are REMOVED — they fabricate values the model never
+    #    saw during training and silently mask warm-up deficits.
     work.replace([np.inf, -np.inf], np.nan, inplace=True)
-    # Snapshot which cells in the last row are NaN BEFORE fill — these are
-    # the features that lack sufficient warmup history.
-    _pre_fill_nan = work[feature_names].iloc[-1].isna() if set(feature_names).issubset(work.columns) else None
     work.ffill(inplace=True)
-    work.bfill(inplace=True)
-    work.fillna(0, inplace=True)
-
-    # Detect which features were zero-filled from NaN (cold-start warning)
-    if _pre_fill_nan is not None:
-        _post_fill_zero = work[feature_names].iloc[-1] == 0
-        _zero_filled = _pre_fill_nan & _post_fill_zero
-        if _zero_filled.any():
-            _zero_cols = _zero_filled[_zero_filled].index.tolist()
-            log.warning(
-                "COLD START: %d features zero-filled from NaN "
-                "(model never saw 0 during training): %s",
-                len(_zero_cols), _zero_cols,
-            )
 
     # 6. Extract the last complete row with the model's expected columns
     missing_cols = set(feature_names) - set(work.columns)
@@ -305,14 +287,19 @@ def build_live_features(
 
     last_row = work[feature_names].iloc[[-1]]
 
-    nan_count = last_row.isna().sum(axis=1).iloc[0]
+    # 7. HARD NaN GUARD — if ANY model feature is still NaN after ffill,
+    #    the cache lacks sufficient warmup history.  Return None to force
+    #    live_trader to skip this bar rather than infer on fabricated data.
+    nan_count = int(last_row.isna().sum(axis=1).iloc[0])
     if nan_count > 0:
         nan_cols = last_row.columns[last_row.isna().iloc[0]].tolist()
-        log.warning(
-            "%d features still NaN after fill (cold start): %s",
-            nan_count, nan_cols,
+        log.error(
+            "FEATURE NaN BLOCK: %d/%d features still NaN after ffill — "
+            "insufficient warmup history. Skipping inference. "
+            "NaN features: %s",
+            nan_count, len(feature_names), nan_cols,
         )
-        last_row = last_row.fillna(0)
+        return None
 
     # 7. Inference-level feature variance monitoring (warning-only).
     #    Tracks recent feature vectors and warns if any critical CHG

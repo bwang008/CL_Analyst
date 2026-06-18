@@ -44,8 +44,12 @@ _EXPECTED_FEATURES = [
 ]
 
 
-def _generate_ohlcv(n_bars: int = 11000, start_price: float = 70.0) -> pd.DataFrame:
-    """Generate synthetic OHLCV data for testing."""
+def _generate_ohlcv(n_bars: int = 27000, start_price: float = 70.0) -> pd.DataFrame:
+    """Generate synthetic OHLCV data for testing.
+
+    Default 27K bars covers the 26K recommended warmup for compound
+    features like VOL_VOLVOL_10080 (rolling-of-rolling, needs ~20K bars).
+    """
     np.random.seed(42)
     dates = pd.date_range(start="2024-01-01", periods=n_bars, freq="5min")
     
@@ -69,7 +73,7 @@ class TestBuildLiveFeatures:
 
     @pytest.fixture(scope="class")
     def ohlcv_data(self):
-        """Generate 11,000 bars of synthetic OHLCV (computed once per class)."""
+        """Generate 27,000 bars of synthetic OHLCV (computed once per class)."""
         return _generate_ohlcv()
 
     @pytest.fixture(scope="class")
@@ -173,7 +177,7 @@ class TestBuildLiveFeaturesSet07:
 
     @pytest.fixture(scope="class")
     def ohlcv_data(self):
-        """Generate 11,000 bars of synthetic OHLCV (computed once per class)."""
+        """Generate 27,000 bars of synthetic OHLCV (computed once per class)."""
         return _generate_ohlcv()
 
     @pytest.fixture(scope="class")

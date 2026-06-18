@@ -1,5 +1,4 @@
-{
-    "Notes":"No HS10 config was ever created because the HS10 models all did worse than the HS09 models
+"Notes":"No HS10 config was ever created because the HS10 models all did worse than the HS09 models
 
 I didn't feel any need to deploy them to production, however
 
@@ -7,4 +6,3 @@ I will still create HS12 which is supposed to be the more improved / cleaned up
 version of HS10, and retest that. 
 
 If you don't see any HS12 config and it jumps to 13 or whatever, you know the reason."
-}

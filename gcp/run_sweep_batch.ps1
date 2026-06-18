@@ -30,7 +30,7 @@
 
 param(
     [string]$ManifestPath        = "configs\sweep_batch_manifest.json",
-    [string]$Zone                = "us-central1-a",
+    [string]$Zone                = "us-central1-a,us-central1-b,us-central1-c,us-central1-f,us-west1-a,us-west1-b,us-west1-c,us-east1-b,us-east1-c,us-east1-d,us-east4-a,us-east4-b,us-east4-c",
     [switch]$DryRun,
     [switch]$DisableTelegram,
     [int]$MaxConcurrentVcpus    = 0,   # 0 = read from manifest defaults

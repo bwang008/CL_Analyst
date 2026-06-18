@@ -25,8 +25,12 @@ from src.live_execution.live_trader import build_live_features, _ALPHA_WINDOWS
 # Fixtures
 # ---------------------------------------------------------------------------
 
-def _make_ohlcv(n: int = 11_000, seed: int = 42) -> pd.DataFrame:
-    """Generate deterministic OHLCV data."""
+def _make_ohlcv(n: int = 27_000, seed: int = 42) -> pd.DataFrame:
+    """Generate deterministic OHLCV data.
+
+    Default 27K bars covers the 26K recommended warmup for compound
+    features like VOL_VOLVOL_10080 (rolling-of-rolling, needs ~20K bars).
+    """
     rng = np.random.RandomState(seed)
     close = 75.0 + np.cumsum(rng.normal(0, 0.1, n))
     close = np.maximum(close, 10.0)
@@ -48,8 +52,8 @@ def _make_ohlcv(n: int = 11_000, seed: int = 42) -> pd.DataFrame:
 
 @pytest.fixture
 def clean_data():
-    """11,000 rows of clean OHLCV data with known feature names."""
-    return _make_ohlcv(11_000)
+    """27,000 rows of clean OHLCV data — sufficient for all compound features."""
+    return _make_ohlcv(27_000)
 
 
 @pytest.fixture
@@ -208,32 +212,39 @@ class TestAllNaNColumn:
 
     def test_all_nan_volume_handled(self, clean_data, feature_names):
         """
-        An entirely NaN Volume column should be caught.
-
-        In practice this shouldn't happen, but if the IBKR feed drops
-        volume data, we need to handle it without NaN reaching the model.
+        An entirely NaN Volume column cannot be forward-filled (no prior
+        valid value exists).  The NaN hard-block guard must return None
+        rather than silently filling with zeros.
         """
         df = clean_data.copy()
         df["Volume"] = np.nan
 
         result = build_live_features(df, feature_names)
-        if result is not None:
-            # build_live_features does fillna(0), so this should be handled
-            assert not result.isna().any().any(), "NaN reached model from all-NaN Volume"
+        # Pipeline must block — all-NaN column has no valid value to ffill from
+        assert result is None, (
+            "All-NaN column should trigger hard NaN block (return None), "
+            "not silently fill with zeros"
+        )
 
 
 class TestBuildLiveFeaturesNaNGuarantee:
-    """Ultimate safety net: build_live_features must never return NaN."""
+    """Ultimate safety net: build_live_features either returns clean data or None."""
 
     def test_build_live_features_never_returns_nan_to_model(self, clean_data, feature_names):
         """
-        The FINAL output of build_live_features must have exactly zero NaN.
+        The FINAL output of build_live_features must either:
+          - Be a DataFrame with exactly zero NaN/inf (sufficient warmup), OR
+          - Be None (hard block due to insufficient warmup).
 
-        This is the last line of defense — even if intermediate steps
-        produce NaN, the final fillna(0) and warning must catch them.
+        It must NEVER return a DataFrame containing NaN or inf values.
+        The old bfill/fillna(0) masking has been removed — the pipeline
+        now returns None rather than fabricating feature values.
         """
         result = build_live_features(clean_data.copy(), feature_names)
-        assert result is not None
+        assert result is not None, (
+            "build_live_features returned None with 27K bars — "
+            "all features should be computable with sufficient warmup"
+        )
         nan_count = result.isna().sum().sum()
         assert nan_count == 0, (
             f"build_live_features returned {nan_count} NaN values — "
