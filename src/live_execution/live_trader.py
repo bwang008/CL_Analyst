@@ -2007,7 +2007,7 @@ class LiveTrader:
                     self._front_month_str,
                 )
                 self._front_month_bars = await self.data_client.subscribe_live_bars_async(
-                    symbol=self._front_month_local_symbol,
+                    symbol=self._execution_symbol,
                     continuous=False,
                     bar_size="5 mins",
                     duration_str="60 S",
