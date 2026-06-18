@@ -310,8 +310,18 @@ def back_adjust_continuous_data(df: pd.DataFrame) -> pd.DataFrame:
 def submit_batch():
     """Submit a batch download request to Databento for historical futures data."""
     import databento as db
+    import os
+    from dotenv import load_dotenv
+    from pathlib import Path
 
-    client = db.Historical("db-rn44nxsG5jfyNvhWrebEhHyQCsRed")
+    # Attempt to load .env from project root
+    load_dotenv(Path(__file__).resolve().parent / ".env")
+
+    api_key = os.getenv("DATABENTO_API_KEY")
+    if not api_key:
+        raise ValueError("DATABENTO_API_KEY not found. Please set it in .env or as an environment variable.")
+
+    client = db.Historical(api_key)
 
     # Fetch the earliest available start date from metadata
     dataset_range = client.metadata.get_dataset_range(dataset="GLBX.MDP3")

@@ -399,6 +399,9 @@ class LiveTrader:
         self._data_farm_ok = False         # Set True when 2104/2106 received
         self._data_farm_broken_only = False # True if only 2103/2105 received (no OK)
         self._callbacks_registered = False
+        # Contract rollover state
+        self._rollover_in_progress = False
+        self._last_rollover_check_date = None
         self._last_decision_context_by_order_id: dict[int, dict] = {}
         self._position_entry_bar_time: Optional[pd.Timestamp] = None
         self._position_bars_held: int = 0
@@ -1911,6 +1914,166 @@ class LiveTrader:
         log.info("Subscribed to front-month live bars")
 
     # ------------------------------------------------------------------
+    # Contract Rollover Detection
+    # ------------------------------------------------------------------
+
+    def _check_contract_rollover(self) -> None:
+        """Check if the front-month contract has rolled and transition if so.
+
+        Called from the main event loop's 5-minute poll cycle (between
+        ib.sleep() calls) and from _resubscribe_and_backfill() after
+        reconnection.  Both call sites are on the main thread with the
+        asyncio event loop idle, so synchronous IBKR API calls
+        (reqContractDetails, placeOrder, cancelOrder) are safe.
+
+        Gated by ``_last_rollover_check_date`` to query IBKR at most
+        once per UTC calendar day.
+
+        If a rollover is detected:
+        1. Force-close any open position on the expiring contract.
+        2. Update ``_front_month_local_symbol`` and ``_front_month_str``.
+        3. Re-cache the execution contract.
+        4. Update DataManager ``front_month_id`` for ratio tracking.
+        5. Re-subscribe the Hands stream to the new contract.
+        6. Send a Telegram notification.
+        """
+        today = datetime.now(timezone.utc).date()
+        if self._last_rollover_check_date == today:
+            return
+        self._last_rollover_check_date = today
+
+        # Resolve current front-month from IBKR
+        try:
+            new_local_sym, new_month_str = (
+                self.data_client.get_front_month_contract(
+                    symbol=self._execution_symbol,
+                )
+            )
+        except Exception as exc:
+            log.warning("Rollover check: failed to resolve front-month: %s", exc)
+            return
+
+        if new_local_sym == self._front_month_local_symbol:
+            log.debug(
+                "Rollover check: front-month unchanged (%s)", new_local_sym,
+            )
+            return
+
+        # ── ROLLOVER DETECTED ─────────────────────────────────────────
+        old_sym = self._front_month_local_symbol
+        log.warning(
+            "=" * 60 + "\n"
+            "CONTRACT ROLLOVER DETECTED: %s → %s\n"
+            + "=" * 60,
+            old_sym, new_local_sym,
+        )
+
+        self._rollover_in_progress = True
+        try:
+            # 1. Force-close any open position on the expiring contract
+            current_position = self.exec_client.get_position(
+                symbol=self._execution_symbol,
+            )
+            if current_position != 0:
+                log.warning(
+                    "ROLLOVER FORCE-CLOSE: position=%d on %s — "
+                    "cancelling brackets and closing at market",
+                    current_position, old_sym,
+                )
+                # Cancel resting TP/SL bracket orders
+                try:
+                    cancelled = self.exec_client.cancel_open_orders(
+                        self._execution_symbol,
+                    )
+                    log.info("Rollover: cancelled %d resting orders", cancelled)
+                except Exception as exc:
+                    log.warning("Rollover: cancel_open_orders failed: %s", exc)
+
+                # Market-close the old position (uses pos.contract from
+                # IBKR portfolio — targets the actual old-month contract,
+                # not our cached reference).
+                try:
+                    self.exec_client.close_position(
+                        symbol=self._execution_symbol,
+                        exit_mode="market",
+                        current_price=0.0,  # market order, price unused
+                    )
+                    log.info("Rollover: market close order submitted")
+                except Exception as exc:
+                    log.error("Rollover: close_position failed: %s", exc)
+
+                # Reset internal position tracking
+                self._reset_position_state(reason="ROLLOVER")
+                self._pending_entry_order_id = None
+                self._pending_entry_bar_time = None
+
+                self._telegram.send(
+                    f"🔄 *CONTRACT ROLLOVER*\n"
+                    f"`{old_sym}` → `{new_local_sym}`\n\n"
+                    f"⚠️ Force-closed position ({current_position:+d}) on "
+                    f"expiring contract at market.\n"
+                    f"Waiting for next natural signal on `{new_local_sym}`."
+                )
+            else:
+                self._telegram.send(
+                    f"🔄 *CONTRACT ROLLOVER*\n"
+                    f"`{old_sym}` → `{new_local_sym}`\n\n"
+                    f"Position: FLAT — clean transition."
+                )
+
+            # 2. Update contract references
+            self._front_month_local_symbol = new_local_sym
+            self._front_month_str = new_month_str
+            log.info(
+                "Rollover: updated front-month to %s (%s)",
+                new_local_sym, new_month_str,
+            )
+
+            # 3. Re-cache execution contract (so orders use the new month)
+            try:
+                self.exec_client.resolve_contract(self._execution_symbol)
+                log.info("Rollover: execution contract re-cached")
+            except Exception as exc:
+                log.error(
+                    "Rollover: failed to re-cache execution contract: %s", exc,
+                )
+
+            # 4. Update DataManager front_month_id for ratio tracking
+            self.data_manager_5m.front_month_id = new_local_sym
+            if self.data_manager_1h is not None:
+                self.data_manager_1h.front_month_id = new_local_sym
+
+            # 5. Re-subscribe Hands stream (front-month bars)
+            if self._front_month_bars is not None:
+                try:
+                    self.data_client.cancel_subscription(
+                        self._front_month_bars,
+                    )
+                except Exception:
+                    pass
+                self._front_month_bars = None
+
+            try:
+                self._subscribe_front_month()
+                log.info("Rollover: front-month bars re-subscribed")
+            except Exception as exc:
+                log.error(
+                    "Rollover: failed to re-subscribe front-month bars: %s",
+                    exc,
+                )
+
+            log.info(
+                "=" * 60 + "\n"
+                "CONTRACT ROLLOVER COMPLETE: now trading %s (%s)\n"
+                + "=" * 60,
+                new_local_sym, new_month_str,
+            )
+        except Exception:
+            log.exception("Unexpected error during contract rollover")
+        finally:
+            self._rollover_in_progress = False
+
+    # ------------------------------------------------------------------
     # Reconnection & Gap Backfill
     # ------------------------------------------------------------------
 
@@ -2189,6 +2352,10 @@ class LiveTrader:
         NOT running at that point (we're inside a time.sleep-based retry
         loop, not inside ib.sleep).
         """
+        # 0. Check for contract rollover (reconnect after long outage may
+        #    span a rollover boundary — re-resolve before resubscribing).
+        self._check_contract_rollover()
+
         # 1. Cancel stale subscriptions
         if self._live_bars_5m is not None:
             try:
@@ -2394,6 +2561,9 @@ class LiveTrader:
         """Run feature generation, strategy evaluation, update ledger, and net execution."""
         if self._emergency_halt:
             log.warning("EMERGENCY HALT ACTIVE — ignoring new bar")
+            return
+        if self._rollover_in_progress:
+            log.debug("Skipping bar during contract rollover transition")
             return
 
         # 0a. Entry order TTL: cancel stale entry orders after 1 bar
@@ -3138,6 +3308,18 @@ class LiveTrader:
                 # Periodic heartbeat (only when idle — no bars arriving)
                 if poll_count % _HEARTBEAT_CYCLES == 0:
                     self._log_heartbeat()
+                    # Contract rollover check (once per UTC day).
+                    # Runs here (between ib.sleep() calls) so that
+                    # synchronous IBKR API calls like reqContractDetails
+                    # and placeOrder work safely — the asyncio event
+                    # loop is idle at this point.
+                    try:
+                        self._check_contract_rollover()
+                    except Exception:
+                        log.warning(
+                            "Rollover check failed in event loop",
+                            exc_info=True,
+                        )
                     # Stale bar watchdog: if bars stopped arriving while
                     # subscriptions are marked lost, force a reconnect.
                     if self._check_stale_bars():

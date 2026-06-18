@@ -543,7 +543,7 @@ class IBKRConnectionManager:
     # IBKR blocks trading on physically-delivered futures near expiry.
     # CL contracts within this buffer (days) are skipped in favour of
     # the next month to avoid Error 201 rejections.
-    _EXPIRY_BUFFER_DAYS = 3
+    _EXPIRY_BUFFER_DAYS = 6
 
     def get_front_month_contract(
         self, symbol: str = "CL",
