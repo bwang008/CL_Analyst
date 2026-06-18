@@ -576,6 +576,10 @@ def main():
         "--progress-every", type=int, default=500,
         help="Log progress every N bars (default: 500)",
     )
+    parser.add_argument(
+        "--predictions-dir", default=None,
+        help="Base path to load prediction CSVs from instead of running inference",
+    )
     args = parser.parse_args()
 
     # Configure logging
@@ -620,6 +624,68 @@ def main():
         "Strategy: %s  direction=%s  features=%d  bar_size=%s",
         strategy.name, strategy.direction, len(strategy.feature_names), bar_size,
     )
+
+    if args.predictions_dir:
+        base_pred_dir = Path(args.predictions_dir)
+        models_cfg = raw_config.get("models", {})
+        
+        long_preds = None
+        short_preds = None
+        
+        long_path_str = models_cfg.get("long", {}).get("predictions_path")
+        if long_path_str:
+            long_path = base_pred_dir / long_path_str
+            if long_path.exists():
+                long_df = pd.read_csv(long_path)
+                if "DateTime" in long_df.columns:
+                    long_df["DateTime"] = pd.to_datetime(long_df["DateTime"])
+                    long_preds = long_df.set_index("DateTime")["prob_Buy"].to_dict()
+                    log.info("Loaded LONG predictions from %s", long_path)
+        
+        short_path_str = models_cfg.get("short", {}).get("predictions_path")
+        if short_path_str:
+            short_path = base_pred_dir / short_path_str
+            if short_path.exists():
+                short_df = pd.read_csv(short_path)
+                if "DateTime" in short_df.columns:
+                    short_df["DateTime"] = pd.to_datetime(short_df["DateTime"])
+                    short_preds = short_df.set_index("DateTime")["prob_Sell"].to_dict()
+                    log.info("Loaded SHORT predictions from %s", short_path)
+        
+        # Monkey patch evaluate
+        orig_evaluate = strategy.evaluate
+        def monkey_evaluate(
+            features: pd.DataFrame,
+            current_price: float,
+            atr_value: float | None,
+            current_position: int,
+            *,
+            atr_value_long: float | None = None,
+            atr_value_short: float | None = None,
+        ):
+            dt = pd.Timestamp(features.index[-1])
+            if dt.tz is not None:
+                dt = dt.tz_convert("UTC").tz_localize(None)
+                
+            orig_run_inference = strategy._run_inference
+            def mock_run_inference(learner, _features):
+                if learner == strategy._long_learner:
+                    return float(long_preds.get(dt, 0.0)) if long_preds else 0.0
+                elif learner == strategy._short_learner:
+                    return float(short_preds.get(dt, 0.0)) if short_preds else 0.0
+                return 0.0
+            
+            strategy._run_inference = mock_run_inference
+            try:
+                return orig_evaluate(
+                    features, current_price, atr_value, current_position,
+                    atr_value_long=atr_value_long, atr_value_short=atr_value_short
+                )
+            finally:
+                strategy._run_inference = orig_run_inference
+                
+        strategy.evaluate = monkey_evaluate
+        log.info("Monkey-patched strategy.evaluate() with prediction injection.")
 
     # 4. Create LiveTrader with simulated adapters
     import tempfile
