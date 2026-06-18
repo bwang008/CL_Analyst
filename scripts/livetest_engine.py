@@ -376,13 +376,12 @@ def run_simulation(
         )
         bars_sub.append(dummy_new)
 
-        # Fire the updateEvent callback (has_new_bar=True)
-        bars_sub.updateEvent.fire(bars_sub, True)
-
         # 3b. In hourly mode, sync rolling_df_5m with the latest bar
         #     so that _check_trailing_stop() can read bar extremes.
         #     In production, 5m bars flow independently; here we mirror
         #     each 1h bar into the 5m rolling window as a proxy.
+        #     MUST be done BEFORE updateEvent.fire() so _check_trailing_stop
+        #     sees the current bar's High/Low (matching backtest evaluation order).
         if bar_size in ("1h", "2h", "4h"):
             new_row = pd.DataFrame([{
                 "DateTime": bar_time,
@@ -397,6 +396,9 @@ def run_simulation(
             trader.rolling_df_5m = pd.concat([trader.rolling_df_5m, new_row])
             if len(trader.rolling_df_5m) > _MAX_ROLLING_BARS:
                 trader.rolling_df_5m = trader.rolling_df_5m.iloc[-_MAX_ROLLING_BARS:]
+
+        # Fire the updateEvent callback (has_new_bar=True)
+        bars_sub.updateEvent.fire(bars_sub, True)
 
         # 4. Flush deferred entry fill callbacks
         #    (fires _on_standard_execution_event → telemetry recording)
@@ -415,7 +417,7 @@ def run_simulation(
                 try:
                     trader._place_bracket_children_on_fill(
                         order_id=int(last_filled),
-                        fill_price=entry_ctx["entry_fill"],
+                        fill_price=entry_ctx["entry_price"],
                         action_str=entry_ctx["action"],
                         qty=entry_ctx["quantity"],
                         contract=SimpleNamespace(symbol=entry_ctx["symbol"]),
@@ -577,6 +579,10 @@ def main():
         help="Log progress every N bars (default: 500)",
     )
     parser.add_argument(
+        "--telegram", action="store_true", default=False,
+        help="Enable real Telegram notifications during simulation (default: OFF)",
+    )
+    parser.add_argument(
         "--predictions-dir", default=None,
         help="Base path to load prediction CSVs from instead of running inference",
     )
@@ -714,16 +720,78 @@ def main():
 
     # 5. Inject sim clock and bootstrap
     _inject_sim_clock(trader)
+
+    # PARITY FIX: _reset_position_state() references self._strategy (private),
+    # but LiveTrader stores it as self.strategy (public). Without this alias,
+    # on_exit() is never called after TP/SL fills, so the strategy's cooldown
+    # counters never activate — causing immediate re-entry after SL exits.
+    trader._strategy = trader.strategy
+
+    # PARITY FIX 2: Cooldown counter timing alignment.
+    #
+    # In the backtest (_run_single_strategy), the counter is:
+    #   1. Incremented at START of each bar loop (line 1200)
+    #   2. Reset to 0 in _close_trade() (mid-bar)
+    #   3. Strategy sees counter=0 on exit bar, counter=1 on next bar
+    #
+    # In the livetest, ConfigurableStrategy.evaluate() does:
+    #   1. Check counter (line 424: if counter <= cooldown → zero buy_prob)
+    #   2. Increment counter (line 436: counter += 1)
+    #   3. Pass incremented counter in EngineState to TieredStrategy
+    #
+    # Net effect: on the exit bar, TieredStrategy sees counter=1 (not 0).
+    # This causes the livetest to release cooldown 1 bar earlier than backtest.
+    #
+    # Fix: Set initial counter so that TieredStrategy sees the correct value:
+    #
+    # For SL/TP exits (signal evaluation runs on exit bar):
+    #   Set to -1: after ConfigurableStrategy's check(-1<=0→zero) + increment,
+    #   TieredStrategy sees counter=0 on exit bar (matching backtest).
+    #
+    # For TIME_BARRIER exits (signal evaluation SKIPPED on exit bar):
+    #   _check_time_barrier() returns True → _on_new_bar() returns immediately.
+    #   Signal evaluation is NOT called on the exit bar. Set counter=0 so the
+    #   NEXT bar starts at counter=0 (matching backtest where strategy IS called
+    #   on the exit bar with counter=0).
+    #
+    # Also neutralize the exit reason so ConfigurableStrategy always uses
+    # tp_cooldown=0, delegating ALL cooldown enforcement to TieredStrategy
+    # (which mirrors the backtest's single cooldown_bars check).
+    orig_on_exit = trader.strategy.on_exit
+
+    def _parity_on_exit(side: int, exit_reason: object, bars_held: int) -> None:
+        orig_on_exit(side, exit_reason, bars_held)
+        # TIME_BARRIER exits call _reset_position_state() with reason="CLOSED"
+        # and skip signal evaluation. SL/TP exits use reason="SL_HIT"/"TP_HIT"
+        # and signal evaluation runs on the exit bar.
+        is_time_barrier = str(exit_reason) == "CLOSED"
+        counter_val = 0 if is_time_barrier else -1
+        if side == 1:
+            trader.strategy._last_exit_bars_ago_long = counter_val
+            trader.strategy._last_exit_reason_long = "PARITY_NEUTRAL"
+        elif side == -1:
+            trader.strategy._last_exit_bars_ago_short = counter_val
+            trader.strategy._last_exit_reason_short = "PARITY_NEUTRAL"
+
+    trader.strategy.on_exit = _parity_on_exit
+
+    # 6. Disable Telegram unless explicitly opted in (prevents flooding
+    #    real channels with hundreds of simulated trade notifications).
+    if not args.telegram:
+        trader._telegram.enabled = False
+        log.info("Telegram alerts DISABLED for simulation (use --telegram to enable)")
+
+    # 7. Bootstrap trader
     _bootstrap_trader(trader, warmup_df, sim_data, sim_exec, bar_size=bar_size)
 
-    # 6. Run simulation
+    # 8. Run simulation
     ledger = run_simulation(
         trader, sim_data, sim_exec, replay_df,
         bar_size=bar_size,
         progress_every=args.progress_every,
     )
 
-    # 7. Export and summarize
+    # 9. Export and summarize
     if args.output:
         output_path = Path(args.output)
     else:

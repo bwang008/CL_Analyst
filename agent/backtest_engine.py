@@ -959,18 +959,17 @@ class BacktestEngine:
         long_cached  = long_col  in ohlcv_df.columns
         short_cached = short_col in ohlcv_df.columns
 
-        if not long_cached or not short_cached:
-            # At least one side needs the rolling mean — compute True Range once
-            tr = np.maximum(
-                ohlcv["High"] - ohlcv["Low"],
-                np.maximum(
-                    (ohlcv["High"] - ohlcv["Close"].shift(1)).abs(),
-                    (ohlcv["Low"]  - ohlcv["Close"].shift(1)).abs(),
-                ),
-            )
-
-        ohlcv["atr_long_"]  = ohlcv_df[long_col].values  if long_cached  else tr.rolling(self.atr_period_long).mean()
-        ohlcv["atr_short_"] = ohlcv_df[short_col].values if short_cached else tr.rolling(self.atr_period_short).mean()
+        import pandas_ta as _ta
+        if not long_cached:
+            ohlcv["atr_long_"] = ohlcv.ta.atr(length=self.atr_period_long).values
+        else:
+            ohlcv["atr_long_"] = ohlcv_df[long_col].values
+            
+        if not short_cached:
+            ohlcv["atr_short_"] = ohlcv.ta.atr(length=self.atr_period_short).values
+        else:
+            ohlcv["atr_short_"] = ohlcv_df[short_col].values
+            
         # Legacy column: used by legacy loop methods and as default
         ohlcv["atr_"] = ohlcv["atr_short_"]
 
@@ -983,16 +982,9 @@ class BacktestEngine:
             ohlcv["exec_Close"] = exec_aligned["Close"].values
 
             # Compute execution ATR from raw prices for TP/SL sizing
-            exec_tr = np.maximum(
-                exec_aligned["High"] - exec_aligned["Low"],
-                np.maximum(
-                    (exec_aligned["High"] - exec_aligned["Close"].shift(1)).abs(),
-                    (exec_aligned["Low"]  - exec_aligned["Close"].shift(1)).abs(),
-                ),
-            )
-            ohlcv["exec_atr_"] = exec_tr.rolling(self.atr_period).mean().values
-            ohlcv["exec_atr_long_"]  = exec_tr.rolling(self.atr_period_long).mean().values
-            ohlcv["exec_atr_short_"] = exec_tr.rolling(self.atr_period_short).mean().values
+            ohlcv["exec_atr_"] = exec_aligned.ta.atr(length=self.atr_period).values
+            ohlcv["exec_atr_long_"]  = exec_aligned.ta.atr(length=self.atr_period_long).values
+            ohlcv["exec_atr_short_"] = exec_aligned.ta.atr(length=self.atr_period_short).values
         else:
             # Fallback: use same OHLCV for both brain and wallet
             ohlcv["exec_Open"]  = ohlcv["Open"].values

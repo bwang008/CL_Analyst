@@ -845,7 +845,11 @@ class LiveTrader:
             "environment": self._environment,
         }
 
-    def _reset_position_state(self) -> None:
+    def _reset_position_state(self, reason: str = "CLOSED") -> None:
+        if hasattr(self, '_strategy') and self._strategy is not None and self._position_side != 0:
+            if hasattr(self._strategy, 'on_exit'):
+                self._strategy.on_exit(self._position_side, reason, self._position_bars_held)
+                
         self._position_entry_bar_time = None
         self._position_bars_held = 0
         self._trailing_activated = False
@@ -3420,7 +3424,7 @@ class LiveTrader:
                     )
                 except Exception:
                     pass
-                self._reset_position_state()
+                self._reset_position_state(reason="TP_HIT" if is_tp_fill else "SL_HIT")
             else:
                 if hasattr(self, '_processed_entry_order_ids'):
                     self._processed_entry_order_ids.add(order_id)

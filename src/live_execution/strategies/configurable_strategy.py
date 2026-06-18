@@ -88,6 +88,12 @@ class ConfigurableStrategy(Strategy):
         )
         self._is_ensemble: bool = "models" in self.config
 
+        # Internal state for execution strategy cooldowns
+        self._last_exit_bars_ago_long: int = 9999
+        self._last_exit_bars_ago_short: int = 9999
+        self._last_exit_reason_long: str = ""
+        self._last_exit_reason_short: str = ""
+
         # ── Tiered config ─────────────────────────────────────────────
         if self._is_tiered:
             self._direction = "BOTH"
@@ -409,11 +415,38 @@ class ConfigurableStrategy(Strategy):
                     sell_prob=sell_prob,
                 )
 
+        # Advanced cooldown guard to match BacktestEngine
+        if current_position == 0:
+            long_cfg = self.config.get("long", {})
+            tp_cd_l = long_cfg.get("tp_cooldown_bars", self.config.get("tp_cooldown_bars", 0))
+            sl_cd_l = long_cfg.get("sl_cooldown_bars", self.config.get("sl_cooldown_bars", 3))
+            long_cooldown = sl_cd_l if self._last_exit_reason_long in ("SL_HIT", "TIME_BARRIER", "REVERSE") else tp_cd_l
+            if self._last_exit_bars_ago_long <= long_cooldown:
+                buy_prob = 0.0
+
+            short_cfg = self.config.get("short", {})
+            tp_cd_s = short_cfg.get("tp_cooldown_bars", self.config.get("tp_cooldown_bars", 0))
+            sl_cd_s = short_cfg.get("sl_cooldown_bars", self.config.get("sl_cooldown_bars", 3))
+            short_cooldown = sl_cd_s if self._last_exit_reason_short in ("SL_HIT", "TIME_BARRIER", "REVERSE") else tp_cd_s
+            if self._last_exit_bars_ago_short <= short_cooldown:
+                sell_prob = 0.0
+
+        # Update cooldown counters
+        if current_position == 0:
+            self._last_exit_bars_ago_long += 1
+            self._last_exit_bars_ago_short += 1
+        elif current_position > 0:
+            self._last_exit_bars_ago_short += 1
+        elif current_position < 0:
+            self._last_exit_bars_ago_long += 1
+
         state = EngineState(
             position=1 if current_position != 0 else 0,
             side=side,
             bars_held=0,  # Live trader tracks its own state, so we just provide FSM equivalents
             open_positions=1 if current_position != 0 else 0,
+            last_exit_bars_ago_long=self._last_exit_bars_ago_long,
+            last_exit_bars_ago_short=self._last_exit_bars_ago_short,
         )
 
         orders = self._exec_strategy.on_bar(
@@ -531,3 +564,16 @@ class ConfigurableStrategy(Strategy):
             **tier_overrides,
         )
 
+    def on_exit(self, side: int, exit_reason: object, bars_held: int) -> None:
+        """Forward position closure to the underlying execution strategy."""
+        if side == 1:
+            self._last_exit_bars_ago_long = 0
+            self._last_exit_reason_long = str(exit_reason)
+        elif side == -1:
+            self._last_exit_bars_ago_short = 0
+            self._last_exit_reason_short = str(exit_reason)
+            
+        if hasattr(self._exec_strategy, 'on_exit'):
+            self._exec_strategy.on_exit(side, exit_reason, bars_held)
+
+    # -- Strategy interface --------------------------------------------------

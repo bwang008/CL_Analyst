@@ -189,7 +189,7 @@ class SimulatedExecution(ExecutionClient):
         events = []
         for oid, order in self._resting_orders.items():
             events.append(StandardExecutionEvent(
-                order_id=str(oid),
+                order_id=oid,
                 symbol=order.symbol,
                 status="Submitted",
                 filled_qty=0,
@@ -282,7 +282,7 @@ class SimulatedExecution(ExecutionClient):
 
         # Queue fill callback (fired by driver after _on_new_bar returns)
         fill_event = StandardExecutionEvent(
-            order_id=str(order_id),
+            order_id=order_id,
             symbol=symbol,
             status="Filled",
             filled_qty=quantity,
@@ -425,23 +425,30 @@ class SimulatedExecution(ExecutionClient):
         exit_mode: str,
         current_price: float,
     ) -> Any:
-        """Close the current position at current_price + slippage.
+        """Close the current position at bar_open + slippage.
 
         Used by LiveTrader for time-barrier exits.
+
+        NOTE: BacktestEngine's time barrier exit uses bar_open (not Close).
+        LiveTrader passes current_price=Close, but for parity we override
+        with self._current_bar_open to match the backtest's behaviour.
         """
         if self._position == 0:
             return None
+
+        # Use bar_open for parity with BacktestEngine time barrier exit
+        exit_base_price = self._current_bar_open
 
         # Determine exit action
         exit_action = "SELL" if self._position > 0 else "BUY"
         qty = abs(self._position)
 
         # Apply slippage
-        fill_price = self._apply_slippage(current_price, exit_action)
+        fill_price = self._apply_slippage(exit_base_price, exit_action)
 
         # Record trade
         self._record_exit(
-            exit_price=current_price,
+            exit_price=exit_base_price,
             exit_fill=fill_price,
             exit_reason="TIME_BARRIER",
             exit_bar_time=self._current_bar_time,
@@ -456,7 +463,7 @@ class SimulatedExecution(ExecutionClient):
 
         log.info(
             "SIM CLOSE: %s %d %s @ %.2f (fill=%.2f) reason=TIME_BARRIER",
-            exit_action, qty, symbol, current_price, fill_price,
+            exit_action, qty, symbol, exit_base_price, fill_price,
         )
 
         return SimpleNamespace(
@@ -682,7 +689,7 @@ class SimulatedExecution(ExecutionClient):
 
             # Fire callback to LiveTrader
             event = StandardExecutionEvent(
-                order_id=str(order.order_id),
+                order_id=order.order_id,
                 symbol=order.symbol,
                 status="Filled",
                 filled_qty=order.quantity,
@@ -727,7 +734,7 @@ class SimulatedExecution(ExecutionClient):
 
             # Fire callback to LiveTrader
             event = StandardExecutionEvent(
-                order_id=str(order.order_id),
+                order_id=order.order_id,
                 symbol=order.symbol,
                 status="Filled",
                 filled_qty=order.quantity,
