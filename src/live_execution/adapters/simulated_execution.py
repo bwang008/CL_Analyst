@@ -378,6 +378,32 @@ class SimulatedExecution(ExecutionClient):
 
         return child_trades
 
+    def modify_order(self, order_id, event=None) -> None:
+        """Modify a resting order's price.
+
+        Called by LiveTrader._check_trailing_stop() to update the SL
+        price after trailing stop activation.  The new price is already
+        written into the event's raw_event.order.auxPrice by the caller.
+        We just need to update our internal _resting_orders dict.
+        """
+        oid = int(order_id) if not isinstance(order_id, int) else order_id
+        resting = self._resting_orders.get(oid)
+        if resting is None:
+            log.debug("modify_order: orderId=%s not found in resting orders", order_id)
+            return
+        # Read the new price from the event if available
+        if event is not None:
+            raw = getattr(event, "raw_event", None)
+            raw_order = getattr(raw, "order", None) if raw else None
+            new_price = getattr(raw_order, "auxPrice", None) if raw_order else None
+            if new_price is not None:
+                old_price = resting.price
+                resting.price = new_price
+                log.debug(
+                    "SIM MODIFY ORDER: orderId=%d price=%.2f → %.2f",
+                    oid, old_price, new_price,
+                )
+
     def cancel_open_orders(self, symbol: str) -> int:
         """Cancel all resting orders for the given symbol."""
         to_remove = [

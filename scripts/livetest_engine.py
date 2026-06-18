@@ -46,6 +46,7 @@ from src.live_execution.adapters.simulated_data_feed import (
     _make_bar_object,
 )
 from src.live_execution.adapters.simulated_execution import SimulatedExecution
+from src.live_execution.interfaces.execution_interface import StandardExecutionEvent
 from src.live_execution.live_trader import LiveTrader
 from src.live_execution.strategies.configurable_strategy import ConfigurableStrategy
 from src.live_execution.data_manager import DataManager
@@ -419,6 +420,42 @@ def run_simulation(
                         qty=entry_ctx["quantity"],
                         contract=SimpleNamespace(symbol=entry_ctx["symbol"]),
                     )
+                    # Register TP/SL child orders in _open_orders so
+                    # _check_trailing_stop() can find them to modify.
+                    for oid in (trader._tp_order_ids or []):
+                        trader._open_orders[oid] = StandardExecutionEvent(
+                            order_id=oid,
+                            symbol=entry_ctx["symbol"],
+                            status="PreSubmitted",
+                            filled_qty=0,
+                            remaining_qty=entry_ctx["quantity"],
+                            avg_price=0.0,
+                            raw_event=SimpleNamespace(
+                                order=SimpleNamespace(
+                                    orderId=oid, orderType="LMT",
+                                    auxPrice=0.0,
+                                ),
+                            ),
+                        )
+                    sl_oid = trader._sl_order_id
+                    if sl_oid is not None:
+                        # Look up actual SL price from resting orders
+                        sl_resting = sim_exec._resting_orders.get(sl_oid)
+                        sl_price = sl_resting.price if sl_resting else 0.0
+                        trader._open_orders[sl_oid] = StandardExecutionEvent(
+                            order_id=sl_oid,
+                            symbol=entry_ctx["symbol"],
+                            status="PreSubmitted",
+                            filled_qty=0,
+                            remaining_qty=entry_ctx["quantity"],
+                            avg_price=0.0,
+                            raw_event=SimpleNamespace(
+                                order=SimpleNamespace(
+                                    orderId=sl_oid, orderType="STP",
+                                    auxPrice=sl_price,
+                                ),
+                            ),
+                        )
                 except Exception as e:
                     log.warning("Failed to place bracket children: %s", e)
 
