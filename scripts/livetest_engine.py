@@ -47,6 +47,7 @@ from src.live_execution.adapters.simulated_data_feed import (
 from src.live_execution.adapters.simulated_execution import SimulatedExecution
 from src.live_execution.live_trader import LiveTrader
 from src.live_execution.strategies.configurable_strategy import ConfigurableStrategy
+from src.live_execution.data_manager import DataManager
 
 log = logging.getLogger("LiveTestEngine")
 
@@ -57,6 +58,47 @@ log = logging.getLogger("LiveTestEngine")
 
 _MAX_ROLLING_BARS = 44_000   # Match LiveTrader's _MAX_ROLLING_BARS
 _DEFAULT_WARMUP_BARS = 15_000
+
+# Bar timedelta lookup
+_BAR_TIMEDELTA = {
+    "5m": pd.Timedelta(minutes=5),
+    "1h": pd.Timedelta(hours=1),
+    "2h": pd.Timedelta(hours=2),
+    "4h": pd.Timedelta(hours=4),
+}
+
+
+# ---------------------------------------------------------------------------
+# Mock DataManager (for 1h feature pipeline)
+# ---------------------------------------------------------------------------
+
+class _MockDataManager:
+    """Lightweight DataManager wrapper for simulation.
+
+    Wraps a rolling DataFrame and provides ``get_ratio_adjusted_df()``
+    and ``append_bar()`` without any IBKR, cache, or seed logic.
+    In simulation, we don't have rollover ratios, so the ratio-adjusted
+    df is identical to the raw df.
+    """
+
+    def __init__(self, df: pd.DataFrame) -> None:
+        self._df = df.copy()
+        self.cache_path = Path("__sim_mock__")  # never written
+
+    def get_ratio_adjusted_df(self) -> pd.DataFrame:
+        return self._df.copy()
+
+    def append_bar(self, new_row: pd.DataFrame) -> None:
+        self._df = pd.concat([self._df, new_row])
+        if len(self._df) > _MAX_ROLLING_BARS:
+            self._df = self._df.iloc[-_MAX_ROLLING_BARS:]
+
+    @property
+    def dataframe(self) -> pd.DataFrame:
+        return self._df
+
+    def save_cache(self) -> None:
+        pass  # no-op
 
 
 # ---------------------------------------------------------------------------
@@ -131,12 +173,15 @@ def _bootstrap_trader(
     warmup_df: pd.DataFrame,
     sim_data: SimulatedDataFeed,
     sim_exec: SimulatedExecution,
+    bar_size: str = "5m",
 ) -> None:
     """Initialize the LiveTrader's internal state without calling start().
 
     This reproduces the essential effects of start() → _warm_start() →
     _subscribe() without any IBKR-specific steps (connect, front-month
     resolution, reconnection, heartbeat, etc.).
+
+    Supports both 5m and 1h bar sizes.
     """
     # 1. Mark as connected
     sim_data.connect()
@@ -154,7 +199,6 @@ def _bootstrap_trader(
     trader._front_month_str = "202612"
 
     # 4. Warm-start: set rolling_df directly from warmup data
-    #    This bypasses DataManager.initialize() which would try IBKR backfill.
     rolling_df = warmup_df.copy()
     if "DateTime" in rolling_df.columns and not isinstance(rolling_df.index, pd.DatetimeIndex):
         rolling_df = rolling_df.set_index("DateTime", drop=False)
@@ -164,29 +208,58 @@ def _bootstrap_trader(
     if len(rolling_df) > _MAX_ROLLING_BARS:
         rolling_df = rolling_df.iloc[-_MAX_ROLLING_BARS:]
 
-    trader.rolling_df_5m = rolling_df
-    trader._last_bar_time_5m = rolling_df.index[-1]
+    if bar_size in ("1h", "2h", "4h"):
+        # ── Hourly mode ───────────────────────────────────────────
+        # The 1h callback is the primary inference path.
+        # rolling_df_5m is ALSO populated with the same bars because
+        # _check_trailing_stop() always reads rolling_df_5m.iloc[-1]
+        # for bar extremes tracking (this mirrors production where
+        # 5m bars keep flowing independently of the 1h stream).
+        trader.rolling_df_1h = rolling_df
+        trader._last_bar_time_1h = rolling_df.index[-1]
 
-    # 5. Subscribe to simulated live bars (creates the mock BarDataList)
-    trader._live_bars_5m = sim_data.subscribe_live_bars(
-        symbol="CL", continuous=True, bar_size="5 mins",
-    )
-    # Hook the LiveTrader's callback onto the mock subscription
-    trader._live_bars_5m.updateEvent += trader._on_bar_update_5m
+        # Populate rolling_df_5m with the SAME data so trailing stop
+        # can read bar extremes. In production, 5m bars flow separately;
+        # in simulation, we share the 1h bars as a conservative proxy.
+        trader.rolling_df_5m = rolling_df.copy()
+        trader._last_bar_time_5m = rolling_df.index[-1]
 
-    # 6. Subscribe front-month stream (mock — needed to avoid NoneType errors)
+        # Replace data_manager_1h with our mock (provides get_ratio_adjusted_df)
+        trader.data_manager_1h = _MockDataManager(rolling_df)
+
+        # Subscribe 1h bars and hook the callback
+        trader._live_bars_1h = sim_data.subscribe_live_bars(
+            symbol="CL", continuous=True, bar_size="1 hour",
+        )
+        trader._live_bars_1h.updateEvent += trader._on_bar_update_1h
+
+        log.info(
+            "LiveTrader bootstrapped (1h): rolling_df_1h=%d bars, last_bar=%s",
+            len(trader.rolling_df_1h), trader._last_bar_time_1h,
+        )
+    else:
+        # ── 5m mode ───────────────────────────────────────────────
+        trader.rolling_df_5m = rolling_df
+        trader._last_bar_time_5m = rolling_df.index[-1]
+
+        trader._live_bars_5m = sim_data.subscribe_live_bars(
+            symbol="CL", continuous=True, bar_size="5 mins",
+        )
+        trader._live_bars_5m.updateEvent += trader._on_bar_update_5m
+
+        log.info(
+            "LiveTrader bootstrapped (5m): rolling_df_5m=%d bars, last_bar=%s",
+            len(trader.rolling_df_5m), trader._last_bar_time_5m,
+        )
+
+    # Subscribe front-month stream (mock — needed to avoid NoneType errors)
     trader._front_month_bars = sim_data.subscribe_live_bars(
         symbol="CL", continuous=False, bar_size="5 mins",
     )
     trader._front_month_bars.updateEvent += trader._on_front_month_bar_update
 
-    # 7. Mark as running
+    # Mark as running
     trader._running = True
-
-    log.info(
-        "LiveTrader bootstrapped: rolling_df=%d bars, last_bar=%s",
-        len(trader.rolling_df_5m), trader._last_bar_time_5m,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +292,7 @@ def run_simulation(
     sim_data: SimulatedDataFeed,
     sim_exec: SimulatedExecution,
     replay_df: pd.DataFrame,
+    bar_size: str = "5m",
     progress_every: int = 500,
 ) -> pd.DataFrame:
     """Replay historical bars through the LiveTrader.
@@ -234,6 +308,7 @@ def run_simulation(
         sim_data: SimulatedDataFeed adapter.
         sim_exec: SimulatedExecution matching engine.
         replay_df: DataFrame of bars to replay.
+        bar_size: Bar size ("5m", "1h", etc.).
         progress_every: Log progress every N bars.
 
     Returns:
@@ -242,10 +317,12 @@ def run_simulation(
     total_bars = len(replay_df)
     log.info("Starting replay of %d bars...", total_bars)
 
-    # Get the main subscription (5m brain stream)
-    bars_5m = sim_data.get_subscription()
-    if bars_5m is None:
-        raise RuntimeError("No 5m subscription found — bootstrap failed")
+    # Get the main subscription (matches bar_size)
+    bars_sub = sim_data.get_subscription()
+    if bars_sub is None:
+        raise RuntimeError("No subscription found — bootstrap failed")
+
+    bar_td = _BAR_TIMEDELTA.get(bar_size, pd.Timedelta(minutes=5))
 
     t0 = time.perf_counter()
 
@@ -278,32 +355,51 @@ def run_simulation(
         )
 
         # 3. Push bar into LiveTrader's subscription callback
-        #    LiveTrader._on_bar_update_5m reads bars[-2] (completed bar)
+        #    LiveTrader._on_bar_update_Xm reads bars[-2] (completed bar)
         #    and bars[-1] (new incomplete bar).  We push a completed bar
         #    at [-2] and a dummy at [-1].
         completed_bar = _make_bar_object(bar_time, open_, high, low, close, volume)
 
         # Push: append completed bar, then append a dummy "new" bar
         # so len(bars) >= 2 and bars[-2] is the completed one.
-        bars_5m.append(completed_bar)
+        bars_sub.append(completed_bar)
 
         # Create dummy "new incomplete bar" (bar that just opened)
         dummy_new = _make_bar_object(
-            bar_time + pd.Timedelta(minutes=5),
+            bar_time + bar_td,
             close, close, close, close, 0,
         )
-        bars_5m.append(dummy_new)
+        bars_sub.append(dummy_new)
 
         # Fire the updateEvent callback (has_new_bar=True)
-        bars_5m.updateEvent.fire(bars_5m, True)
+        bars_sub.updateEvent.fire(bars_sub, True)
+
+        # 3b. In hourly mode, sync rolling_df_5m with the latest bar
+        #     so that _check_trailing_stop() can read bar extremes.
+        #     In production, 5m bars flow independently; here we mirror
+        #     each 1h bar into the 5m rolling window as a proxy.
+        if bar_size in ("1h", "2h", "4h"):
+            new_row = pd.DataFrame([{
+                "DateTime": bar_time,
+                "Open": open_, "High": high,
+                "Low": low, "Close": close,
+                "Volume": volume,
+            }])
+            new_row = new_row.set_index(
+                pd.DatetimeIndex(new_row["DateTime"]), drop=False
+            )
+            new_row.index.name = "DateTime"
+            trader.rolling_df_5m = pd.concat([trader.rolling_df_5m, new_row])
+            if len(trader.rolling_df_5m) > _MAX_ROLLING_BARS:
+                trader.rolling_df_5m = trader.rolling_df_5m.iloc[-_MAX_ROLLING_BARS:]
 
         # 4. Flush deferred entry fill callbacks
         #    (fires _on_standard_execution_event which calls place_child_orders)
         sim_exec.flush_deferred_callbacks()
 
         # Trim bars list to prevent unbounded memory growth
-        if len(bars_5m) > 100:
-            del bars_5m[:-4]
+        if len(bars_sub) > 100:
+            del bars_sub[:-4]
 
         # Progress logging
         if (i + 1) % progress_every == 0:
@@ -391,7 +487,11 @@ def main():
     )
     parser.add_argument(
         "--data", required=True,
-        help="Path to historical data parquet (e.g., data/processed/CL_set_07.parquet)",
+        help="Path to historical data parquet (e.g., data/processed/CL_HourSet_11.parquet)",
+    )
+    parser.add_argument(
+        "--exec-data", default=None,
+        help="Path to raw/panama execution price CSV (for split-brain)",
     )
     parser.add_argument(
         "--warmup-bars", type=int, default=_DEFAULT_WARMUP_BARS,
@@ -405,6 +505,10 @@ def main():
         "--log-level", default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Log level (default: INFO)",
+    )
+    parser.add_argument(
+        "--slippage-per-side", type=float, default=0.01,
+        help="Slippage per side in price units (default: 0.01)",
     )
     parser.add_argument(
         "--progress-every", type=int, default=500,
@@ -435,49 +539,59 @@ def main():
     log.info("  Warmup bars: %d", args.warmup_bars)
     log.info("=" * 60)
 
+    # 0. Read bar_size from config
+    with open(config_path) as f:
+        raw_config = json.load(f)
+    bar_size = raw_config.get("bar_size", "5m").lower()
+    log.info("  Bar size:    %s", bar_size)
+
     # 1. Load and split data
     warmup_df, replay_df = load_and_split_data(args.data, args.warmup_bars)
 
     # 2. Create adapters
     sim_data = SimulatedDataFeed(warmup_df=warmup_df, replay_df=replay_df)
-    sim_exec = SimulatedExecution()
+    sim_exec = SimulatedExecution(slippage_per_side=args.slippage_per_side)
 
     # 3. Create Strategy
     strategy = ConfigurableStrategy(config_path=str(config_path))
     log.info(
-        "Strategy: %s  direction=%s  features=%d",
-        strategy.name, strategy.direction, len(strategy.feature_names),
+        "Strategy: %s  direction=%s  features=%d  bar_size=%s",
+        strategy.name, strategy.direction, len(strategy.feature_names), bar_size,
     )
 
     # 4. Create LiveTrader with simulated adapters
-    #    Use a temp DB for telemetry so we don't pollute the real one.
     import tempfile
     tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     tmp_db.close()
     tmp_db_path = tmp_db.name
 
-    # Use the real seed path — DataManager needs it for initialization.
-    # But since we bypass DataManager.initialize() in bootstrap, the seed
-    # doesn't actually need to exist.  We use a dummy path.
+    # For hourly configs, we need a valid seed path to avoid FileNotFoundError
+    # in LiveTrader.__init__. We use the real seed path for the 5m DataManager
+    # (which is always created even for 1h strategies) but skip its initialization.
+    from src.data_paths import get_data_path as _dp_data_path, get_data_root as _dp_data_root
+    seed_path_5m = str(_dp_data_path("raw/cl-5m_bk.csv"))
+    cache_path_5m = str(_dp_data_root() / "processed" / "warm_start_cache_sim.parquet")
+
     trader = LiveTrader(
         data_client=sim_data,
         exec_client=sim_exec,
         strategy=strategy,
         db_path=tmp_db_path,
-        seed_path=str(_PROJECT_ROOT / "data" / "raw" / "cl-5m_bk.csv"),
-        cache_path=str(_PROJECT_ROOT / "data" / "processed" / "warm_start_cache_sim.parquet"),
+        seed_path=seed_path_5m,
+        cache_path=cache_path_5m,
         quantity=1,
         dry_run=False,
-        entry_mode="market",  # Use market orders in simulation
+        entry_mode="market",
     )
 
     # 5. Inject sim clock and bootstrap
     _inject_sim_clock(trader)
-    _bootstrap_trader(trader, warmup_df, sim_data, sim_exec)
+    _bootstrap_trader(trader, warmup_df, sim_data, sim_exec, bar_size=bar_size)
 
     # 6. Run simulation
     ledger = run_simulation(
         trader, sim_data, sim_exec, replay_df,
+        bar_size=bar_size,
         progress_every=args.progress_every,
     )
 
