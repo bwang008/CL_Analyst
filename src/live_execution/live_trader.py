@@ -391,6 +391,7 @@ class LiveTrader:
         self._front_month_bars = None  # Two-Stream: raw front-month
         self._front_month_local_symbol = None
         self._front_month_str: Optional[str] = None
+        self._front_month_last_close: Optional[float] = None  # Hands stream price
         self._running = False
         self._last_bar_time_5m: Optional[pd.Timestamp] = None
         self._last_bar_time_1h: Optional[pd.Timestamp] = None
@@ -2024,6 +2025,7 @@ class LiveTrader:
             # 2. Update contract references
             self._front_month_local_symbol = new_local_sym
             self._front_month_str = new_month_str
+            self._front_month_last_close = None  # stale — will refresh on next bar
             log.info(
                 "Rollover: updated front-month to %s (%s)",
                 new_local_sym, new_month_str,
@@ -2414,6 +2416,10 @@ class LiveTrader:
             new_bar.open, new_bar.high, new_bar.low,
             new_bar.close, float(new_bar.volume),
         )
+        # Cache close for execution pricing (used by _on_new_bar to set
+        # the MARKETABLE_LIMIT price on the actual execution contract
+        # rather than the Brain stream's continuous contract close).
+        self._front_month_last_close = float(new_bar.close)
 
     def _on_bar_update_5m(self, bars, has_new_bar=False) -> None:
         """Callback fired by ib_insync when continuous 5m bars are updated."""
@@ -2611,8 +2617,19 @@ class LiveTrader:
             log.info("Feature generation skipped (insufficient data or NaN)")
             return
 
-        # WALLET: current_price comes from RAW rolling_df (real market price)
-        current_price = float(rolling_df["Close"].iloc[-1])
+        # WALLET: current_price for execution pricing.
+        # Prefer the Hands stream (front-month close) so that the
+        # MARKETABLE_LIMIT price, TP/SL offsets, and trailing stop
+        # reference the actual execution contract price.  During the
+        # ~2-day rollover mismatch window (when our buffer rolls before
+        # the continuous contract), this avoids limit orders priced on
+        # a different contract month.
+        # Falls back to Brain stream (rolling_df close) if front-month
+        # bars haven't arrived yet (e.g., first bar after startup).
+        if self._front_month_last_close is not None:
+            current_price = self._front_month_last_close
+        else:
+            current_price = float(rolling_df["Close"].iloc[-1])
 
         # Get per-side ATR for bracket sizing (parity with BacktestEngine).
         # CRITICAL: Bracket ATR must use RAW prices, NOT ratio-adjusted.

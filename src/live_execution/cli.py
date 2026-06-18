@@ -274,7 +274,7 @@ def main() -> None:
     from src.live_execution.factories import DataFeedFactory, ExecutionFactory
 
     data_client = DataFeedFactory.create(args.data_source, host=args.host, port=args.data_port, client_id=resolved_client_id)
-    exec_client = ExecutionFactory.create(args.exec_source, host=args.host, port=args.exec_port, client_id=resolved_client_id)
+    exec_client = ExecutionFactory.create(args.exec_source, host=args.host, port=args.exec_port, client_id=resolved_client_id + 1)
 
     trader = LiveTrader(
         data_client=data_client,
