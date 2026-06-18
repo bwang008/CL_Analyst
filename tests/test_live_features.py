@@ -2,7 +2,7 @@
 Tests for the live feature pipeline.
 
 Verifies that build_live_features() produces exactly the 80 columns
-expected by the S_Ultimate (EXP-017) model.
+expected by the current models.
 """
 
 import numpy as np

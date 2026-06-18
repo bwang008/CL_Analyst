@@ -2,7 +2,7 @@
 Archive trained model artifacts into a registry bundle keyed by experiment ID.
 
 Usage:
-    python agent/archive_model.py --experiment-id EXP-017
+    python agent/archive_model.py --experiment-id HS11_3x1_6H
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ def _find_experiment(experiment_id: str, log_data: dict) -> dict:
 
 def _extract_report_metrics(report_text: str, experiment_id: str) -> dict:
     """
-    Parse summary metrics from REPORT.log for EXP-017 champion table.
+    Parse summary metrics from REPORT.log for champion table.
     Falls back to empty values if not found.
     """
     metrics = {
@@ -64,7 +64,7 @@ def _extract_report_metrics(report_text: str, experiment_id: str) -> dict:
         "tp_hits": None,
         "sl_hits": None,
     }
-    if experiment_id != "EXP-017" or not report_text:
+    if not report_text:
         return metrics
 
     patterns = {
@@ -365,7 +365,7 @@ def archive_experiment(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--experiment-id", required=True, help="Experiment ID to archive, e.g., EXP-017")
+    parser.add_argument("--experiment-id", required=True, help="Experiment ID to archive, e.g., HS11_3x1_6H")
     parser.add_argument(
         "--model-path",
         default=None,

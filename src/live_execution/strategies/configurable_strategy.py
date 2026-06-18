@@ -13,7 +13,7 @@ configs/strategies/ and point it at a model registry experiment.
 Config schema (see configs/strategies/manatee.json for reference):
     {
         "nickname":         str   — Human-readable strategy name,
-        "experiment_id":    str   — Registry folder name (e.g. "EXP-017_S_Ultimate"),
+        "experiment_id":    str   — Registry folder name (e.g. "HS11_3x1_6H"),
         "direction":        str   — "LONG", "SHORT", or "BOTH",
         "allow_concurrent": bool  — Allow entry while a position is open,
         "entry_threshold":  float — Min probability to trigger an entry,
@@ -309,7 +309,7 @@ class ConfigurableStrategy(Strategy):
         """Load a LGBMLearner from the model registry or a direct path.
 
         Args:
-            experiment_id: Registry folder name (e.g. "EXP-017_S_Ultimate").
+            experiment_id: Registry folder name (e.g. "HS11_3x1_6H").
             label: Human-readable label for logging ("LONG" or "SHORT").
             model_path: Optional direct path to the model PKL file.
                 If provided, used instead of the registry path.

@@ -1,0 +1,137 @@
+{
+  "timestamp": "2026-06-15T16:41:26",
+  "data_path": "/home/bwang/data/cl-1h_bk_HourSet_11.parquet",
+  "train_cutoff_date": "2022-01-01",
+  "strategy_config": "configs/strategies/hourly_ensemble_010.json",
+  "wall_time_seconds": 18.4,
+  "backtest_results": {
+    "long_logloss": {
+      "direction": "long",
+      "trade_count": 802,
+      "total_pnl": -11938.52,
+      "win_rate": 70.45,
+      "profit_factor": 0.9632,
+      "max_drawdown": -22170.62,
+      "exit_distribution": {
+        "TP": {
+          "count": 562,
+          "pct": 70.07481296758104
+        },
+        "SL": {
+          "count": 224,
+          "pct": 27.93017456359102
+        },
+        "TIME_BARRIER": {
+          "count": 15,
+          "pct": 1.8703241895261846
+        },
+        "TRAILING_BE": {
+          "count": 1,
+          "pct": 0.12468827930174563
+        }
+      }
+    },
+    "long_average_precision": {
+      "direction": "long",
+      "trade_count": 812,
+      "total_pnl": 29421.46,
+      "win_rate": 73.03,
+      "profit_factor": 1.0973,
+      "max_drawdown": -22048.87,
+      "exit_distribution": {
+        "TP": {
+          "count": 590,
+          "pct": 72.66009852216749
+        },
+        "SL": {
+          "count": 209,
+          "pct": 25.738916256157633
+        },
+        "TIME_BARRIER": {
+          "count": 12,
+          "pct": 1.477832512315271
+        },
+        "TRAILING_BE": {
+          "count": 1,
+          "pct": 0.12315270935960591
+        }
+      }
+    },
+    "short_logloss": {
+      "direction": "short",
+      "trade_count": 580,
+      "total_pnl": 10039.9,
+      "win_rate": 63.1,
+      "profit_factor": 1.0514,
+      "max_drawdown": -34515.19,
+      "exit_distribution": {
+        "SL": {
+          "count": 152,
+          "pct": 26.20689655172414
+        },
+        "TRAILING_BE": {
+          "count": 408,
+          "pct": 70.34482758620689
+        },
+        "TP": {
+          "count": 19,
+          "pct": 3.2758620689655173
+        },
+        "TIME_BARRIER": {
+          "count": 1,
+          "pct": 0.1724137931034483
+        }
+      }
+    },
+    "short_average_precision": {
+      "direction": "short",
+      "trade_count": 152,
+      "total_pnl": -17261.98,
+      "win_rate": 62.5,
+      "profit_factor": 0.7038,
+      "max_drawdown": -20624.95,
+      "exit_distribution": {
+        "SL": {
+          "count": 49,
+          "pct": 32.23684210526316
+        },
+        "TRAILING_BE": {
+          "count": 98,
+          "pct": 64.47368421052632
+        },
+        "TP": {
+          "count": 4,
+          "pct": 2.631578947368421
+        },
+        "TIME_BARRIER": {
+          "count": 1,
+          "pct": 0.6578947368421052
+        }
+      }
+    },
+    "ensemble_logloss": {
+      "direction": "ensemble",
+      "metric": "logloss",
+      "trade_count": 1108,
+      "total_pnl": 37548.52,
+      "win_rate": 68.68,
+      "profit_factor": 1.0922,
+      "max_drawdown": -27590.06
+    },
+    "ensemble_average_precision": {
+      "direction": "ensemble",
+      "metric": "average_precision",
+      "trade_count": 878,
+      "total_pnl": 20998.34,
+      "win_rate": 71.75,
+      "profit_factor": 1.0636,
+      "max_drawdown": -19784.14
+    }
+  },
+  "registry_bundles": [
+    "/home/bwang/project/canary_output/registry/E2E_HourSet_11_long_logloss",
+    "/home/bwang/project/canary_output/registry/E2E_HourSet_11_long_average_precision",
+    "/home/bwang/project/canary_output/registry/E2E_HourSet_11_short_logloss",
+    "/home/bwang/project/canary_output/registry/E2E_HourSet_11_short_average_precision"
+  ]
+}

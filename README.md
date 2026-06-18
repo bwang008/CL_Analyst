@@ -1,5 +1,7 @@
 # CL_Analyst
 
+> **Note**: Datasets before `HS09` (including `HS08` and earlier 5-min models) are deprecated and invalid due to data leakage. The project now uses hourly models (e.g., `HS09`, `HS11`). 5-minute bars are retained exclusively as a live subscription for heartbeat updates, not for training.
+
 Machine learning pipeline for predicting significant price movements in Crude Oil (CL) futures using multi-timeframe (5-minute and hourly) OHLCV data.
 
 ## Setup
@@ -262,9 +264,7 @@ The production-grade model is **`HourSet_08_Ensemble_03`**, an asymmetric ensemb
 * **Short Model Holdout PnL**: `$2,018` (31 trades, 49.26% win rate, Sharpe: 2.4803)
 
 ### Primary artifacts
-* **Asymmetric Ensemble Config**: `configs/strategies/HourSet_08_Ensemble_03_05242026.json`
-* **Long Model Predictions**: `data/predictions/oos_predictions_sweep_hs08_3x1_24h_20260523_2040_long_logloss.csv`
-* **Short Model Predictions**: `data/predictions/oos_predictions_sweep_hs08_4x1_6h_20260523_2040_short_logloss.csv`
+* **Asymmetric Ensemble Config**: `configs/strategies/HS09_Ensemble_E01_06032026.json`
 * **Registry (archived bundles)**: `models/registry/` (catalog in `models/registry/README.md`)
 
 ## Global Risk Filters (ExecutionGuard)
@@ -440,7 +440,7 @@ python -m pytest tests/test_config_parity.py tests/test_pipeline_parity.py tests
 python scripts/validate_parity.py
 
 # Side-by-side config parameter comparison (manual review)
-python tests/test_config_parity.py --compare configs/strategies/hs08_scout_3x1_12h_logloss_opt.json
+python tests/test_config_parity.py --compare configs/strategies/HS09_Ensemble_E01_06032026.json
 ```
 
 **Validation layers:**

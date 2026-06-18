@@ -1,0 +1,30 @@
+{
+  "experiment_id": "E2E_HourSet_11_short_logloss",
+  "strategy": "e2e_alpha_factory_short_logloss",
+  "hypothesis": "E2E Alpha Factory: short model optimized for logloss on set_09",
+  "data_path": "/home/bwang/data/cl-1h_bk_HourSet_11.parquet",
+  "target_name": "TARGET_TRIPLE_3x1_6H_SHORT",
+  "method": "walk_forward",
+  "balance_mode": "downsample",
+  "train_cutoff_date": "2022-01-01",
+  "model_params": {
+    "boosting_type": "gbdt",
+    "num_leaves": 24,
+    "min_child_samples": 143,
+    "learning_rate": 0.01051318559655193,
+    "feature_fraction": 0.5464877152492771,
+    "reg_alpha": 0.014210970115865647,
+    "reg_lambda": 0.033485175012286254,
+    "max_depth": 7,
+    "min_gain_to_split": 0.4157782610502007,
+    "path_smooth": 9.363985599193658,
+    "scale_pos_weight_mult": 1.0264064865721105,
+    "bagging_fraction": 0.9305738939556278,
+    "bagging_freq": 6,
+    "n_estimators": 2400
+  },
+  "optuna_provenance": {
+    "source": "Optuna study: sweep_hs11_3x1_6h_20260615_0622_short_logloss",
+    "note": "E2E Alpha Factory production run on set_09 (MACRO lookahead fix)"
+  }
+}

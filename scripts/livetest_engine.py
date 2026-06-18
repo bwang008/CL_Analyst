@@ -26,6 +26,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -324,6 +325,9 @@ def run_simulation(
 
     bar_td = _BAR_TIMEDELTA.get(bar_size, pd.Timedelta(minutes=5))
 
+    # Track which entry fills have already had bracket children placed
+    _placed_children: set = set()
+
     t0 = time.perf_counter()
 
     for i, (bar_time, row) in enumerate(replay_df.iterrows()):
@@ -394,8 +398,29 @@ def run_simulation(
                 trader.rolling_df_5m = trader.rolling_df_5m.iloc[-_MAX_ROLLING_BARS:]
 
         # 4. Flush deferred entry fill callbacks
-        #    (fires _on_standard_execution_event which calls place_child_orders)
+        #    (fires _on_standard_execution_event → telemetry recording)
         sim_exec.flush_deferred_callbacks()
+
+        # 5. After entry fill, explicitly place bracket children (TP/SL)
+        #    _on_standard_execution_event doesn't call _place_bracket_children_on_fill
+        #    automatically — in production, IBKR brackets are placed atomically.
+        #    In simulation, we must trigger it explicitly after the fill callback.
+        last_filled = getattr(trader, "_last_filled_entry_order_id", None)
+        if last_filled is not None and last_filled not in _placed_children:
+            _placed_children.add(last_filled)
+            # Look up fill details from the sim execution
+            entry_ctx = sim_exec._active_entry
+            if entry_ctx is not None:
+                try:
+                    trader._place_bracket_children_on_fill(
+                        order_id=int(last_filled),
+                        fill_price=entry_ctx["entry_fill"],
+                        action_str=entry_ctx["action"],
+                        qty=entry_ctx["quantity"],
+                        contract=SimpleNamespace(symbol=entry_ctx["symbol"]),
+                    )
+                except Exception as e:
+                    log.warning("Failed to place bracket children: %s", e)
 
         # Trim bars list to prevent unbounded memory growth
         if len(bars_sub) > 100:

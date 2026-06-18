@@ -18,7 +18,7 @@ If predictions diverge -> Pipeline Bug (live vs. batch feature mismatch).
 Usage:
     python scripts/validate_parity.py
     python scripts/validate_parity.py --file data/processed/mock_shadow_log.parquet
-    python scripts/validate_parity.py --file data/processed/live_shadow_log.parquet --model-dir models/registry/EXP-017_S_Ultimate
+    python scripts/validate_parity.py --file data/processed/live_shadow_log.parquet --model-dir models/registry/HS11_3x1_6H
 """
 
 from __future__ import annotations

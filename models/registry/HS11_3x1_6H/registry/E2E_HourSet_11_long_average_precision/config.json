@@ -1,0 +1,24 @@
+{
+  "experiment_id": "E2E_HourSet_11_long_average_precision",
+  "strategy": "e2e_alpha_factory_long_average_precision",
+  "timestamp": "2026-06-15T16:41:12",
+  "target_name": "TARGET_TRIPLE_3x1_6H_LONG",
+  "type": "Long",
+  "dataset_path": "/home/bwang/data/cl-1h_bk_HourSet_11.parquet",
+  "model_params": {
+    "boosting_type": "gbdt",
+    "num_leaves": 109,
+    "min_child_samples": 155,
+    "learning_rate": 0.0026695711413196703,
+    "feature_fraction": 0.6648348356976387,
+    "reg_alpha": 0.01580376172471022,
+    "reg_lambda": 1.0317021425270236,
+    "max_depth": 3,
+    "min_gain_to_split": 1.7857078837846105,
+    "path_smooth": 0.8514200428855392,
+    "scale_pos_weight_mult": 1.027056433650209,
+    "bagging_fraction": 0.5247603485999776,
+    "bagging_freq": 7,
+    "n_estimators": 700
+  }
+}

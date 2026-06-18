@@ -74,7 +74,7 @@ strategy config. Useful for manual review before deployment.
 
 ```powershell
 $env:PYTHONUTF8 = "1"
-python tests/test_config_parity.py --compare configs/strategies/hs08_scout_3x1_12h_logloss_opt.json
+python tests/test_config_parity.py --compare configs/strategies/HS09_Ensemble_E01_06032026.json
 ```
 
 ### 4. Verify Output
