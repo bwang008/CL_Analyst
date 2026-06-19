@@ -50,9 +50,13 @@ python agent/backtest_engine.py --config configs/strategies/HS11_Ensemble_E01_06
 #HS11 Production   
 (moderate)
 python agent/backtest_engine.py --config configs/strategies/HS11_Prod_Ensemble_E01_06162026.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_11.parquet" --exec-data "C:\CL_Analyst_Data\data\raw\DataBentoSample\CL_raw.csv" --slippage-per-side 0.01
-
 (conservative)
 python agent/backtest_engine.py --config configs/strategies/HS11_Prod_Ensemble_E02_06162026.json --data "C:\CL_Analyst_Data\data\processed\CL_HourSet_11.parquet" --exec-data "C:\CL_Analyst_Data\data\raw\DataBentoSample\CL_raw.csv" --slippage-per-side 0.01
+
+#HS13A Scout
+
+#HS13B Scout
+
 
 Step 4: Run live_trader
 python -m src.live_execution.live_trader --config configs/strategies/HourSet_08_Ensemble_01_opt.json

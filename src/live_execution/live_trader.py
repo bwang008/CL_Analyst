@@ -3439,6 +3439,9 @@ class LiveTrader:
             mute_status,
         )
 
+        # Naked position guardrail (kill switch)
+        self._check_naked_position()
+
         # Periodic macro data freshness check
         if getattr(self, "_needs_macro", False):
             now = time.time()
@@ -3592,6 +3595,112 @@ class LiveTrader:
 
 
 
+    def _check_naked_position(self) -> None:
+        """Kill switch: detect and flatten naked positions.
+
+        A "naked" position is one where IBKR reports a non-zero position
+        but the bot has no tracked SL order (self._sl_order_id is None).
+        This indicates a broken state where the position is unprotected.
+
+        When detected:
+        1. Cancel all open CL orders (stale TP/SL remnants)
+        2. Flatten the book with a market order
+        3. Log CRITICAL and send Telegram alert
+        4. Reset state to FLAT
+        """
+        # Only check when we think we have a position
+        if self._active_trade_id is None:
+            return
+        # Skip if we have a pending entry that hasn't filled yet
+        if self._pending_entry_order_id is not None:
+            return
+
+        if self._sl_order_id is not None:
+            return  # SL is tracked — position is protected
+
+        # Verify IBKR actually has a position (avoid false positives)
+        try:
+            ibkr_pos = self.exec_client.get_position(
+                symbol=self._execution_symbol,
+            )
+        except Exception:
+            log.debug("Naked position check: IBKR query failed", exc_info=True)
+            return
+
+        if ibkr_pos == 0:
+            # IBKR is flat but we think we have a position — OOB close.
+            # Let the normal OOB detection in _check_time_barrier handle it.
+            return
+
+        # ── NAKED POSITION DETECTED — FLATTEN ──────────────────────
+        log.critical(
+            "[KILL SWITCH] NAKED POSITION DETECTED: "
+            "IBKR position=%d, _sl_order_id=None, "
+            "active_trade=%s — FLATTENING BOOK",
+            ibkr_pos, self._active_trade_id,
+        )
+
+        # 1. Cancel all open CL orders
+        try:
+            cancelled = self.exec_client.cancel_open_orders(
+                symbol=self._execution_symbol,
+            )
+            log.info(
+                "[KILL SWITCH] Cancelled %d open order(s)", cancelled,
+            )
+        except Exception:
+            log.exception("[KILL SWITCH] Failed to cancel open orders")
+
+        # 2. Flatten with market order
+        try:
+            current_price = 0.0
+            if self.rolling_df_5m is not None and len(self.rolling_df_5m) > 0:
+                current_price = float(self.rolling_df_5m["Close"].iloc[-1])
+            self.exec_client.close_position(
+                symbol=self._execution_symbol,
+                exit_mode="market",
+                current_price=current_price,
+            )
+            log.critical(
+                "[KILL SWITCH] Market close order submitted for %d contracts",
+                ibkr_pos,
+            )
+        except Exception:
+            log.exception(
+                "[KILL SWITCH] FAILED to flatten position — "
+                "MANUAL INTERVENTION REQUIRED"
+            )
+
+        # 3. Close ledger position
+        try:
+            self.telemetry.close_position(
+                self._active_trade_id,
+                reason="NAKED_POSITION_KILL_SWITCH",
+                close_time=self._utc_iso_now(),
+                bars_held=self._position_bars_held,
+            )
+        except Exception:
+            log.debug("[KILL SWITCH] Failed to close ledger", exc_info=True)
+
+        # 4. Telegram alert
+        try:
+            self._telegram.send(
+                f"🚨 *CRITICAL: NAKED POSITION DETECTED*\n"
+                f"IBKR position: `{ibkr_pos}` contracts\n"
+                f"SL order: `None` (MISSING)\n"
+                f"Trade ID: `{self._active_trade_id}`\n"
+                f"Bars held: `{self._position_bars_held}`\n\n"
+                f"*ACTION: Flattening book immediately.*\n"
+                f"Fix root cause before restarting."
+            )
+        except Exception:
+            pass  # Never let Telegram failure block safety actions
+
+        # 5. Reset state to FLAT
+        self._reset_position_state(reason="NAKED_POSITION_KILL_SWITCH")
+        self._pending_entry_order_id = None
+        self._pending_entry_bar_time = None
+
     def _on_standard_execution_event(self, event: StandardExecutionEvent) -> None:
         self._open_orders[event.order_id] = event
         
@@ -3600,15 +3709,32 @@ class LiveTrader:
             avg_price = event.avg_price
             qty = event.filled_qty
             symbol_str = event.symbol
-            action_str = "UNKNOWN"
+            # Extract action from raw ib_insync Trade object
+            raw_trade = getattr(event, "raw_event", None)
+            raw_order = getattr(raw_trade, "order", None)
+            action_str = getattr(raw_order, "action", "UNKNOWN")
             
             if hasattr(self, '_processed_exit_order_ids') and order_id in self._processed_exit_order_ids:
                 return
             if hasattr(self, '_processed_entry_order_ids') and order_id in self._processed_entry_order_ids:
                 return
-                
-            is_tp_fill = hasattr(self, '_tp_order_ids') and order_id in self._tp_order_ids
-            is_sl_fill = hasattr(self, '_sl_order_id') and order_id == self._sl_order_id
+
+            # TP/SL order IDs are stored as int but event.order_id is str;
+            # compare both representations to avoid type-mismatch misses.
+            order_id_int = None
+            try:
+                order_id_int = int(order_id)
+            except (ValueError, TypeError):
+                pass
+
+            is_tp_fill = hasattr(self, '_tp_order_ids') and (
+                order_id in self._tp_order_ids
+                or (order_id_int is not None and order_id_int in self._tp_order_ids)
+            )
+            is_sl_fill = hasattr(self, '_sl_order_id') and (
+                order_id == self._sl_order_id
+                or (order_id_int is not None and order_id_int == self._sl_order_id)
+            )
             
             if is_tp_fill or is_sl_fill:
                 if hasattr(self, '_processed_exit_order_ids'):
@@ -3630,10 +3756,21 @@ class LiveTrader:
                 self._last_filled_entry_order_id = order_id
                 trade_id = "trade_" + str(order_id)
                 self._active_trade_id = trade_id
+
+                # Resolve side from the raw order action
+                if action_str == "BUY":
+                    side_str = "LONG"
+                elif action_str == "SELL":
+                    side_str = "SHORT"
+                else:
+                    side_str = "LONG" if self._position_side == 1 else (
+                        "SHORT" if self._position_side == -1 else "UNKNOWN"
+                    )
+
                 try:
                     self.telemetry.open_position(
                         trade_id=trade_id, 
-                        side="UNKNOWN", 
+                        side=side_str, 
                         quantity=int(qty), 
                         entry_price=avg_price, 
                         entry_order_id=order_id, 
@@ -3645,6 +3782,27 @@ class LiveTrader:
                     )
                 except Exception:
                     pass
+
+                # Phase 2: Place TP/SL child orders on the actual fill price.
+                # The decision context was stored with int keys at order
+                # submission; the callback receives str order_id from IBKR.
+                # Try both key types for lookup.
+                ctx_key = order_id_int if order_id_int is not None else order_id
+                if ctx_key not in self._last_decision_context_by_order_id:
+                    ctx_key = order_id  # fallback to str
+                contract = getattr(raw_trade, "contract", None)
+                log.info(
+                    "[TRADE] ENTRY FILLED: orderId=%s  action=%s  "
+                    "fill=%.2f  qty=%d — placing TP/SL children",
+                    order_id, action_str, avg_price, int(qty),
+                )
+                self._place_bracket_children_on_fill(
+                    order_id=ctx_key,
+                    fill_price=avg_price,
+                    action_str=action_str,
+                    qty=qty,
+                    contract=contract,
+                )
 
 if __name__ == "__main__":
     from src.live_execution.cli import main

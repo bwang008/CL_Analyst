@@ -785,7 +785,7 @@ def _compute_objective_score(
     trades_df["exit_dt"] = pd.to_datetime(trades_df["exit_dt"])
     trades_df = trades_df.set_index("exit_dt").sort_index()
 
-    monthly_pnls = trades_df["pnl"].resample("M").sum().dropna()
+    monthly_pnls = trades_df["pnl"].resample("ME").sum().dropna()
     monthly_pnl_vals = monthly_pnls.values
 
     if len(monthly_pnl_vals) == 0:
@@ -941,7 +941,7 @@ def make_objective(
         trades_df["exit_dt"] = pd.to_datetime(trades_df["exit_dt"])
         trades_df = trades_df.set_index("exit_dt").sort_index()
 
-        monthly_pnls = trades_df["pnl"].resample("M").sum().dropna()
+        monthly_pnls = trades_df["pnl"].resample("ME").sum().dropna()
         monthly_pnl_vals = monthly_pnls.values
 
         if len(monthly_pnl_vals) == 0:
