@@ -159,8 +159,8 @@ def main():
             
             if use_merged:
                 shutil.copy2(merged_csv_path, predictions_dst)
-                pred_path_long = os.path.join(batch_dir, "predictions", predictions_name)
-                pred_path_short = os.path.join(batch_dir, "predictions", predictions_name)
+                pred_path_long = f"../predictions/{predictions_name}"
+                pred_path_short = f"../predictions/{predictions_name}"
             else:
                 pred_path_long = os.path.join("reports", long_sweep, "registry", "canary_output", f"{long_oos_key}.csv")
                 pred_path_short = os.path.join("reports", short_sweep, "registry", "canary_output", f"{short_oos_key}.csv")

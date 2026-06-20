@@ -2057,11 +2057,18 @@ def main() -> None:
             models_cfg = strategy_cfg.get("models", {})
             long_preds_path = models_cfg.get("long", {}).get("predictions_path")
             short_preds_path = models_cfg.get("short", {}).get("predictions_path")
+
+            def _resolve_config_path(path_str):
+                if not path_str: return path_str
+                if path_str.startswith(".") or path_str.startswith(".."):
+                    if args.config:
+                        return os.path.normpath(os.path.join(os.path.dirname(args.config), path_str))
+                return resolve_cli_path(path_str)
     
             if long_preds_path and short_preds_path:
                 # Dual-model: auto-merge long + short predictions
-                long_preds_path = resolve_cli_path(long_preds_path)
-                short_preds_path = resolve_cli_path(short_preds_path)
+                long_preds_path = _resolve_config_path(long_preds_path)
+                short_preds_path = _resolve_config_path(short_preds_path)
                 print(f"Auto-resolving predictions from config (dual-model):")
                 print(f"  Long:  {long_preds_path}")
                 print(f"  Short: {short_preds_path}")
@@ -2087,11 +2094,11 @@ def main() -> None:
                 preds = long_probs.join(short_probs, how="outer").fillna(0.0)
                 print(f"  Merged: {len(preds):,} rows ({preds['prob_Buy'].gt(0).sum():,} buy signals, {preds['prob_Sell'].gt(0).sum():,} sell signals)")
             elif long_preds_path:
-                long_preds_path = resolve_cli_path(long_preds_path)
+                long_preds_path = _resolve_config_path(long_preds_path)
                 print(f"Auto-resolving predictions from config: {long_preds_path}")
                 preds = load_predictions(long_preds_path)
             elif short_preds_path:
-                short_preds_path = resolve_cli_path(short_preds_path)
+                short_preds_path = _resolve_config_path(short_preds_path)
                 print(f"Auto-resolving predictions from config: {short_preds_path}")
                 preds = load_predictions(short_preds_path)
             else:
