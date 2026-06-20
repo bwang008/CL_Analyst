@@ -1381,6 +1381,8 @@ def run_hybrid_optimization(
     label: str = "",
     objective_metric: str = "sharpe",
     optimize_side: str | None = None,
+    exec_ohlcv_path: str | None = None,
+    slippage_per_side: float | None = None,
     vbt_top_n: int = 20,
 ) -> tuple[dict, BacktestResult]:
     """Two-Stage Hybrid optimizer: vectorbt pre-screen → Optuna warm-start.
@@ -1461,9 +1463,13 @@ def run_hybrid_optimization(
 
     print(f"  Predictions: {predictions_path}")
     print(f"  OHLCV data: {ohlcv_path}")
+    if exec_ohlcv_path:
+        print(f"  EXEC data: {exec_ohlcv_path}")
 
     print("\nLoading data...")
-    ohlcv_df = load_ohlcv(ohlcv_path)
+    ohlcv_df, ohlcv_exec_df = load_ohlcv_dual(ohlcv_path) if exec_ohlcv_path is None else (load_ohlcv_dual(ohlcv_path)[0], None)
+    if exec_ohlcv_path:
+        ohlcv_exec_df = load_ohlcv(exec_ohlcv_path)
     ohlcv_df = attach_atr_cache(ohlcv_df)   # stamp ATR_{period} cols once; BacktestEngine skips recomputation per trial
     print(f"  Predictions: {len(predictions_df):,} rows  cols={list(predictions_df.columns)}")
     print(f"  OHLCV: {len(ohlcv_df):,} rows")
@@ -1493,8 +1499,12 @@ def run_hybrid_optimization(
         if other_side in baseline_cfg and "tiers" in baseline_cfg[other_side]:
             for tier in baseline_cfg[other_side]["tiers"]:
                 tier["min_prob"] = 1.0
-    baseline_engine = BacktestEngine.from_config(baseline_cfg)
-    baseline_result = baseline_engine.run(predictions_df, ohlcv_df, label="Baseline")
+    overrides = {}
+    if slippage_per_side is not None:
+        overrides["slippage_per_side"] = slippage_per_side
+
+    baseline_engine = BacktestEngine.from_config(baseline_cfg, **overrides)
+    baseline_result = baseline_engine.run(predictions_df, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df, label="Baseline")
     baseline_metrics = extract_metrics(baseline_result)
     print(f"  PnL: ${baseline_metrics['total_pnl']:,.2f}  "
           f"PF: {baseline_metrics['profit_factor']:.2f}  "
@@ -1526,9 +1536,9 @@ def run_hybrid_optimization(
     best_result_tracker = BestResultTracker()
     tracker = TopKTracker(k=5, save_dir="configs/strategies/candidates")
     objective = make_objective(
-        base_cfg, predictions_df, ohlcv_df, best_result_tracker,
+        base_cfg, predictions_df, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df, best_tracker=best_result_tracker,
         tracker=tracker, objective_metric=objective_metric,
-        optimize_side=optimize_side,
+        optimize_side=optimize_side, slippage_per_side=slippage_per_side,
     )
 
     db_hash = hashlib.md5(f"hybrid_opt_{model_name}_{objective_metric}".encode()).hexdigest()[:8]
@@ -1649,8 +1659,8 @@ def run_hybrid_optimization(
 
     # ── Final backtest ───────────────────────────────────────────────────────
     opt_label = f"Hybrid_Optimized_{optimize_side}" if optimize_side else "Hybrid_Optimized_Ensemble"
-    best_engine = BacktestEngine.from_config(best_cfg)
-    best_result = best_engine.run(predictions_df, ohlcv_df, label=opt_label)
+    best_engine = BacktestEngine.from_config(best_cfg, **overrides)
+    best_result = best_engine.run(predictions_df, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df, label=opt_label)
     best_metrics = extract_metrics(best_result)
 
     print(f"\n  OPTIMIZED: PnL=${best_metrics['total_pnl']:,.2f}  "
@@ -1731,7 +1741,7 @@ def run_hybrid_optimization(
     # ── Holdout backtest ─────────────────────────────────────────────────────
     if holdout_preds is not None and len(holdout_preds) > 0:
         print(f"\n--- HOLDOUT BACKTEST ({_holdout_months} months, unseen by optimizer) ---")
-        holdout_engine = BacktestEngine.from_config(best_cfg)
+        holdout_engine = BacktestEngine.from_config(best_cfg, **overrides)
         holdout_result = holdout_engine.run(holdout_preds, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df, label="Holdout")
         holdout_metrics = extract_metrics(holdout_result)
         best_cfg["optuna_info"]["holdout_metrics"] = holdout_metrics
