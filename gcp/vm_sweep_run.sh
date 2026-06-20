@@ -167,6 +167,15 @@ fi
 # Resolve DATA path from DATASET_NAME
 DATA="/home/$(whoami)/data/${DATASET_NAME}.parquet"
 
+# Download exec-data (raw unadjusted prices) from GCS if specified
+if [[ "$EXEC_DATA" == gs://* ]]; then
+    EXEC_BASENAME=$(basename "$EXEC_DATA")
+    echo "  Downloading exec-data: $EXEC_DATA" | tee -a "$LOG"
+    gsutil cp "$EXEC_DATA" "/home/$(whoami)/data/$EXEC_BASENAME" 2>&1 | tee -a "$LOG"
+    EXEC_DATA="/home/$(whoami)/data/$EXEC_BASENAME"
+    echo "  Exec-data ready ($(du -h $EXEC_DATA | cut -f1))" | tee -a "$LOG"
+fi
+
 # ---------- CPU VALIDATION ----------
 SYSTEM_CPUS=$(nproc)
 REQUIRED_CPUS=$((N_WORKERS * THREADS_PER_WORKER))
@@ -211,6 +220,8 @@ echo "  Shutdown:   $SHUTDOWN" | tee -a "$LOG"
 echo "  Log:        $LOG" | tee -a "$LOG"
 echo "  GCS dest:   $BUCKET/$JOB_NAME/" | tee -a "$LOG"
 echo "  Buckets:    $USE_BUCKETS" | tee -a "$LOG"
+echo "  Exec data:  $EXEC_DATA" | tee -a "$LOG"
+echo "  Slippage:   $SLIPPAGE_PER_SIDE" | tee -a "$LOG"
 echo "" | tee -a "$LOG"
 echo "  SEARCH SPACE CONSTRAINTS:" | tee -a "$LOG"
 echo "    max_depth:          [$MAX_DEPTH_MIN, $MAX_DEPTH_MAX]" | tee -a "$LOG"

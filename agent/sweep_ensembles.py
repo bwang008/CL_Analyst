@@ -234,7 +234,7 @@ def _write_frictionless_report(args, df, threshold):
 # Legacy backtest mode (subprocess-based)
 # ---------------------------------------------------------------------------
 
-def run_backtest(long_path, short_path, base_config, data_path, temp_config, long_threshold=None, short_threshold=None):
+def run_backtest(long_path, short_path, base_config, data_path, temp_config, long_threshold=None, short_threshold=None, exec_data_path=None, slippage_override=None):
     # Load base config fresh for each pair
     with open(base_config, "r") as f:
         cfg = json.load(f)
@@ -275,12 +275,15 @@ def run_backtest(long_path, short_path, base_config, data_path, temp_config, lon
     with open(temp_config, "w") as f:
         json.dump(cfg, f, indent=4)
         
+    slippage_val = str(slippage_override) if slippage_override is not None else "0.01"
     cmd = [
         sys.executable, "agent/backtest_engine.py",
         "--config", temp_config,
         "--data", data_path,
-        "--slippage-per-side", "0.01"
+        "--slippage-per-side", slippage_val,
     ]
+    if exec_data_path:
+        cmd.extend(["--exec-data", exec_data_path])
     
     result = subprocess.run(cmd, capture_output=True, text=True)
     out = result.stdout
@@ -362,7 +365,9 @@ def _run_backtest_legacy(args, long_models, short_models):
         thread_temp_cfg = temp_cfg.replace(".json", f"_{pair_hash}.json")
         met = run_backtest(
             lpath, spath, args.base_config, args.data, thread_temp_cfg, 
-            args.long_threshold, args.short_threshold
+            args.long_threshold, args.short_threshold,
+            exec_data_path=getattr(args, 'exec_data', None),
+            slippage_override=getattr(args, 'slippage_per_side', None),
         )
         try:
             if os.path.exists(thread_temp_cfg):
@@ -470,6 +475,10 @@ def main():
                         help="Number of months at tail of dataset to reserve as holdout (default: 6)")
     parser.add_argument("--min-signals", type=int, default=360,
                         help="Minimum non-zero binary signals to keep an ensemble (default: 360)")
+    parser.add_argument("--exec-data", default=None,
+                        help="Path to raw unadjusted OHLCV data for execution simulation")
+    parser.add_argument("--slippage-per-side", type=float, default=None,
+                        help="Slippage to apply per side in points")
     args = parser.parse_args()
 
     print(f"\nScanning for models...")

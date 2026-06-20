@@ -868,6 +868,10 @@ if ($batchState.completed -gt 0) {
     Write-Host "  Optimizer sizing: $($batchState.completed) experiments × 8 (2 metrics × 2 sides × 2 objectives) = $optTaskCount tasks → $optMachineType (workers=auto)" -ForegroundColor Cyan
 
     foreach ($oz in $optZoneList) {
+        # Read exec_data / slippage from defaults for optimizer
+        $optExecData  = if ($defaults.exec_data) { $defaults.exec_data } else { "" }
+        $optSlippage  = if ($defaults.slippage_per_side) { [double]$defaults.slippage_per_side } else { 0 }
+
         $optArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\gcp\gcp_deploy_optimizer.ps1",
             "-BatchId", $BatchId,
             "-NTrials", $postOptTrials,
@@ -877,6 +881,8 @@ if ($batchState.completed -gt 0) {
             "-Zone", $oz,
             "-SweepMode", $SweepMode,
             "-OptMode", $OptMode)
+        if ($optExecData)       { $optArgs += @("-ExecData", $optExecData) }
+        if ($optSlippage -gt 0) { $optArgs += @("-SlippagePerSide", $optSlippage) }
         if ($DisableTelegram) { $optArgs += "-DisableTelegram" }
         Write-Host "  Trying optimizer deploy in zone $oz..." -ForegroundColor Yellow
         & powershell @optArgs

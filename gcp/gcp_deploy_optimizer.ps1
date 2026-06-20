@@ -27,7 +27,9 @@ param(
     [switch]$DisableTelegram,
     [string]$Objective = "both",
     [string]$SweepMode = "backtest",
-    [string]$OptMode = "individual"
+    [string]$OptMode = "individual",
+    [string]$ExecData = "",
+    [double]$SlippagePerSide = 0
 )
 
 # Add gcloud to PATH if not already there
@@ -253,7 +255,9 @@ Write-Host "  Line endings fixed." -ForegroundColor Green
 Write-Host "`n[5/7] Launching post-optimizer in tmux..."
 
 $shutdownFlag = if ($NoShutdown) { "" } else { "--shutdown" }
-$launchCmd = "tmux kill-session -t optimizer 2>/dev/null; tmux new-session -d -s optimizer 'bash $RemoteProject/gcp/vm_post_optimize.sh --batch-id=$BatchId --n-trials=$NTrials --holdout-months=$HoldoutMonths --workers=$Workers --objective=$Objective --sweep-mode=$SweepMode --opt-mode=$OptMode $shutdownFlag'"
+$execDataFlag = if ($ExecData) { " --exec-data=$ExecData" } else { "" }
+$slippageFlag = if ($SlippagePerSide -gt 0) { " --slippage-per-side=$SlippagePerSide" } else { "" }
+$launchCmd = "tmux kill-session -t optimizer 2>/dev/null; tmux new-session -d -s optimizer 'bash $RemoteProject/gcp/vm_post_optimize.sh --batch-id=$BatchId --n-trials=$NTrials --holdout-months=$HoldoutMonths --workers=$Workers --objective=$Objective --sweep-mode=$SweepMode --opt-mode=$OptMode$execDataFlag$slippageFlag $shutdownFlag'"
 gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd --quiet 2>$null
 
 Write-Host "  Optimizer launched!" -ForegroundColor Green

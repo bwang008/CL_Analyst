@@ -1,9 +1,9 @@
-﻿{
+{
     "nickname": "HS13A_Scout_Ensemble_E01_06192026",
-    "description": "Scout run - LL_LONG (HS13A 2x1 3H) + LL_SHORT (HS13A 5x1 12H) - Optimized for Sharpe",
+    "description": "Scout run - LL_LONG (HS13A 2x1 3H) + LL_SHORT (HS13A 5x1 12H) - Baseline (regression guard triggered)",
     "execution_class": "TieredEnsembleStrategy",
     "exit_mode": "TIERED",
-    "conflict_resolution": "reverse_position",
+    "conflict_resolution": "hold",
     "allow_concurrent": false,
     "max_concurrent": 1,
     "max_position_size": 1,
@@ -20,65 +20,65 @@
         "long": {
             "experiment_id": "E2E_HourSet_13A_long_logloss",
             "model_path": "reports/sweep_hs13a_2x1_3h_scout_20260618_1721/registry/canary_output/registry/E2E_HourSet_13A_long_logloss/final_model.pkl",
-            "predictions_path": "reports/sweep_hs13a_2x1_3h_scout_20260618_1721/registry/canary_output/extended_predictions_long_ll.csv",
-            "threshold": 0.66
+            "predictions_path": "reports/sweep_hs13a_2x1_3h_scout_20260618_1721/registry/canary_output/oos_predictions_sweep_hs13a_2x1_3h_scout_20260618_1721_long_logloss.csv",
+            "threshold": 0.5
         },
         "short": {
             "experiment_id": "E2E_HourSet_13A_short_logloss",
             "model_path": "reports/sweep_hs13a_5x1_12h_scout_20260618_1721/registry/canary_output/registry/E2E_HourSet_13A_short_logloss/final_model.pkl",
-            "predictions_path": "reports/sweep_hs13a_5x1_12h_scout_20260618_1721/registry/canary_output/extended_predictions_short_ll.csv",
-            "threshold": 0.56
+            "predictions_path": "reports/sweep_hs13a_5x1_12h_scout_20260618_1721/registry/canary_output/oos_predictions_sweep_hs13a_5x1_12h_scout_20260618_1721_short_logloss.csv",
+            "threshold": 0.53
         }
     },
     "long": {
-        "tp_atr_mult": 5.0,
-        "sl_atr_mult": 2.75,
+        "tp_atr_mult": 1.5,
+        "sl_atr_mult": 3.5,
         "trailing_atr_mult": 3.5,
-        "cooldown_bars": 19,
-        "max_hold_bars": 36,
-        "consecutive_signal_threshold": 0,
+        "cooldown_bars": 7,
+        "max_hold_bars": 48,
+        "consecutive_signal_threshold": 3,
         "atr_period": 36,
-        "trailing_sl_atr_offset": 4.5,
+        "trailing_sl_atr_offset": 2.0,
         "tiered_exits": [
             {
                 "qty_pct": 1.0,
-                "tp_atr_mult": 5.0
+                "tp_atr_mult": 1.5
             }
         ],
         "tiers": [
             {
-                "min_prob": 0.66,
+                "min_prob": 0.5,
                 "lots": 1,
-                "tp_atr_mult": 5.0,
-                "sl_atr_mult": 2.75,
+                "tp_atr_mult": 1.5,
+                "sl_atr_mult": 3.5,
                 "trailing_atr_mult": 3.5,
-                "max_hold_bars": 36
+                "max_hold_bars": 48
             }
         ]
     },
     "short": {
-        "tp_atr_mult": 9.5,
-        "sl_atr_mult": 3.5,
-        "trailing_atr_mult": 2.75,
-        "cooldown_bars": 9,
-        "max_hold_bars": 36,
-        "consecutive_signal_threshold": 4,
+        "tp_atr_mult": 10.0,
+        "sl_atr_mult": 3.0,
+        "trailing_atr_mult": 1.25,
+        "cooldown_bars": 7,
+        "max_hold_bars": 240,
+        "consecutive_signal_threshold": 2,
         "atr_period": 20,
         "trailing_sl_atr_offset": 1.0,
         "tiered_exits": [
             {
                 "qty_pct": 1.0,
-                "tp_atr_mult": 9.5
+                "tp_atr_mult": 10.0
             }
         ],
         "tiers": [
             {
-                "min_prob": 0.56,
+                "min_prob": 0.53,
                 "lots": 1,
-                "tp_atr_mult": 9.5,
-                "sl_atr_mult": 3.5,
-                "trailing_atr_mult": 2.75,
-                "max_hold_bars": 36
+                "tp_atr_mult": 10.0,
+                "sl_atr_mult": 3.0,
+                "trailing_atr_mult": 1.25,
+                "max_hold_bars": 240
             }
         ]
     }

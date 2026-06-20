@@ -4,6 +4,8 @@
     "machine_type": "c2-standard-16",
     "provisioning_model": "STANDARD",
     "gcs_data_path": "gs://cltrainer-optuna-results/data/cl-4h_bk_Hour4Set_01.parquet",
+    "exec_data": "gs://cltrainer-optuna-results/data/CL_raw.parquet",
+    "slippage_per_side": 0.01,
     "strategy_config": "hour4_ensemble_001.json",
     "metrics": "logloss,average_precision",
     "timeout_minutes": 240,
