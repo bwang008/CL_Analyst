@@ -294,6 +294,7 @@ def generate_optimized_report(
     n_workers: int = 1,
     objective_metric: str = "sharpe",
     task_experiment_labels: dict | None = None,
+    base_cfg: dict | None = None,
 ) -> str:
     """Generate batch_summary_optimized_{objective}.md with pre/post comparison."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -596,17 +597,23 @@ def generate_optimized_report(
                 ("ATR Period", "atr_period"),
             ]
             for display_name, param_key in param_keys:
+                # Baseline from base config long/short blocks
+                if param_key == "entry_threshold":
+                    bl = base_cfg.get("models", {}).get("long", {}).get("threshold", '-') if base_cfg else '-'
+                    bs = base_cfg.get("models", {}).get("short", {}).get("threshold", '-') if base_cfg else '-'
+                else:
+                    bl = base_cfg.get("long", {}).get(param_key, '-') if base_cfg else '-'
+                    bs = base_cfg.get("short", {}).get(param_key, '-') if base_cfg else '-'
                 lv = long_params.get(param_key, '-')
                 sv = short_params.get(param_key, '-')
-                lines.append(f"| {display_name} | - | {lv} / {sv} |")
+                lines.append(f"| {display_name} | {bl} / {bs} | {lv} / {sv} |")
         else:
-            lines.append(f"| Threshold | - | {params.get('entry_threshold', '-')} |")
-            lines.append(f"| TP ATR Mult | - | {params.get('tp_atr_mult', '-')} |")
-            lines.append(f"| SL ATR Mult | - | {params.get('sl_atr_mult', '-')} |")
-            lines.append(f"| Trailing ATR | - | {params.get('trailing_atr_mult', '-')} |")
-            lines.append(f"| Cooldown Bars | - | {params.get('cooldown_bars', '-')} |")
-            lines.append(f"| Max Hold Bars | - | {params.get('max_hold_bars', '-')} |")
-            lines.append(f"| Consec Signal | - | {params.get('consecutive_signal_threshold', '-')} |")
+            # Show baseline from base config (use top-level or long-side fallback)
+            bt = base_cfg.get("models", {}).get("long", {}).get("threshold", '-') if base_cfg else '-'
+            lines.append(f"| Threshold | {bt} | {params.get('entry_threshold', '-')} |")
+            for display_name, param_key in [("TP ATR Mult", "tp_atr_mult"), ("SL ATR Mult", "sl_atr_mult"), ("Trailing ATR", "trailing_atr_mult"), ("Cooldown Bars", "cooldown_bars"), ("Max Hold Bars", "max_hold_bars"), ("Consec Signal", "consecutive_signal_threshold")]:
+                bv = base_cfg.get("long", {}).get(param_key, base_cfg.get(param_key, '-')) if base_cfg else '-'
+                lines.append(f"| {display_name} | {bv} | {params.get(param_key, '-')} |")
 
         trial_num = opt_info.get('trial_number', '-')
         lines.append(f"| Best Trial | - | #{trial_num}/{opt_info.get('n_trials', '-')} |")
@@ -638,6 +645,7 @@ def _finalize_objective_results(
     progress: dict,
     obj_elapsed: float,
     task_experiment_labels: dict | None = None,
+    base_cfg: dict | None = None,
 ):
     """Generate report and save results JSON for a single objective."""
     ok_count = sum(1 for v in all_results.values() if v.get('status') == 'OK')
@@ -662,6 +670,7 @@ def _finalize_objective_results(
         n_workers=args.workers,
         objective_metric=objective_metric,
         task_experiment_labels=task_experiment_labels,
+        base_cfg=base_cfg,
     )
     report_path = os.path.join(batch_dir, report_name)
     with open(report_path, "w", encoding="utf-8") as f:
@@ -695,6 +704,7 @@ def _run_all_objectives_concurrent(
     n_workers: int,
     total_start: float,
     task_experiment_labels: dict | None = None,
+    base_cfg: dict | None = None,
 ):
     """Run all optimization tasks for all objectives concurrently in a single pool.
 
@@ -827,6 +837,7 @@ def _run_all_objectives_concurrent(
             progress=progress,
             obj_elapsed=obj_elapsed,
             task_experiment_labels=task_experiment_labels,
+            base_cfg=base_cfg,
         )
 
     return obj_elapsed
@@ -898,7 +909,17 @@ def main():
         _, ohlcv_exec_df = load_ohlcv_dual(args.exec_data)
     else:
         ohlcv_df, ohlcv_exec_df = load_ohlcv_dual(ohlcv_path)
-    
+
+    # Load base strategy config for baseline parameter display in reports
+    base_config_name = progress.get("defaults", {}).get("strategy_config", "hourly_ensemble_010.json")
+    _base_config_path = os.path.join(PROJECT_ROOT, "configs", "strategies", base_config_name)
+    base_cfg = None
+    if os.path.exists(_base_config_path):
+        with open(_base_config_path, encoding="utf-8") as f:
+            base_cfg = json.load(f)
+    else:
+        print(f"  WARNING: base config not found for report baseline: {_base_config_path}")
+
     total_start = time.perf_counter()
 
     # Build list of PER-SIDE optimization tasks
@@ -1074,6 +1095,7 @@ def main():
         n_workers=n_workers,
         total_start=total_start,
         task_experiment_labels=task_experiment_labels,
+        base_cfg=base_cfg,
     )
 
     total_elapsed = time.perf_counter() - total_start

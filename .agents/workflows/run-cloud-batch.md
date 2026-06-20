@@ -56,7 +56,11 @@ reports/batch_runs/batch_<timestamp>/
 ├── batch_progress.json              ← live progress tracker
 ├── batch_summary.md                 ← unoptimized results
 ├── batch_summary_optimized.md       ← MAIN DELIVERABLE
+├── sharpe_ensemble_backtests.md     ← full backtest dumps for sharpe ensembles
+├── sortino_ensemble_backtests.md    ← full backtest dumps for sortino ensembles
 ├── wall_clock_summary.md            ← auto-generated timing report
 ├── optimization_results.json        ← raw optimization data
+├── configs/                         ← backtest-ready config JSONs per ensemble
+├── predictions/                     ← merged prediction CSVs per ensemble
 └── manifest.json                    ← frozen config
 ```

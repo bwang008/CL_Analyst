@@ -1392,12 +1392,25 @@ def format_report(
             lines.append(f"  Direction:      {direction}")
             lines.append(f"  Threshold:      {threshold}")
 
-        tp = config.get("tp_atr_mult") or config.get("long", {}).get("tp_atr_mult", "?")
-        sl = config.get("sl_atr_mult") or config.get("long", {}).get("sl_atr_mult", "?")
-        trailing = config.get("trailing_atr_mult") or config.get("long", {}).get("trailing_atr_mult", "?")
-        lines.append(f"  TP / SL:        {tp}x / {sl}x ATR")
-        trailing_note = " (disabled)" if isinstance(trailing, (int, float)) and trailing >= 50 else ""
-        lines.append(f"  Trailing:       {trailing}x{trailing_note}")
+        # For dual-model ensemble configs, show per-side TP/SL/Trailing
+        if models and "long" in config and "short" in config:
+            tp_l = config["long"].get("tp_atr_mult", config.get("tp_atr_mult", "?"))
+            sl_l = config["long"].get("sl_atr_mult", config.get("sl_atr_mult", "?"))
+            tr_l = config["long"].get("trailing_atr_mult", config.get("trailing_atr_mult", "?"))
+            tp_s = config["short"].get("tp_atr_mult", config.get("tp_atr_mult", "?"))
+            sl_s = config["short"].get("sl_atr_mult", config.get("sl_atr_mult", "?"))
+            tr_s = config["short"].get("trailing_atr_mult", config.get("trailing_atr_mult", "?"))
+            lines.append(f"  TP / SL:        {tp_l}x / {sl_l}x ATR (Long), {tp_s}x / {sl_s}x ATR (Short)")
+            tr_l_note = " (disabled)" if isinstance(tr_l, (int, float)) and tr_l >= 50 else ""
+            tr_s_note = " (disabled)" if isinstance(tr_s, (int, float)) and tr_s >= 50 else ""
+            lines.append(f"  Trailing:       {tr_l}x{tr_l_note} (Long), {tr_s}x{tr_s_note} (Short)")
+        else:
+            tp = config.get("tp_atr_mult") or config.get("long", {}).get("tp_atr_mult", "?")
+            sl = config.get("sl_atr_mult") or config.get("long", {}).get("sl_atr_mult", "?")
+            trailing = config.get("trailing_atr_mult") or config.get("long", {}).get("trailing_atr_mult", "?")
+            lines.append(f"  TP / SL:        {tp}x / {sl}x ATR")
+            trailing_note = " (disabled)" if isinstance(trailing, (int, float)) and trailing >= 50 else ""
+            lines.append(f"  Trailing:       {trailing}x{trailing_note}")
 
     if predictions_path:
         lines.append(f"  Predictions:    {predictions_path}")

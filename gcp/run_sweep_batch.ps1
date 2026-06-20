@@ -957,17 +957,77 @@ if ($batchState.completed -gt 0) {
                 Write-Host "Running ensemble optimization locally (4 pairs)..." -ForegroundColor Cyan
                 Send-BatchTelegram "[Ensemble] Starting local ensemble optimization (4 pairs)."
                 $ensWorkers = 4
-                & python agent/batch_post_optimizer.py `
-                    --batch-dir $localBatch `
-                    --target-pairs-json $topPairsPath `
-                    --n-trials $postOptTrials `
-                    --holdout-months $postOptHoldout `
-                    --workers $ensWorkers `
-                    --objective "both" `
-                    --no-filter
+
+                # Resolve exec-data: GCS path -> local path
+                $localExecData = ""
+                if ($optExecData) {
+                    $execBasename = Split-Path $optExecData -Leaf
+                    $localExecCandidates = @(
+                        (Join-Path "C:\CL_Analyst_Data\data\raw\DataBentoSample" $execBasename),
+                        (Join-Path "C:\CL_Analyst_Data\data\raw" $execBasename),
+                        (Join-Path "data\raw" $execBasename)
+                    )
+                    foreach ($candidate in $localExecCandidates) {
+                        if (Test-Path $candidate) {
+                            $localExecData = $candidate
+                            break
+                        }
+                    }
+                    if ($localExecData) {
+                        Write-Host "  Exec data: $localExecData (slippage: $optSlippage)" -ForegroundColor Cyan
+                    } else {
+                        Write-Host "  WARNING: Could not resolve local exec-data for $optExecData" -ForegroundColor Yellow
+                    }
+                }
+
+                $ensArgs = @(
+                    "agent/batch_post_optimizer.py",
+                    "--batch-dir", $localBatch,
+                    "--target-pairs-json", $topPairsPath,
+                    "--n-trials", $postOptTrials,
+                    "--holdout-months", $postOptHoldout,
+                    "--workers", $ensWorkers,
+                    "--objective", "both",
+                    "--no-filter"
+                )
+                if ($localExecData)       { $ensArgs += @("--exec-data", $localExecData) }
+                if ($optSlippage -gt 0)   { $ensArgs += @("--slippage-per-side", $optSlippage) }
+
+                & python @ensArgs
                 if ($LASTEXITCODE -eq 0) {
                     Write-Host "  Ensemble optimization complete." -ForegroundColor Green
                     Send-BatchTelegram "[COMPLETE] Local ensemble optimization finished."
+
+                    # --- Generate Ensemble Backtest Artifacts ---
+                    Write-Host ""
+                    Write-Host "Generating ensemble backtest artifacts..." -ForegroundColor Cyan
+                    # Resolve local OHLCV data path from manifest gcs_data_path
+                    $gcsDataPath = $defaults.gcs_data_path
+                    $ohlcvBasename = [System.IO.Path]::GetFileName($gcsDataPath)
+                    $localOhlcvPath = "data/processed/$ohlcvBasename"
+                    # Fall back to common naming convention if GCS basename doesn't exist locally
+                    if (-not (Test-Path $localOhlcvPath)) {
+                        $altName = $ohlcvBasename -replace '^cl-1h_bk_', 'CL_'
+                        $altPath = "data/processed/$altName"
+                        if (Test-Path $altPath) { $localOhlcvPath = $altPath }
+                    }
+
+                    $artifactArgs = @(
+                        "agent/generate_ensemble_artifacts.py",
+                        "--batch-dir", $localBatch,
+                        "--data", $localOhlcvPath
+                    )
+                    if ($localExecData)       { $artifactArgs += @("--exec-data", $localExecData) }
+                    if ($optSlippage -gt 0)   { $artifactArgs += @("--slippage-per-side", $optSlippage) }
+
+                    & python @artifactArgs
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Host "  Ensemble backtest artifacts generated." -ForegroundColor Green
+                        Send-BatchTelegram "[COMPLETE] Ensemble backtest artifact reports generated."
+                    } else {
+                        Write-Host "  WARNING: Ensemble backtest artifact generation failed (exit $LASTEXITCODE)." -ForegroundColor Yellow
+                        Send-BatchTelegram "[WARNING] Ensemble backtest artifact generation failed (exit $LASTEXITCODE)."
+                    }
                 } else {
                     Write-Host "  WARNING: Ensemble optimization failed (exit $LASTEXITCODE)." -ForegroundColor Yellow
                     Send-BatchTelegram "[WARNING] Local ensemble optimization failed (exit $LASTEXITCODE)."

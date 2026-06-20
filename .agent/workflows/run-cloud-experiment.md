@@ -67,6 +67,8 @@ powershell -ExecutionPolicy Bypass -File .\gcp\run_sweep_batch.ps1 `
    - Generates consolidated batch summary
    - Deploys a post-optimizer VM, waits for completion, downloads results
    - Sweeps 256 ensemble pairs and automatically selects Top 8
+   - Runs local ensemble optimization with exec-data and slippage
+   - Generates ensemble backtest verification reports (`sharpe_ensemble_backtests.md`, `sortino_ensemble_backtests.md`)
    - Produces final `batch_ensemble_pre_opt.md`, `batch_summary_optimized.md`, and `wall_clock_summary.md`
 
 ### 5. Review results:
@@ -77,8 +79,12 @@ reports/batch_runs/batch_<timestamp>/
 ├── batch_ensemble_pre_opt.md        ← baseline sweep of 256 ensembles
 ├── top_8_ensembles.json             ← dynamically selected top ensembles
 ├── batch_summary_optimized.md       ← MAIN DELIVERABLE
+├── sharpe_ensemble_backtests.md     ← full backtest dumps for sharpe ensembles
+├── sortino_ensemble_backtests.md    ← full backtest dumps for sortino ensembles
 ├── wall_clock_summary.md            ← auto-generated timing report
 ├── optimization_results.json        ← raw optimization data
+├── configs/                         ← backtest-ready config JSONs per ensemble
+├── predictions/                     ← merged prediction CSVs per ensemble
 └── manifest.json                    ← frozen config
 ```
 
