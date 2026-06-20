@@ -19,6 +19,9 @@ def parse_experiment_key(key, direction):
     metric = parts[1]
     rest = parts[0]
     
+    if rest.startswith("oos_predictions_"):
+        rest = rest[len("oos_predictions_"):]
+        
     idx = rest.rfind("_E2E_")
     if idx == -1:
         return rest, "", metric
@@ -80,7 +83,14 @@ def main():
         mmddyyyy = "00000000"
 
     parts = batch_name.split('_')
-    dataset_tag = parts[3] if len(parts) > 3 else "TAG"
+    if len(parts) > 3:
+        dataset_tag = parts[3]
+    else:
+        experiments = manifest.get("experiments", [])
+        if experiments and "label" in experiments[0]:
+            dataset_tag = experiments[0]["label"].split(" ")[0]
+        else:
+            dataset_tag = "TAG"
 
     objectives = [o.strip() for o in args.objectives.split(",")]
 
@@ -149,8 +159,8 @@ def main():
             
             if use_merged:
                 shutil.copy2(merged_csv_path, predictions_dst)
-                pred_path_long = os.path.join("predictions", predictions_name)
-                pred_path_short = os.path.join("predictions", predictions_name)
+                pred_path_long = os.path.join(batch_dir, "predictions", predictions_name)
+                pred_path_short = os.path.join(batch_dir, "predictions", predictions_name)
             else:
                 pred_path_long = os.path.join("reports", long_sweep, "registry", "canary_output", f"{long_oos_key}.csv")
                 pred_path_short = os.path.join("reports", short_sweep, "registry", "canary_output", f"{short_oos_key}.csv")

@@ -906,7 +906,7 @@ def main():
 
     if args.exec_data:
         ohlcv_df, _ = load_ohlcv_dual(ohlcv_path)
-        _, ohlcv_exec_df = load_ohlcv_dual(args.exec_data)
+        ohlcv_exec_df = load_ohlcv(args.exec_data)
     else:
         ohlcv_df, ohlcv_exec_df = load_ohlcv_dual(ohlcv_path)
 

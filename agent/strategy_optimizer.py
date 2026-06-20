@@ -1082,7 +1082,7 @@ def run_optimization(
     print("\nLoading data...")
     ohlcv_df, ohlcv_exec_df = load_ohlcv_dual(ohlcv_path) if exec_ohlcv_path is None else load_ohlcv_dual(ohlcv_path)
     if exec_ohlcv_path:
-        _, ohlcv_exec_df = load_ohlcv_dual(exec_ohlcv_path)
+        ohlcv_exec_df = load_ohlcv(exec_ohlcv_path)
         
     ohlcv_df = attach_atr_cache(ohlcv_df)   # stamp ATR_{period} cols once; BacktestEngine skips recomputation per trial
     print(f"  Predictions: {len(predictions_df):,} rows  cols={list(predictions_df.columns)}")
