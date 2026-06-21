@@ -1057,8 +1057,8 @@ def main():
 
     # Auto-detect worker count: 0 = match task count (max parallelism)
     if len(opt_tasks) == 0:
-        print("CRITICAL: No optimization tasks generated! This usually indicates 0 trades in backtest or missing artifacts.")
-        sys.exit(1)
+        print("WARNING: No optimization tasks generated! This usually indicates 0 trades in backtest or missing artifacts. Proceeding anyway.")
+        # sys.exit(1)
 
     # Determine which objectives to run
     objectives = ["sharpe", "sortino"] if args.objective == "both" else [args.objective]

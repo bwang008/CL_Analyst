@@ -31,16 +31,16 @@
   },
   "experiments": [
     {
-      "label": "HS13B 2x1 3H",
-      "target_long": "TARGET_TRIPLE_2x1_3H_LONG",
-      "target_short": "TARGET_TRIPLE_2x1_3H_SHORT",
-      "gcs_prefix": "sweep_hs13b_2x1_3h"
+      "label": "HS13B 2x1 12H",
+      "target_long": "TARGET_TRIPLE_2x1_12H_LONG",
+      "target_short": "TARGET_TRIPLE_2x1_12H_SHORT",
+      "gcs_prefix": "sweep_hs13b_2x1_12h"
     },
     {
-      "label": "HS13B 4x1 36H",
-      "target_long": "TARGET_TRIPLE_4x1_36H_LONG",
-      "target_short": "TARGET_TRIPLE_4x1_36H_SHORT",
-      "gcs_prefix": "sweep_hs13b_4x1_36h"
+      "label": "HS13B 5x1 36H",
+      "target_long": "TARGET_TRIPLE_5x1_36H_LONG",
+      "target_short": "TARGET_TRIPLE_5x1_36H_SHORT",
+      "gcs_prefix": "sweep_hs13b_5x1_36h"
     }
   ]
 }

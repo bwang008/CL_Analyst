@@ -1,0 +1,7 @@
+# GEMINI.md - SDL-MCP
+
+Use SDL-MCP first for repository `cl_analyst_development`.
+
+SDL-MCP (Symbol Delta Ledger MCP Server) - an MCP server providing cards-first code context for polyglot repositories. Replaces bulk code reads with structured symbol cards, graph slices, delta packs, and gated code windows. Uses LadybugDB (graph DB), tree-sitter (AST parsing), and optional Rust native addon (napi-rs) for performance.
+
+> Optimized tool-use workflow for agents: see [SDL.md](./SDL.md).
