@@ -1025,8 +1025,8 @@ def run_optimization(
     """
     start_time = time.perf_counter()
 
-    with open(config_path) as f:
-        base_cfg = json.load(f)
+    from src.live_execution.config_loader import load_strategy_config
+    base_cfg = load_strategy_config(config_path)
 
     model_name = base_cfg.get("nickname", Path(config_path).stem)
     if label:
@@ -1414,8 +1414,8 @@ def run_hybrid_optimization(
     """
     start_time = time.perf_counter()
 
-    with open(config_path) as f:
-        base_cfg = json.load(f)
+    from src.live_execution.config_loader import load_strategy_config
+    base_cfg = load_strategy_config(config_path)
 
     model_name = base_cfg.get("nickname", Path(config_path).stem)
     if label:

@@ -915,8 +915,8 @@ def main():
     _base_config_path = os.path.join(PROJECT_ROOT, "configs", "strategies", base_config_name)
     base_cfg = None
     if os.path.exists(_base_config_path):
-        with open(_base_config_path, encoding="utf-8") as f:
-            base_cfg = json.load(f)
+        from src.live_execution.config_loader import load_strategy_config
+        base_cfg = load_strategy_config(_base_config_path)
     else:
         print(f"  WARNING: base config not found for report baseline: {_base_config_path}")
 
