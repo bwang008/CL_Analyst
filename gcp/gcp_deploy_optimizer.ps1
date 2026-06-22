@@ -198,6 +198,7 @@ $codeFiles = @(
     @{ Local = "agent\forward_returns.py";       Remote = "agent/" },
     @{ Local = "agent\alpha_evaluator.py";       Remote = "agent/" },
     @{ Local = "agent\backtest_engine.py";       Remote = "agent/" },
+    @{ Local = "agent\generate_ensemble_artifacts.py"; Remote = "agent/" },
     @{ Local = "agent\__init__.py";              Remote = "agent/" },
     @{ Local = "src\util.py";                    Remote = "src/" },
     @{ Local = "src\__init__.py";                Remote = "src/" },

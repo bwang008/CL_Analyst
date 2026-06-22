@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import logging
 import os
 import sys
 import time
@@ -844,6 +845,11 @@ def _run_all_objectives_concurrent(
 
 
 def main():
+    # Suppress ExecutionGuard activation logs during heavy optimization
+    # to prevent I/O bottlenecks in the terminal (6.5M+ lines otherwise).
+    # The guard still functions correctly — only the log output is silenced.
+    logging.getLogger("src.live_execution.execution_guard").setLevel(logging.ERROR)
+
     parser = argparse.ArgumentParser(description="Batch Post-Optimizer")
     parser.add_argument("--batch-dir", required=True, help="Path to batch directory")
     parser.add_argument("--target-pairs-json", type=str, default=None, help="JSON file with top N pairs to optimize")

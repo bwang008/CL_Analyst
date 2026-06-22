@@ -275,10 +275,11 @@ class LiveTrader:
         self._execution_symbol: str = strategy_config.get(
             "execution_symbol", "CL"
         ).upper()
-        # Whether to use the lean (momentum-only) feature path
-        self._lean_features: bool = bool(
-            strategy_config.get("lean_features", False)
-        )
+        # Force lean_features to False in live trading because live models
+        # generally require the full feature set (MACRO/DIST).
+        # This prevents accidental missing feature errors if the config retains
+        # backtest optimizations.
+        self._lean_features: bool = False
 
         # Extract designated primary stream from config (e.g. "1h" or "5m")
         self._bar_size: str = strategy_config.get("bar_size", "5m").lower()
@@ -327,6 +328,7 @@ class LiveTrader:
         self.data_manager_5m = DataManager(
             seed_path=seed_path,
             cache_path=cache_path,
+            master_ledger_path=str(_get_data_root() / "processed" / "cl_continuous_master.parquet"),
             data_client=self.data_client,
             bar_size="5 mins",
             bars_per_day=288,
@@ -371,6 +373,7 @@ class LiveTrader:
             self.data_manager_1h = DataManager(
                 seed_path=seed_path_1h,
                 cache_path=cache_path_1h,
+                master_ledger_path=str(_data_root / "processed" / "cl_continuous_master_1h.parquet"),
                 data_client=self.data_client,
                 bar_size="1 hour",
                 bars_per_day=24,
@@ -2226,22 +2229,15 @@ class LiveTrader:
                 )
 
                 try:
-                    contract = build_cl_contract(continuous=True)
-                    contract = await self.data_client.qualify_contract_async(contract)
-
-                    bars = await self.data_client.fetch_historical_bars_by_duration(
-                        contract,
-                        endDateTime="",
-                        durationStr=duration_str,
-                        barSizeSetting="5 mins",
-                        whatToShow="TRADES",
-                        useRTH=False,
-                        formatDate=1,
-                        keepUpToDate=False,
+                    chunk_df = self.data_client.fetch_historical_bars_by_duration(
+                        duration_str=duration_str,
+                        continuous=True,
+                        bar_size="5 mins",
+                        what_to_show="TRADES",
+                        use_rth=False
                     )
 
-                    if bars:
-                        chunk_df = ib_bars_to_dataframe(bars)
+                    if chunk_df is not None and not chunk_df.empty:
                         # Only keep bars newer than our last known bar
                         new_bars = chunk_df[chunk_df.index > self._last_bar_time_5m]
                         if len(new_bars) > 0:
@@ -2294,22 +2290,15 @@ class LiveTrader:
                 )
 
                 try:
-                    contract = build_cl_contract(continuous=True)
-                    contract = await self.data_client.qualify_contract_async(contract)
-
-                    bars = await self.data_client.fetch_historical_bars_by_duration(
-                        contract,
-                        endDateTime="",
-                        durationStr=duration_str,
-                        barSizeSetting="1 hour",
-                        whatToShow="TRADES",
-                        useRTH=False,
-                        formatDate=1,
-                        keepUpToDate=False,
+                    chunk_df = self.data_client.fetch_historical_bars_by_duration(
+                        duration_str=duration_str,
+                        continuous=True,
+                        bar_size="1 hour",
+                        what_to_show="TRADES",
+                        use_rth=False
                     )
 
-                    if bars:
-                        chunk_df = ib_bars_to_dataframe(bars)
+                    if chunk_df is not None and not chunk_df.empty:
                         new_bars = chunk_df[chunk_df.index > self._last_bar_time_1h]
                         if len(new_bars) > 0:
                             self.rolling_df_1h = pd.concat([self.rolling_df_1h, new_bars])

@@ -659,14 +659,14 @@ def _load_ensemble_predictions(base_cfg: dict) -> pd.DataFrame:
 # Parameter search ranges — single source of truth for _suggest_side_params
 # and _extract_warm_start_params.  Each entry: (low, high, step, type).
 _PARAM_RANGES = {
-    "tp_atr_mult":                    (1.5,  10.0, 0.25, "float"),
-    "sl_atr_mult":                    (0.5,   4.5, 0.25, "float"),
-    "trailing_atr_mult":              (0.5,   5.0, 0.25, "float"),
-    "trailing_sl_atr_offset":         (1.0,   5.0, 0.5,  "float"),
+    "tp_atr_mult":                    (2.0,   8.0, 0.5,  "float"),
+    "sl_atr_mult":                    (0.5,   3.0, 0.5,  "float"),
+    "trigger_frac":                   (0.1,   0.8, 0.1,  "float"),
+    "distance_frac":                  (0.0,   0.8, 0.1,  "float"),
     "cooldown_bars":                  (1,    21,   2,    "int"),
-    "max_hold_bars":                  (6,   36,   6,     "int"),
+    "max_hold_bars":                  (6,    36,   6,    "int"),
     "consecutive_signal_threshold":   (0,     4,   1,    "int"),
-    "entry_threshold":                (0.50,  0.80, 0.01, "float"),
+    "entry_threshold":                (0.50,  0.80, 0.02, "float"),
     "atr_period":                     (10,   40,   2,    "int"),
 }
 
@@ -681,6 +681,15 @@ def _snap_to_grid(value: float, low: float, high: float, step: float,
     if dtype == "int":
         return int(round(snapped))
     return round(snapped, 10)  # avoid float precision noise
+
+
+def _derive_trailing_params(params: dict) -> dict:
+    """Derive structural trailing stops from latent variables."""
+    out = params.copy()
+    if "trigger_frac" in out and "tp_atr_mult" in out:
+        out["trailing_atr_mult"] = round(out["tp_atr_mult"] * out.pop("trigger_frac"), 10)
+        out["trailing_sl_atr_offset"] = round(out["trailing_atr_mult"] * (1.0 - out.pop("distance_frac")), 10)
+    return out
 
 
 def _extract_warm_start_params(
@@ -713,12 +722,16 @@ def _extract_warm_start_params(
                 "threshold", cfg.get("entry_threshold", 0.55)
             )
 
+        raw_tp = side_cfg.get("tp_atr_mult", cfg.get("tp_atr_mult", 3.0))
+        raw_trail = side_cfg.get("trailing_atr_mult", cfg.get("trailing_atr_mult", 2.0))
+        raw_offset = side_cfg.get("trailing_sl_atr_offset", cfg.get("trailing_sl_atr_offset", 2.0))
+
         raw_values = {
             "entry_threshold": raw_thr,
-            "tp_atr_mult": side_cfg.get("tp_atr_mult", cfg.get("tp_atr_mult", 3.0)),
+            "tp_atr_mult": raw_tp,
             "sl_atr_mult": side_cfg.get("sl_atr_mult", cfg.get("sl_atr_mult", 1.5)),
-            "trailing_atr_mult": side_cfg.get("trailing_atr_mult", cfg.get("trailing_atr_mult", 2.0)),
-            "trailing_sl_atr_offset": side_cfg.get("trailing_sl_atr_offset", cfg.get("trailing_sl_atr_offset", 2.0)),
+            "trigger_frac": raw_trail / raw_tp if raw_tp > 0 else 0.5,
+            "distance_frac": 1.0 - (raw_offset / raw_trail) if raw_trail > 0 else 0.0,
             "cooldown_bars": side_cfg.get("cooldown_bars", cfg.get("cooldown_bars", 7)),
             "max_hold_bars": side_cfg.get("max_hold_bars", cfg.get("max_hold_bars", 24)),
             "consecutive_signal_threshold": side_cfg.get("consecutive_signal_threshold", cfg.get("consecutive_signal_threshold", 0)),
@@ -860,18 +873,13 @@ def make_objective(
 
     def _suggest_side_params(trial: optuna.Trial, suffix: str) -> dict:
         """Suggest params for one side with the given suffix."""
-        params = {
-            "tp_atr_mult": trial.suggest_float(f"tp_atr_mult_{suffix}", 1.5, 10.0, step=0.25),
-            "sl_atr_mult": trial.suggest_float(f"sl_atr_mult_{suffix}", 0.5, 4.5, step=0.25),
-            "trailing_atr_mult": trial.suggest_float(f"trailing_atr_mult_{suffix}", 0.5, 5.0, step=0.25),
-            "trailing_sl_atr_offset": trial.suggest_float(f"trailing_sl_atr_offset_{suffix}", 1.0, 5.0, step=0.5),
-            "cooldown_bars": trial.suggest_int(f"cooldown_bars_{suffix}", 1, 21, step=2),
-            "max_hold_bars": trial.suggest_int(f"max_hold_bars_{suffix}", 6, 36, step=6),
-            "consecutive_signal_threshold": trial.suggest_int(f"consecutive_signal_threshold_{suffix}", 0, 4, step=1),
-            "entry_threshold": trial.suggest_float(f"entry_threshold_{suffix}", 0.50, 0.80, step=0.01),
-            "atr_period": trial.suggest_int(f"atr_period_{suffix}", 10, 40, step=2),
-        }
-        return params
+        params = {}
+        for key, (low, high, step, dtype) in _PARAM_RANGES.items():
+            if dtype == "float":
+                params[key] = trial.suggest_float(f"{key}_{suffix}", low, high, step=step)
+            elif dtype == "int":
+                params[key] = trial.suggest_int(f"{key}_{suffix}", int(low), int(high), step=int(step))
+        return _derive_trailing_params(params)
 
     def _disable_side(cfg: dict, side_to_disable: str) -> None:
         """Disable a side by setting all tier min_prob to 1.0."""
@@ -908,17 +916,13 @@ def make_objective(
                 strategy.apply_trial_params(cfg, short_params, side="short")
         else:
             # Non-tiered: single set of params
-            params = {
-                "tp_atr_mult": trial.suggest_float("tp_atr_mult", 1.5, 10.0, step=0.25),
-                "sl_atr_mult": trial.suggest_float("sl_atr_mult", 0.5, 4.5, step=0.25),
-                "trailing_atr_mult": trial.suggest_float("trailing_atr_mult", 0.5, 5.0, step=0.25),
-                "trailing_sl_atr_offset": trial.suggest_float("trailing_sl_atr_offset", 1.0, 5.0, step=0.5),
-                "cooldown_bars": trial.suggest_int("cooldown_bars", 1, 21, step=2),
-                "max_hold_bars": trial.suggest_int("max_hold_bars", 6, 36, step=6),
-                "consecutive_signal_threshold": trial.suggest_int("consecutive_signal_threshold", 0, 4, step=1),
-                "entry_threshold": trial.suggest_float("entry_threshold", 0.50, 0.80, step=0.01),
-                "atr_period": trial.suggest_int("atr_period", 10, 40, step=2),
-            }
+            params = {}
+            for key, (low, high, step, dtype) in _PARAM_RANGES.items():
+                if dtype == "float":
+                    params[key] = trial.suggest_float(key, low, high, step=step)
+                elif dtype == "int":
+                    params[key] = trial.suggest_int(key, int(low), int(high), step=int(step))
+            params = _derive_trailing_params(params)
             if base_cfg.get("execution_class") == "BreakoutStraddleStrategy":
                 params["breakout_window"] = trial.suggest_int("breakout_window", 2, 24, step=2)
             strategy.apply_trial_params(cfg, params)

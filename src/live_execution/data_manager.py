@@ -918,32 +918,45 @@ class DataManager:
         self._save_ledger(ledger)
 
     def _load_full_seed(self) -> pd.DataFrame:
-        """Load the entire seed CSV (not just the last N days)."""
+        """Load the entire seed file (not just the last N days)."""
         if not self.seed_path.exists():
             _alt = _PROJECT_ROOT / "data" / "raw" / "cl-5m_bk.csv"
             raise FileNotFoundError(
                 f"Seed file not found: {self.seed_path}\n"
-                f"The CL seed CSV (cl-5m_bk.csv) must exist in one of:\n"
+                f"The CL seed file must exist in one of:\n"
                 f"  1. CL_DATA_ROOT env var location: "
                 f"{os.environ.get('CL_DATA_ROOT', '(not set)')}\n"
                 f"  2. Project-relative path: {_alt}\n"
                 f"Set CL_DATA_ROOT or copy the file to fix this."
             )
 
-        df = pd.read_csv(
-            self.seed_path,
-            sep=";",
-            header=None,
-            names=["Date", "Time", "Open", "High", "Low", "Close", "Volume"],
-        )
-        df["DateTime"] = pd.to_datetime(
-            df["Date"] + " " + df["Time"],
-            format="%d/%m/%Y %H:%M",
-        )
-        df = df[["DateTime", "Open", "High", "Low", "Close", "Volume"]]
-        df = df.set_index("DateTime", drop=False)
-        df.index.name = "DateTime"
-        return df.sort_index()
+        # ── Parquet seed ──────────────────────────────────────────────────
+        if self.seed_path.suffix.lower() == ".parquet":
+            df = pd.read_parquet(self.seed_path, engine="pyarrow")
+            if "DateTime" not in df.columns:
+                # Try resetting index if DateTime is the index
+                df = df.reset_index()
+            df["DateTime"] = pd.to_datetime(df["DateTime"])
+            df = df[["DateTime", "Open", "High", "Low", "Close", "Volume"]]
+            df = df.set_index("DateTime", drop=False)
+            df.index.name = "DateTime"
+            return df.sort_index()
+        else:
+            # ── Legacy CSV seed ───────────────────────────────────────────
+            df = pd.read_csv(
+                self.seed_path,
+                sep=";",
+                header=None,
+                names=["Date", "Time", "Open", "High", "Low", "Close", "Volume"],
+            )
+            df["DateTime"] = pd.to_datetime(
+                df["Date"] + " " + df["Time"],
+                format="%d/%m/%Y %H:%M",
+            )
+            df = df[["DateTime", "Open", "High", "Low", "Close", "Volume"]]
+            df = df.set_index("DateTime", drop=False)
+            df.index.name = "DateTime"
+            return df.sort_index()
 
     def _get_seed_end_timestamp(self, ledger: pd.DataFrame) -> pd.Timestamp:
         """

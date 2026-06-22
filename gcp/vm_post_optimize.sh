@@ -330,8 +330,47 @@ else
     echo "[4b/5] Running Unified Selection & Pairing Engine..." | tee -a "$LOG"
     python agent/unified_pair_optimizer.py --batch-dir "$BATCH_DIR" 2>&1 | tee -a "$LOG"
 
-    # Note: Ensemble optimization (step 4c) runs locally after VM shutdown
-    # to avoid paying for a large VM during a lightweight job (4 pairs)
+    # --- [4c/5] Run ensemble optimization on VM ---
+    # Runs on the same VM that just completed individual optimization.
+    # 4 pairs is lightweight (~5-10 min on the warm VM).
+    TOP_PAIRS="$BATCH_DIR/top_pairs.json"
+    if [ -f "$TOP_PAIRS" ]; then
+        echo "" | tee -a "$LOG"
+        echo "[4c/5] Running ensemble optimization on VM (top pairs)..." | tee -a "$LOG"
+
+        EXEC_ENS_ARGS=""
+        if [ -n "$EXEC_DATA_PATH" ]; then
+            EXEC_ENS_ARGS="--exec-data $EXEC_DATA_PATH"
+        fi
+        if (( $(echo "$SLIPPAGE_PER_SIDE > 0" | bc -l) )); then
+            EXEC_ENS_ARGS="$EXEC_ENS_ARGS --slippage-per-side $SLIPPAGE_PER_SIDE"
+        fi
+
+        python agent/batch_post_optimizer.py \
+            --batch-dir "$BATCH_DIR" \
+            --target-pairs-json "$TOP_PAIRS" \
+            --n-trials "$N_TRIALS" \
+            --holdout-months "$HOLDOUT_MONTHS" \
+            --workers 4 \
+            --objective "$OBJECTIVE" \
+            --no-filter \
+            $EXEC_ENS_ARGS \
+            2>&1 | tee -a "$LOG"
+
+        # Generate ensemble backtest artifacts (markdown reports)
+        echo "  Generating ensemble backtest artifacts..." | tee -a "$LOG"
+        ENS_ART_ARGS="--batch-dir $BATCH_DIR --data data/processed/$OHLCV_BASENAME"
+        if [ -n "$EXEC_DATA_PATH" ]; then
+            ENS_ART_ARGS="$ENS_ART_ARGS --exec-data $EXEC_DATA_PATH"
+        fi
+        if (( $(echo "$SLIPPAGE_PER_SIDE > 0" | bc -l) )); then
+            ENS_ART_ARGS="$ENS_ART_ARGS --slippage-per-side $SLIPPAGE_PER_SIDE"
+        fi
+        python agent/generate_ensemble_artifacts.py $ENS_ART_ARGS 2>&1 | tee -a "$LOG"
+        echo "  Ensemble optimization complete." | tee -a "$LOG"
+    else
+        echo "  No top_pairs.json — skipping ensemble optimization." | tee -a "$LOG"
+    fi
 fi
 
 OPT_EXIT=$?
@@ -374,6 +413,20 @@ find reports/ -name "*_opt_short.json" -path "*/canary_output/*" -exec gsutil cp
 if [ -d "$BATCH_DIR/configs" ]; then
     gsutil -m cp "$BATCH_DIR/configs/*.json" "$BUCKET/$GCS_OPT_PREFIX/batch_configs/" 2>&1 | tee -a "$LOG" || true
     echo "  Uploaded batch configs" | tee -a "$LOG"
+fi
+
+# Upload ensemble backtest artifacts (MDs, JSONs, predictions)
+for f in "$BATCH_DIR"/*ensemble_backtests*.md; do
+    [ -f "$f" ] && gsutil cp "$f" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+done
+# Upload all JSON configs from batch dir (includes optimized ensemble configs)
+for f in "$BATCH_DIR"/*.json; do
+    [ -f "$f" ] && gsutil cp "$f" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+done
+# Upload ensemble predictions directory
+if [ -d "$BATCH_DIR/predictions" ]; then
+    gsutil -m cp -r "$BATCH_DIR/predictions" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+    echo "  Uploaded ensemble predictions" | tee -a "$LOG"
 fi
 
 # Upload log
