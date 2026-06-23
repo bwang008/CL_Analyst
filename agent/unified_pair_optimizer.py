@@ -72,31 +72,36 @@ def parse_markdown_table(filepath, direction, metric, objective, progress_data):
                 pnl_opt = float(pnl_opt_str.replace('$', '').replace(',', ''))
                 pnl_holdout = float(pnl_holdout_str.replace('$', '').replace(',', ''))
                 
+                robustness = pnl_opt + (pnl_holdout * 6)
+                
                 # Minimums: PnL (opt) > 0, PnL (holdout) > 0, Trades (opt) >= 100
-                if pnl_opt > 0 and pnl_holdout > 0 and trades >= 100:
-                    robustness = pnl_opt + (pnl_holdout * 6)
+                passed_filter = pnl_opt > 0 and pnl_holdout > 0 and trades >= 100
+                if not passed_filter:
+                    # Heavily penalize failed models so they only get picked if we don't have enough passing models
+                    robustness -= 1000000.0
                     
-                    # Compute unique prefix
-                    gcs_prefix = None
-                    for exp in progress_data.get("experiments", []):
-                        if exp["label"] == exp_label:
-                            gcs_prefix = exp["gcs_prefix"]
-                            break
-                    if gcs_prefix:
-                        # Use the flat CSV naming convention from new orchestrator
-                        unique_target = f"oos_predictions_{gcs_prefix}_{direction}_{metric}"
-                        
-                        models.append({
-                            "experiment": exp_label,
-                            "direction": direction,
-                            "metric": metric,
-                            "objective": objective,
-                            "unique_target": unique_target,
-                            "trades": trades,
-                            "pnl_opt": pnl_opt,
-                            "pnl_holdout": pnl_holdout,
-                            "robustness": robustness
-                        })
+                # Compute unique prefix
+                gcs_prefix = None
+                for exp in progress_data.get("experiments", []):
+                    if exp["label"] == exp_label:
+                        gcs_prefix = exp["gcs_prefix"]
+                        break
+                if gcs_prefix:
+                    # Use the flat CSV naming convention from new orchestrator
+                    unique_target = f"oos_predictions_{gcs_prefix}_{direction}_{metric}"
+                    
+                    models.append({
+                        "experiment": exp_label,
+                        "direction": direction,
+                        "metric": metric,
+                        "objective": objective,
+                        "unique_target": unique_target,
+                        "trades": trades,
+                        "pnl_opt": pnl_opt,
+                        "pnl_holdout": pnl_holdout,
+                        "robustness": robustness,
+                        "passed_filter": passed_filter
+                    })
             except Exception as e:
                 pass
         else:
@@ -107,6 +112,7 @@ def parse_markdown_table(filepath, direction, metric, objective, progress_data):
 def main():
     parser = argparse.ArgumentParser(description="Top 2 Unified Selection & Pairing Engine")
     parser.add_argument("--batch-dir", required=True, help="Path to batch directory")
+    parser.add_argument("--top-n", type=int, default=2, help="Number of top models to select per side")
     args = parser.parse_args()
     
     batch_dir = args.batch_dir
@@ -145,15 +151,15 @@ def main():
     long_models = deduplicate(long_models)
     short_models = deduplicate(short_models)
     
-    # Sort and take top 2
-    long_models = sorted(long_models, key=lambda x: x["robustness"], reverse=True)[:2]
-    short_models = sorted(short_models, key=lambda x: x["robustness"], reverse=True)[:2]
+    # Sort and take top N
+    long_models = sorted(long_models, key=lambda x: x["robustness"], reverse=True)[:args.top_n]
+    short_models = sorted(short_models, key=lambda x: x["robustness"], reverse=True)[:args.top_n]
     
-    print("## Top 2 Long Models")
+    print(f"## Top {args.top_n} Long Models")
     table_long = [[m["experiment"], m["metric"], m["objective"], m["pnl_opt"], m["pnl_holdout"], m["trades"], m["robustness"]] for m in long_models]
     print(tabulate(table_long, headers=["Experiment", "Metric", "Objective", "Opt PnL", "Holdout PnL", "Trades", "Robustness Score"], tablefmt="github", floatfmt=".2f"))
     
-    print("\n## Top 2 Short Models")
+    print(f"\n## Top {args.top_n} Short Models")
     table_short = [[m["experiment"], m["metric"], m["objective"], m["pnl_opt"], m["pnl_holdout"], m["trades"], m["robustness"]] for m in short_models]
     print(tabulate(table_short, headers=["Experiment", "Metric", "Objective", "Opt PnL", "Holdout PnL", "Trades", "Robustness Score"], tablefmt="github", floatfmt=".2f"))
     

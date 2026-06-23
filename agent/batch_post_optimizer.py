@@ -412,8 +412,8 @@ def generate_optimized_report(
             for metric in ["logloss", "average_precision"]:
                 lines.append(f"### {section_name} ({metric.replace('_', ' ').title()})")
                 lines.append("")
-                lines.append("| Experiment | Trades (pre) T/L/S | Trades (opt) T/L/S | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (holdout) | Opt Thr | Opt TP | Opt SL | Opt Trail | Opt Cool | Opt Hold | Opt Consec | Best Trial |")
-                lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+                lines.append("| Experiment | Trades (pre) T/L/S | Trades (opt) T/L/S | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (holdout) | Opt Thr | Opt TP | Opt SL | Opt TrgF | Opt DstF | Opt Cool | Opt Hold | Opt Consec | Best Trial |")
+                lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 
                 # Sort experiments naturally by label for readability
                 def natural_sort_key(s):
@@ -464,7 +464,8 @@ def generate_optimized_report(
                         opt_thr = params.get("entry_threshold", "-")
                         opt_tp = params.get("tp_atr_mult", "-")
                         opt_sl = params.get("sl_atr_mult", "-")
-                        opt_trail = params.get("trailing_atr_mult", "-")
+                        opt_trgf = params.get("trigger_frac", "-")
+                        opt_dstf = params.get("distance_frac", "-")
                         opt_cool = params.get("cooldown_bars", "-")
                         opt_hold = params.get("max_hold_bars", "-")
                         opt_consec = params.get("consecutive_signal_threshold", "-")
@@ -478,7 +479,7 @@ def generate_optimized_report(
                             f"{base_pf:.2f} | {opt_pf:.2f} | "
                             f"${base_pnl:,.0f} | ${opt_pnl:,.0f} | "
                             f"{ho_pnl} | "
-                            f"{opt_thr} | {opt_tp} | {opt_sl} | {opt_trail} | {opt_cool} | {opt_hold} | {opt_consec} | {best_trial_str} |"
+                            f"{opt_thr} | {opt_tp} | {opt_sl} | {opt_trgf} | {opt_dstf} | {opt_cool} | {opt_hold} | {opt_consec} | {best_trial_str} |"
                         )
                     else:
                         # Fallback to pipeline_summary.json if optimization didn't complete
@@ -504,7 +505,7 @@ def generate_optimized_report(
                         lines.append(
                             f"| {label} | {base_trades} | - | "
                             f"{base_pf:.2f} | - | "
-                            f"${base_pnl:,.0f} | - | - | - | - | - | - | - | - | - | - |"
+                            f"${base_pnl:,.0f} | - | - | - | - | - | - | - | - | - | - | - |"
                         )
                 lines.append("")
 
@@ -591,7 +592,8 @@ def generate_optimized_report(
                 ("Threshold", "entry_threshold"),
                 ("TP ATR Mult", "tp_atr_mult"),
                 ("SL ATR Mult", "sl_atr_mult"),
-                ("Trailing ATR", "trailing_atr_mult"),
+                ("Trigger Frac", "trigger_frac"),
+                ("Distance Frac", "distance_frac"),
                 ("Cooldown Bars", "cooldown_bars"),
                 ("Max Hold Bars", "max_hold_bars"),
                 ("Consec Signal", "consecutive_signal_threshold"),
@@ -612,7 +614,7 @@ def generate_optimized_report(
             # Show baseline from base config (use top-level or long-side fallback)
             bt = base_cfg.get("models", {}).get("long", {}).get("threshold", '-') if base_cfg else '-'
             lines.append(f"| Threshold | {bt} | {params.get('entry_threshold', '-')} |")
-            for display_name, param_key in [("TP ATR Mult", "tp_atr_mult"), ("SL ATR Mult", "sl_atr_mult"), ("Trailing ATR", "trailing_atr_mult"), ("Cooldown Bars", "cooldown_bars"), ("Max Hold Bars", "max_hold_bars"), ("Consec Signal", "consecutive_signal_threshold")]:
+            for display_name, param_key in [("TP ATR Mult", "tp_atr_mult"), ("SL ATR Mult", "sl_atr_mult"), ("Trigger Frac", "trigger_frac"), ("Distance Frac", "distance_frac"), ("Cooldown Bars", "cooldown_bars"), ("Max Hold Bars", "max_hold_bars"), ("Consec Signal", "consecutive_signal_threshold")]:
                 bv = base_cfg.get("long", {}).get(param_key, base_cfg.get(param_key, '-')) if base_cfg else '-'
                 lines.append(f"| {display_name} | {bv} | {params.get(param_key, '-')} |")
 

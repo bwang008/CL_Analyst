@@ -1237,6 +1237,7 @@ def run_optimization(
             for k, v in best_trial.params.items()
             if k.endswith(f"_{optimize_side}")
         }
+        side_params = _derive_trailing_params(side_params)
         strategy.apply_trial_params(best_cfg, side_params, side=optimize_side)
         # Disable the other side
         other_side = "short" if optimize_side == "long" else "long"
@@ -1247,10 +1248,13 @@ def run_optimization(
         # Split suffixed params back into per-side dicts
         long_params = {k.replace("_long", ""): v for k, v in best_trial.params.items() if k.endswith("_long")}
         short_params = {k.replace("_short", ""): v for k, v in best_trial.params.items() if k.endswith("_short")}
+        long_params = _derive_trailing_params(long_params)
+        short_params = _derive_trailing_params(short_params)
         strategy.apply_trial_params(best_cfg, long_params, side="long")
         strategy.apply_trial_params(best_cfg, short_params, side="short")
     else:
-        strategy.apply_trial_params(best_cfg, dict(best_trial.params))
+        params = _derive_trailing_params(dict(best_trial.params))
+        strategy.apply_trial_params(best_cfg, params)
 
     # Final backtest with best params
     opt_label = f"Optimized_{optimize_side}" if optimize_side else "Optimized_Ensemble"
@@ -1648,6 +1652,7 @@ def run_hybrid_optimization(
             for k, v in best_trial.params.items()
             if k.endswith(f"_{optimize_side}")
         }
+        side_params = _derive_trailing_params(side_params)
         strategy.apply_trial_params(best_cfg, side_params, side=optimize_side)
         other_side = "short" if optimize_side == "long" else "long"
         if other_side in best_cfg and "tiers" in best_cfg[other_side]:
@@ -1656,10 +1661,13 @@ def run_hybrid_optimization(
     elif is_tiered:
         long_params = {k.replace("_long", ""): v for k, v in best_trial.params.items() if k.endswith("_long")}
         short_params = {k.replace("_short", ""): v for k, v in best_trial.params.items() if k.endswith("_short")}
+        long_params = _derive_trailing_params(long_params)
+        short_params = _derive_trailing_params(short_params)
         strategy.apply_trial_params(best_cfg, long_params, side="long")
         strategy.apply_trial_params(best_cfg, short_params, side="short")
     else:
-        strategy.apply_trial_params(best_cfg, dict(best_trial.params))
+        params = _derive_trailing_params(dict(best_trial.params))
+        strategy.apply_trial_params(best_cfg, params)
 
     # ── Final backtest ───────────────────────────────────────────────────────
     opt_label = f"Hybrid_Optimized_{optimize_side}" if optimize_side else "Hybrid_Optimized_Ensemble"
