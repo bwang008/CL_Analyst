@@ -478,6 +478,7 @@ class LiveTrader:
         current_position = 0
         unrealized_pnl = 0.0
         realized_pnl = 0.0
+        net_liq = 0.0
 
         # Guard: only query IBKR if connected.  This method may be called
         # from the TelegramHeartbeat daemon thread, which has no asyncio
@@ -491,6 +492,7 @@ class LiveTrader:
                 current_position = acct["cl_position"]
                 unrealized_pnl = acct["cl_unrealized_pnl"]
                 realized_pnl = acct["cl_realized_pnl"]
+                net_liq = acct.get("net_liquidation", 0.0)
             except Exception:
                 pass
 
@@ -520,6 +522,8 @@ class LiveTrader:
 
         payload = (
             f"⏱️ Uptime: `{uptime_str}` | Broker: {broker_status}\n\n"
+            f"💰 *Account Balance:*\n"
+            f"Total Liq: `${net_liq:,.2f}`\n\n"
             f"📈 *Position & PnL*\n"
             f"Position: `{current_position}`\n"
             f"Unrealized PnL: `${unrealized_pnl:,.2f}`\n"
@@ -3728,17 +3732,27 @@ class LiveTrader:
             if is_tp_fill or is_sl_fill:
                 if hasattr(self, '_processed_exit_order_ids'):
                     self._processed_exit_order_ids.add(order_id)
+                exit_reason = "TP_HIT" if is_tp_fill else "SL_HIT"
+                try:
+                    self._telegram.send(
+                        f"✅ *POSITION CLOSED* ({exit_reason})\n"
+                        f"Price: `{avg_price}`\n"
+                        f"Qty: `{int(qty)}`\n"
+                        f"Action: `{action_str}`"
+                    )
+                except Exception:
+                    pass
                 try:
                     self.telemetry.close_position(
                         trade_id=self._active_trade_id or "unknown", 
-                        reason="TP_HIT" if is_tp_fill else "SL_HIT", 
+                        reason=exit_reason, 
                         close_time=self._utc_iso_now(), 
                         bars_held=self._position_bars_held, 
                         exit_price=avg_price
                     )
                 except Exception:
                     pass
-                self._reset_position_state(reason="TP_HIT" if is_tp_fill else "SL_HIT")
+                self._reset_position_state(reason=exit_reason)
             else:
                 if hasattr(self, '_processed_entry_order_ids'):
                     self._processed_entry_order_ids.add(order_id)
@@ -3768,6 +3782,16 @@ class LiveTrader:
                         entry_bar_time=self._position_entry_bar_time.isoformat() if self._position_entry_bar_time else None, 
                         trailing_atr_mult=self._trade_trailing_atr_mult, 
                         max_hold_bars=self._trade_max_hold_bars
+                    )
+                except Exception:
+                    pass
+                
+                try:
+                    self._telegram.send(
+                        f"🚀 *ENTRY FILLED*\n"
+                        f"Side: `{side_str}`\n"
+                        f"Price: `{avg_price}`\n"
+                        f"Qty: `{int(qty)}`"
                     )
                 except Exception:
                     pass
