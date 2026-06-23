@@ -486,10 +486,10 @@ class MacroFeatureEngine:
         df = self._load_cot().copy()
         df = df.set_index("Date").sort_index()
 
-        # Shift dates forward by 3 business days to match publication date.
-        # This prevents lookahead: Tuesday's data becomes available Friday.
-        df.index = df.index + pd.offsets.BDay(3)
-        log.debug("COT dates shifted +3 business days for publication lag")
+        # Shift dates forward by 3 business days + 15.5 hours to match publication date.
+        # This prevents lookahead: Tuesday's data becomes available Friday at 15:30 EST.
+        df.index = df.index + pd.offsets.BDay(3) + pd.Timedelta(hours=15, minutes=30)
+        log.debug("COT dates shifted +3 business days + 15.5H for publication lag")
 
         features = pd.DataFrame(index=df.index)
 
@@ -548,8 +548,8 @@ class MacroFeatureEngine:
         """Merge all macro features into a bar-level OHLCV DataFrame.
 
         The target DataFrame must have a DatetimeIndex. Macro features
-        are joined by date (ignoring time) and forward-filled so every
-        bar within a trading day gets the most recent daily value.
+        are joined by exact timestamp and forward-filled so every
+        bar gets the most recent macro value strictly <= the bar time.
 
         Parameters
         ----------
@@ -571,22 +571,22 @@ class MacroFeatureEngine:
                 f"Got index type: {type(df.index)}"
             )
 
-        # Extract date from the bar-level index for joining
-        bar_dates = df.index.normalize()  # Strip time → midnight
-        
-        # Macro datasets are tz-naive. Ensure bar_dates are tz-naive for reindexing matching.
-        if bar_dates.tzinfo is not None:
-            bar_dates = bar_dates.tz_localize(None)
+        # Macro datasets are tz-naive. Ensure bar_times are tz-naive for reindexing matching.
+        bar_times = df.index
+        if bar_times.tzinfo is not None:
+            bar_times = bar_times.tz_localize(None)
+
+        # Ensure index is sorted for reindex(method='ffill')
+        if not bar_times.is_monotonic_increasing:
+            raise ValueError("Bar index must be monotonic increasing for ffill reindex.")
 
         n_before = len(df.columns)
 
         if include_fred:
             try:
                 fred_features = self._build_fred_features()
-                # Join by date: each bar gets the daily macro value
-                fred_aligned = fred_features.reindex(bar_dates)
-                # Forward-fill to handle weekends/holidays in bar data
-                fred_aligned = fred_aligned.ffill()
+                # Join by exact time: each bar gets the most recent daily value strictly <= bar time
+                fred_aligned = fred_features.reindex(bar_times, method='ffill')
                 # Reset index to match the bar-level index
                 fred_aligned.index = df.index
                 for col in fred_aligned.columns:
@@ -599,9 +599,9 @@ class MacroFeatureEngine:
         if include_cot:
             try:
                 cot_features = self._build_cot_features()
-                # COT is weekly — join by date, ffill to every bar
-                cot_aligned = cot_features.reindex(bar_dates)
-                cot_aligned = cot_aligned.ffill()
+                # COT is weekly — join by exact time, ffill to every bar. 
+                # A 15:00 Friday bar will receive the previous week's COT data.
+                cot_aligned = cot_features.reindex(bar_times, method='ffill')
                 cot_aligned.index = df.index
                 for col in cot_aligned.columns:
                     df[col] = cot_aligned[col].values
