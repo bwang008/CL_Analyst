@@ -607,28 +607,6 @@ class LiveTrader:
                     except Exception as e:
                         log.warning("Failed to fetch daily close for %s: %s", sym, e)
                 
-                log.info("Fetching previous daily close for DX (DXY) from Yahoo Finance...")
-                import yfinance as yf
-                import time as _time
-                import pandas as pd
-                for attempt in range(3):
-                    try:
-                        dx_ticker = yf.Ticker("DX-Y.NYB")
-                        dx_hist = dx_ticker.history(period="5d")
-                        if not dx_hist.empty:
-                            today = pd.Timestamp.now(tz="America/New_York").date()
-                            last_date = dx_hist.index[-1].date()
-                            if last_date == today and len(dx_hist) > 1:
-                                prev_close = dx_hist.iloc[-2]["Close"]
-                            else:
-                                prev_close = dx_hist.iloc[-1]["Close"]
-                            self._macro_daily_closes["DXY"] = float(prev_close)
-                            break
-                    except Exception as e:
-                        log.warning("yfinance DX fetch attempt %d failed: %s", attempt + 1, e)
-                        if attempt < 2:
-                            _time.sleep(2)
-                            
                 log.info("Loaded macro daily closes: %s", self._macro_daily_closes)
 
             # Step 4: Resolve front-month contract (Hands stream)
