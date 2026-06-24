@@ -102,10 +102,10 @@ def _check_inference_feature_variance(
 def build_live_features(
     df: pd.DataFrame,
     feature_names: list[str],
-    *,
-    lean: bool = False,
+    lean: bool = True,
     bar_size: str = "5m",
-) -> Optional[pd.DataFrame]:
+    macro_overrides: dict[str, float] | None = None,
+) -> pd.DataFrame | None:
     """
     Generate features from a rolling OHLCV DataFrame for live inference.
 
@@ -252,7 +252,12 @@ def build_live_features(
     )
     if _has_external_macro:
         try:
-            work = MacroFeatureEngine().merge_all(work)
+            live_time = work.index[-1] if not work.empty else None
+            work = MacroFeatureEngine().merge_all(
+                work, 
+                live_overrides=macro_overrides, 
+                live_time=live_time
+            )
         except StaleDataException:
             # Let staleness exceptions propagate directly so the live
             # trader can catch them and enter Safety Mute mode.

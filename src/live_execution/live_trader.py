@@ -220,6 +220,7 @@ class LiveTrader:
             for f in self.feature_names
         )
         self._last_macro_check_time: float = 0.0
+        self._macro_daily_closes: dict[str, float] = {}
 
         # Read max_hold_bars from strategy config (keeps backtest & live in sync)
         strategy_config = getattr(strategy, "config", {})
@@ -597,6 +598,15 @@ class LiveTrader:
             self._register_execution_callbacks()
 
             # Step 3: Qualify continuous contract (Brain stream) (Now handled by DataFeed)
+
+            if self._needs_macro:
+                log.info("Fetching previous daily closes for macro indices (VIX, OVX, DX)...")
+                for sym, alias in [("VIX", "VIX"), ("OVX", "OVX"), ("DX", "DXY")]:
+                    try:
+                        self._macro_daily_closes[alias] = self.data_client.fetch_daily_close(sym)
+                    except Exception as e:
+                        log.warning("Failed to fetch daily close for %s: %s", sym, e)
+                log.info("Loaded macro daily closes: %s", self._macro_daily_closes)
 
             # Step 4: Resolve front-month contract (Hands stream)
             #         Use execution_symbol from config (CL or MCL)
@@ -1906,6 +1916,7 @@ class LiveTrader:
             self._live_bars_1h.updateEvent += self._on_bar_update_1h
             log.info("Subscribed to 1-hour continuous contract live bars")
 
+
     def _subscribe_front_month(self) -> None:
         """Subscribe to live 5-min bars (Hands stream: front-month contract)."""
         log.info(
@@ -2154,7 +2165,7 @@ class LiveTrader:
                     self.data_client.cancel_subscription(self._front_month_bars)
                 except Exception:
                     pass
-
+            
             # 2. Re-subscribe using async API
             log.info("Subscribing to live 5-min bars (Stream A)...")
             self._live_bars_5m = await self.data_client.subscribe_live_bars_async(
@@ -2578,8 +2589,19 @@ class LiveTrader:
                 ratio_adjusted_df = self.data_manager_1h.get_ratio_adjusted_df()
             else:
                 ratio_adjusted_df = rolling_df  # fallback for non-1h modes
+
+            # Prepare macro overrides from real-time IBKR subscriptions
+            macro_overrides = {}
+            if self._needs_macro:
+                if getattr(self, "_macro_daily_closes", None):
+                    macro_overrides = self._macro_daily_closes.copy()
+
             features = build_live_features(
-                ratio_adjusted_df, self.feature_names, lean=self._lean_features, bar_size=stream
+                ratio_adjusted_df, 
+                self.feature_names, 
+                lean=self._lean_features, 
+                bar_size=stream,
+                macro_overrides=macro_overrides
             )
         except StaleDataException as exc:
             if not self._data_mute:

@@ -401,7 +401,11 @@ class MacroFeatureEngine:
     # FRED Feature Engineering
     # ------------------------------------------------------------------
 
-    def _build_fred_features(self) -> pd.DataFrame:
+    def _build_fred_features(
+        self,
+        live_overrides: dict[str, float] | None = None,
+        live_time: pd.Timestamp | None = None,
+    ) -> pd.DataFrame:
         """Build all FRED-derived features on a daily-resolution DataFrame.
 
         Returns a DataFrame indexed by Date with all macro feature columns.
@@ -417,6 +421,22 @@ class MacroFeatureEngine:
         # This shift ensures no intra-day lookahead from daily signals.
         df.index = df.index + pd.Timedelta(days=1)
         log.debug("FRED dates shifted +1 day for end-of-day publication lag")
+
+        # Inject real-time values for live trading inference
+        if live_overrides and live_time:
+            if live_time.tzinfo is not None:
+                live_time = live_time.tz_localize(None)
+            
+            # Use the last row as a base to ffill any non-overridden columns
+            new_row = df.iloc[-1].copy()
+            for key, val in live_overrides.items():
+                if key in new_row and pd.notna(val):
+                    new_row[key] = float(val)
+            
+            # Append the live row with exact current time. 
+            # This ensures .pct_change correctly compares LIVE against yesterday's close.
+            df.loc[live_time] = new_row
+            log.debug("Injected live overrides: %s", live_overrides)
 
         features = pd.DataFrame(index=df.index)
 
@@ -544,6 +564,8 @@ class MacroFeatureEngine:
         df: pd.DataFrame,
         include_fred: bool = True,
         include_cot: bool = True,
+        live_overrides: dict[str, float] | None = None,
+        live_time: pd.Timestamp | None = None,
     ) -> pd.DataFrame:
         """Merge all macro features into a bar-level OHLCV DataFrame.
 
@@ -559,6 +581,10 @@ class MacroFeatureEngine:
             Include FRED-derived features (VIX, DXY, etc.).
         include_cot : bool
             Include CFTC COT-derived features.
+        live_overrides : dict
+            Real-time IBKR values for live inference injection.
+        live_time : pd.Timestamp
+            The exact timestamp for the live data injection.
 
         Returns
         -------
@@ -584,7 +610,9 @@ class MacroFeatureEngine:
 
         if include_fred:
             try:
-                fred_features = self._build_fred_features()
+                fred_features = self._build_fred_features(
+                    live_overrides=live_overrides, live_time=live_time
+                )
                 # Join by exact time: each bar gets the most recent daily value strictly <= bar time
                 fred_aligned = fred_features.reindex(bar_times, method='ffill')
                 # Reset index to match the bar-level index

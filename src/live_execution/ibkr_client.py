@@ -708,6 +708,51 @@ class IBKRConnectionManager:
             set_index=set_index,
         )
 
+    async def fetch_daily_close_async(self, contract: Contract) -> float:
+        """Fetch the previous daily close for a given contract asynchronously.
+        
+        This fetches 2 days of daily bars and extracts the most recent completed day's close.
+        """
+        self.ensure_connected()
+        bars = await self.ib.reqHistoricalDataAsync(
+            contract,
+            endDateTime="",
+            durationStr="2 D",
+            barSizeSetting="1 day",
+            whatToShow="TRADES" if getattr(contract, "symbol", "") not in ("VIX", "OVX") else "MIDPOINT",
+            useRTH=False,
+            formatDate=1,
+            keepUpToDate=False,
+        )
+        if not bars:
+            # Fallback to TRADES if MIDPOINT fails, or vice versa
+            bars = await self.ib.reqHistoricalDataAsync(
+                contract,
+                endDateTime="",
+                durationStr="2 D",
+                barSizeSetting="1 day",
+                whatToShow="TRADES",
+                useRTH=False,
+                formatDate=1,
+                keepUpToDate=False,
+            )
+            if not bars:
+                raise ValueError(f"No historical daily data returned for {contract.symbol}")
+        
+        import pandas as pd
+        today = pd.Timestamp.now("America/New_York").date()
+        last_bar_date = bars[-1].date
+        if hasattr(last_bar_date, 'date'):
+            last_bar_date = last_bar_date.date()
+            
+        if last_bar_date == today and len(bars) > 1:
+            return float(bars[-2].close)
+        return float(bars[-1].close)
+
+    def fetch_daily_close(self, contract: Contract) -> float:
+        """Fetch the previous daily close for a given contract synchronously."""
+        return self.ib.run(self.fetch_daily_close_async(contract))
+
     # ------------------------------------------------------------------
     # Live bar subscription
     # ------------------------------------------------------------------
