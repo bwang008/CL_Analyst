@@ -142,8 +142,6 @@ class IBKRDataFeedClient(DataFeedClient):
         from ib_insync import Index
         if symbol in ("VIX", "OVX"):
             contract = Index(symbol, "CBOE", "USD")
-        elif symbol == "DX":
-            contract = Index("DX", "NYBOT", "USD")
         else:
             raise ValueError(f"fetch_daily_close_async only supports index symbols. Got: {symbol}")
         

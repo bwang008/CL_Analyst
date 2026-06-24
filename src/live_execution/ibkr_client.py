@@ -719,24 +719,12 @@ class IBKRConnectionManager:
             endDateTime="",
             durationStr="2 D",
             barSizeSetting="1 day",
-            whatToShow="TRADES" if getattr(contract, "symbol", "") not in ("VIX", "OVX") else "MIDPOINT",
+            whatToShow="TRADES",
             useRTH=False,
             formatDate=1,
             keepUpToDate=False,
         )
         if not bars:
-            # Fallback to TRADES if MIDPOINT fails, or vice versa
-            bars = await self.ib.reqHistoricalDataAsync(
-                contract,
-                endDateTime="",
-                durationStr="2 D",
-                barSizeSetting="1 day",
-                whatToShow="TRADES",
-                useRTH=False,
-                formatDate=1,
-                keepUpToDate=False,
-            )
-            if not bars:
             raise ValueError(f"No historical daily data returned for {contract.symbol}")
         
         import pandas as pd
