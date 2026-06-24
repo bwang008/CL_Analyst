@@ -49,7 +49,7 @@ def parse_markdown_table(filepath, direction, metric, objective, progress_data):
             else:
                 in_table = False
                 
-        elif line.startswith("|") and "---" in line:
+        elif line.startswith("|") and line.replace(" ", "").startswith("|---"):
             continue
         elif line.startswith("|") and in_table:
             # Parse row

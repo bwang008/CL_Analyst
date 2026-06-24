@@ -105,6 +105,7 @@ def build_live_features(
     lean: bool = True,
     bar_size: str = "5m",
     macro_overrides: dict[str, float] | None = None,
+    return_last_n: int = 1,
 ) -> pd.DataFrame | None:
     """
     Generate features from a rolling OHLCV DataFrame for live inference.
@@ -284,25 +285,24 @@ def build_live_features(
     work.replace([np.inf, -np.inf], np.nan, inplace=True)
     work.ffill(inplace=True)
 
-    # 6. Extract the last complete row with the model's expected columns
+    # 6. Extract the last rows with the model's expected columns
     missing_cols = set(feature_names) - set(work.columns)
     if missing_cols:
         log.error("Missing feature columns: %s", missing_cols)
         return None
 
-    last_row = work[feature_names].iloc[[-1]]
+    last_rows = work[feature_names].iloc[-return_last_n:]
 
     # 7. HARD NaN GUARD — if ANY model feature is still NaN after ffill,
     #    the cache lacks sufficient warmup history.  Return None to force
     #    live_trader to skip this bar rather than infer on fabricated data.
-    nan_count = int(last_row.isna().sum(axis=1).iloc[0])
+    #    We check only the oldest returned row (if it has no NaNs, the newer ones won't either due to ffill)
+    nan_count = int(last_rows.iloc[0].isna().sum())
     if nan_count > 0:
-        nan_cols = last_row.columns[last_row.isna().iloc[0]].tolist()
+        nan_cols = last_rows.columns[last_rows.iloc[0].isna()].tolist()
         log.error(
-            "FEATURE NaN BLOCK: %d/%d features still NaN after ffill — "
-            "insufficient warmup history. Skipping inference. "
-            "NaN features: %s",
-            nan_count, len(feature_names), nan_cols,
+            "HARD NaN GUARD FAILED: cache lacks sufficient warmup history. "
+            "Found NaNs in features: %s", nan_cols[:5]
         )
         return None
 
@@ -311,7 +311,7 @@ def build_live_features(
     #    feature has zero variance — catches stuck features that pass
     #    the FRED-level circuit breaker.
     try:
-        _check_inference_feature_variance(last_row, feature_names)
+        _check_inference_feature_variance(last_rows.iloc[[-1]], feature_names)
     except Exception:
         pass  # Never let monitoring crash inference
 
@@ -319,6 +319,6 @@ def build_live_features(
     #    training features.  LightGBM tree splits are exact comparisons;
     #    float64 values near split thresholds may route to different leaves
     #    than the float32 values the model was trained on.
-    last_row = last_row.astype(np.float32)
+    last_rows = last_rows.astype(np.float32)
 
-    return last_row
+    return last_rows

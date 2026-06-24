@@ -684,6 +684,10 @@ class LiveTrader:
             # Step 8: Warm-start via DataManager
             self._warm_start()
 
+            # Step 8b: Warmup inference state for continuity
+            warmup_bars = self.config.get("warmup_bars", 24)
+            self._warmup_inference_state(num_bars=warmup_bars)
+
             # Step 7b: Recover any inherited position from the ledger
             self._recover_inherited_position()
 
@@ -1890,6 +1894,118 @@ class LiveTrader:
                 self._telegram.send(f"⚠️ *CACHE VALIDATION FAILED*\n`{err_msg}`")
                 raise RuntimeError(err_msg)
 
+    def _warmup_inference_state(self, num_bars: int) -> None:
+        """Run inference on the last N historical bars to restore state
+        (e.g., consecutive signal counts, trailing tops) before live trading begins.
+        """
+        if num_bars <= 0:
+            return
+
+        source_df = None
+        if self._bar_size in ("1h", "2h", "4h") and self.data_manager_1h is not None:
+            source_df = self.data_manager_1h.get_ratio_adjusted_df()
+        elif self.rolling_df_5m is not None:
+            source_df = self.rolling_df_5m
+
+        if source_df is None or source_df.empty:
+            return
+
+        N = min(num_bars, len(source_df))
+        if N <= 0:
+            return
+
+        log.info("Warming up inference state on last %d bars...", N)
+
+        # 1. Fetch real current position and average cost from IBKR
+        try:
+            real_current_position = self.exec_client.get_position(
+                symbol=self._execution_symbol,
+            )
+            acct = self.exec_client.get_account_summary(symbol=self._execution_symbol)
+            average_cost = float(acct.get("cl_avg_cost", 0.0))
+        except Exception:
+            log.warning("Warmup: failed to fetch IBKR position, defaulting to 0", exc_info=True)
+            real_current_position = 0
+            average_cost = 0.0
+
+        # 2. Build features for the last N bars in one pass
+        from src.live_execution.feature_pipeline import build_live_features
+        try:
+            warmup_features = build_live_features(
+                source_df,
+                self.feature_names,
+                lean=self._lean_features,
+                bar_size=self._bar_size,
+                macro_overrides={},  # no live overrides during warmup
+                return_last_n=N
+            )
+        except Exception as exc:
+            log.warning("Warmup feature generation failed: %s", exc)
+            return
+
+        if warmup_features is None or warmup_features.empty:
+            log.info("Warmup skipped (insufficient feature data).")
+            return
+
+        # 3. Pre-compute ATR arrays from raw source (parity with _on_new_bar)
+        def _compute_series_atr(period: int):
+            if len(source_df) >= period + 1:
+                import pandas_ta as _ta
+                return source_df.ta.atr(length=period)
+            return None
+
+        atr_series_long = _compute_series_atr(self._atr_period_long)
+        atr_series_short = _compute_series_atr(self._atr_period_short)
+        atr_series = _compute_series_atr(self._atr_period)
+
+        # 4. Determine if entry occurred during this warmup window
+        entry_crossed = False
+        if real_current_position != 0 and average_cost > 0:
+            for i in range(len(warmup_features)):
+                dt_idx = warmup_features.index[i]
+                if dt_idx in source_df.index:
+                    if float(source_df.loc[dt_idx, "Low"]) <= average_cost <= float(source_df.loc[dt_idx, "High"]):
+                        entry_crossed = True
+                        break
+
+        # If the position was entered BEFORE the warmup window, it won't cross the average cost.
+        # In that case, we start with the mock_position already active.
+        mock_position = 0 if entry_crossed else real_current_position
+
+        # 5. Iterate over the returned feature rows and run strategy.evaluate
+        # warmup_features has DateTime index matching the source_df
+        for i in range(len(warmup_features)):
+            row_features = warmup_features.iloc[[i]]
+            dt = row_features.index[0]
+
+            # Get raw prices for this bar
+            if dt in source_df.index:
+                current_price = float(source_df.loc[dt, "Close"])
+                high_price = float(source_df.loc[dt, "High"])
+                low_price = float(source_df.loc[dt, "Low"])
+                atr_val = float(atr_series.loc[dt]) if atr_series is not None and not pd.isna(atr_series.loc[dt]) else None
+                atr_long = float(atr_series_long.loc[dt]) if atr_series_long is not None and not pd.isna(atr_series_long.loc[dt]) else None
+                atr_short = float(atr_series_short.loc[dt]) if atr_series_short is not None and not pd.isna(atr_series_short.loc[dt]) else None
+            else:
+                continue # Should not happen
+
+            # Heuristic for Time-Travel Position Guard
+            if real_current_position != 0 and mock_position == 0:
+                if low_price <= average_cost <= high_price:
+                    mock_position = real_current_position
+
+            # 6. Execute isolated inference (discard output)
+            _ = self.strategy.evaluate(
+                features=row_features,
+                current_price=current_price,
+                atr_value=atr_val,
+                current_position=mock_position,
+                atr_value_long=atr_long,
+                atr_value_short=atr_short,
+            )
+
+        log.info("Inference warmup complete.")
+
     # ------------------------------------------------------------------
     # Live bar subscription
     # ------------------------------------------------------------------
@@ -2229,6 +2345,7 @@ class LiveTrader:
         from src.live_execution.ibkr_client import build_cl_contract, ib_bars_to_dataframe
 
         now = pd.Timestamp.now()
+        warmup_count = 0
 
         # ── 5M gap backfill ──────────────────────────────────────────
         if self._last_bar_time_5m is not None:
@@ -2282,6 +2399,8 @@ class LiveTrader:
                                 f"Successfully stitched *{len(new_bars)}* missing 5-minute bars into cache.\n"
                                 f"Latest: `{self._last_bar_time_5m}`"
                             )
+                            if self._bar_size == "5m":
+                                warmup_count = len(new_bars)
                         else:
                             log.info("RECONNECT BACKFILL (5M): no new bars to stitch")
                     else:
@@ -2341,6 +2460,8 @@ class LiveTrader:
                                 f"Successfully stitched *{len(new_bars)}* missing 1-hour bars into cache.\n"
                                 f"Latest: `{self._last_bar_time_1h}`"
                             )
+                            if self._bar_size in ("1h", "2h", "4h"):
+                                warmup_count = len(new_bars)
                         else:
                             log.info("RECONNECT BACKFILL (1H): no new bars to stitch")
                     else:
@@ -2350,6 +2471,8 @@ class LiveTrader:
             else:
                 log.info("RECONNECT BACKFILL (1H): gap < 70 min — no backfill needed")
 
+        if warmup_count > 0:
+            self._warmup_inference_state(num_bars=warmup_count)
 
     def _resubscribe_and_backfill(self) -> None:
         """Synchronous resubscription — used by _reconnect() after a clean reconnect.

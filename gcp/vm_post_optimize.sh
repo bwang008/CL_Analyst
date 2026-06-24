@@ -290,6 +290,12 @@ if [ "$OPT_MODE" = "ensemble" ]; then
         --top-n 8 \
         2>&1 | tee -a "$LOG"
 
+    PAIR_COUNT=$(python3 -c "import json, os; print(len(json.load(open('$BATCH_DIR/top_8_ensembles.json')))) if os.path.exists('$BATCH_DIR/top_8_ensembles.json') else print(0)")
+    if [ "$PAIR_COUNT" -eq 0 ]; then
+        echo "  FATAL ERROR: select_top_ensembles.py produced 0 pairs! Aborting to prevent silent failure." | tee -a "$LOG"
+        exit 1
+    fi
+
     # --- [4/5] Run batch_post_optimizer (ensemble mode) ---
     echo "" | tee -a "$LOG"
     echo "[4/5] Running batch post-optimizer on Top 8 (ensemble mode)..." | tee -a "$LOG"
@@ -335,6 +341,12 @@ else
     # 4 pairs is lightweight (~5-10 min on the warm VM).
     TOP_PAIRS="$BATCH_DIR/top_pairs.json"
     if [ -f "$TOP_PAIRS" ]; then
+        PAIR_COUNT=$(python3 -c "import json; print(len(json.load(open('$TOP_PAIRS'))))")
+        if [ "$PAIR_COUNT" -eq 0 ]; then
+            echo "  FATAL ERROR: unified_pair_optimizer.py produced 0 pairs! This indicates a failure in parsing or individual optimization. Aborting." | tee -a "$LOG"
+            exit 1
+        fi
+
         echo "" | tee -a "$LOG"
         echo "[4c/5] Running ensemble optimization on VM (top pairs)..." | tee -a "$LOG"
 

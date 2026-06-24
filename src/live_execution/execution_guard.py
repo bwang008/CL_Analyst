@@ -268,7 +268,7 @@ class ExecutionGuard:
         with the same reason are silent to avoid log spam.
         """
         if reason != self._last_block_reason:
-            log.warning("[GUARD ACTIVATED] %s", reason)
+            log.debug("[GUARD ACTIVATED] %s", reason)
             self._last_block_reason = reason
 
     def _clear_block(self) -> None:
@@ -279,5 +279,5 @@ class ExecutionGuard:
         flowing again.
         """
         if self._last_block_reason is not None:
-            log.info("[GUARD DEACTIVATED] new entries allowed")
+            log.debug("[GUARD DEACTIVATED] Resuming allowed entries")
             self._last_block_reason = None
