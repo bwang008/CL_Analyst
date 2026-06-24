@@ -118,7 +118,7 @@ class DataProcessor:
         """
         if input_path is None:
             # Resolve from CL_DATA_ROOT first, repo-local fallback
-            resolved = get_data_path("raw/cl-5m_bk.csv")
+            resolved = get_data_path("raw/CL.csv")
             if resolved.exists():
                 input_path = str(resolved)
             else:
@@ -368,7 +368,7 @@ class DataProcessor:
             entry = close[i]
             tp_barrier = entry + tp_atr_mult * atr[i]
             sl_barrier = entry - sl_atr_mult * atr[i]
-            end_idx = min(i + max_horizon, n)
+            end_idx = min(i + max_horizon + 1, n)
             for j in range(i + 1, end_idx):
                 if high_all[j] >= tp_barrier:
                     long_labels[i] = 1
@@ -384,7 +384,7 @@ class DataProcessor:
             entry = close[i]
             tp_barrier = entry - tp_atr_mult * atr[i]  # TP below entry
             sl_barrier = entry + sl_atr_mult * atr[i]  # SL above entry
-            end_idx = min(i + max_horizon, n)
+            end_idx = min(i + max_horizon + 1, n)
             for j in range(i + 1, end_idx):
                 if low_all[j] <= tp_barrier:
                     short_labels[i] = 1
@@ -714,12 +714,14 @@ class DataProcessor:
         if len(df) > effective_warmup:
             df = df.iloc[effective_warmup:].copy()
             print(f"  - Dropped first {effective_warmup} warmup rows")
+        else:
+            df = df.copy()
 
         # Forward fill ONLY — never backward fill.
         # bfill() is a lookahead bias: it copies future values into past rows.
         target_cols = [c for c in df.columns if c.startswith('TARGET_')]
         non_target_cols = [c for c in df.columns if c not in target_cols]
-        df[non_target_cols] = df[non_target_cols].ffill()
+        df.loc[:, non_target_cols] = df.loc[:, non_target_cols].ffill()
 
         # Drop any rows that still contain NaN in non-target columns.
         # If NaNs survived the warmup drop + forward fill, the data is
@@ -880,6 +882,10 @@ class DataProcessor:
         elif self.dataset_version == "HourSet_13A":
             return self.process_hourset_13a(exec_ohlcv_path=kwargs.get("exec_ohlcv_path"))
         elif self.dataset_version == "HourSet_13B":
+            return self.process_hourset_13b(exec_ohlcv_path=kwargs.get("exec_ohlcv_path"))
+        elif self.dataset_version == "HourSet_14A":
+            return self.process_hourset_13a(exec_ohlcv_path=kwargs.get("exec_ohlcv_path"))
+        elif self.dataset_version == "HourSet_14B":
             return self.process_hourset_13b(exec_ohlcv_path=kwargs.get("exec_ohlcv_path"))
         elif self.dataset_version == "Hour4Set_01":
             return self.process_hour4set_01()
@@ -2705,7 +2711,7 @@ class DataProcessor:
 
         # ── Step 4: External macro features (FRED + COT) ─────────────
         macro_engine = MacroFeatureEngine()
-        df = macro_engine.merge_all(df)
+        df = macro_engine.merge_all(df, check_staleness=False)
         n_macro = len(macro_engine.get_feature_names())
         print(f"  [55%] {n_macro} external macro features added at "
               f"{datetime.now().isoformat(timespec='seconds')}")
@@ -2878,7 +2884,7 @@ class DataProcessor:
 
         # ── Step 4: External macro features (FRED + COT) ─────────────
         macro_engine = MacroFeatureEngine()
-        df = macro_engine.merge_all(df)
+        df = macro_engine.merge_all(df, check_staleness=False)
 
         # ── Step 5: RAW columns for evaluation (120H forward window) ──
         raw_horizon = 120

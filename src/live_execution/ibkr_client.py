@@ -737,7 +737,7 @@ class IBKRConnectionManager:
                 keepUpToDate=False,
             )
             if not bars:
-                raise ValueError(f"No historical daily data returned for {contract.symbol}")
+            raise ValueError(f"No historical daily data returned for {contract.symbol}")
         
         import pandas as pd
         today = pd.Timestamp.now("America/New_York").date()

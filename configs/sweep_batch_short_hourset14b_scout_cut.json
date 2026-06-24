@@ -1,0 +1,58 @@
+{
+  "_comment": "HourSet_14B SCOUT - Reduced to 8 orthogonal, high-performance targets",
+  "defaults": {
+    "machine_type": "c2-standard-16",
+    "provisioning_model": "STANDARD",
+    "gcs_data_path": "gs://cltrainer-optuna-results/data/cl-1h_bk_HourSet_14B.parquet",
+    "exec_data": "gs://cltrainer-optuna-results/data/CL_raw.parquet",
+    "slippage_per_side": 0.01,
+    "strategy_config": "hourly_ensemble_010.json",
+    "metrics": "logloss,average_precision",
+    "timeout_minutes": 360,
+    "max_concurrent_vcpus": 288,
+    "vcpus_per_vm": 16,
+    "max_concurrent_vms": 12,
+    "n_trials": 100,
+    "max_depth_min": 3,
+    "max_depth_max": 8,
+    "num_leaves_min": 15,
+    "num_leaves_max": 64,
+    "max_n_estimators": 1500,
+    "early_stopping_rounds": 30,
+    "max_folds": 5,
+    "learning_rate_min": 0.001,
+    "learning_rate_max": 0.05,
+    "min_child_samples_min": 100,
+    "min_child_samples_max": 500,
+    "feature_fraction_min": 0.4,
+    "feature_fraction_max": 0.8,
+    "post_optimizer_trials": 200,
+    "post_optimizer_holdout_months": 6
+  },
+  "experiments": [
+    {
+      "label": "HS14B 2x1 6H",
+      "target_long": "TARGET_TRIPLE_2x1_6H_LONG",
+      "target_short": "TARGET_TRIPLE_2x1_6H_SHORT",
+      "gcs_prefix": "sweep_hs14b_2x1_6h_scout"
+    },
+    {
+      "label": "HS14B 3x1 6H",
+      "target_long": "TARGET_TRIPLE_3x1_6H_LONG",
+      "target_short": "TARGET_TRIPLE_3x1_6H_SHORT",
+      "gcs_prefix": "sweep_hs14b_3x1_6h_scout"
+    },
+    {
+      "label": "HS14B 5x1 24H",
+      "target_long": "TARGET_TRIPLE_5x1_24H_LONG",
+      "target_short": "TARGET_TRIPLE_5x1_24H_SHORT",
+      "gcs_prefix": "sweep_hs14b_5x1_24h_scout"
+    },
+    {
+      "label": "HS14B 4x1 36H",
+      "target_long": "TARGET_TRIPLE_4x1_36H_LONG",
+      "target_short": "TARGET_TRIPLE_4x1_36H_SHORT",
+      "gcs_prefix": "sweep_hs14b_4x1_36h_scout"
+    }
+  ]
+}

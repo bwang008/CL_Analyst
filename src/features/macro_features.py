@@ -405,6 +405,7 @@ class MacroFeatureEngine:
         self,
         live_overrides: dict[str, float] | None = None,
         live_time: pd.Timestamp | None = None,
+        check_staleness: bool = True,
     ) -> pd.DataFrame:
         """Build all FRED-derived features on a daily-resolution DataFrame.
 
@@ -476,16 +477,17 @@ class MacroFeatureEngine:
 
         log.debug("Built %d FRED features", len(features.columns))
 
-        # Value-staleness gate: raise if critical series have repeated
-        # values at the tail — file age alone does not guarantee freshness.
-        self._check_value_staleness(df)
+        if check_staleness:
+            # Value-staleness gate: raise if critical series have repeated
+            # values at the tail — file age alone does not guarantee freshness.
+            self._check_value_staleness(df)
 
-        # Feature-staleness gate: raise if derived CHG_1D features are
-        # stuck at zero beyond their per-feature thresholds.  This catches
-        # the blind spot where raw values differ slightly (below
-        # _STALE_THRESHOLDS) but pct_change produces 0.0 due to FRED
-        # publication lag + weekend ffill.
-        self._check_feature_staleness(features)
+            # Feature-staleness gate: raise if derived CHG_1D features are
+            # stuck at zero beyond their per-feature thresholds.  This catches
+            # the blind spot where raw values differ slightly (below
+            # _STALE_THRESHOLDS) but pct_change produces 0.0 due to FRED
+            # publication lag + weekend ffill.
+            self._check_feature_staleness(features)
 
         return features
 
@@ -566,6 +568,7 @@ class MacroFeatureEngine:
         include_cot: bool = True,
         live_overrides: dict[str, float] | None = None,
         live_time: pd.Timestamp | None = None,
+        check_staleness: bool = True,
     ) -> pd.DataFrame:
         """Merge all macro features into a bar-level OHLCV DataFrame.
 
@@ -585,6 +588,8 @@ class MacroFeatureEngine:
             Real-time IBKR values for live inference injection.
         live_time : pd.Timestamp
             The exact timestamp for the live data injection.
+        check_staleness: bool
+            If True, raise StaleDataException if FRED data is stale.
 
         Returns
         -------
@@ -611,7 +616,7 @@ class MacroFeatureEngine:
         if include_fred:
             try:
                 fred_features = self._build_fred_features(
-                    live_overrides=live_overrides, live_time=live_time
+                    live_overrides=live_overrides, live_time=live_time, check_staleness=check_staleness
                 )
                 # Join by exact time: each bar gets the most recent daily value strictly <= bar time
                 fred_aligned = fred_features.reindex(bar_times, method='ffill')

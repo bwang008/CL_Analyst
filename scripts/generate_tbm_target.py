@@ -73,7 +73,7 @@ def generate_tbm_target(
         entry = close[i]
         tp_barrier = entry + tp_atr_mult * atr[i]
         sl_barrier = entry - sl_atr_mult * atr[i]
-        end_idx = min(i + max_horizon, n)
+        end_idx = min(i + max_horizon + 1, n)
         for j in range(i + 1, end_idx):
             if high_all[j] >= tp_barrier:
                 long_labels[i] = 1
