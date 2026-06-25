@@ -33,6 +33,9 @@ import pandas as pd
 from agent.backtest_engine import BacktestEngine, load_ohlcv, load_ohlcv_dual, load_predictions
 from agent.strategy_optimizer import run_optimization, extract_metrics, send_telegram, suppress_telegram
 
+import logging
+logging.getLogger("src.live_execution.execution_guard").setLevel(logging.ERROR)
+
 
 import re as _re
 
@@ -169,6 +172,11 @@ def find_ohlcv_path(manifest_path: str) -> str:
     """Resolve the local OHLCV parquet from the batch manifest."""
     with open(manifest_path) as f:
         manifest = json.load(f)
+        
+    local_path = manifest.get("defaults", {}).get("local_data_path")
+    if local_path and os.path.exists(local_path):
+        return local_path
+        
     gcs_path = manifest.get("defaults", {}).get("gcs_data_path", "")
     # Extract filename from GCS path: gs://bucket/data/cl-1h_bk_HourSet_08.parquet
     basename = os.path.basename(gcs_path)
@@ -1027,7 +1035,9 @@ def main():
 
             label = exp["label"]
             local_dir = exp.get("local_dir")
-            if not local_dir:
+            # If local_dir is missing, or if it's an absolute path from another OS that doesn't exist here,
+            # fall back to dynamically resolving the path relative to the batch_dir.
+            if not local_dir or not os.path.exists(local_dir):
                 local_dir = os.path.join(batch_dir, exp.get("gcs_prefix", ""))
             canary_dir = os.path.join(local_dir, "registry", "canary_output")
 

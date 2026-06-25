@@ -39,6 +39,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Any
 
+import logging
+logging.getLogger("src.live_execution.execution_guard").setLevel(logging.ERROR)
+
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module=".*execution_models")
+
 import numpy as np
 import pandas as pd
 
@@ -137,6 +143,7 @@ def send_telegram(message: str) -> None:
     has been called (used by batch_post_optimizer to silence per-worker
     start/complete spam).
     """
+    print(f"\n[Telegram Output]\n{message}\n", flush=True)
     if _tg_suppress:
         return
     import urllib.request
@@ -438,7 +445,7 @@ def attach_atr_cache(
         The same DataFrame with ATR_{period} columns added.
     """
     if periods is None:
-        periods = list(range(10, 52, 2))
+        periods = list(range(4, 44, 4))
     tr = np.maximum(
         ohlcv_df["High"] - ohlcv_df["Low"],
         np.maximum(
@@ -663,11 +670,11 @@ _PARAM_RANGES = {
     "sl_atr_mult":                    (0.5,   3.0, 0.5,  "float"),
     "trigger_frac":                   (0.1,   0.8, 0.1,  "float"),
     "distance_frac":                  (0.0,   0.8, 0.1,  "float"),
-    "cooldown_bars":                  (1,    21,   2,    "int"),
+    "cooldown_bars":                  (1,    15,   2,    "int"),
     "max_hold_bars":                  (6,    36,   6,    "int"),
     "consecutive_signal_threshold":   (0,     4,   1,    "int"),
-    "entry_threshold":                (0.50,  0.80, 0.02, "float"),
-    "atr_period":                     (10,   40,   2,    "int"),
+    "entry_threshold":                (0.50,  0.80, 0.03, "float"),
+    "atr_period":                     (4,    40,   4,    "int"),
 }
 
 
