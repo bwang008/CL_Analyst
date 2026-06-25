@@ -246,7 +246,10 @@ def main():
             markdown_lines.append("### Verification Command")
             markdown_lines.append("```bash")
             rel_config_path = f"{batch_dir}/configs/{config_name}".replace("\\", "/")
-            markdown_lines.append(f'python agent/backtest_engine.py --config "{rel_config_path}" --data "{args.data}" --exec-data "{args.exec_data}" --slippage-per-side {args.slippage_per_side}')
+            if args.exec_data:
+                markdown_lines.append(f'python agent/backtest_engine.py --config "{rel_config_path}" --data "{args.data}" --exec-data "{args.exec_data}" --slippage-per-side {args.slippage_per_side}')
+            else:
+                markdown_lines.append(f'python agent/backtest_engine.py --config "{rel_config_path}" --data "{args.data}" --slippage-per-side {args.slippage_per_side}')
             markdown_lines.append("```")
             markdown_lines.append("")
             

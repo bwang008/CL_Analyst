@@ -71,10 +71,24 @@ Diagnosed and resolved a critical pipeline outage in /run-cloud-batch where the 
 ### Implementation & Fixes
 1. **gcp/vm_startup.sh:** Updated the VM provisioning script to explicitly add the ppa:deadsnakes/ppa repository and install python3.12 and python3.12-venv natively.
 2. **gent/strategy_optimizer.py & gent/alpha_evaluator.py:** Migrated all .resample('M') calls to .resample('ME') to comply with Pandas 2.2+ and Pandas 3.0+ deprecation standards.
-3. **Validation:** Successfully re-ran the optuna-post-optimizer VM for atch_20260618_1721 with the updated code. The pipeline completed without outages and successfully generated all atch_summary_optimized_ensembles_*.md reports.
+2. ** gent/strategy_optimizer.py &  gent/alpha_evaluator.py:** Migrated all .resample('M') calls to .resample('ME') to comply with Pandas 2.2+ and Pandas 3.0+ deprecation standards.
+3. **Validation:** Successfully re-ran the optuna-post-optimizer VM for  atch_20260618_1721 with the updated code. The pipeline completed without outages and successfully generated all  atch_summary_optimized_ensembles_*.md reports.
 
 ### Gotchas for Future Agents
-- **Dependency Drift:** Be aware that the pipeline installs pandas-ta==0.4.71b0, which actively forces pandas>=2.3.2 (Pandas 3.0+). You cannot pin an older Pandas version (like 2.2.2) globally in the m_startup.sh script or the build will fail with a resolution error.
-- **Zombie VMs:** If the un_sweep_batch.ps1 orchestrator is forcefully cancelled by the user during VM provisioning, GCP quota may become exhausted due to hanging optuna-sweep-* instances. Run gcloud compute instances list and clean up zombies before initiating a fresh batch.
+- **Dependency Drift:** Be aware that the pipeline installs pandas-ta==0.4.71b0, which actively forces pandas>=2.3.2 (Pandas 3.0+). You cannot pin an older Pandas version (like 2.2.2) globally in the  m_startup.sh script or the build will fail with a resolution error.
+- **Zombie VMs:** If the un_sweep_batch.ps1 orchestrator is forcefully cancelled by the user during VM provisioning, GCP quota may become exhausted due to hanging optuna-sweep-* instances. Run gcloud compute instances list and clean up zombies before initiating a fresh batch.
 - **Quota Exhaustion:** The post-optimizer dynamically spins up large machines (e.g., 
 2-standard-32). If a zone (e.g., us-central1-a) returns ZONE_RESOURCE_POOL_EXHAUSTED, the orchestrator will fail. The orchestrator may need its -Zone argument adjusted (e.g., us-west1-b) if the primary zone is out of resources.
+
+## 2026-06-25 — Live Trader Robustness Improvements (FRED Cutoff & Session PnL Caching)
+
+### Summary
+Addressed live trading bugs related to Telegram markdown errors, missing PnL tracking after a position closes, and FRED data refresh drift.
+
+### Implementation & Fixes
+1. **Telegram Markdown Escaping**: Fixed a 400 Bad Request error where the `SL_HIT` exit reason contained an unescaped underscore, causing Telegram's parser to fail. Wrapped the `exit_reason` variable with `_tg_escape()`.
+2. **Realized PnL Caching**: IBKR's `portfolio()` feed aggressively drops `position=0` entries (especially on the Live server). When this happens, the `get_account_summary` method defaults to `$0.00` for the specific contract, causing the heartbeat log to mistakenly report `$0.00` Realized PnL instead of the true session PnL. Fixed by caching `self._session_realized_pnl` in `LiveTrader._log_heartbeat()` whenever `pos != 0` or `real_pnl != 0.0`.
+3. **FRED Publication-Based Cutoff**: Refactored `MacroFeatureEngine.refresh_if_stale()` to use a fixed **7:00 PM Eastern Time (ET)** cutoff rather than a rolling 24-hour file age check. This prevents the download time from "drifting" (e.g., if the bot starts at 5 AM, it won't refresh again at 5 AM the next day; it will refresh at 7:00 PM ET). The 7:00 PM ET time provides a 2-hour safety buffer after FRED's typical 5:00 PM ET daily publication.
+
+### Gotchas for Future Agents
+- **PnL Tracking**: If a strategy holds multiple sequential positions in the same day, `IBKR`'s `realizedPNL` for the contract is cumulative for the session. The caching mechanism in `LiveTrader` correctly holds this cumulative value even when `portfolio()` temporarily drops the `0` position between trades. Do NOT attempt to calculate PnL manually via `execution_events` without accounting for commission and point-value multipliers unless specifically requested.

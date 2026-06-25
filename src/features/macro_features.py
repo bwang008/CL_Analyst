@@ -155,16 +155,28 @@ class MacroFeatureEngine:
         # --- FRED refresh ---
         fred_stale = True
         if self.fred_path.exists():
-            age = now - self.fred_path.stat().st_mtime
-            fred_stale = age > _FRED_MAX_AGE_SECONDS
+            import pytz
+            now_utc = datetime.now(pytz.utc)
+            et = pytz.timezone("America/New_York")
+            now_et = now_utc.astimezone(et)
+            
+            # Most recent 7:00 PM ET cutoff
+            cutoff_et = now_et.replace(hour=19, minute=0, second=0, microsecond=0)
+            if now_et < cutoff_et:
+                cutoff_et -= timedelta(days=1)
+            cutoff_ts = cutoff_et.timestamp()
+            
+            mtime = self.fred_path.stat().st_mtime
+            fred_stale = mtime < cutoff_ts
+            age = now - mtime
             if fred_stale:
                 log.info(
-                    "FRED data is stale (%.1f hours old), refreshing...",
+                    "FRED data is stale (last modified before 7:00 PM ET cutoff, %.1f hours old), refreshing...",
                     age / 3600,
                 )
             else:
                 log.info(
-                    "FRED data is fresh (%.1f hours old), skipping refresh",
+                    "FRED data is fresh (last modified after 7:00 PM ET cutoff, %.1f hours old), skipping refresh",
                     age / 3600,
                 )
         else:

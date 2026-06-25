@@ -685,7 +685,8 @@ class LiveTrader:
             self._warm_start()
 
             # Step 8b: Warmup inference state for continuity
-            warmup_bars = self.config.get("warmup_bars", 24)
+            strategy_config = getattr(self.strategy, "config", {})
+            warmup_bars = strategy_config.get("warmup_bars", 24)
             self._warmup_inference_state(num_bars=warmup_bars)
 
             # Step 7b: Recover any inherited position from the ledger
@@ -3556,6 +3557,12 @@ class LiveTrader:
                 unr_pnl = acct["cl_unrealized_pnl"]
                 real_pnl = acct["cl_realized_pnl"]
 
+                # Cache Realized PnL to prevent it from resetting to 0.0 when IBKR drops the position from the feed
+                if pos != 0 or real_pnl != 0.0:
+                    self._session_realized_pnl = real_pnl
+                else:
+                    real_pnl = getattr(self, "_session_realized_pnl", 0.0)
+
             pos_str = f"{pos:g} contracts" if pos != 0 else "FLAT"
             pnl_str = f" | unr_pnl=${unr_pnl:,.2f} | real_pnl=${real_pnl:,.2f}"
         except Exception:
@@ -3881,7 +3888,7 @@ class LiveTrader:
                 exit_reason = "TP_HIT" if is_tp_fill else "SL_HIT"
                 try:
                     self._telegram.send(
-                        f"✅ *POSITION CLOSED* ({exit_reason})\n"
+                        f"✅ *POSITION CLOSED* ({_tg_escape(exit_reason)})\n"
                         f"Price: `{avg_price}`\n"
                         f"Qty: `{int(qty)}`\n"
                         f"Action: `{action_str}`"
