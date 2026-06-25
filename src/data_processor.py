@@ -143,9 +143,8 @@ class DataProcessor:
             self._update_output_path()
 
     def _update_output_path(self):
-        # Auto-generate output path based on input filename and dataset version
-        input_name = Path(self.input_path).stem
-        self.output_path = str(get_data_root() / "processed" / f"{input_name}_{self._dataset_version}.parquet")
+        # Auto-generate output path based on dataset version (decoupled from raw input name)
+        self.output_path = str(get_data_root() / "processed" / f"CL_{self._dataset_version}.parquet")
             
         self.df = None
         

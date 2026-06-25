@@ -260,6 +260,7 @@ class ExecutionGuard:
     # Edge-triggered logging helpers
     # ------------------------------------------------------------------
 
+
     def _log_block(self, reason: str) -> None:
         """Emit a warning only when the block reason changes (edge-triggered).
 
@@ -268,7 +269,7 @@ class ExecutionGuard:
         with the same reason are silent to avoid log spam.
         """
         if reason != self._last_block_reason:
-            log.debug("[GUARD ACTIVATED] %s", reason)
+            log.warning("[GUARD ACTIVATED] %s", reason)
             self._last_block_reason = reason
 
     def _clear_block(self) -> None:
@@ -279,5 +280,5 @@ class ExecutionGuard:
         flowing again.
         """
         if self._last_block_reason is not None:
-            log.debug("[GUARD DEACTIVATED] Resuming allowed entries")
+            log.warning("[GUARD DEACTIVATED] Resuming allowed entries")
             self._last_block_reason = None

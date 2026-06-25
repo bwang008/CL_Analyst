@@ -1725,6 +1725,10 @@ def load_ohlcv(path: str) -> pd.DataFrame:
     else:
         df = pd.read_csv(path, index_col=0, parse_dates=True, sep=None, engine="python")
 
+    if "DateTime" in df.columns:
+        df["DateTime"] = pd.to_datetime(df["DateTime"])
+        df = df.set_index("DateTime")
+
     # Ensure standard column names
     rename_map = {
         "open": "Open",
@@ -1929,6 +1933,18 @@ def main() -> None:
     ohlcv_a, ohlcv_exec_a = load_ohlcv_dual(args.data)
     if args.exec_data:
         ohlcv_exec_a = load_ohlcv(args.exec_data)
+
+        if len(ohlcv_a) > 1 and len(ohlcv_exec_a) > 1:
+            diff_main = pd.Series(ohlcv_a.index).diff().median()
+            diff_exec = pd.Series(ohlcv_exec_a.index).diff().median()
+            if diff_exec < diff_main:
+                raise ValueError(
+                    f"FATAL MISMATCH: Execution dataset resolution ({diff_exec}) is higher "
+                    f"than inference dataset resolution ({diff_main}). This will cause the "
+                    f"engine's .reindex() function to slice a single intra-bar tick instead "
+                    f"of aggregating the full bar's High/Low range. Pass a properly aggregated "
+                    f"unadjusted dataset instead."
+                )
 
     if args.retrain_every is not None:
         if not args.oos_start:

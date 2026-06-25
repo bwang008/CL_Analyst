@@ -220,7 +220,7 @@
         "3M": 2160
       },
       "change_from_set_10": "Additional features (199 vs 156). Same cleanup and MACRO methods.",
-      "gcs_path": "gs://cltrainer-optuna-results/data/cl-5m_bk_set_11.parquet",
+      "gcs_path": "gs://cltrainer-optuna-results/data/CL_set_11.parquet",
       "canary_result": "long_logloss: 319 trades, PF 0.84, -$8,913. Others: 0-5 trades.",
       "targets": [
         "TARGET_TRIPLE_2x1_24H_LONG",
@@ -249,7 +249,7 @@
         "3M": 2160
       },
       "change_from_set_11": "Added EXHDIV_SLOPE_DIVERGE_*, EXHDIV_PEAK_OFFSET_*, EXHDIV_EFFORT_REWARD_* at each window + TARGET_VOL_EXPANSION",
-      "gcs_path": "gs://cltrainer-optuna-results/data/cl-5m_bk_set_12.parquet",
+      "gcs_path": "gs://cltrainer-optuna-results/data/CL_set_12.parquet",
       "new_features": [
         "EXHDIV_SLOPE_DIVERGE_*",
         "EXHDIV_PEAK_OFFSET_*",
@@ -298,8 +298,8 @@
         "ICHIMOKU_CLOUD_THICKNESS",
         "ICHIMOKU_ABOVE_CLOUD"
       ],
-      "file": "cl-1h_bk_HourSet_06.parquet",
-      "gcs_path": "gs://cltrainer-optuna-results/data/cl-1h_bk_HourSet_06.parquet",
+      "file": "CL_HourSet_06.parquet",
+      "gcs_path": "gs://cltrainer-optuna-results/data/CL_HourSet_06.parquet",
       "targets": [
         "TARGET_TRIPLE_1p5x1_72H_LONG",
         "TARGET_TRIPLE_1p5x1_72H_SHORT",

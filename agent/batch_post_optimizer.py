@@ -1026,7 +1026,9 @@ def main():
                 continue
 
             label = exp["label"]
-            local_dir = os.path.join(batch_dir, exp.get("gcs_prefix", ""))
+            local_dir = exp.get("local_dir")
+            if not local_dir:
+                local_dir = os.path.join(batch_dir, exp.get("gcs_prefix", ""))
             canary_dir = os.path.join(local_dir, "registry", "canary_output")
 
             prefix = exp.get("gcs_prefix", "")

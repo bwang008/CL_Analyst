@@ -40,7 +40,7 @@ def build_config(opt_result, objective, ensemble_idx, batch_dir, date_str, datas
 def main():
     parser = argparse.ArgumentParser(description="Generate ensemble backtest artifacts")
     parser.add_argument("--batch-dir", required=True, help="Path to batch directory")
-    parser.add_argument("--data", required=True, help="Path to OHLCV parquet")
+    parser.add_argument("--data", default=None, help="Path to OHLCV parquet (overrides manifest local_data_path)")
     parser.add_argument("--exec-data", default="", help="Path to raw execution parquet")
     parser.add_argument("--slippage-per-side", type=float, default=0.01, help="Slippage per side")
     parser.add_argument("--objectives", default="sharpe,sortino", help="Objectives to process")
@@ -64,6 +64,25 @@ def main():
         sys.exit(1)
     with open(manifest_path, "r") as f:
         manifest = json.load(f)
+
+    # -------------------------------------------------------------------------
+    # Resolve Data Path (Manifest -> CLI Fallback)
+    # -------------------------------------------------------------------------
+    # CLI args.data takes precedence over manifest if explicitly provided
+    data_path = args.data
+    if not data_path:
+        data_path = manifest.get("defaults", {}).get("local_data_path")
+        
+    if not data_path:
+        raise ValueError(
+            "FATAL: No local_data_path specified in manifest 'defaults', and no --data provided! "
+            "The dataset must be explicitly defined in the manifest to prevent dataset mismatches."
+        )
+    args.data = data_path  # Override args.data so the rest of the script uses the resolved path
+
+    # Attempt to resolve exec_data from manifest if not provided via CLI
+    if not args.exec_data:
+        args.exec_data = manifest.get("defaults", {}).get("local_exec_data", "")
 
     base_config_name = manifest.get("defaults", {}).get("strategy_config", "hourly_ensemble_010.json")
     base_config_path = os.path.join("configs", "strategies", base_config_name)

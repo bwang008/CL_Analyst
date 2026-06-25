@@ -3,7 +3,7 @@
   "defaults": {
     "machine_type": "c2-standard-16",
     "provisioning_model": "STANDARD",
-    "gcs_data_path": "gs://cltrainer-optuna-results/data/cl-1h_bk_HourSet_11.parquet",
+    "gcs_data_path": "gs://cltrainer-optuna-results/data/CL_HourSet_11.parquet",
     "strategy_config": "hourly_ensemble_010.json",
     "metrics": "logloss,average_precision",
     "timeout_minutes": 600,
