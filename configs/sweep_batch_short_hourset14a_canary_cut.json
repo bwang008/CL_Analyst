@@ -42,18 +42,6 @@
       "target_long": "TARGET_TRIPLE_3x1_6H_LONG",
       "target_short": "TARGET_TRIPLE_3x1_6H_SHORT",
       "gcs_prefix": "sweep_hs14a_3x1_6h_canary"
-    },
-    {
-      "label": "HS14A 5x1 24H",
-      "target_long": "TARGET_TRIPLE_5x1_24H_LONG",
-      "target_short": "TARGET_TRIPLE_5x1_24H_SHORT",
-      "gcs_prefix": "sweep_hs14a_5x1_24h_canary"
-    },
-    {
-      "label": "HS14A 4x1 36H",
-      "target_long": "TARGET_TRIPLE_4x1_36H_LONG",
-      "target_short": "TARGET_TRIPLE_4x1_36H_SHORT",
-      "gcs_prefix": "sweep_hs14a_4x1_36h_canary"
     }
   ]
 }
