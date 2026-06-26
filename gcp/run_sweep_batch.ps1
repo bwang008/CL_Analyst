@@ -884,9 +884,12 @@ if ($batchState.completed -gt 0) {
         if ($optExecData)       { $optArgs += @("-ExecData", $optExecData) }
         if ($optSlippage -gt 0) { $optArgs += @("-SlippagePerSide", $optSlippage) }
         if ($DisableTelegram) { $optArgs += "-DisableTelegram" }
+        $optStartTracker = Get-Date
         Write-Host "  Trying optimizer deploy in zone $oz..." -ForegroundColor Yellow
         & powershell @optArgs
         $optDeployExit = $LASTEXITCODE
+        $optDeployMins = [math]::Round(((Get-Date) - $optStartTracker).TotalMinutes, 1)
+
         if ($optDeployExit -eq 0) {
             $optActualZone = $oz
             Write-Host "  Optimizer deployed in zone $oz" -ForegroundColor Green
@@ -920,8 +923,8 @@ if ($batchState.completed -gt 0) {
 
             $optStatus = gcloud compute instances describe $optVmName --zone=$optActualZone --format="get(status)" 2>$null
             if (-not $optStatus -or $optStatus.ToString().Trim() -in @("TERMINATED", "STOPPED")) {
-                $optElapsedTotal = $optElapsed
-                Write-Host "  Optimizer VM finished after ~${optElapsed}min." -ForegroundColor Green
+                $optElapsedTotal = $optElapsed + $optDeployMins
+                Write-Host "  Optimizer VM finished after ~${optElapsedTotal}min." -ForegroundColor Green
                 break
             }
             if ($optElapsed % 5 -eq 0) {

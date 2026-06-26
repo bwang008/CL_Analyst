@@ -363,7 +363,7 @@ else
             --target-pairs-json "$TOP_PAIRS" \
             --n-trials "$N_TRIALS" \
             --holdout-months "$HOLDOUT_MONTHS" \
-            --workers 4 \
+            --workers "$WORKERS" \
             --objective "$OBJECTIVE" \
             --no-filter \
             $EXEC_ENS_ARGS \

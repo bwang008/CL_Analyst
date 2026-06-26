@@ -49,13 +49,8 @@ PCTILE_WINDOWS = [14, 35, 60]
 # Per-series thresholds reflect real-world FRED publication lags:
 #   DXY  (DTWEXBGS) — Broad Dollar Index: FRED lags 3-5 business days.
 #                     Use 7 to cover the max lag + weekend buffer.
-#   VIX  (VIXCLS)   — Published daily by CBOE, but FRED sometimes lags
-#                     1-2 days. Use 3 to avoid false weekend mutes.
-#   OVX  (OVXCLS)   — Same as VIX. Use 3.
 _STALE_THRESHOLDS: dict[str, int] = {
-    "DXY": 7,   # FRED Broad Dollar Index: 3-5 day lag + weekend buffer
-    "VIX": 3,   # CBOE VIX via FRED: 1-2 day lag, use 3 for weekend safety
-    "OVX": 3,   # CBOE OVX via FRED: same as VIX
+    "DXY": 10,   # FRED Broad Dollar Index: 3-5 day lag + weekend buffer
 }
 
 # Per-feature thresholds for derived CHG_1D staleness detection.
@@ -65,9 +60,7 @@ _STALE_THRESHOLDS: dict[str, int] = {
 # trading days.  Per-feature thresholds give extra leeway for slower
 # series (DXY) while catching truly stale data.
 _FEATURE_STALE_THRESHOLDS: dict[str, int] = {
-    "MACRO_DXY_CHG_1D": 8,   # DXY lags 3-5 biz days; 8 trading days
-    "MACRO_VIX_CHG_1D": 5,   # VIX lags 1-2 days; 5 trading days
-    "MACRO_OVX_CHG_1D": 5,   # OVX same as VIX; 5 trading days
+    "MACRO_DXY_CHG_1D": 11,   # DXY lags 3-5 biz days; 11 trading days
 }
 
 

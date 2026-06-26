@@ -661,7 +661,11 @@ class LiveTrader:
                     MacroFeatureEngine().refresh_if_stale()
                     # Also verify value-level freshness (file may be
                     # new but contain repeated data from FRED).
-                    MacroFeatureEngine()._build_fred_features()
+                    overrides = getattr(self, "_macro_daily_closes", {})
+                    MacroFeatureEngine()._build_fred_features(
+                        live_overrides=overrides,
+                        live_time=pd.Timestamp.now()
+                    )
                 except StaleDataException as e:
                     self._data_mute = True
                     self._data_mute_reason = str(e)
@@ -3600,7 +3604,11 @@ class LiveTrader:
                     # has resolved by doing a trial feature build.
                     if self._data_mute:
                         try:
-                            MacroFeatureEngine()._build_fred_features()
+                            overrides = getattr(self, "_macro_daily_closes", {})
+                            MacroFeatureEngine()._build_fred_features(
+                                live_overrides=overrides,
+                                live_time=pd.Timestamp.now()
+                            )
                             # No exception = data is fresh again
                             self._data_mute = False
                             self._data_mute_reason = ""
