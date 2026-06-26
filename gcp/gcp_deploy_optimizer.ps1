@@ -235,6 +235,14 @@ foreach ($file in $codeFiles) {
     }
 }
 
+# Upload global risk filters
+$globalFilters = Join-Path $ProjectDir "configs\global_risk_filters.json"
+if (Test-Path $globalFilters) {
+    gcloud compute scp "$globalFilters" "${VmName}:${RemoteProject}/configs/" --zone=$Zone --quiet 2>$null
+} else {
+    Write-Host "  WARNING: Missing configs\global_risk_filters.json" -ForegroundColor Yellow
+}
+
 # Upload strategy configs
 $configsDir = Join-Path $ProjectDir "configs\strategies\*.json"
 try {

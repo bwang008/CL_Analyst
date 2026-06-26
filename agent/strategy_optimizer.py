@@ -191,8 +191,8 @@ def send_telegram(message: str) -> None:
 # ---------------------------------------------------------------------------
 import math
 
-TRADES_PER_YEAR_FLOOR = 36  # Minimum ~3 trades/month combined (long+short)
-TRADES_PER_YEAR_FLOOR_SINGLE = 18  # Minimum ~1.5 trades/month for single-side optimization
+TRADES_PER_YEAR_FLOOR = 100  # Minimum ~8 trades/month combined (long+short)
+TRADES_PER_YEAR_FLOOR_SINGLE = 50  # Minimum ~4 trades/month for single-side optimization
 
 
 def _trade_floor_weight(trade_count: int, trade_floor: float,
@@ -295,14 +295,15 @@ def compute_sharpe(equity_curve: list[float], bars_per_year: int = 105120) -> fl
 
 
 def compute_sortino(equity_curve: list[float], bars_per_year: int = 105120) -> float:
-    """Annualized Sortino ratio (downside deviation only)."""
+    """Annualized Sortino ratio (target downside deviation, target=0)."""
     if len(equity_curve) < 2:
         return 0.0
     returns = np.diff(equity_curve)
-    downside = returns[returns < 0]
-    if len(downside) == 0 or np.std(downside) == 0:
+    downside_sq = np.minimum(0, returns) ** 2
+    downside_dev = float(np.sqrt(np.mean(downside_sq)))
+    if downside_dev < 1e-9:
         return float("inf") if np.mean(returns) > 0 else 0.0
-    return float(np.mean(returns) / np.std(downside) * np.sqrt(bars_per_year))
+    return float(np.mean(returns) / downside_dev * np.sqrt(bars_per_year))
 
 
 def compute_calmar(total_pnl: float, max_drawdown: float, years: float) -> float:
@@ -603,11 +604,12 @@ def run_vbt_prescreener(
                         std_r = np.std(ret_vals)
 
                         if objective_metric == "sortino":
-                            neg = ret_vals[ret_vals < 0]
-                            if len(neg) == 0 or np.std(neg) < 1e-12:
+                            downside_sq = np.minimum(0, ret_vals) ** 2
+                            downside_dev = float(np.sqrt(np.mean(downside_sq)))
+                            if downside_dev < 1e-12:
                                 score = 10.0 if mean_r > 0 else 0.0
                             else:
-                                score = float(mean_r / np.std(neg) * np.sqrt(bars_per_year))
+                                score = float(mean_r / downside_dev * np.sqrt(bars_per_year))
                         else:  # sharpe
                             if std_r < 1e-12:
                                 continue
@@ -812,11 +814,15 @@ def _compute_objective_score(
         return -9999.0
 
     if objective_metric == "sortino":
-        neg_pnls = monthly_pnl_vals[monthly_pnl_vals < 0]
-        if len(neg_pnls) == 0 or float(np.std(neg_pnls)) < 1e-9:
-            return 10.0
+        downside_sq = np.minimum(0, monthly_pnl_vals) ** 2
+        downside_dev = float(np.sqrt(np.mean(downside_sq)))
+        if downside_dev < 1e-9:
+            if len(monthly_pnl_vals) > 0 and float(np.mean(monthly_pnl_vals)) > 0:
+                return 10.0   # Holy grail: only winning months
+            else:
+                return -9999.0  # Degenerate: 0 trades or perfectly flat
         return float(
-            (np.mean(monthly_pnl_vals) / np.std(neg_pnls)) * np.sqrt(12)
+            (np.mean(monthly_pnl_vals) / downside_dev) * np.sqrt(12)
         )
     else:
         std_pnl = float(np.std(monthly_pnl_vals))
@@ -959,13 +965,17 @@ def make_objective(
             return -9999.0
 
         if objective_metric == "sortino":
-            # --- Annualized Monthly Sortino ---
-            neg_pnls = monthly_pnl_vals[monthly_pnl_vals < 0]
-            if len(neg_pnls) == 0 or float(np.std(neg_pnls)) < 1e-9:
-                annualized_score = 10.0  # cap to avoid inf
+            # --- Annualized Monthly Sortino (Target Downside Deviation) ---
+            downside_sq = np.minimum(0, monthly_pnl_vals) ** 2
+            downside_dev = float(np.sqrt(np.mean(downside_sq)))
+            if downside_dev < 1e-9:
+                if len(monthly_pnl_vals) > 0 and float(np.mean(monthly_pnl_vals)) > 0:
+                    annualized_score = 10.0   # Holy grail: only winning months
+                else:
+                    annualized_score = -9999.0  # Degenerate
             else:
                 annualized_score = float(
-                    (np.mean(monthly_pnl_vals) / np.std(neg_pnls)) * np.sqrt(12)
+                    (np.mean(monthly_pnl_vals) / downside_dev) * np.sqrt(12)
                 )
         else:
             # --- Annualized Monthly Sharpe ---

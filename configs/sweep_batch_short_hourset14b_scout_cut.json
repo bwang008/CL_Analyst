@@ -44,10 +44,10 @@
       "gcs_prefix": "sweep_hs14b_3x1_6h_scout"
     },
     {
-      "label": "HS14B 5x1 24H",
-      "target_long": "TARGET_TRIPLE_5x1_24H_LONG",
-      "target_short": "TARGET_TRIPLE_5x1_24H_SHORT",
-      "gcs_prefix": "sweep_hs14b_5x1_24h_scout"
+      "label": "HS14B 2x1 3H",
+      "target_long": "TARGET_TRIPLE_2x1_3H_LONG",
+      "target_short": "TARGET_TRIPLE_2x1_3H_SHORT",
+      "gcs_prefix": "sweep_hs14b_2x1_3h_scout"
     },
     {
       "label": "HS14B 4x1 36H",

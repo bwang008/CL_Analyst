@@ -126,7 +126,8 @@ function Write-WallClockSummary {
         [string]$OptMachineType,
         [int]$OptElapsedMin,
         [int]$OptTrials,
-        [int]$OptWorkers
+        [int]$OptWorkers,
+        [double]$TotalScriptDurationMin
     )
 
     $summaryPath = Join-Path $BatchDir "wall_clock_summary.md"
@@ -144,8 +145,8 @@ function Write-WallClockSummary {
         } catch {}
     }
 
-    # E2E total = sweep phase + optimizer elapsed
-    $e2eTotalMin = [math]::Round($sweepDurationMin + $OptElapsedMin, 1)
+    # E2E total = sweep phase + optimizer
+    $e2eTotalMin = if ($TotalScriptDurationMin) { $TotalScriptDurationMin } else { [math]::Round($sweepDurationMin + $OptElapsedMin, 1) }
 
     # Pre-compute detail strings
     $sweepDetail = "$($BatchState.total) experiments ($($BatchState.completed) completed, $($BatchState.failed) failed)"
@@ -415,8 +416,10 @@ if ($DryRun) {
 # ============================================================
 
 if (-not (Test-Path $BatchDir)) { New-Item -ItemType Directory -Path $BatchDir -Force | Out-Null }
+# Log tracking arrays and flags
+$ScriptStartTracker = Get-Date
 
-# Freeze manifest in the batch directory
+# Initialize state object representing the batch process
 $savedManifestPath = Join-Path $BatchDir "manifest.json"
 Copy-Item $ManifestPath $savedManifestPath -Force
 
@@ -992,10 +995,14 @@ if ($batchState.completed -gt 0) {
 
 # --- Generate Wall Clock Summary ---
 $sweepMachine = if ($defaults.machine_type) { $defaults.machine_type } else { "unknown" }
+$ScriptEndTracker = Get-Date
+$TotalScriptDurationMin = [math]::Round(($ScriptEndTracker - $ScriptStartTracker).TotalMinutes, 1)
+
 Write-WallClockSummary -BatchState $batchState -BatchDir $BatchDir `
     -SweepMachineType $sweepMachine -SweepVcpus $vcpusPerVm `
     -OptMachineType $optMachineType -OptElapsedMin $optElapsedTotal `
-    -OptTrials $postOptTrials -OptWorkers $optWorkerCount
+    -OptTrials $postOptTrials -OptWorkers $optWorkerCount `
+    -TotalScriptDurationMin $TotalScriptDurationMin
 
 Write-Host ""
 

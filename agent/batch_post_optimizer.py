@@ -699,6 +699,8 @@ def _finalize_objective_results(
             sv["optuna_info"] = v["config"]["optuna_info"]
         if v.get("error"):
             sv["error"] = v["error"]
+        if task_experiment_labels and k in task_experiment_labels:
+            sv["experiment_labels"] = task_experiment_labels[k]
         serializable[k] = sv
     with open(results_json_path, "w") as f:
         json.dump(serializable, f, indent=2, default=str)
