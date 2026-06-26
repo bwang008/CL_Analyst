@@ -2,6 +2,7 @@
     "nickname": "HS14B_Sharpe_E01_06262026",
     "description": "Sharpe Ensemble #1: AP_LONG + LL_SHORT",
     "execution_class": "TieredEnsembleStrategy",
+    "override_global_filters": true,
     "exit_mode": "TIERED",
     "tp_atr_mult": 10.0,
     "sl_atr_mult": 3.0,
