@@ -304,7 +304,7 @@ class ConfigurableStrategy(Strategy):
         else:
             self._execution_guard = None
             log.warning(
-                "[%s] ⚠ ExecutionGuard is DISABLED — no blocked_entry_hours_est, "
+                "[%s] ExecutionGuard is DISABLED — no blocked_entry_hours_est, "
                 "blocked_entry_hours_by_day, or block_long_weekends found in config. "
                 "Trades will NOT be blocked during toxic hours. "
                 "Check that configs/global_risk_filters.json exists and is being loaded.",

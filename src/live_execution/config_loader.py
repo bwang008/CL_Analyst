@@ -39,7 +39,7 @@ def _load_global_filters() -> dict:
     """Load the global risk filters JSON, returning {} if not found."""
     if not _GLOBAL_FILTERS_PATH.exists():
         log.warning(
-            "[ConfigLoader] ⚠ global_risk_filters.json NOT FOUND at %s — "
+            "[ConfigLoader] global_risk_filters.json NOT FOUND at %s — "
             "ExecutionGuard risk filters will NOT be applied. "
             "If this is a deployed environment, ensure the file is present.",
             _GLOBAL_FILTERS_PATH,

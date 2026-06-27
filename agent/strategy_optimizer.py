@@ -821,16 +821,18 @@ def _compute_objective_score(
                 return 10.0   # Holy grail: only winning months
             else:
                 return -9999.0  # Degenerate: 0 trades or perfectly flat
-        return float(
+        score = float(
             (np.mean(monthly_pnl_vals) / downside_dev) * np.sqrt(12)
         )
+        return min(score, 10.0)
     else:
         std_pnl = float(np.std(monthly_pnl_vals))
         if std_pnl < 1e-9:
             return -9999.0
-        return float(
+        score = float(
             (np.mean(monthly_pnl_vals) / std_pnl) * np.sqrt(12)
         )
+        return min(score, 10.0)
 
 
 # ---------------------------------------------------------------------------
@@ -977,6 +979,7 @@ def make_objective(
                 annualized_score = float(
                     (np.mean(monthly_pnl_vals) / downside_dev) * np.sqrt(12)
                 )
+                annualized_score = min(annualized_score, 10.0)
         else:
             # --- Annualized Monthly Sharpe ---
             std_pnl = float(np.std(monthly_pnl_vals))
@@ -985,6 +988,7 @@ def make_objective(
             annualized_score = float(
                 (np.mean(monthly_pnl_vals) / std_pnl) * np.sqrt(12)
             )
+            annualized_score = min(annualized_score, 10.0)
 
         # --- Trade Floor Penalty ---
         # Negative score returned as-is (multiplying by weight < 1 would

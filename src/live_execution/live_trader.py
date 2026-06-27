@@ -473,8 +473,11 @@ class LiveTrader:
     def _build_heartbeat_payload(self, recent_errors: list | None = None) -> str:
         """Format the heartbeat payload for Telegram."""
         uptime = datetime.now(timezone.utc) - self._bot_start_time
-        uptime_str = str(uptime).split('.')[0]
-        broker_status = "🟢 Connected" if (self.data_client.is_connected() and self.exec_client.is_connected()) else "🔴 Disconnected"
+        total_seconds = int(uptime.total_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        uptime_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        broker_status = "Connected" if (self.data_client.is_connected() and self.exec_client.is_connected()) else "Disconnected"
 
         current_position = 0
         unrealized_pnl = 0.0
@@ -508,7 +511,7 @@ class LiveTrader:
 
         if self._last_inference_bar_time is not None:
             infer_str = f"`{self._last_inference_bar_time}`"
-            recent_logs_block = "\n📝 *Recent Activity*\n"
+            recent_logs_block = "\n*Recent Activity*\n"
             if self._last_5m_bar_log:
                 recent_logs_block += f"`{self._last_5m_bar_log}`\n"
             if self._last_1h_bar_log:
@@ -518,18 +521,18 @@ class LiveTrader:
             if self._last_inference_log:
                 recent_logs_block += f"`{self._last_inference_log}`\n"
         else:
-            infer_str = "❌ None (inference not yet computed)"
-            recent_logs_block = "\n📝 *Recent Activity*\n`Market Closed / No Data`\n"
+            infer_str = "None (inference not yet computed)"
+            recent_logs_block = "\n*Recent Activity*\n`Market Closed / No Data`\n"
 
         payload = (
-            f"⏱️ Uptime: `{uptime_str}` | Broker: {broker_status}\n\n"
-            f"💰 *Account Balance:*\n"
+            f"Uptime: `{uptime_str}` | Broker: {broker_status}\n\n"
+            f"*Account Balance:*\n"
             f"Total Liq: `${net_liq:,.2f}`\n\n"
-            f"📈 *Position & PnL*\n"
+            f"*Position & PnL*\n"
             f"Position: `{current_position}`\n"
             f"Unrealized PnL: `${unrealized_pnl:,.2f}`\n"
             f"Realized PnL: `${realized_pnl:,.2f}`\n\n"
-            f"🧠 *MLOps & System*\n"
+            f"*MLOps & System*\n"
             f"Last Inference Bar: {infer_str}\n"
             f"Inference Latency: `{self._last_inference_time_sec:.4f}s`\n"
             f"CPU: `{cpu_pct:.1f}%` | RAM: `{ram_pct:.1f}%` | Disk: `{disk_pct:.1f}%`\n"
@@ -539,9 +542,9 @@ class LiveTrader:
         if recent_errors:
             lines = []
             for level, msg, ts_utc in recent_errors[-5:]:
-                icon = "🚨" if level == "ERROR" else "⚠️"
+                icon = "[ERROR]" if level == "ERROR" else "[WARNING]"
                 lines.append(f"{icon} `{ts_utc}` `{msg[:150]}`")
-            payload += "\n\n📝 *Recent Warnings/Errors*\n" + "\n".join(lines)
+            payload += "\n\n*Recent Warnings/Errors*\n" + "\n".join(lines)
 
         return payload
 
@@ -563,7 +566,9 @@ class LiveTrader:
             try:
                 recent_errors = self._log_capture.drain()
                 payload = self._build_heartbeat_payload(recent_errors=recent_errors)
-                self._telegram.send(f"💓 *1-Hour Heartbeat*\n\n" + payload)
+                if payload != self._last_heartbeat_payload:
+                    self._telegram.send(f"*1-Hour Heartbeat*\n\n" + payload)
+                    self._last_heartbeat_payload = payload
             except Exception:
                 pass  # Never let heartbeat crash the thread
 
@@ -713,7 +718,7 @@ class LiveTrader:
             data_port = getattr(self.data_client, "port", "N/A")
             exec_port = getattr(self.exec_client, "port", "N/A")
             startup_msg = (
-                f"🚀 *LiveTrader Online*\n"
+                f"*LiveTrader Online*\n"
                 f"Strategy: `{self.strategy.name}`\n"
                 f"Environment: `{self._environment}`\n"
                 f"Host: `{self._hostname}`\n"
@@ -733,7 +738,7 @@ class LiveTrader:
             log.exception("Fatal error in LiveTrader")
             # ── Telegram: fatal exception alert ───────────────────────
             self._telegram.send(
-                f"🚨 *FATAL ERROR — LiveTrader Down*\n"
+                f"[FATAL] *FATAL ERROR — LiveTrader Down*\n"
                 f"Strategy: `{self.strategy.name}`\n"
                 f"Error: `{type(_fatal_exc).__name__}: {str(_fatal_exc)[:200]}`\n"
                 f"Host: `{self._hostname}`",
@@ -1896,7 +1901,7 @@ class LiveTrader:
                     f"Delete warm_start_cache_1h.parquet to trigger reseed."
                 )
                 log.error("CACHE VALIDATION FAILED: %s", err_msg)
-                self._telegram.send(f"⚠️ *CACHE VALIDATION FAILED*\n`{err_msg}`")
+                self._telegram.send(f"[WARNING] *CACHE VALIDATION FAILED*\n`{err_msg}`")
                 raise RuntimeError(err_msg)
 
     def _warmup_inference_state(self, num_bars: int) -> None:
@@ -2149,15 +2154,15 @@ class LiveTrader:
                 self._pending_entry_bar_time = None
 
                 self._telegram.send(
-                    f"🔄 *CONTRACT ROLLOVER*\n"
+                    f"*CONTRACT ROLLOVER*\n"
                     f"`{old_sym}` → `{new_local_sym}`\n\n"
-                    f"⚠️ Force-closed position ({current_position:+d}) on "
+                    f"[WARNING] Force-closed position ({current_position:+d}) on "
                     f"expiring contract at market.\n"
                     f"Waiting for next natural signal on `{new_local_sym}`."
                 )
             else:
                 self._telegram.send(
-                    f"🔄 *CONTRACT ROLLOVER*\n"
+                    f"*CONTRACT ROLLOVER*\n"
                     f"`{old_sym}` → `{new_local_sym}`\n\n"
                     f"Position: FLAT — clean transition."
                 )
@@ -2685,7 +2690,7 @@ class LiveTrader:
         
         if len(self._order_timestamps) >= 10:
             self._emergency_halt = True
-            msg = "🚨 CRITICAL: Order rate limit exceeded (10 orders / 60s). System HALTED."
+            msg = "[CRITICAL] Order rate limit exceeded (10 orders / 60s). System HALTED."
             log.critical(msg)
             try:
                 self._telegram.send(msg)
@@ -3839,7 +3844,7 @@ class LiveTrader:
         # 4. Telegram alert
         try:
             self._telegram.send(
-                f"🚨 *CRITICAL: NAKED POSITION DETECTED*\n"
+                f"[CRITICAL] *NAKED POSITION DETECTED*\n"
                 f"IBKR position: `{ibkr_pos}` contracts\n"
                 f"SL order: `None` (MISSING)\n"
                 f"Trade ID: `{self._active_trade_id}`\n"
@@ -3896,7 +3901,7 @@ class LiveTrader:
                 exit_reason = "TP_HIT" if is_tp_fill else "SL_HIT"
                 try:
                     self._telegram.send(
-                        f"✅ *POSITION CLOSED* ({_tg_escape(exit_reason)})\n"
+                        f"[CLOSED] *POSITION CLOSED* ({_tg_escape(exit_reason)})\n"
                         f"Price: `{avg_price}`\n"
                         f"Qty: `{int(qty)}`\n"
                         f"Action: `{action_str}`"
