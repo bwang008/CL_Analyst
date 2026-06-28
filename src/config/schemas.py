@@ -55,12 +55,22 @@ class DataWorkflowConfig(BaseModel):
     features: FeatureConfig = Field(default_factory=FeatureConfig)
     targets: TargetConfig
 
+class TrainingWorkflowConfig(BaseModel):
+    train_cutoff_date: str
+    holdout_cutoff_date: Optional[str] = None
+    target_columns: List[str]
+    gcs_base_dir: str
+
+class ExecutionWorkflowConfig(BaseModel):
+    slippage_multiplier: float = 1.0
+    execution_data_path: Optional[str] = None
+    strategy_config_path: str
+
 class MasterConfig(BaseModel):
     symbol: str
     data_workflow: Optional[DataWorkflowConfig] = None
-    # Future expansion:
-    # training_workflow: Optional[TrainingWorkflowConfig] = None
-    # execution_workflow: Optional[ExecutionWorkflowConfig] = None
+    training_workflow: Optional[TrainingWorkflowConfig] = None
+    execution_workflow: Optional[ExecutionWorkflowConfig] = None
 
     @field_validator("symbol")
     @classmethod

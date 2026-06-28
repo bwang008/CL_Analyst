@@ -9,6 +9,7 @@ class Instrument:
     tick_value: float
     cftc_code: str
     volatility_index: str
+    slippage_ticks: int = 1
 
 INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
     "CL": Instrument(

@@ -1068,12 +1068,12 @@ def main():
         )
     )
     parser.add_argument(
-        "--target", required=True,
-        help="Target column (e.g. TARGET_TRIPLE_2x1_24H_LONG)",
+        "--master-config", required=True,
+        help="Path to Master Config JSON (e.g., configs/sweeps/sweep_es_v1.json)",
     )
     parser.add_argument(
-        "--data", required=True,
-        help="Path to processed parquet dataset",
+        "--target", required=True,
+        help="Target column to train (must be one of the target_columns in training_workflow)",
     )
     parser.add_argument(
         "--ml-metric",
@@ -1089,15 +1089,6 @@ def main():
         "--balance-mode", default="downsample",
         choices=["downsample", "none"],
         help="Class balancing mode (default: downsample)",
-    )
-    parser.add_argument(
-        "--strategy-config", default=None,
-        help="Strategy JSON config (required for --ml-metric sharpe)",
-    )
-    parser.add_argument(
-        "--train-cutoff-date", default=None,
-        help="Date cutoff for gym/vault split (YYYY-MM-DD). "
-             "If not set, uses --gym-fraction.",
     )
     parser.add_argument(
         "--gym-fraction", type=float, default=0.85,
@@ -1181,6 +1172,42 @@ def main():
         help="Optional: path to raw unadjusted execution data for wallet/fills",
     )
     args = parser.parse_args()
+
+    import json
+    import os
+    from pathlib import Path
+    
+    config_path = Path(args.master_config)
+    if not config_path.exists():
+        raise FileNotFoundError(f"MasterConfig not found at {config_path}")
+        
+    with open(config_path, "r") as f:
+        raw_json = json.load(f)
+        
+    from src.config.schemas import MasterConfig
+    try:
+        master_config = MasterConfig(**raw_json)
+    except Exception as e:
+        raise ValueError(f"Configuration Validation Error:\n{e}")
+        
+    if not master_config.training_workflow:
+        raise ValueError("MasterConfig must define a training_workflow for this script.")
+        
+    if args.target not in master_config.training_workflow.target_columns:
+        raise ValueError(f"Target '{args.target}' is not in the config's training_workflow.target_columns")
+
+    # Derive data path from data_workflow dataset_version
+    from src.data_paths import get_data_root
+    data_path = str(get_data_root() / "processed" / f"{master_config.symbol}_{master_config.data_workflow.dataset_version}.parquet")
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(f"Dataset not found at derived path: {data_path}")
+
+    args.data = data_path
+    args.train_cutoff_date = master_config.training_workflow.train_cutoff_date
+    if master_config.execution_workflow:
+        args.strategy_config = master_config.execution_workflow.strategy_config_path
+    else:
+        args.strategy_config = None
 
     # Set global worker ID and total trials for logging
     global _worker_id, _total_trials

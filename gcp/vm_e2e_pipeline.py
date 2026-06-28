@@ -1006,9 +1006,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="E2E Alpha Factory Pipeline — train final models + backtest after Optuna"
     )
-    parser.add_argument("--data", required=True, help="Path to processed parquet dataset")
-    parser.add_argument("--train-cutoff-date", required=True, help="OOS cutoff (YYYY-MM-DD)")
-    parser.add_argument("--strategy-config", required=True, help="Strategy JSON config path")
+    parser.add_argument("--master-config", required=True, help="Path to Master Config JSON (e.g., configs/sweeps/sweep_es_v1.json)")
     parser.add_argument("--db-dir", default="models/optuna_studies", help="Dir with Optuna .db files")
     parser.add_argument("--output-dir", default="production_output", help="Output directory")
     parser.add_argument("--gcs-bucket", default="gs://cltrainer-optuna-results", help="GCS bucket")
@@ -1017,11 +1015,6 @@ def main():
         "--metrics", nargs="+",
         default=["logloss", "average_precision"],
         help="Metrics to process (default: logloss average_precision)",
-    )
-    parser.add_argument(
-        "--targets", nargs="+",
-        default=None,
-        help="Target columns (default: both LONG and SHORT)",
     )
     parser.add_argument(
         "--study-prefix",
@@ -1034,42 +1027,90 @@ def main():
         help="GCS subfolder prefix (e.g. 'canary'). If set, uploads to bucket/prefix/ instead of bucket/",
     )
     parser.add_argument(
-        "--holdout-cutoff-date",
-        default=None,
-        help="Holdout split date (YYYY-MM-DD). Validation = [train_cutoff, holdout_cutoff). "
-             "If omitted, defaults to train_cutoff + 1 year.",
-    )
-    parser.add_argument(
         "--opt-trials", type=int, default=100,
         help="Optuna trials for execution param optimization (0 to skip)",
     )
     parser.add_argument(
-        "--exec-data", default=None,
-        help="High-resolution OHLCV data for execution simulation",
-    )
-    parser.add_argument(
-        "--slippage-per-side", type=float, default=None,
-        help="Slippage to apply per side in points",
+        "--dry-run", action="store_true", help="Parse config, resolve paths, and exit successfully without running pipeline",
     )
 
     args = parser.parse_args()
+    
+    import json
+    import os
+    from pathlib import Path
+    
+    config_path = Path(args.master_config)
+    if not config_path.exists():
+        raise FileNotFoundError(f"MasterConfig not found at {config_path}")
+        
+    with open(config_path, "r") as f:
+        raw_json = json.load(f)
+        
+    from src.config.schemas import MasterConfig
+    try:
+        master_config = MasterConfig(**raw_json)
+    except Exception as e:
+        raise ValueError(f"Configuration Validation Error:\n{e}")
+        
+    if not master_config.training_workflow:
+        raise ValueError("MasterConfig must define a training_workflow for this script.")
+    if not master_config.execution_workflow:
+        raise ValueError("MasterConfig must define an execution_workflow for this script.")
+
+    # Derive data path from data_workflow dataset_version
+    from src.data_paths import get_data_root
+    data_path = str(get_data_root() / "processed" / f"{master_config.symbol}_{master_config.data_workflow.dataset_version}.parquet")
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(f"Dataset not found at derived path: {data_path}")
+
+    # Resolve Slippage
+    from src.core.instrument_master import get_instrument
+    instrument = get_instrument(master_config.symbol)
+    base_slippage_points = instrument.slippage_ticks * instrument.tick_size
+    resolved_slippage = base_slippage_points * master_config.execution_workflow.slippage_multiplier
+
+    # Build targets array expected by run_pipeline: list of tuples (name, direction)
+    targets_arg = []
+    for t_col in master_config.training_workflow.target_columns:
+        if t_col.endswith("_LONG"):
+            targets_arg.append((t_col, "LONG"))
+        elif t_col.endswith("_SHORT"):
+            targets_arg.append((t_col, "SHORT"))
+        else:
+            print(f"Warning: could not infer direction for target {t_col}. Assuming LONG.")
+            targets_arg.append((t_col, "LONG"))
+
+    print(f"============================================================")
+    print(f" E2E Pipeline (Parsed MasterConfig)")
+    print(f"============================================================")
+    print(f"  Symbol:     {master_config.symbol}")
+    print(f"  Data Path:  {data_path}")
+    print(f"  Strategy:   {master_config.execution_workflow.strategy_config_path}")
+    print(f"  Targets:    {targets_arg}")
+    print(f"  Slippage:   {resolved_slippage} points (ticks: {instrument.slippage_ticks}, mult: {master_config.execution_workflow.slippage_multiplier})")
+    print(f"============================================================")
+
+    if args.dry_run:
+        print("Dry run successful. Exiting.")
+        return
 
     run_pipeline(
-        data_path=args.data,
-        train_cutoff_date=args.train_cutoff_date,
-        strategy_config_path=args.strategy_config,
+        data_path=data_path,
+        train_cutoff_date=master_config.training_workflow.train_cutoff_date,
+        strategy_config_path=master_config.execution_workflow.strategy_config_path,
         db_dir=args.db_dir,
         output_dir=args.output_dir,
         gcs_bucket=args.gcs_bucket,
         gcs_prefix=args.gcs_prefix,
         shutdown_after=args.shutdown,
         metrics=args.metrics,
-        targets=args.targets,
+        targets=targets_arg,
         study_prefix=args.study_prefix,
-        holdout_cutoff_date=args.holdout_cutoff_date,
+        holdout_cutoff_date=master_config.training_workflow.holdout_cutoff_date,
         opt_trials=args.opt_trials,
-        exec_data_path=args.exec_data,
-        slippage_per_side=args.slippage_per_side,
+        exec_data_path=master_config.execution_workflow.execution_data_path,
+        slippage_per_side=resolved_slippage,
     )
 
 

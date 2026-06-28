@@ -14,38 +14,32 @@
     .\gcp_deploy_sweep.ps1 -NoShutdown
 #>
 
-param(
-    [string]$VmName = "optuna-runner-canary",
-    [string]$MachineType = "c2-standard-16",
-    [string]$Zone = "us-central1-a",
-    [int]$DiskSizeGB = 50,
-    [string]$Project = "cltrainer",
-    [string]$ProvisioningModel = "STANDARD",
-    [string]$GcsDataPath = "gs://cltrainer-optuna-results/data/cl-5m_bk_set_10.parquet",
-    [string]$StrategyConfig = "ensemble4.json",
-    [string]$Metrics = "logloss,average_precision",
-    [string]$TargetLong = "",
-    [string]$TargetShort = "",
-    [string]$JobName = "",
-    [string]$ExecData = "",
-    [double]$Slippage = 0,
-    [int]$NTrials = 0,
-    [int]$MaxDepthMin = 0,
-    [int]$MaxDepthMax = 0,
-    [int]$NumLeavesMin = 0,
-    [int]$NumLeavesMax = 0,
-    [int]$MaxNEstimators = 0,
-    [int]$EarlyStoppingRounds = 0,
-    [int]$MaxFolds = 0,
-    [double]$LearningRateMin = 0,
-    [double]$LearningRateMax = 0,
-    [int]$MinChildSamplesMin = 0,
-    [int]$MinChildSamplesMax = 0,
-    [double]$FeatureFractionMin = 0,
-    [double]$FeatureFractionMax = 0,
+param (
+    [Parameter(Mandatory=$true)][string]$VmName,
+    [Parameter(Mandatory=$true)][string]$MasterConfig,
+    [string]$AgentId = "default_agent",
+    [string]$Zone = "us-east4-a",
+    [string]$MachineType = "c3-highcpu-44",
+    [int]$DiskSizeGB = 100,
     [switch]$NoShutdown,
+    [string]$JobName = "",
+    [int]$Trials = 200,
     [switch]$SkipProvision,
-    [switch]$UseBuckets
+    [switch]$UseBuckets,
+    [int]$MaxDepthMin = 3,
+    [int]$MaxDepthMax = 10,
+    [int]$NumLeavesMin = 15,
+    [int]$NumLeavesMax = 100,
+    [int]$MaxNEstimators = 2000,
+    [int]$EarlyStopping = 25,
+    [int]$MaxFolds = 5,
+    [double]$LearningRateMin = 0.005,
+    [double]$LearningRateMax = 0.02,
+    [int]$MinChildSamplesMin = 150,
+    [int]$MinChildSamplesMax = 400,
+    [double]$FeatureFractionMin = 0.3,
+    [double]$FeatureFractionMax = 1.0,
+    [string]$ProvisioningModel = "SPOT"
 )
 
 # Add gcloud to PATH if not already there
@@ -237,17 +231,11 @@ Write-Host "  Data ready on VM!" -ForegroundColor Green
 Write-Host "`n[5/6] Launching sweep pipeline in tmux..."
 
 $shutdownFlag = if ($NoShutdown) { "" } else { "--shutdown" }
-$datasetName = [System.IO.Path]::GetFileNameWithoutExtension($DataFileName)
-$targetFlags = ""
-if ($TargetLong) { $targetFlags += " --target-long=$TargetLong" }
-if ($TargetShort) { $targetFlags += " --target-short=$TargetShort" }
 $bucketFlag = if ($UseBuckets) { " --use-buckets" } else { "" }
-$execDataFlag = if ($ExecData) { " --exec-data=$ExecData" } else { "" }
-$slippageFlag = if ($Slippage -gt 0) { " --slippage-per-side=$Slippage" } else { "" }
-# Derive a unique job name from the dataset to prevent GCS collisions between parallel VMs
-if ($JobName) {
-    $jobName = $JobName
-} else {
+
+# The dataset is now retrieved dynamically from the master config, so we only pass the config path
+# We also pass all the Optuna search bounds
+$runCmd = "cd $RemoteProject && source venv/bin/activate && tmux new-session -d -s sweep `"bash gcp/vm_sweep_run.sh --master-config=configs/sweeps/$MasterConfig $shutdownFlag $bucketFlag --agent-id=$AgentId --job-name=$JobName --n-trials=$Trials --max-depth-min=$MaxDepthMin --max-depth-max=$MaxDepthMax --num-leaves-min=$NumLeavesMin --num-leaves-max=$NumLeavesMax --max-n-estimators=$MaxNEstimators --early-stopping=$EarlyStopping --max-folds=$MaxFolds --learning-rate-min=$LearningRateMin --learning-rate-max=$LearningRateMax --min-child-samples-min=$MinChildSamplesMin --min-child-samples-max=$MinChildSamplesMax --feature-fraction-min=$FeatureFractionMin --feature-fraction-max=$FeatureFractionMax > sweep_tmux.log 2>&1`""
     $cleanName = $datasetName -replace '^cl-[0-9]+[mh]_bk_', ''
     $jobName = "sweep_$cleanName"
 }
