@@ -46,7 +46,7 @@ def dm(tmp_dir, seed_csv):
         seed_path=seed_csv,
         cache_path=str(tmp_dir / "cache.parquet"),
         master_ledger_path=str(tmp_dir / "master.parquet"),
-        ibkr_manager=None,
+        data_client=None,
         front_month_id="CLJ6",
     )
 
@@ -135,53 +135,44 @@ class TestRolloverDetection:
 # Roll delta computation (Panama Canal method)
 # ---------------------------------------------------------------------------
 
-class TestComputeRollDelta:
+class TestComputeRollRatio:
     def test_empty_cache_returns_none(self, dm):
         """Computing delta with empty cache returns None."""
         dm._df = None
-        assert dm._compute_roll_delta() is None
+        assert dm._compute_roll_ratio() is None
 
-    def test_correct_delta_computed(self, dm, seed_csv, monkeypatch):
+    def test_correct_ratio_computed(self, dm, seed_csv, monkeypatch):
         """Roll delta is the median difference between IBKR and cache Close."""
         dm._df = dm._seed_from_csv()
         overlap_idx = dm._df.index[-20:]
 
-        # IBKR data shifted by exactly $1.50
+        # IBKR data scaled by exactly 1.05
         mock_ibkr_df = dm._df.loc[overlap_idx].copy()
-        mock_ibkr_df["Open"] += 1.50
-        mock_ibkr_df["High"] += 1.50
-        mock_ibkr_df["Low"] += 1.50
-        mock_ibkr_df["Close"] += 1.50
+        mock_ibkr_df["Open"] *= 1.05
+        mock_ibkr_df["High"] *= 1.05
+        mock_ibkr_df["Low"] *= 1.05
+        mock_ibkr_df["Close"] *= 1.05
 
         mock_manager = MagicMock()
-        mock_manager.qualify_contract.return_value = MagicMock()
-        mock_manager._request_historical_data.return_value = ["bar"]
-        dm.ibkr_manager = mock_manager
+        mock_manager.fetch_historical_bars_by_duration.return_value = mock_ibkr_df
+        dm.data_client = mock_manager
 
-        import src.live_execution.ibkr_client as ibkr_mod
-        monkeypatch.setattr(ibkr_mod, "build_cl_contract", lambda **kw: MagicMock())
-        monkeypatch.setattr(ibkr_mod, "ib_bars_to_dataframe", lambda bars: mock_ibkr_df)
-
-        delta = dm._compute_roll_delta()
-        assert delta is not None
-        assert abs(delta - 1.50) < 0.01, f"Expected delta ~1.50, got {delta}"
+        ratio = dm._compute_roll_ratio()
+        assert ratio is not None
+        assert abs(ratio - 1.05) < 0.01, f"Expected ratio ~1.05, got {ratio}"
 
     def test_no_ibkr_data_returns_none(self, dm, seed_csv, monkeypatch):
         """If IBKR returns no bars, delta is None."""
         dm._df = dm._seed_from_csv()
 
         mock_manager = MagicMock()
-        mock_manager.qualify_contract.return_value = MagicMock()
-        mock_manager._request_historical_data.return_value = []
-        dm.ibkr_manager = mock_manager
+        mock_manager.fetch_historical_bars_by_duration.return_value = pd.DataFrame()
+        dm.data_client = mock_manager
 
-        import src.live_execution.ibkr_client as ibkr_mod
-        monkeypatch.setattr(ibkr_mod, "build_cl_contract", lambda **kw: MagicMock())
-
-        assert dm._compute_roll_delta() is None
+        assert dm._compute_roll_ratio() is None
 
     def test_no_overlap_returns_none(self, dm, seed_csv, monkeypatch):
-        """No overlapping timestamps = None (cannot compute delta)."""
+        """No overlapping timestamps = None (cannot compute ratio)."""
         dm._df = dm._seed_from_csv()
 
         future_base = pd.Timestamp("2025-06-01 09:00")
@@ -201,41 +192,37 @@ class TestComputeRollDelta:
         mock_ibkr_df.index.name = "DateTime"
 
         mock_manager = MagicMock()
-        mock_manager.qualify_contract.return_value = MagicMock()
-        mock_manager._request_historical_data.return_value = ["bar"]
-        dm.ibkr_manager = mock_manager
+        mock_manager.fetch_historical_bars_by_duration.return_value = mock_ibkr_df
+        dm.data_client = mock_manager
 
-        import src.live_execution.ibkr_client as ibkr_mod
-        monkeypatch.setattr(ibkr_mod, "build_cl_contract", lambda **kw: MagicMock())
-        monkeypatch.setattr(ibkr_mod, "ib_bars_to_dataframe", lambda bars: mock_ibkr_df)
-
-        assert dm._compute_roll_delta() is None
+        assert dm._compute_roll_ratio() is None
 
 
 # ---------------------------------------------------------------------------
 # Back-adjustment (Panama Canal shift)
 # ---------------------------------------------------------------------------
 
-class TestBackAdjustCache:
-    def test_ohlc_shifted_by_delta(self, dm, seed_csv):
-        """OHLC columns should be shifted by delta after back-adjustment."""
+class TestApplyRollToCache:
+    def test_ohlc_scaled_by_ratio(self, dm, seed_csv):
+        """OHLC columns should be scaled by ratio after back-adjustment."""
         dm._df = dm._seed_from_csv()
         original_close = dm._df["Close"].copy()
         original_open = dm._df["Open"].copy()
-        delta = 2.50
+        ratio = 1.5
 
-        dm._back_adjust_cache(delta)
+        dm._apply_roll_to_cache(ratio)
+        adj_df = dm.get_ratio_adjusted_df()
 
-        # All OHLC shifted
-        assert abs(dm._df["Close"].iloc[0] - (original_close.iloc[0] + delta)) < 0.001
-        assert abs(dm._df["Open"].iloc[0] - (original_open.iloc[0] + delta)) < 0.001
+        # All OHLC shifted in the adjusted df
+        assert abs(adj_df["Close"].iloc[0] - (original_close.iloc[0] * ratio)) < 0.001
+        assert abs(adj_df["Open"].iloc[0] - (original_open.iloc[0] * ratio)) < 0.001
 
     def test_volume_untouched(self, dm, seed_csv):
         """Volume column should NOT be modified by back-adjustment."""
         dm._df = dm._seed_from_csv()
         original_volume = dm._df["Volume"].copy()
 
-        dm._back_adjust_cache(1.50)
+        dm._apply_roll_to_cache(1.50)
 
         pd.testing.assert_series_equal(
             dm._df["Volume"], original_volume, check_names=False,
@@ -246,16 +233,16 @@ class TestBackAdjustCache:
         dm._df = dm._seed_from_csv()
         n_before = len(dm._df)
 
-        dm._back_adjust_cache(1.50)
+        dm._apply_roll_to_cache(1.50)
 
         assert len(dm._df) == n_before
 
-    def test_zero_delta_noop(self, dm, seed_csv):
-        """Delta of 0 should leave data unchanged."""
+    def test_ratio_one_noop(self, dm, seed_csv):
+        """Ratio of 1 should leave data unchanged."""
         dm._df = dm._seed_from_csv()
         original_close = dm._df["Close"].copy()
 
-        dm._back_adjust_cache(0.0)
+        dm._apply_roll_to_cache(1.0)
 
         pd.testing.assert_series_equal(
             dm._df["Close"], original_close, check_names=False,
@@ -273,19 +260,19 @@ class TestBackAdjustCache:
 
         dm._ibkr_overlap_df = ibkr_df
 
-        dm._back_adjust_cache(1.50)
+        dm._apply_roll_to_cache(1.50)
 
         # The overlap bars should have IBKR values, not shifted values
         assert abs(dm._df.loc[overlap_idx[-1], "Close"] - 99.99) < 0.001
         assert abs(dm._df.loc[overlap_idx[-1], "Open"] - 99.00) < 0.001
 
-    def test_stores_roll_delta(self, dm, seed_csv):
-        """Back-adjustment should store the delta for metadata/ledger use."""
+    def test_stores_roll_ratio(self, dm, seed_csv):
+        """Back-adjustment should store the ratio for metadata/ledger use."""
         dm._df = dm._seed_from_csv()
 
-        dm._back_adjust_cache(2.75)
+        dm._apply_roll_to_cache(2.75)
 
-        assert dm._roll_delta == 2.75
+        assert dm._roll_ratios[-1] == 2.75
 
 
 # ---------------------------------------------------------------------------
@@ -303,22 +290,22 @@ class TestRollMetadataHistory:
             # First roll
             dm.front_month_id = "CLK6"
             dm._roll_detected = True
-            dm._roll_delta = 1.50
+            dm._roll_ratios.append(1.5)
             dm._save_roll_metadata()
 
             meta = dm._load_roll_metadata()
             assert len(meta["roll_history"]) == 1
-            assert meta["roll_history"][0]["delta"] == 1.50
-            assert meta["cumulative_delta"] == 1.50
+            assert meta["roll_history"][0]["ratio"] == 1.50
+            assert meta["cumulative_ratio"] == 1.50
 
             # Second roll
             dm.front_month_id = "CLM6"
-            dm._roll_delta = 0.80
+            dm._roll_ratios.append(1.2)
             dm._save_roll_metadata()
 
             meta = dm._load_roll_metadata()
             assert len(meta["roll_history"]) == 2
-            assert abs(meta["cumulative_delta"] - 2.30) < 0.01
+            assert abs(meta["cumulative_ratio"] - 1.8) < 0.01
 
     def test_no_history_without_roll(self, dm, tmp_dir):
         """No roll history entry added when no roll was detected."""
@@ -328,12 +315,12 @@ class TestRollMetadataHistory:
             str(meta_file),
         ):
             dm._roll_detected = False
-            dm._roll_delta = 0.0
+            dm._roll_ratios.append(1.0)
             dm._save_roll_metadata()
 
             meta = dm._load_roll_metadata()
             assert meta.get("roll_history", []) == []
-            assert meta.get("cumulative_delta", 0.0) == 0.0
+            assert meta.get("cumulative_ratio", 1.0) == 1.0
 
 
 # ---------------------------------------------------------------------------

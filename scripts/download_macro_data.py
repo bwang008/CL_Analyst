@@ -58,27 +58,11 @@ from src.data_paths import get_data_path
 # Where to save everything
 OUTPUT_DIR = get_data_path("raw/macro")
 
-# FRED series to download
-FRED_SERIES = {
-    "VIXCLS": "VIX",           # CBOE Volatility Index (daily, since 1990)
-    "OVXCLS": "OVX",           # CBOE Crude Oil Volatility Index (daily, since 2007)
-    "DTWEXBGS": "DXY",         # Nominal Broad US Dollar Index (daily, since 2006)
-    "T10Y2Y": "YIELD_CURVE",   # 10Y-2Y Treasury spread (daily, since 1976)
-    "FEDFUNDS": "FED_FUNDS",   # Effective Federal Funds Rate (monthly, since 1954)
-}
-
 # CFTC COT report configuration
-# Disaggregated Futures Only report — has Money Managers & Producers
 CFTC_BASE_URL = "https://www.cftc.gov/files/dea/history"
 CFTC_CURRENT_YEAR_URL = f"{CFTC_BASE_URL}/fut_disagg_txt_2026.zip"
-# Historical years available as annual ZIPs
 CFTC_YEAR_RANGE = range(2006, 2026)  # 2006-2025
 CFTC_COMBINED_URL = f"{CFTC_BASE_URL}/fut_disagg_txt_hist_2006_2016.zip"
-
-# CL commodity code in CFTC reports
-CL_CFTC_CODE = "067651"  # Crude Oil, Light Sweet (NYMEX)
-CL_CFTC_NAME = "CRUDE OIL, LIGHT SWEET"
-
 
 # ---------------------------------------------------------------------------
 # FRED Download
@@ -97,7 +81,23 @@ def download_fred_data(api_key: str) -> dict[str, pd.DataFrame]:
     fred = Fred(api_key=api_key)
     results: dict[str, pd.DataFrame] = {}
 
-    for series_id, label in FRED_SERIES.items():
+    from src.core.instrument_master import Instrument
+
+    def _get_fred_series(instrument: Instrument = None) -> dict[str, str]:
+        base_series = {
+            "VIXCLS": "VIX",
+            "DTWEXBGS": "DXY",
+            "T10Y2Y": "YIELD_CURVE",
+            "FEDFUNDS": "FED_FUNDS",
+        }
+        if instrument and instrument.volatility_index and instrument.volatility_index != "VIXCLS":
+            # Strip CLS for the label if needed, or just use the index name
+            label = instrument.volatility_index.replace("CLS", "")
+            base_series[instrument.volatility_index] = label
+        return base_series
+
+    series_map = _get_fred_series(getattr(download_fred_data, "instrument", None))
+    for series_id, label in series_map.items():
         log.info("Downloading FRED/%s (%s) ...", series_id, label)
         try:
             data = fred.get_series(series_id)
@@ -207,8 +207,8 @@ def _download_cot_zip(url: str, timeout: int = 120) -> pd.DataFrame | None:
         return None
 
 
-def _filter_cl_cot(df: pd.DataFrame) -> pd.DataFrame:
-    """Filter COT data to CL (crude oil) rows only."""
+def _filter_cot(df: pd.DataFrame, instrument) -> pd.DataFrame:
+    """Filter COT data to the given instrument's rows only."""
     # The CFTC code column may be named differently across files
     code_col = None
     for candidate in ["CFTC_Contract_Market_Code", "CFTC Contract Market Code"]:
@@ -224,14 +224,13 @@ def _filter_cl_cot(df: pd.DataFrame) -> pd.DataFrame:
                 name_col = candidate
                 break
         if name_col:
-            mask = df[name_col].str.contains("CRUDE OIL", case=False, na=False)
-            # Filter to NYMEX only (not ICE Brent)
-            mask &= df[name_col].str.contains("NYMEX", case=False, na=False)
+            # simple filter, may not perfectly capture the exchange
+            mask = df[name_col].str.contains(instrument.name.split()[0].upper(), case=False, na=False)
             return df[mask].copy()
         log.warning("Could not find CFTC code or name column")
         return pd.DataFrame()
 
-    return df[df[code_col].astype(str).str.strip() == CL_CFTC_CODE].copy()
+    return df[df[code_col].astype(str).str.strip() == instrument.cftc_code].copy()
 
 
 def _normalize_cot_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -284,21 +283,21 @@ def _normalize_cot_columns(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def download_cot_data() -> pd.DataFrame:
+def download_cot_data(instrument) -> pd.DataFrame:
     """Download CFTC COT disaggregated futures data for CL."""
     all_frames: list[pd.DataFrame] = []
 
     # Strategy: try the combined historical file first, then individual years
-    log.info("Downloading CFTC COT data for Crude Oil...")
+    log.info("Downloading CFTC COT data for %s...", instrument.name)
 
     # Try the big historical combined file (2006-2016)
     df_hist = _download_cot_zip(CFTC_COMBINED_URL)
     if df_hist is not None and len(df_hist) > 0:
-        cl_hist = _filter_cl_cot(df_hist)
+        cl_hist = _filter_cot(df_hist, instrument)
         if len(cl_hist) > 0:
             normalized = _normalize_cot_columns(cl_hist)
             all_frames.append(normalized)
-            log.info("  -> Historical combined: %d CL rows", len(cl_hist))
+            log.info("  -> Historical combined: %d rows", len(cl_hist))
 
     # Download individual year files (2017 onwards, or all if combined failed)
     start_year = 2017 if all_frames else 2006
@@ -306,11 +305,11 @@ def download_cot_data() -> pd.DataFrame:
         url = f"{CFTC_BASE_URL}/fut_disagg_txt_{year}.zip"
         df_year = _download_cot_zip(url)
         if df_year is not None and len(df_year) > 0:
-            cl_year = _filter_cl_cot(df_year)
+            cl_year = _filter_cot(df_year, instrument)
             if len(cl_year) > 0:
                 normalized = _normalize_cot_columns(cl_year)
                 all_frames.append(normalized)
-                log.info("  -> %d: %d CL rows", year, len(cl_year))
+                log.info("  -> %d: %d rows", year, len(cl_year))
 
     if not all_frames:
         log.error("No COT data downloaded")
@@ -381,7 +380,15 @@ def main():
                         help="Download only CFTC COT data")
     parser.add_argument("--fred-key", type=str, default=None,
                         help="FRED API key (overrides FRED_API_KEY env var)")
+    parser.add_argument("--symbol", type=str, default="CL",
+                        help="Symbol to fetch macro data for (determines CFTC code and Vol index)")
     args = parser.parse_args()
+
+    from src.core.instrument_master import get_instrument
+    instrument = get_instrument(args.symbol)
+
+    # Inject instrument into global scope for downloading functions
+    download_fred_data.instrument = instrument
 
     # Ensure output directory exists
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -392,6 +399,7 @@ def main():
     print(f"\n{'='*60}")
     print("CL ANALYST — MACRO DATA DOWNLOADER".center(60))
     print(f"{'='*60}")
+    print(f"  Symbol: {instrument.symbol}")
     print(f"  Output: {OUTPUT_DIR}")
     print(f"  FRED:   {'Yes' if do_fred else 'Skip'}")
     print(f"  COT:    {'Yes' if do_cot else 'Skip'}")
@@ -413,20 +421,36 @@ def main():
                 sys.exit(1)
         else:
             fred_data = download_fred_data(api_key)
-            save_fred_data(fred_data)
+            if fred_data:
+                # Combine FRED data and save
+                fred_path = OUTPUT_DIR / f"fred_macro_data_{instrument.symbol.lower()}.csv"
+                combined_fred = None
+                for label, df in fred_data.items():
+                    if combined_fred is None:
+                        combined_fred = df
+                    else:
+                        combined_fred = pd.merge(combined_fred, df, on="Date", how="outer")
+                
+                if combined_fred is not None:
+                    combined_fred.sort_values("Date", inplace=True)
+                    combined_fred.to_csv(fred_path, index=False)
+                    log.info("Saved combined FRED data to %s", fred_path)
 
     # --- CFTC COT ---
     if do_cot:
-        cot_data = download_cot_data()
-        save_cot_data(cot_data)
+        cot_data = download_cot_data(instrument)
+        if not cot_data.empty:
+            cot_path = OUTPUT_DIR / f"cftc_cot_{instrument.symbol.lower()}.csv"
+            cot_data.to_csv(cot_path)
+            log.info("Saved combined COT data to %s", cot_path)
 
     print(f"\n{'='*60}")
     print("DOWNLOAD COMPLETE".center(60))
     print(f"{'='*60}")
     print(f"\nFiles saved to: {OUTPUT_DIR}")
-    print(f"  fred_macro_data.csv       — VIX, OVX, DXY, Yield Curve, Fed Funds")
-    print(f"  cftc_cot_crude_oil.csv    — COT positioning (weekly)")
-    print(f"\nNext step: run DataProcessor to create set_11")
+    print(f"  fred_macro_data_{instrument.symbol.lower()}.csv       — Vol Index, DXY, Yield Curve, Fed Funds")
+    print(f"  cftc_cot_{instrument.symbol.lower()}.csv    — COT positioning (weekly)")
+    print(f"\nNext step: run regenerate_features.py with the config for {instrument.symbol}")
     print(f"{'='*60}\n")
 
 

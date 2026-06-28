@@ -37,13 +37,18 @@ def _make_trader_stub(
     """
     trader = object.__new__(lt_module.LiveTrader)
 
-    # Mock the IBKRConnectionManager
-    trader.manager = MagicMock()
-    trader.manager.ib = MagicMock()
-    trader.manager.connect = MagicMock()
-    trader.manager.get_cl_position = MagicMock(return_value=0)
-    trader.manager.subscribe_live_bars = MagicMock()
-    trader.manager.cancel_subscription = MagicMock()
+    # Mock the IBKR clients
+    trader.exec_client = MagicMock()
+    trader.exec_client.get_position = MagicMock(return_value=0)
+    
+    trader.data_client = MagicMock()
+    trader.data_client.connect = MagicMock()
+    trader.data_client.subscribe_live_bars = MagicMock()
+    trader.data_client.cancel_subscription = MagicMock()
+
+    trader._execution_symbol = "CL"
+    trader._front_month_local_symbol = "CLH6"
+    trader._last_rollover_check_date = None
 
     # Strategy mock
     trader.strategy = MagicMock()
@@ -172,9 +177,9 @@ class TestTimeBarrierExitMode:
         trader._position_bars_held = 6  # > max_hold_bars
 
         # Position is open
-        trader.manager.get_cl_position.return_value = 1
-        trader.manager.cancel_open_cl_orders.return_value = 0
-        trader.manager.close_cl_position.return_value = MagicMock()
+        trader.exec_client.get_position.return_value = 1
+        trader.exec_client.cancel_open_orders.return_value = 0
+        trader.exec_client.close_position.return_value = MagicMock()
 
         result = trader._check_time_barrier(
             bar_time=pd.Timestamp("2026-03-02 18:00:00"),
@@ -183,13 +188,13 @@ class TestTimeBarrierExitMode:
         )
 
         assert result is True
-        # Verify it called close_cl_position with exit_mode, NOT close_cl_position_market
-        trader.manager.close_cl_position.assert_called_once_with(
-            symbol="CL",
+        # Verify it called close_position with exit_mode, NOT close_position_market
+        trader.exec_client.close_position.assert_called_once_with(
+            symbol=trader._execution_symbol,
             exit_mode="marketable_limit",
             current_price=72.50,
         )
-        trader.manager.close_cl_position_market.assert_not_called()
+        trader.exec_client.close_position_market.assert_not_called()
 
     def test_time_barrier_default_market_mode(self):
         """Default exit_mode='market' is passed to close_cl_position."""
@@ -200,9 +205,9 @@ class TestTimeBarrierExitMode:
         trader._position_entry_bar_time = pd.Timestamp("2026-03-02 17:00:00")
         trader._position_bars_held = 6
 
-        trader.manager.get_cl_position.return_value = 1
-        trader.manager.cancel_open_cl_orders.return_value = 0
-        trader.manager.close_cl_position.return_value = MagicMock()
+        trader.exec_client.get_position.return_value = 1
+        trader.exec_client.cancel_open_orders.return_value = 0
+        trader.exec_client.close_position.return_value = MagicMock()
 
         trader._check_time_barrier(
             bar_time=pd.Timestamp("2026-03-02 18:00:00"),
@@ -210,8 +215,8 @@ class TestTimeBarrierExitMode:
             atr_value=0.5,
         )
 
-        trader.manager.close_cl_position.assert_called_once_with(
-            symbol="CL",
+        trader.exec_client.close_position.assert_called_once_with(
+            symbol=trader._execution_symbol,
             exit_mode="market",
             current_price=72.50,
         )

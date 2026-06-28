@@ -104,6 +104,8 @@ class DataProcessor:
         output_path: str = None,
         dataset_version: str = "set_03",
         keep_ohlcv: bool = True,
+        symbol: str = "CL",
+        config: "DataWorkflowConfig" = None,
     ):
         """
         Initialize the DataProcessor.
@@ -118,12 +120,14 @@ class DataProcessor:
         """
         if input_path is None:
             # Resolve from CL_DATA_ROOT first, repo-local fallback
-            resolved = get_data_path("raw/CL.csv")
+            resolved = get_data_path(f"raw/{symbol}.csv")
             if resolved.exists():
                 input_path = str(resolved)
             else:
                 input_path = str(get_data_path("raw/test100k.csv"))
         self.input_path = input_path
+        self.symbol = symbol
+        self.config = config
         self._dataset_version = dataset_version
         self.keep_ohlcv = keep_ohlcv
         self._explicit_output_path = output_path is not None
@@ -144,7 +148,7 @@ class DataProcessor:
 
     def _update_output_path(self):
         # Auto-generate output path based on dataset version (decoupled from raw input name)
-        self.output_path = str(get_data_root() / "processed" / f"CL_{self._dataset_version}.parquet")
+        self.output_path = str(get_data_root() / "processed" / f"{self.symbol}_{self._dataset_version}.parquet")
             
         self.df = None
         
@@ -3143,6 +3147,145 @@ class DataProcessor:
 
         self.df = df
         return df
+
+
+    def process_from_config(self, exec_ohlcv_path: Optional[str] = None) -> pd.DataFrame:
+        """Process data dynamically based on the injected DataWorkflowConfig."""
+        if not self.config:
+            raise ValueError("DataWorkflowConfig must be provided to DataProcessor to use process_from_config.")
+        
+        cfg = self.config
+        
+        start_time = datetime.now()
+        print("=" * 60)
+        print(f"Starting Data Processing Pipeline - {self.symbol} {self._dataset_version}")
+        print(f"  Config-driven features & targets")
+        print(f"Started at: {start_time.isoformat(timespec='seconds')}")
+        print("=" * 60)
+
+        # ── Step 1: Load data and resample ───────────────
+        df = self.load_data()
+        print(f"  [10%] Loaded {len(df)} 5-min rows")
+        if cfg.resolution == "1h":
+            df = self.resample_to_hourly(df)
+            print(f"  [15%] Resampled to {len(df)} hourly bars at {datetime.now().isoformat(timespec='seconds')}")
+            bars_per_hour = 1
+        elif cfg.resolution == "4h":
+            df = self.resample_to_4hourly(df)
+            bars_per_hour = 1/4
+        else:
+            bars_per_hour = 12 # assuming 5-min
+
+        # ── Step 2: Time features ─────────────────────────────────────
+        df = self.add_time_features(df, include_day_of_week=True)
+        print(f"  [20%] Time features added")
+
+        # ── Step 3: AlphaFactory ──────────────────────────────────────
+        df = AlphaFactory(df, bars_per_hour=bars_per_hour).add_all_features(
+            windows=cfg.features.windows,
+            include_momentum=cfg.features.include_momentum,
+            include_macro=cfg.features.include_macro,
+            include_extended=cfg.features.include_extended,
+            include_dma=cfg.features.include_dma,
+            include_ichimoku=cfg.features.include_ichimoku,
+            include_term_structure=cfg.features.include_term_structure,
+            macro_windows=cfg.features.macro_windows,
+            log_progress=True,
+        )
+        print(f"  [50%] AlphaFactory features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # ── Step 4: External macro features ───────────────────────────
+        from src.core.instrument_master import get_instrument
+        macro_engine = MacroFeatureEngine(instrument=get_instrument(self.symbol))
+        df = macro_engine.merge_all(df, check_staleness=False)
+        n_macro = len(macro_engine.get_feature_names())
+        print(f"  [55%] {n_macro} external macro features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # ── Step 5: RAW columns ───────────────────────────────────────
+        raw_horizon = cfg.targets.raw_horizon
+        
+        if exec_ohlcv_path:
+            print(f"  - Loading raw execution data from {exec_ohlcv_path}...")
+            raw_resampled = self._load_and_resample_exec(exec_ohlcv_path)
+            raw_resampled = raw_resampled.reindex(df.index)
+            
+            df["EXEC_Open"] = raw_resampled["Open"]
+            df["EXEC_High"] = raw_resampled["High"]
+            df["EXEC_Low"] = raw_resampled["Low"]
+            df["EXEC_Close"] = raw_resampled["Close"]
+            
+            exec_tr = np.maximum(
+                raw_resampled["High"] - raw_resampled["Low"],
+                np.maximum(
+                    (raw_resampled["High"] - raw_resampled["Close"].shift(1)).abs(),
+                    (raw_resampled["Low"] - raw_resampled["Close"].shift(1)).abs(),
+                ),
+            )
+            df["EXEC_ATR_14"] = exec_tr.rolling(14).mean()
+            
+            future_high = raw_resampled["High"].iloc[::-1].rolling(window=raw_horizon, min_periods=1).max().iloc[::-1].shift(-1)
+            future_low = raw_resampled["Low"].iloc[::-1].rolling(window=raw_horizon, min_periods=1).min().iloc[::-1].shift(-1)
+            
+            df["RAW_Close"] = raw_resampled["Close"].copy()
+            df["RAW_Future_High"] = future_high
+            df["RAW_Future_Low"] = future_low
+            print("  - Added EXEC_* columns and updated RAW_ columns from raw data")
+        else:
+            future_high = df["High"].iloc[::-1].rolling(window=raw_horizon, min_periods=1).max().iloc[::-1].shift(-1)
+            future_low = df["Low"].iloc[::-1].rolling(window=raw_horizon, min_periods=1).min().iloc[::-1].shift(-1)
+            df["RAW_Open"] = df["Open"].copy()
+            df["RAW_High"] = df["High"].copy()
+            df["RAW_Low"] = df["Low"].copy()
+            df["RAW_Close"] = df["Close"].copy()
+            df["RAW_Future_High"] = future_high
+            df["RAW_Future_Low"] = future_low
+            print("  - Added RAW_Open, RAW_High, RAW_Low, RAW_Close, RAW_Future_High, RAW_Future_Low")
+
+        # ── Step 6: Config-driven Target Suite ────────────────────────
+        for tdef in cfg.targets.definitions:
+            if tdef.type == "triple_barrier_grid":
+                for tp_mult in tdef.tp_multipliers:
+                    tp_label = str(int(tp_mult)) if tp_mult.is_integer() else str(tp_mult).replace(".", "p")
+                    for horizon_h in tdef.horizons:
+                        df = self.add_triple_barrier_target(
+                            df,
+                            prefix=f"TARGET_TRIPLE_{tp_label}x1_{horizon_h}H",
+                            tp_atr_mult=tp_mult,
+                            sl_atr_mult=tdef.sl_multiplier,
+                            max_horizon=horizon_h,
+                            atr_period=cfg.targets.atr_period,
+                        )
+            elif tdef.type == "triple_barrier":
+                tp_label = str(int(tdef.tp_multiplier)) if tdef.tp_multiplier.is_integer() else str(tdef.tp_multiplier).replace(".", "p")
+                sl_label = str(int(tdef.sl_multiplier)) if tdef.sl_multiplier.is_integer() else str(tdef.sl_multiplier).replace(".", "p")
+                suffix = "1" if tdef.sl_multiplier == 1.0 else sl_label
+                df = self.add_triple_barrier_target(
+                    df,
+                    prefix=f"TARGET_TRIPLE_{tp_label}x{suffix}_{tdef.horizon}H",
+                    tp_atr_mult=tdef.tp_multiplier,
+                    sl_atr_mult=tdef.sl_multiplier,
+                    max_horizon=tdef.horizon,
+                    atr_period=cfg.targets.atr_period,
+                )
+            elif tdef.type == "continuous_return":
+                df = self.add_return_target(df, horizons=tdef.horizons)
+        print(f"  [70%] Targets added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # ── Step 7: Final processing ──────────────────────────────────
+        df = self.normalize_features(df)
+        print(f"  [85%] Features normalized")
+
+        # Configs can specify warmup, but defaults are fine for now
+        warmup = 2200 if cfg.resolution == "1h" else 600
+        df = self.cleanup(df, warmup_rows=warmup, max_warmup_bars=warmup)
+        print(f"  [95%] Cleanup complete, dropped first {warmup} rows")
+
+        self.df = df
+        print(f"  [100%] Process complete at {datetime.now().isoformat(timespec='seconds')}")
+        print(f"  Final DataFrame shape: {self.df.shape}")
+        
+        self.save(self.df)
+        return self.df
 
 
 def main():

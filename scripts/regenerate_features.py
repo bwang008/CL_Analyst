@@ -1,25 +1,67 @@
 import sys
 import os
+import argparse
+import json
+from pathlib import Path
+from pydantic import ValidationError
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from src.data_processor import DataProcessor
+from src.config.schemas import MasterConfig
 
-input_csv = r"C:\CL_Analyst_Data\data\raw\CL.csv"
+def main():
+    parser = argparse.ArgumentParser(description="Config-driven Data Pipeline")
+    parser.add_argument("--config", required=True, help="Path to Master Config JSON")
+    parser.add_argument("--exec-data", default=None, help="Path to raw execution data")
+    args = parser.parse_args()
 
-def generate_set(dataset_version):
-    print(f"Generating features for {dataset_version}...")
+    config_path = Path(args.config)
+    if not config_path.exists():
+        print(f"Error: Config file not found at {config_path}")
+        sys.exit(1)
+
+    with open(config_path, "r") as f:
+        raw_json = json.load(f)
+
+    try:
+        master_config = MasterConfig(**raw_json)
+    except ValidationError as e:
+        print(f"Configuration Validation Error in {config_path.name}:\n{e}")
+        sys.exit(1)
+
+    if not master_config.data_workflow:
+        print("Error: No data_workflow section found in Master Config.")
+        sys.exit(1)
+
+    print(f"Validated configuration for {master_config.symbol}")
+    
+    # Save a copy of the validated configuration for artifact lineage
+    lineage_path = Path(PROJECT_ROOT) / "data" / "processed" / f"{master_config.symbol}_{master_config.data_workflow.dataset_version}_config.json"
+    lineage_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lineage_path, "w") as f:
+        f.write(master_config.model_dump_json(indent=2))
+        
+    print(f"Saved artifact lineage to {lineage_path}")
+
     processor = DataProcessor(
-        input_path=input_csv,
-        dataset_version=dataset_version,
+        dataset_version=master_config.data_workflow.dataset_version,
+        symbol=master_config.symbol,
+        config=master_config.data_workflow,
         keep_ohlcv=True,
     )
-    # the process method expects threshold and horizon, but for HourSets they might be hardcoded inside
-    # let's just call process()
-    processor.process()
-    print(f"Finished generating features for {dataset_version}")
+    
+    try:
+        df = processor.process_from_config(exec_ohlcv_path=args.exec_data)
+        
+        print("\nFeature Summary:")
+        print("-" * 40)
+        print(df.describe().T.head(20)) # Print just the head so it doesn't flood the terminal
+        
+    except Exception as e:
+        print(f"Error during processing: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
-    generate_set("HourSet_09")
-    generate_set("HourSet_10")
+    main()

@@ -144,6 +144,7 @@ def live_last_row_1h(ohlcv_data_1h, live_feature_names_1h):
         ohlcv_data_1h.copy(),
         live_feature_names_1h,
         bar_size="1h",
+        lean=False,
     )
 
 

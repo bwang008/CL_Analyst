@@ -411,29 +411,24 @@ class AlphaFactory:
             self.df[f"VOLFLOW_OBV_SLOPE{suffix}"] = np.nan
             self.df[f"VOLFLOW_DIVERGENCE{suffix}"] = np.nan
         else:
-            obv_slope = ta.linreg(obv, length=window, slope=True)
-            price_slope = ta.linreg(self.close, length=window, slope=True)
+            obv_arr = obv.to_numpy(dtype=np.float64)
+            price_arr = self.close.to_numpy(dtype=np.float64)
             
-            if obv_slope is None or price_slope is None:
-                self.df[f"VOLFLOW_OBV_SLOPE{suffix}"] = np.nan
-                self.df[f"VOLFLOW_DIVERGENCE{suffix}"] = np.nan
-            else:
-                obv_slope_series = (
-                    obv_slope if isinstance(obv_slope, pd.Series) else obv_slope.iloc[:, 0]
-                )
-                price_slope_series = (
-                    price_slope if isinstance(price_slope, pd.Series) else price_slope.iloc[:, 0]
-                )
+            obv_slope_np, _ = _rolling_slope_r2_numba(obv_arr, window)
+            price_slope_np, _ = _rolling_slope_r2_numba(price_arr, window)
+            
+            obv_slope_series = pd.Series(obv_slope_np, index=self.df.index)
+            price_slope_series = pd.Series(price_slope_np, index=self.df.index)
 
-                # Normalise slopes by rolling std before subtracting to ensure scale-invariance
-                obv_std = obv_slope_series.rolling(window).std().replace(0, np.nan)
-                price_std = price_slope_series.rolling(window).std().replace(0, np.nan)
-                
-                norm_obv_slope = (obv_slope_series / obv_std).fillna(0.0)
-                norm_price_slope = (price_slope_series / price_std).fillna(0.0)
+            # Normalise slopes by rolling std before subtracting to ensure scale-invariance
+            obv_std = obv_slope_series.rolling(window).std().replace(0, np.nan)
+            price_std = price_slope_series.rolling(window).std().replace(0, np.nan)
+            
+            norm_obv_slope = (obv_slope_series / obv_std).fillna(0.0)
+            norm_price_slope = (price_slope_series / price_std).fillna(0.0)
 
-                self.df[f"VOLFLOW_OBV_SLOPE{suffix}"] = obv_slope_series
-                self.df[f"VOLFLOW_DIVERGENCE{suffix}"] = norm_obv_slope - norm_price_slope
+            self.df[f"VOLFLOW_OBV_SLOPE{suffix}"] = obv_slope_series
+            self.df[f"VOLFLOW_DIVERGENCE{suffix}"] = norm_obv_slope - norm_price_slope
 
         vol_sum = self.volume.rolling(window).sum().clip(lower=1e-8)
         vwap = (self.close * self.volume).rolling(window).sum() / vol_sum

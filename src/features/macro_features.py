@@ -119,11 +119,16 @@ class MacroFeatureEngine:
 
     def __init__(
         self,
+        instrument: "Instrument" = None,
         fred_path: Path | str | None = None,
         cot_path: Path | str | None = None,
     ):
-        self.fred_path = Path(fred_path) if fred_path else get_data_path("raw/macro/fred_macro_data.csv")
-        self.cot_path = Path(cot_path) if cot_path else get_data_path("raw/macro/cftc_cot_crude_oil.csv")
+        from src.core.instrument_master import get_instrument
+        self.instrument = instrument if instrument else get_instrument("CL")
+        
+        # Paths resolve dynamically based on symbol
+        self.fred_path = Path(fred_path) if fred_path else get_data_path(f"raw/macro/fred_macro_data_{self.instrument.symbol.lower()}.csv")
+        self.cot_path = Path(cot_path) if cot_path else get_data_path(f"raw/macro/cftc_cot_{self.instrument.symbol.lower()}.csv")
 
         self._fred_df: pd.DataFrame | None = None
         self._cot_df: pd.DataFrame | None = None
@@ -447,7 +452,21 @@ class MacroFeatureEngine:
         features = pd.DataFrame(index=df.index)
 
         # Process each signal
-        for col in ["VIX", "OVX", "DXY", "YIELD_CURVE"]:
+        vol_label = "OVX"  # Fallback
+        if hasattr(self, "instrument"):
+            # Depending on if we imported Instrument
+            # Instrument doesn't have a vol_label attribute in the schema, it has volatility_index
+            # Let's map volatility_index to label here or pass it.
+            # In the original plan, the schema had vol_label. In Instrument it has volatility_index.
+            # Let's dynamically find the vol column (it's the one that isn't VIX, DXY, YIELD_CURVE, FED_FUNDS)
+            # Or we can just use the instrument.volatility_index mapping.
+            # Wait, download_macro_data maps VIXCLS -> VIX, OVXCLS -> OVX.
+            pass
+
+        vol_cols = [c for c in df.columns if c not in ["VIX", "DXY", "YIELD_CURVE", "FED_FUNDS"]]
+        vol_label = vol_cols[0] if vol_cols else "OVX"
+
+        for col in ["VIX", vol_label, "DXY", "YIELD_CURVE"]:
             if col not in df.columns:
                 log.warning("FRED column '%s' not found — skipping", col)
                 continue
@@ -469,9 +488,9 @@ class MacroFeatureEngine:
                 )
 
         # Derived features
-        if "VIX" in df.columns and "OVX" in df.columns:
-            ovx_safe = df["OVX"].replace(0, np.nan)
-            features["MACRO_VIX_OVX_RATIO"] = df["VIX"] / ovx_safe
+        if "VIX" in df.columns and vol_label in df.columns and vol_label != "VIX":
+            vol_safe = df[vol_label].replace(0, np.nan)
+            features[f"MACRO_VIX_{vol_label}_RATIO"] = df["VIX"] / vol_safe
 
         if "YIELD_CURVE" in df.columns:
             features["MACRO_YIELD_CURVE_SIGN"] = (df["YIELD_CURVE"] > 0).astype(int)

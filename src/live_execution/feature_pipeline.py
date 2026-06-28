@@ -200,6 +200,7 @@ def build_live_features(
     _has_dma = any(f.startswith("TREND_DMA_") for f in feature_names)
     _has_exh_div = any(f.startswith("EXHDIV_") for f in feature_names)
     _has_term_structure = any(f.startswith("TS_") for f in feature_names)
+    _has_internal_macro = any(f.startswith(("MACRO_POS_", "MACRO_WIDTH_")) for f in feature_names)
 
     factory = AlphaFactory(work, bars_per_hour=_bars_per_hour)
     if lean:
@@ -208,7 +209,7 @@ def build_live_features(
         work = factory.add_all_features(
             windows=alpha_windows,
             include_momentum=True,
-            include_macro=False,
+            include_macro=_has_internal_macro,
             include_extended=False,
             include_ichimoku=_has_ichimoku,
             include_dma=_has_dma,

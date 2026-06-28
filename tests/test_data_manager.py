@@ -114,33 +114,33 @@ class TestSeedLoading:
         dm = DataManager(
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
-            ibkr_manager=None,
+            data_client=None,
         )
         df = dm.initialize()
 
         assert cache_path.exists(), "Cache file should be created"
         assert len(df) > 0, "Should have data from seed"
 
-    def test_seed_loads_last_150_days(self, mock_seed, cache_path):
-        """Seed should only contain last 150 days of data."""
+    def test_seed_loads_last_200_days(self, mock_seed, cache_path):
+        """Seed should only contain last 200 days of data."""
         dm = DataManager(
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
-            ibkr_manager=None,
+            data_client=None,
         )
         df = dm.initialize()
 
         date_range = df.index.max() - df.index.min()
-        # Should be roughly 150 days (within margin)
-        assert date_range.days <= 151, f"Range too large: {date_range.days} days"
-        assert date_range.days >= 148, f"Range too small: {date_range.days} days"
+        # Should be roughly 200 days (within margin)
+        assert date_range.days <= 201, f"Range too large: {date_range.days} days"
+        assert date_range.days >= 198, f"Range too small: {date_range.days} days"
 
     def test_seed_has_correct_columns(self, mock_seed, cache_path):
         """Seed DataFrame should have standard OHLCV + DateTime columns."""
         dm = DataManager(
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
-            ibkr_manager=None,
+            data_client=None,
         )
         df = dm.initialize()
 
@@ -152,7 +152,7 @@ class TestSeedLoading:
         dm = DataManager(
             seed_path="/nonexistent/seed.csv",
             cache_path=str(cache_path),
-            ibkr_manager=None,
+            data_client=None,
         )
         with pytest.raises(FileNotFoundError):
             dm.initialize()
@@ -162,7 +162,7 @@ class TestSeedLoading:
         dm = DataManager(
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
-            ibkr_manager=None,
+            data_client=None,
         )
         df = dm.initialize()
 
@@ -182,7 +182,7 @@ class TestCacheReuse:
         dm1 = DataManager(
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
-            ibkr_manager=None,
+            data_client=None,
         )
         df1 = dm1.initialize()
         n_bars_1 = len(df1)
@@ -191,7 +191,7 @@ class TestCacheReuse:
         dm2 = DataManager(
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
-            ibkr_manager=None,
+            data_client=None,
         )
         df2 = dm2.initialize()
 
@@ -210,7 +210,7 @@ class TestDedupAndSort:
         dm = DataManager(
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
-            ibkr_manager=None,
+            data_client=None,
         )
         df = dm.initialize()
         n_before = len(df)
@@ -226,7 +226,7 @@ class TestDedupAndSort:
         dm = DataManager(
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
-            ibkr_manager=None,
+            data_client=None,
         )
         dm.initialize()
 
@@ -250,7 +250,7 @@ class TestDedupAndSort:
         dm = DataManager(
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
-            ibkr_manager=None,
+            data_client=None,
         )
         dm.initialize()
 
@@ -281,7 +281,7 @@ class TestAppendAndFlush:
         dm = DataManager(
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
-            ibkr_manager=None,
+            data_client=None,
         )
         dm.initialize()
         n_before = len(dm.dataframe)
@@ -304,7 +304,7 @@ class TestAppendAndFlush:
         dm = DataManager(
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
-            ibkr_manager=None,
+            data_client=None,
         )
         dm.initialize()
         dm.save_cache()
@@ -319,7 +319,7 @@ class TestAppendAndFlush:
         dm = DataManager(
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
-            ibkr_manager=None,
+            data_client=None,
         )
         df = dm.initialize()
 
@@ -330,7 +330,7 @@ class TestAppendAndFlush:
         dm = DataManager(
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
-            ibkr_manager=None,
+            data_client=None,
         )
         assert dm.last_timestamp is None
 
@@ -339,7 +339,7 @@ class TestAppendAndFlush:
         dm = DataManager(
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
-            ibkr_manager=None,
+            data_client=None,
         )
         new_row = pd.Series({
             "Open": 70.0, "High": 70.5, "Low": 69.5,

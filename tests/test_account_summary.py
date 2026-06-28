@@ -53,7 +53,7 @@ class TestGetAccountSummary:
         mgr = object.__new__(IBKRConnectionManager)
         mgr.ib = MagicMock()
         mgr.ib.isConnected.return_value = True
-        mgr.ib.accountSummary.return_value = acct_values
+        mgr.ib.accountValues.return_value = acct_values
         mgr.ib.portfolio.return_value = portfolio_items
         mgr._last_error = None
         return mgr
@@ -167,6 +167,7 @@ class TestPrintAccountSummary:
         from src.live_execution import live_trader as lt_module
 
         trader = object.__new__(lt_module.LiveTrader)
+        trader._execution_symbol = "CL"
         trader.exec_client = MagicMock()
         trader.exec_client.get_account_summary.return_value = acct_data
         trader.telemetry = MagicMock()

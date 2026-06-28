@@ -207,7 +207,10 @@ def evaluate_ensemble(
                 bin_sig * fwd_df[peak_col].values,
                 index=fwd_df.index,
             )
-            monthly = fpnl_series.resample("ME").sum().dropna()
+            try:
+                monthly = fpnl_series.resample("ME").sum().dropna()
+            except ValueError:
+                monthly = fpnl_series.resample("M").sum().dropna()
             metrics["monthly_breakdown"] = {
                 dt.strftime("%Y-%m"): round(float(v), 6)
                 for dt, v in monthly.items()

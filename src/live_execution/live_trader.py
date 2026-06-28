@@ -3872,6 +3872,46 @@ class LiveTrader:
             raw_trade = getattr(event, "raw_event", None)
             raw_order = getattr(raw_trade, "order", None)
             action_str = getattr(raw_order, "action", "UNKNOWN")
+
+            # Log EXECUTION_FILL event to tradebook
+            event_ts = self._utc_iso_now()
+            event_id = self._build_event_id(
+                event_type="EXECUTION_FILL",
+                event_ts=event_ts,
+                order_id=order_id,
+            )
+            
+            # Resolve decision context using either string or int order_id
+            order_id_int = None
+            try:
+                order_id_int = int(order_id)
+            except (ValueError, TypeError):
+                pass
+                
+            ctx = self._last_decision_context_by_order_id.get(order_id)
+            if ctx is None and order_id_int is not None:
+                ctx = self._last_decision_context_by_order_id.get(order_id_int)
+            if ctx is None:
+                ctx = {}
+                
+            self.telemetry.log_tradebook_event(
+                event_id=event_id,
+                event_type="EXECUTION_FILL",
+                event_timestamp_utc=event_ts,
+                order_id=order_id,
+                perm_id=getattr(raw_order, "permId", None),
+                parent_order_id=getattr(raw_order, "parentId", None),
+                account=getattr(raw_order, "account", None),
+                symbol=symbol_str,
+                local_symbol=symbol_str,
+                signal_id=ctx.get("signal_id"),
+                decision_id=ctx.get("decision_id"),
+                decision_timestamp_utc=ctx.get("decision_timestamp_utc"),
+                contract_month=self._front_month_str,
+                action=action_str,
+                last_fill_price=avg_price,
+                fill_qty=qty,
+            )
             
             if hasattr(self, '_processed_exit_order_ids') and order_id in self._processed_exit_order_ids:
                 return

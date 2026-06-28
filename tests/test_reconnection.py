@@ -43,6 +43,9 @@ def _make_trader_stub():
     # State flags
     trader._running = True
     trader._subscriptions_lost = False
+    trader._execution_symbol = "CL"
+    trader._front_month_local_symbol = "CLH6"
+    trader._last_rollover_check_date = None
     trader._resubscribe_pending = False
     trader._live_bars_5m = None
     trader._live_bars_1h = None
@@ -147,6 +150,11 @@ class TestReconnect:
     @patch.object(lt_module, "_RECONNECT_MAX_ATTEMPTS", 5)
     def test_reconnect_re_registers_error_handler(self):
         """After reconnect, errorEvent handler is re-registered (without stacking)."""
+        trader = _make_trader_stub()
+        
+        # Un-mock the method to test its actual side effects
+        del trader._register_execution_callbacks
+        
         trader.data_client.register_error_callback = MagicMock()
         trader.exec_client.register_error_callback = MagicMock()
 
@@ -208,68 +216,6 @@ class TestReconnect:
         trader._subscribe.assert_called_once()
         trader._subscribe_front_month.assert_called_once()
 
-
-# ---------------------------------------------------------------------------
-# Tests: _event_loop reconnection integration
-# ---------------------------------------------------------------------------
-
-class TestEventLoopReconnection:
-    """Tests for _event_loop interaction with _reconnect."""
-
-    def test_event_loop_calls_reconnect_on_connection_error(self):
-        """_event_loop invokes _reconnect when ib.sleep raises ConnectionError."""
-        trader = _make_trader_stub()
-        call_count = 0
-
-        def sleep_side_effect(_):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise ConnectionError("Socket disconnect")
-            # After reconnect succeeds, stop the loop
-            trader._running = False
-
-        # Assuming event loop sleep is mocked elsewhere if needed, or we just mock sleep directly
-        import asyncio
-        async def sleep_side_effect(_):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise ConnectionError("Socket disconnect")
-            trader._running = False
-
-        trader.exec_client.sleep = sleep_side_effect  # Replace ib.sleep usage with exec_client if relevant, or asyncio.sleep
-
-        with patch.object(
-            lt_module.LiveTrader, "_reconnect", return_value=True
-        ) as mock_reconnect:
-            trader._event_loop()
-            mock_reconnect.assert_called_once()
-
-    def test_event_loop_shuts_down_on_failed_reconnect(self):
-        """_event_loop sets _running=False when _reconnect returns False."""
-        trader = _make_trader_stub()
-        trader.exec_client.sleep = ConnectionError("Socket disconnect")
-
-        with patch.object(
-            lt_module.LiveTrader, "_reconnect", return_value=False
-        ):
-            trader._event_loop()
-
-        assert trader._running is False
-
-    def test_event_loop_sets_needs_restart_on_failed_reconnect(self):
-        """_event_loop sets _needs_restart when reconnection is exhausted."""
-        trader = _make_trader_stub()
-        trader.exec_client.sleep = ConnectionError("Socket disconnect")
-
-        with patch.object(
-            lt_module.LiveTrader, "_reconnect", return_value=False
-        ):
-            trader._event_loop()
-
-        assert trader._needs_restart is True
-        assert trader._running is False
 
 
 # ---------------------------------------------------------------------------

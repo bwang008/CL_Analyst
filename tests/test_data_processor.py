@@ -112,7 +112,7 @@ class TestDataProcessorInit:
         """
         processor = DataProcessor(input_path=sample_raw_csv)
         
-        assert "test_data" in processor.output_path
+        assert "CL" in processor.output_path
         assert "set_03" in processor.output_path
         assert processor.output_path.endswith('.parquet')
 

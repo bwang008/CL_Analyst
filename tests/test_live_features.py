@@ -183,7 +183,7 @@ class TestBuildLiveFeaturesSet07:
     @pytest.fixture(scope="class")
     def feature_row(self, ohlcv_data):
         """Run the full extended feature pipeline once per class."""
-        return build_live_features(ohlcv_data, _EXPECTED_FEATURES_SET_07)
+        return build_live_features(ohlcv_data, _EXPECTED_FEATURES_SET_07, lean=False)
 
     def test_returns_dataframe(self, feature_row):
         assert feature_row is not None

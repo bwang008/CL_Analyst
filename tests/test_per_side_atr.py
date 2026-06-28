@@ -150,15 +150,9 @@ class TestATRComputation:
         engine.run(preds, ohlcv)
         # The ATR computation happens on a copy, so we verify via the engine
         # by running manually
-        tr = np.maximum(
-            ohlcv["High"] - ohlcv["Low"],
-            np.maximum(
-                (ohlcv["High"] - ohlcv["Close"].shift(1)).abs(),
-                (ohlcv["Low"] - ohlcv["Close"].shift(1)).abs(),
-            ),
-        )
-        atr_10 = tr.rolling(10).mean()
-        atr_30 = tr.rolling(30).mean()
+        import pandas_ta as ta
+        atr_10 = ohlcv.ta.atr(length=10)
+        atr_30 = ohlcv.ta.atr(length=30)
         # They should differ (different lookback windows)
         valid_mask = atr_10.notna() & atr_30.notna()
         assert not np.allclose(atr_10[valid_mask].values, atr_30[valid_mask].values)
@@ -195,15 +189,9 @@ class TestTradesUsePerSideATR:
         if result.trades:
             # Verify ATR at entry matches ATR(10) not ATR(30)
             trade = result.trades[0]
-            tr = np.maximum(
-                ohlcv["High"] - ohlcv["Low"],
-                np.maximum(
-                    (ohlcv["High"] - ohlcv["Close"].shift(1)).abs(),
-                    (ohlcv["Low"] - ohlcv["Close"].shift(1)).abs(),
-                ),
-            )
-            atr_10 = tr.rolling(10).mean()
-            atr_30 = tr.rolling(30).mean()
+            import pandas_ta as ta
+            atr_10 = ohlcv.ta.atr(length=10)
+            atr_30 = ohlcv.ta.atr(length=30)
             entry_idx = ohlcv.index.get_loc(trade.entry_dt)
             expected_atr_long = atr_10.iloc[entry_idx]
             expected_atr_short = atr_30.iloc[entry_idx]
@@ -227,14 +215,8 @@ class TestTradesUsePerSideATR:
 
         if result.trades:
             trade = result.trades[0]
-            tr = np.maximum(
-                ohlcv["High"] - ohlcv["Low"],
-                np.maximum(
-                    (ohlcv["High"] - ohlcv["Close"].shift(1)).abs(),
-                    (ohlcv["Low"] - ohlcv["Close"].shift(1)).abs(),
-                ),
-            )
-            atr_30 = tr.rolling(30).mean()
+            import pandas_ta as ta
+            atr_30 = ohlcv.ta.atr(length=30)
             entry_idx = ohlcv.index.get_loc(trade.entry_dt)
             expected_atr_short = atr_30.iloc[entry_idx]
             assert abs(trade.atr_at_entry - expected_atr_short) < 1e-10, \
