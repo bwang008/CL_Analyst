@@ -457,36 +457,69 @@ def run_parity_check(
             }
             continue
 
-        # Compute close price differences on overlapping bars
+        # Compute OHLCV differences on overlapping bars
+        ohlcv_stats: dict[str, dict[str, float]] = {}
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            db_vals = df_db.loc[overlap_idx, col].astype(float)
+            ibkr_vals = df_ibkr.loc[overlap_idx, col].astype(float)
+
+            abs_diff = (ibkr_vals - db_vals).abs()
+            denom = db_vals.replace(0, np.nan)
+            pct_diff = (abs_diff / denom * 100.0)
+
+            ohlcv_stats[col] = {
+                "mean_abs_error": float(abs_diff.mean()),
+                "max_abs_error": float(abs_diff.max()),
+                "mean_pct_error": float(pct_diff.mean()),
+            }
+
+        # Correlation on Close
         db_close = df_db.loc[overlap_idx, "Close"].astype(float)
         ibkr_close = df_ibkr.loc[overlap_idx, "Close"].astype(float)
-
-        abs_diff = (ibkr_close - db_close).abs()
-        pct_diff = (abs_diff / db_close.replace(0, np.nan) * 100.0)
-
-        # Correlation
         if n_overlap >= 2:
             corr = float(np.corrcoef(db_close.values, ibkr_close.values)[0, 1])
         else:
             corr = float("nan")
+
+        # Volume correlation
+        db_vol = df_db.loc[overlap_idx, "Volume"].astype(float)
+        ibkr_vol = df_ibkr.loc[overlap_idx, "Volume"].astype(float)
+        if n_overlap >= 2:
+            vol_corr = float(np.corrcoef(db_vol.values, ibkr_vol.values)[0, 1])
+        else:
+            vol_corr = float("nan")
 
         stats = {
             "status": "OK",
             "db_bars": len(df_db),
             "ibkr_bars": len(df_ibkr),
             "overlap_bars": n_overlap,
-            "mean_abs_error": float(abs_diff.mean()),
-            "max_abs_error": float(abs_diff.max()),
-            "mean_pct_error": float(pct_diff.mean()),
-            "correlation": corr,
+            "close_mean_abs_error": ohlcv_stats["Close"]["mean_abs_error"],
+            "close_max_abs_error": ohlcv_stats["Close"]["max_abs_error"],
+            "close_mean_pct_error": ohlcv_stats["Close"]["mean_pct_error"],
+            "close_correlation": corr,
+            "volume_mean_pct_error": ohlcv_stats["Volume"]["mean_pct_error"],
+            "volume_correlation": vol_corr,
+            "ohlcv_details": ohlcv_stats,
         }
         parity_results[sym] = stats
 
         log.info("  Overlapping bars: %d", n_overlap)
-        log.info("  Mean |Close err|: %.6f", stats["mean_abs_error"])
-        log.info("  Max  |Close err|: %.6f", stats["max_abs_error"])
-        log.info("  Mean %%Close err: %.4f%%", stats["mean_pct_error"])
-        log.info("  Correlation:      %.6f", stats["correlation"])
+        log.info("  --- Price Parity (Close) ---")
+        log.info("    Mean |Close err|: %.6f", stats["close_mean_abs_error"])
+        log.info("    Max  |Close err|: %.6f", stats["close_max_abs_error"])
+        log.info("    Mean %%Close err: %.4f%%", stats["close_mean_pct_error"])
+        log.info("    Correlation:      %.6f", stats["close_correlation"])
+        log.info("  --- Volume Parity ---")
+        log.info("    Mean %%Vol err:   %.4f%%", stats["volume_mean_pct_error"])
+        log.info("    Vol correlation:  %.6f", stats["volume_correlation"])
+        log.info("  --- All OHLCV ---")
+        for col, col_stats in ohlcv_stats.items():
+            log.info(
+                "    %-7s  mean_abs=%.6f  max_abs=%.6f  mean_pct=%.4f%%",
+                col, col_stats["mean_abs_error"],
+                col_stats["max_abs_error"], col_stats["mean_pct_error"],
+            )
 
         # Save per-symbol report
         report_path = ibkr_dir / f"parity_report_{sym}.txt"
@@ -519,12 +552,26 @@ def _save_parity_report(
         f"Overlapping bars:   {stats['overlap_bars']}",
         "",
         "Close Price Parity:",
-        f"  Mean |error|:     {stats['mean_abs_error']:.6f}",
-        f"  Max  |error|:     {stats['max_abs_error']:.6f}",
-        f"  Mean % error:     {stats['mean_pct_error']:.4f}%",
-        f"  Correlation:      {stats['correlation']:.6f}",
+        f"  Mean |error|:     {stats['close_mean_abs_error']:.6f}",
+        f"  Max  |error|:     {stats['close_max_abs_error']:.6f}",
+        f"  Mean % error:     {stats['close_mean_pct_error']:.4f}%",
+        f"  Correlation:      {stats['close_correlation']:.6f}",
+        "",
+        "Volume Parity:",
+        f"  Mean % error:     {stats['volume_mean_pct_error']:.4f}%",
+        f"  Correlation:      {stats['volume_correlation']:.6f}",
         "",
     ]
+    # Add per-column details
+    if "ohlcv_details" in stats:
+        lines.append("Per-Column Detail:")
+        for col, cs in stats["ohlcv_details"].items():
+            lines.append(
+                f"  {col:7s}  mean_abs={cs['mean_abs_error']:.6f}  "
+                f"max_abs={cs['max_abs_error']:.6f}  "
+                f"mean_pct={cs['mean_pct_error']:.4f}%"
+            )
+        lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -535,24 +582,26 @@ def _print_parity_summary(results: dict[str, dict]) -> None:
     log.info("PARITY SUMMARY")
     log.info("=" * 80)
     log.info(
-        "  %-6s  %-14s  %8s  %12s  %12s  %10s  %10s",
-        "Symbol", "Status", "Overlap", "Mean|Err|", "Max|Err|", "Mean%Err", "Corr",
+        "  %-6s  %-14s  %8s  %12s  %12s  %10s  %10s  %10s  %10s",
+        "Symbol", "Status", "Overlap", "ClsMeanErr", "ClsMaxErr", "Cls%Err", "ClsCorr", "Vol%Err", "VolCorr",
     )
     log.info(
-        "  %-6s  %-14s  %8s  %12s  %12s  %10s  %10s",
-        "------", "--------------", "--------", "----------", "----------", "--------", "--------",
+        "  %-6s  %-14s  %8s  %12s  %12s  %10s  %10s  %10s  %10s",
+        "------", "--------------", "--------", "----------", "----------", "--------", "--------", "--------", "--------",
     )
     for sym, info in results.items():
         if info["status"] == "OK":
             log.info(
-                "  %-6s  %-14s  %8d  %12.6f  %12.6f  %9.4f%%  %10.6f",
+                "  %-6s  %-14s  %8d  %12.6f  %12.6f  %9.4f%%  %10.6f  %9.4f%%  %10.6f",
                 sym,
                 info["status"],
                 info["overlap_bars"],
-                info["mean_abs_error"],
-                info["max_abs_error"],
-                info["mean_pct_error"],
-                info["correlation"],
+                info["close_mean_abs_error"],
+                info["close_max_abs_error"],
+                info["close_mean_pct_error"],
+                info["close_correlation"],
+                info["volume_mean_pct_error"],
+                info["volume_correlation"],
             )
         else:
             log.info("  %-6s  %-14s  %8s", sym, info["status"], "-")

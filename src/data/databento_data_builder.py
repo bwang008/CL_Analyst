@@ -322,8 +322,13 @@ class DatabentoDataBuilder:
     ) -> dict[str, dict[str, Any]]:
         """Run a minimal N-day smoke test for each symbol.
 
-        Submits a small batch request, downloads the data, and validates
-        the structure of the raw CSV against expected Databento format.
+        Submits **one batch per symbol** so each gets its own CSV file
+        (Databento interleaves multiple symbols into a single CSV when
+        submitted together, making per-symbol validation harder).
+
+        Files are saved to ``<output_dir>/<SYMBOL>/`` (one sub-directory
+        per symbol).  If ``output_dir`` is None, defaults to
+        ``$CL_DATA_ROOT/data/raw/DataBentoSample/``.
 
         Checks performed per symbol:
             - Expected columns present
@@ -334,24 +339,27 @@ class DatabentoDataBuilder:
         Args:
             symbols: List of short symbol names or Databento codes.
             days: Number of recent calendar days to request.
-            output_dir: Where to save downloaded test files.  Defaults to
-                        a temp directory.
+            output_dir: Root directory for per-symbol sub-folders.
 
         Returns:
             Per-symbol dict of ``{"pass": bool, "details": str, ...}``.
         """
-        import tempfile
-
         symbols_resolved = _resolve_symbols(symbols)
+
         if output_dir is None:
-            output_dir = Path(tempfile.mkdtemp(prefix="databento_canary_"))
+            from src.data_paths import get_data_root
+            output_dir = get_data_root() / "raw" / "DataBentoSample"
         else:
             output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        end_date = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d")
+        # Databento CME data has a publication lag (~1 hour); using today
+        # triggers 422 dataset_unavailable_range.  Use yesterday as safe end.
+        end_date = (
+            pd.Timestamp.now(tz="UTC") - timedelta(days=1)
+        ).strftime("%Y-%m-%d")
         start_date = (
-            pd.Timestamp.now(tz="UTC") - timedelta(days=days)
+            pd.Timestamp.now(tz="UTC") - timedelta(days=days + 1)
         ).strftime("%Y-%m-%d")
 
         log.info(
@@ -359,25 +367,47 @@ class DatabentoDataBuilder:
             symbols_resolved, start_date, end_date, days,
         )
 
-        # Submit and download
-        files = self.submit_and_download(
-            symbols=symbols_resolved,
-            start=start_date,
-            end=end_date,
-            output_dir=output_dir,
-        )
-
-        # Validate each downloaded CSV
         results: dict[str, dict[str, Any]] = {}
-        for fpath in files:
-            if not fpath.suffix == ".csv":
-                continue
-            sym_key = fpath.stem  # best-effort label
+
+        for db_sym in symbols_resolved:
+            # Extract short name (e.g. "ES" from "ES.v.0")
+            short_name = db_sym.split(".")[0]
+            sym_dir = output_dir / short_name
+            sym_dir.mkdir(parents=True, exist_ok=True)
+
+            log.info("--- Canary: %s (%s) ---", short_name, db_sym)
+
             try:
-                result = self._validate_canary_file(fpath, symbols_resolved)
-                results[sym_key] = result
+                # Submit one batch per symbol → clean, single-symbol CSV
+                files = self.submit_and_download(
+                    symbols=[db_sym],
+                    start=start_date,
+                    end=end_date,
+                    output_dir=sym_dir,
+                )
+
+                # Validate the downloaded CSV
+                csv_files = [f for f in files if f.suffix == ".csv"]
+                if not csv_files:
+                    results[short_name] = {
+                        "pass": False,
+                        "details": "No CSV file in download",
+                        "rows": 0,
+                    }
+                    continue
+
+                result = self._validate_canary_file(csv_files[0], [db_sym])
+                result["output_dir"] = str(sym_dir)
+                result["csv_file"] = str(csv_files[0])
+                results[short_name] = result
+
             except Exception as exc:
-                results[sym_key] = {"pass": False, "details": str(exc)}
+                log.error("  %s FAILED: %s", short_name, exc)
+                results[short_name] = {
+                    "pass": False,
+                    "details": str(exc),
+                    "rows": 0,
+                }
 
         # Summary
         n_pass = sum(1 for r in results.values() if r.get("pass"))
@@ -423,10 +453,14 @@ class DatabentoDataBuilder:
             )
 
         # Timestamp checks
-        ts = pd.to_datetime(df["ts_event"], unit="ns", utc=True)
-        if ts.dt.tz is None:
+        ts_col = pd.to_datetime(df["ts_event"], unit="ns", utc=True)
+        if ts_col.dt.tz is None:
             issues.append("Timestamps are not UTC")
-        hour_diffs = ts.diff().dropna().dt.total_seconds()
+        # Multi-symbol files interleave rows (same ts for different symbols).
+        # Filter to the first instrument_id before checking bar intervals.
+        first_iid = df["instrument_id"].iloc[0]
+        ts_single = ts_col[df["instrument_id"] == first_iid]
+        hour_diffs = ts_single.diff().dropna().dt.total_seconds()
         # Check that the modal diff is 3600s (hourly bars)
         if len(hour_diffs) > 0:
             modal_diff = hour_diffs.mode()
@@ -441,8 +475,8 @@ class DatabentoDataBuilder:
             "pass": passed,
             "details": "; ".join(issues) if issues else "OK",
             "rows": len(df),
-            "first_ts": str(ts.iloc[0]),
-            "last_ts": str(ts.iloc[-1]),
+            "first_ts": str(ts_col.iloc[0]),
+            "last_ts": str(ts_col.iloc[-1]),
             "sample_price": round(sample_price, 4),
         }
 
