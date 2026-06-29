@@ -715,8 +715,8 @@ class LiveTrader:
             self._running = True
 
             # ── Telegram: startup confirmation ────────────────────────
-            data_port = getattr(self.data_client, "port", "N/A")
-            exec_port = getattr(self.exec_client, "port", "N/A")
+            data_port = getattr(self.data_client, "port", None) or getattr(getattr(self.data_client, "manager", None), "port", "N/A")
+            exec_port = getattr(self.exec_client, "port", None) or getattr(getattr(self.exec_client, "manager", None), "port", "N/A")
             startup_msg = (
                 f"*LiveTrader Online*\n"
                 f"Strategy: `{self.strategy.name}`\n"
