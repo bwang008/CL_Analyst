@@ -452,6 +452,7 @@ class LiveTrader:
         self._last_1h_bar_log: str = ""
         self._last_virtual_ledger_log: str = ""
         self._last_inference_log: str = ""
+        self._last_heartbeat_payload: str = ""
         self._heartbeat_stop_event = threading.Event()
         self._heartbeat_thread: Optional[threading.Thread] = None
         # Event set on SIGINT/SIGTERM — used to interrupt interruptible sleeps
