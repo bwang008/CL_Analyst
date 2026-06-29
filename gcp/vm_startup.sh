@@ -30,14 +30,21 @@ echo "$(date): Installing Python packages..."
 pip install --no-cache-dir --quiet \
     'lightgbm>=4.0.0' \
     'optuna>=3.0.0' \
-    'pandas>=1.5.0' \
-    'numpy>=1.21.0' \
+    'pandas>=2.3.2,<3.0' \
+    'numpy>=1.21.0,<2.0.0' \
     'scikit-learn>=1.0.0' \
     'pyarrow>=10.0.0' \
     'sqlalchemy>=1.4.0' \
     'tabulate>=0.9.0' \
-    'pandas-ta==0.4.71b0' \
-    'python-dotenv>=1.0.0'
+    'pydantic>=2.0.0' \
+    'python-dotenv>=1.0.0' \
+    'filelock>=3.0.0' \
+    'numba==0.61.2' \
+    'tqdm'
+
+# Install pandas-ta without dependencies to prevent it from upgrading numpy to 2.x
+# (which causes segfaults with pandas C-extensions)
+pip install --no-cache-dir --quiet --no-deps pandas-ta
 
 # Make venv accessible to all users (SSH user needs write access)
 chmod -R 777 /opt/optuna-env

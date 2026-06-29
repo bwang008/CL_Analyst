@@ -61,6 +61,7 @@ class DataWorkflowConfig(BaseModel):
 
 class OptunaConfig(BaseModel):
     n_trials: int = 200
+    metrics: List[str] = ["logloss", "average_precision"]
     max_depth_min: int = 3
     max_depth_max: int = 10
     num_leaves_min: int = 15

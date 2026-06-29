@@ -172,6 +172,9 @@ def _append_to_log(record):
     os.makedirs(os.path.dirname(_EXPERIMENT_LOG_PATH), exist_ok=True)
     with filelock.FileLock(lock_path):
         log_data = load_experiment_log()
+        # Generate ID safely inside the lock if it's missing
+        if "id" not in record or not record["id"]:
+            record["id"] = generate_experiment_id(log_data)
         log_data["experiments"].append(record)
         with open(_EXPERIMENT_LOG_PATH, "w", encoding="utf-8") as f:
             json.dump(log_data, f, indent=2, default=str)
@@ -1015,10 +1018,8 @@ def run_search(
         print(f"  Trials CSV: {csv_path} ({len(csv_df)} trials)")
 
     # ---- Log to experiment log ----
-    log = load_experiment_log()
-    exp_id = generate_experiment_id(log)
     experiment_record = {
-        "id": exp_id,
+        "id": None,  # Generated safely inside _append_to_log's file lock
         "timestamp": pd.Timestamp.now().isoformat(timespec="seconds"),
         "strategy": f"optuna_v2_{direction_tag}_{ml_metric}",
         "hypothesis": (
@@ -1050,7 +1051,7 @@ def run_search(
         "verdict": "search_complete",
     }
     _append_to_log(experiment_record)
-    print(f"  Logged as {exp_id}")
+    print(f"  Logged as {experiment_record['id']}")
 
     if os.name != 'nt':
         print(f"\n  Study journal: {journal_path}")

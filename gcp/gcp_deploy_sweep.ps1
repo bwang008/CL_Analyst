@@ -14,6 +14,13 @@ param (
     [string]$JobName = ""
 )
 
+# Enforce required gcloud SSH config for Windows/PLink
+$forceConnect = gcloud config get ssh/putty_force_connect --quiet 2>$null
+if ($forceConnect -ne "True") {
+    Write-Host "Setting ssh/putty_force_connect=True (required for Windows PLink)..." -ForegroundColor Yellow
+    gcloud config set ssh/putty_force_connect True --quiet
+}
+
 # Add gcloud to PATH if not already there
 $gcloudBin = "C:\Users\bwang\AppData\Local\Google\Cloud SDK\google-cloud-sdk\bin"
 if ($env:PATH -notlike "*$gcloudBin*") {
@@ -37,8 +44,15 @@ $Project = gcloud config get-value project --quiet
 $cfg = Get-Content $MasterConfig -Raw | ConvertFrom-Json
 $symbol = $cfg.symbol
 $datasetVersion = $cfg.data_workflow.dataset_version
-$datasetName = "${symbol}_${datasetVersion}.parquet"
-$GcsDataPath = "gs://cltrainer-data/processed/$datasetName"
+
+# Avoid redundant prefixing if version already starts with symbol
+if ($datasetVersion.ToUpper().StartsWith($symbol.ToUpper())) {
+    $datasetName = "${datasetVersion}.parquet"
+} else {
+    $datasetName = "${symbol}_${datasetVersion}.parquet"
+}
+
+$GcsDataPath = "gs://cltrainer-optuna-results/data/$datasetName"
 $StrategyConfig = Split-Path -Leaf $cfg.execution_workflow.strategy_config_path
 
 $DataFileName = Split-Path -Leaf $GcsDataPath
@@ -143,52 +157,37 @@ gcloud compute ssh $VmName --zone=$Zone --quiet `
 # --- [3/6] Upload code ---
 Write-Host "`n[3/6] Uploading code..."
 
-$codeFiles = @(
-    @{ Local = "agent\optuna_lgbm_search_v2.py"; Remote = "agent/" },
-    @{ Local = "agent\experiment_runner.py";     Remote = "agent/" },
-    @{ Local = "agent\backtest_engine.py";       Remote = "agent/" },
-    @{ Local = "agent\__init__.py";              Remote = "agent/" },
-    @{ Local = "src\util.py";                    Remote = "src/" },
-    @{ Local = "src\__init__.py";                Remote = "src/" },
-    @{ Local = "src\LGBMLearner.py";             Remote = "src/" },
-    @{ Local = "src\data_paths.py";              Remote = "src/" },
-    @{ Local = "src\data_processor.py";          Remote = "src/" },
-    @{ Local = "src\live_execution\__init__.py";                   Remote = "src/live_execution/" },
-    @{ Local = "src\live_execution\strategy_config.py";            Remote = "src/live_execution/" },
-    @{ Local = "src\live_execution\execution_guard.py";            Remote = "src/live_execution/" },
-    @{ Local = "src\live_execution\strategies\__init__.py";        Remote = "src/live_execution/strategies/" },
-    @{ Local = "src\live_execution\strategies\execution_models.py"; Remote = "src/live_execution/strategies/" },
-    @{ Local = "src\live_execution\strategies\configurable_strategy.py"; Remote = "src/live_execution/strategies/" },
-    @{ Local = "src\live_execution\strategies\buy70_sized_manatee.py"; Remote = "src/live_execution/strategies/" },
-    @{ Local = "src\features\__init__.py";       Remote = "src/features/" },
-    @{ Local = "src\features\feature_buckets.py"; Remote = "src/features/" },
-    @{ Local = "src\config\schemas.py";           Remote = "src/config/" },
-    @{ Local = "src\core\instrument_master.py";   Remote = "src/core/" },
-    @{ Local = "gcp\vm_sweep_run.sh";           Remote = "gcp/" },
-    @{ Local = "gcp\vm_e2e_pipeline.py";         Remote = "gcp/" },
-    @{ Local = "gcp\orchestrator.py";            Remote = "gcp/" }
-)
+$zipFile = Join-Path $ProjectDir "deploy.zip"
+if (Test-Path $zipFile) { Remove-Item $zipFile -Force }
 
-# Upload .env for Telegram (if exists)
-$envFile = Join-Path $ProjectDir ".env"
-if (Test-Path $envFile) {
-    $codeFiles += @{ Local = ".env"; Remote = "" }
+$itemsToZip = @("src", "agent", "gcp", "requirements.txt", ".env")
+$existingItems = @()
+foreach ($item in $itemsToZip) {
+    if (Test-Path (Join-Path $ProjectDir $item)) {
+        $existingItems += $item
+    }
 }
 
-foreach ($file in $codeFiles) {
-    $localPath = Join-Path $ProjectDir $file.Local
-    $remotePath = "$RemoteProject/$($file.Remote)"
-    if (Test-Path $localPath) {
-        try {
-            gcloud compute scp "$localPath" "${VmName}:${remotePath}" --zone=$Zone --quiet 2>$null
-        } catch {
-            Write-Host "  Retrying scp for $($file.Local)..." -ForegroundColor Yellow
-            Start-Sleep -Seconds 2
-            try { gcloud compute scp "$localPath" "${VmName}:${remotePath}" --zone=$Zone --quiet 2>$null } catch { Write-Host "  Failed to copy $($file.Local)" -ForegroundColor Red }
-        }
-    } else {
-        Write-Host "  WARNING: Missing $($file.Local)" -ForegroundColor Yellow
+if ($existingItems.Count -gt 0) {
+    Write-Host "  Zipping codebase (excluding pycache and datasets)..."
+    $tarArgs = @("-a", "-c", "-f", "deploy.zip", "--exclude=__pycache__", "--exclude=*.parquet", "--exclude=*.csv") + $existingItems
+    & "tar.exe" $tarArgs
+    
+    Write-Host "  Uploading deploy.zip to VM..."
+    try {
+        gcloud compute scp "$zipFile" "${VmName}:${RemoteProject}/deploy.zip" --zone=$Zone --quiet 2>$null
+    } catch {
+        Write-Host "  Retrying scp for deploy.zip..." -ForegroundColor Yellow
+        Start-Sleep -Seconds 2
+        try { gcloud compute scp "$zipFile" "${VmName}:${RemoteProject}/deploy.zip" --zone=$Zone --quiet 2>$null } catch { Write-Host "  Failed to copy deploy.zip" -ForegroundColor Red }
     }
+    
+    Write-Host "  Unzipping codebase on VM..."
+    gcloud compute ssh $VmName --zone=$Zone --command="cd $RemoteProject && unzip -q -o deploy.zip && rm deploy.zip" --quiet 2>$null
+    
+    Remove-Item $zipFile -ErrorAction SilentlyContinue
+} else {
+    Write-Host "  WARNING: No code directories found to upload." -ForegroundColor Yellow
 }
 
 # Upload resolved master config JSON to the VM
@@ -235,7 +234,7 @@ Write-Host "  Data ready on VM!" -ForegroundColor Green
 # --- [5/6] Launch sweep run ---
 Write-Host "`n[5/6] Launching sweep pipeline in tmux..."
 
-$launchCmd = "tmux kill-session -t sweep 2>/dev/null; tmux new-session -d -s sweep 'bash $RemoteProject/gcp/vm_sweep_run.sh --master-config=configs/sweeps/$(Split-Path -Leaf $MasterConfig) --gcs-data-bucket=gs://cltrainer-data/processed'"
+$launchCmd = "tmux kill-session -t sweep 2>/dev/null; tmux new-session -d -s sweep 'cd $RemoteProject && bash gcp/vm_sweep_run.sh --master-config=configs/sweeps/$(Split-Path -Leaf $MasterConfig) --gcs-data-bucket=gs://cltrainer-optuna-results/data --gcs-prefix=$JobName --shutdown'"
 
 # Execute and capture both streams with explicit exit code handling
 $launchOutput = gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd --quiet 2>&1

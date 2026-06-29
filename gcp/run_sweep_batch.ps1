@@ -30,7 +30,7 @@
 
 param(
     [string]$ManifestPath        = "configs\sweep_batch_manifest.json",
-    [string]$Zone                = "us-central1-a,us-central1-b,us-central1-c,us-central1-f,us-west1-a,us-west1-b,us-west1-c,us-east1-b,us-east1-c,us-east1-d,us-east4-a,us-east4-b,us-east4-c",
+    [string]$Zone                = "us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f,us-east1-b,us-east1-c,us-east1-d,us-east4-a,us-east4-b,us-east4-c",
     [switch]$DryRun,
     [switch]$DisableTelegram,
     [int]$MaxConcurrentVcpus    = 0,   # 0 = read from manifest defaults
@@ -362,7 +362,8 @@ $orchestratorData = $pythonOut | ConvertFrom-Json
 $limits = $orchestratorData.infrastructure_limits
 $optuna = $orchestratorData.optuna_config
 $experiments = $orchestratorData.experiments
-$postOptTrials = if ($optuna -and $optuna.post_optimizer_trials) { $optuna.post_optimizer_trials } else { 3 }
+$postOptTrials  = if ($optuna -and $optuna.post_optimizer_trials) { $optuna.post_optimizer_trials } else { 3 }
+$postOptHoldout = if ($optuna -and $optuna.post_optimizer_holdout_months) { $optuna.post_optimizer_holdout_months } else { 6 }
 
 # Apply MaxConcurrentVcpus override or read from manifest infrastructure
 $maxVcpus    = if ($MaxConcurrentVcpus -gt 0) { $MaxConcurrentVcpus } `
@@ -542,6 +543,7 @@ try {
                 )
 
                 Write-Host "  Deploying VM in zone $z..." -ForegroundColor Yellow
+                Send-BatchTelegram "[DEPLOYING] $($exp.Label)`nVM: $($exp.VmName)`nZone: $z"
                 $deployOutput = & powershell @deployArgs 2>&1
                 $deployExit   = $LASTEXITCODE
 

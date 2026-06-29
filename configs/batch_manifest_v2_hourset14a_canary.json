@@ -59,6 +59,7 @@
       "gcs_base_dir": "gs://cltrainer-optuna-results/canary",
       "optuna": {
         "n_trials": 3,
+        "metrics": ["logloss", "average_precision"],
         "max_depth_min": 3,
         "max_depth_max": 6,
         "num_leaves_min": 15,

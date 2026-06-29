@@ -409,6 +409,7 @@ def run_pipeline(
     data_path: str,
     train_cutoff_date: str,
     strategy_config_path: str,
+    symbol: str = "CL",
     db_dir: str = "models/optuna_studies",
     output_dir: str = "production_output",
     gcs_bucket: str = "gs://cltrainer-optuna-results",
@@ -638,8 +639,8 @@ def run_pipeline(
             match = re.search(r'bk_(.+)$', data_basename)
             if match:
                 dataset_tag = match.group(1)
-            elif data_basename.upper().startswith(master_config.symbol.upper() + "_"):
-                dataset_tag = data_basename[len(master_config.symbol) + 1:]
+            elif data_basename.upper().startswith(symbol.upper() + "_"):
+                dataset_tag = data_basename[len(symbol) + 1:]
             else:
                 dataset_tag = data_basename
             
@@ -717,8 +718,8 @@ def run_pipeline(
         match = re.search(r'bk_(.+)$', data_basename)
         if match:
             dataset_tag = match.group(1)
-        elif data_basename.upper().startswith(master_config.symbol.upper() + "_"):
-            dataset_tag = data_basename[len(master_config.symbol) + 1:]
+        elif data_basename.upper().startswith(symbol.upper() + "_"):
+            dataset_tag = data_basename[len(symbol) + 1:]
         else:
             dataset_tag = data_basename
 
@@ -966,26 +967,50 @@ def run_pipeline(
     # Upload to GCS
     gcs_dest = f"{gcs_bucket}/{gcs_prefix}/production" if gcs_prefix else f"{gcs_bucket}/production"
     zip_name = f"{gcs_prefix}_artifacts.zip" if gcs_prefix else "production_artifacts.zip"
+    gcs_root_dest = f"{gcs_bucket}/{gcs_prefix}" if gcs_prefix else gcs_bucket
+    
     print(f"\n  Uploading to {gcs_dest}/...")
-    try:
-        subprocess.run(
-            ["gsutil", "cp", zip_path, f"{gcs_dest}/{zip_name}"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        # Also upload pipeline_summary.json separately to the root prefix for the orchestrator
-        gcs_root_dest = f"{gcs_bucket}/{gcs_prefix}" if gcs_prefix else gcs_bucket
-        subprocess.run(
-            ["gsutil", "cp", summary_path, f"{gcs_root_dest}/pipeline_summary.json"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        print(f"  ✓ Uploaded to GCS")
-    except Exception as e:
-        print(f"  ✗ GCS upload failed: {e}")
-        print(f"    Artifacts are still available locally at: {zip_path}")
+    
+    is_sandbox = os.environ.get("IS_LOCAL_SANDBOX", "False").lower() == "true"
+    if is_sandbox:
+        def mock_gcs_path(gcs_uri: str) -> str:
+            if not gcs_uri.startswith("gs://"): return gcs_uri
+            parts = gcs_uri[5:].split("/", 1)
+            path = parts[1] if len(parts) > 1 else ""
+            mock_base = os.path.join(os.getcwd(), "tests", "sandbox", "mock_gcs")
+            final_path = os.path.join(mock_base, path)
+            os.makedirs(os.path.dirname(final_path), exist_ok=True)
+            return final_path
+            
+        try:
+            zip_mock_dest = mock_gcs_path(f"{gcs_dest}/{zip_name}")
+            shutil.copy(zip_path, zip_mock_dest)
+            
+            summary_mock_dest = mock_gcs_path(f"{gcs_root_dest}/pipeline_summary.json")
+            shutil.copy(summary_path, summary_mock_dest)
+            
+            print(f"  ✓ Copied to Sandbox Mock GCS")
+        except Exception as e:
+            print(f"  ✗ Sandbox mock copy failed: {e}")
+    else:
+        try:
+            subprocess.run(
+                ["gsutil", "cp", zip_path, f"{gcs_dest}/{zip_name}"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            # Also upload pipeline_summary.json separately to the root prefix for the orchestrator
+            subprocess.run(
+                ["gsutil", "cp", summary_path, f"{gcs_root_dest}/pipeline_summary.json"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            print(f"  ✓ Uploaded to GCS")
+        except Exception as e:
+            print(f"  ✗ GCS upload failed: {e}")
+            print(f"    Artifacts are still available locally at: {zip_path}")
 
     # Shutdown VM if requested
     if shutdown_after:
@@ -1104,9 +1129,10 @@ def main():
         return
 
     run_pipeline(
-        data_path=data_path,
+        data_path=str(data_path),
         train_cutoff_date=master_config.training_workflow.train_cutoff_date,
         strategy_config_path=master_config.execution_workflow.strategy_config_path,
+        symbol=master_config.symbol,
         db_dir=args.db_dir,
         output_dir=args.output_dir,
         gcs_bucket=args.gcs_bucket,

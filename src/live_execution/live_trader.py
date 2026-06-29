@@ -2844,7 +2844,7 @@ class LiveTrader:
                 # Skip tracked TP/SL orders (they are standalone with
                 # parentId==0 but are NOT entry orders)
                 if oid is not None and (
-                    oid in self._tp_order_ids or oid == self._sl_order_id
+                    str(oid) in map(str, self._tp_order_ids) or str(oid) == str(self._sl_order_id)
                 ):
                     continue
                 parent_id = getattr(o, "parentId", 0) if o else 0
@@ -2893,11 +2893,11 @@ class LiveTrader:
                     oid = evt.order_id
                     # Extract raw ib_insync order to read limit/stop prices
                     raw_order = getattr(getattr(evt, "raw_event", None), "order", None)
-                    if oid is not None and oid in self._tp_order_ids:
+                    if oid is not None and str(oid) in map(str, self._tp_order_ids):
                         lmt = getattr(raw_order, "lmtPrice", 0.0) or 0.0 if raw_order else 0.0
                         if lmt > 0:
                             tp_price_live = lmt
-                    elif oid is not None and oid == self._sl_order_id:
+                    elif oid is not None and str(oid) == str(self._sl_order_id):
                         aux = getattr(raw_order, "auxPrice", 0.0) or 0.0 if raw_order else 0.0
                         if aux > 0:
                             sl_price_live = aux
@@ -2909,15 +2909,10 @@ class LiveTrader:
             atr_str = f"ATR={atr_value:.4f}" if atr_value else "ATR=N/A"
 
             try:
-                # Use cached portfolio (sync) — NOT get_account_summary()
-                # which calls ib.accountSummary() async and fails inside callbacks
-                unrealized_pnl = 0.0
-                avg_cost = 0.0
-                for item in []:
-                    if item.contract.symbol == "CL":
-                        unrealized_pnl = float(item.unrealizedPNL)
-                        avg_cost = float(item.averageCost)
-                        break
+                # Use cached portfolio (sync) via the execution client adapter.
+                acct_summary = self.exec_client.get_account_summary(symbol="CL")
+                unrealized_pnl = float(acct_summary.get("cl_unrealized_pnl", 0.0))
+                avg_cost = float(acct_summary.get("cl_avg_cost", 0.0))
                 # IBKR averageCost = price * multiplier (1000 for CL)
                 entry_price = avg_cost / 1000.0 if avg_cost else 0.0
                 log.info(
