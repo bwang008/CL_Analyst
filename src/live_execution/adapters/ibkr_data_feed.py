@@ -55,6 +55,24 @@ class IBKRDataFeedClient(DataFeedClient):
             use_rth=use_rth
         )
 
+    async def fetch_historical_bars_by_duration_async(
+        self,
+        duration_str: str,
+        continuous: bool = True,
+        contract_month: Optional[str] = None,
+        bar_size: str = "5 mins",
+        what_to_show: str = "TRADES",
+        use_rth: bool = False
+    ) -> pd.DataFrame:
+        return await self.manager.fetch_historical_bars_by_duration_async(
+            duration_str=duration_str,
+            continuous=continuous,
+            contract_month=contract_month,
+            bar_size=bar_size,
+            what_to_show=what_to_show,
+            use_rth=use_rth
+        )
+
     def subscribe_live_bars(
         self,
         symbol: str,

@@ -356,6 +356,61 @@ class IBKRConnectionManager:
                 time.sleep(sleep_for)
         return []
 
+    async def _request_historical_data_async(
+        self,
+        *,
+        contract: Contract,
+        duration_str: str,
+        bar_size: str,
+        what_to_show: str,
+        use_rth: bool,
+        end_datetime: str,
+        max_retries: int,
+        backoff_seconds: float,
+        throttle_seconds: float,
+    ) -> list:
+        import asyncio
+        attempt = 0
+        while attempt < max_retries:
+            attempt += 1
+            self._last_error = None
+            try:
+                bars = await self.ib.reqHistoricalDataAsync(
+                    contract,
+                    endDateTime=end_datetime,
+                    durationStr=duration_str,
+                    barSizeSetting=bar_size,
+                    whatToShow=what_to_show,
+                    useRTH=use_rth,
+                    formatDate=1,
+                    keepUpToDate=False,
+                )
+                if self._last_error and self._last_error[0] in _PACING_ERROR_CODES:
+                    if _is_pacing_error(RuntimeError(self._last_error[1])):
+                        raise RuntimeError(f"IBKR pacing violation: {self._last_error[1]}")
+                    else:
+                        log.warning(
+                            "IBKR error %d (non-pacing): %s — retrying normally",
+                            self._last_error[0], self._last_error[1],
+                        )
+                        raise RuntimeError(f"IBKR historical data error: {self._last_error[1]}")
+                if throttle_seconds:
+                    await asyncio.sleep(throttle_seconds)
+                return bars
+            except Exception as exc:
+                is_pacing = _is_pacing_error(exc) or (
+                    self._last_error
+                    and self._last_error[0] in _PACING_ERROR_CODES
+                    and _is_pacing_error(RuntimeError(self._last_error[1]))
+                )
+                if attempt >= max_retries:
+                    raise
+                sleep_for = backoff_seconds * attempt
+                if not is_pacing:
+                    sleep_for = min(sleep_for, 5.0)
+                await asyncio.sleep(sleep_for)
+        return []
+
     # ------------------------------------------------------------------
     # Position management
     # ------------------------------------------------------------------
@@ -690,6 +745,54 @@ class IBKRConnectionManager:
         contract = self.qualify_contract(contract)
 
         bars = self._request_historical_data(
+            contract=contract,
+            duration_str=duration_str,
+            bar_size=bar_size,
+            what_to_show=what_to_show,
+            use_rth=use_rth,
+            end_datetime=end_datetime,
+            max_retries=max_retries,
+            backoff_seconds=backoff_seconds,
+            throttle_seconds=throttle_seconds,
+        )
+        return ib_bars_to_dataframe(
+            bars,
+            source_tz=source_tz,
+            target_tz=target_tz,
+            make_naive=make_naive,
+            set_index=set_index,
+        )
+
+    async def fetch_historical_bars_by_duration_async(
+        self,
+        *,
+        duration_str: str,
+        continuous: bool = True,
+        contract_month: Optional[str] = None,
+        bar_size: str = "5 mins",
+        what_to_show: str = "TRADES",
+        use_rth: bool = False,
+        end_datetime: str = "",
+        max_retries: int = 5,
+        backoff_seconds: float = 2.0,
+        throttle_seconds: float = 0.5,
+        source_tz: str = _DEFAULT_SOURCE_TZ,
+        target_tz: str = _DEFAULT_TARGET_TZ,
+        make_naive: bool = True,
+        set_index: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Fetch historical bars asynchronously using a raw duration string.
+        """
+        if not self.ib.isConnected():
+            raise ConnectionError("Not connected to IBKR. Cannot fetch historical bars asynchronously.")
+        contract = build_cl_contract(
+            continuous=continuous,
+            contract_month=contract_month,
+        )
+        contract = await self.qualify_contract_async(contract)
+
+        bars = await self._request_historical_data_async(
             contract=contract,
             duration_str=duration_str,
             bar_size=bar_size,

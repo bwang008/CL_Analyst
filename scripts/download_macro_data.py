@@ -68,7 +68,7 @@ CFTC_COMBINED_URL = f"{CFTC_BASE_URL}/fut_disagg_txt_hist_2006_2016.zip"
 # FRED Download
 # ---------------------------------------------------------------------------
 
-def download_fred_data(api_key: str) -> dict[str, pd.DataFrame]:
+def download_fred_data(api_key: str, instrument=None) -> dict[str, pd.DataFrame]:
     """Download all FRED series and return as dict of DataFrames."""
     try:
         from fredapi import Fred
@@ -96,7 +96,7 @@ def download_fred_data(api_key: str) -> dict[str, pd.DataFrame]:
             base_series[instrument.volatility_index] = label
         return base_series
 
-    series_map = _get_fred_series(getattr(download_fred_data, "instrument", None))
+    series_map = _get_fred_series(instrument or getattr(download_fred_data, "instrument", None))
     for series_id, label in series_map.items():
         log.info("Downloading FRED/%s (%s) ...", series_id, label)
         try:
@@ -128,7 +128,7 @@ def download_fred_data(api_key: str) -> dict[str, pd.DataFrame]:
     return results
 
 
-def save_fred_data(data: dict[str, pd.DataFrame]) -> Path:
+def save_fred_data(data: dict[str, pd.DataFrame], instrument=None) -> Path:
     """Save all FRED data merged into a single CSV."""
     if not data:
         log.error("No FRED data to save")
@@ -149,7 +149,8 @@ def save_fred_data(data: dict[str, pd.DataFrame]) -> Path:
         if col != "Date":
             merged[col] = merged[col].ffill()
 
-    output_path = OUTPUT_DIR / "fred_macro_data.csv"
+    suffix = f"_{instrument.symbol.lower()}" if instrument else ""
+    output_path = OUTPUT_DIR / f"fred_macro_data{suffix}.csv"
     merged.to_csv(output_path, index=False)
     log.info("Saved FRED data to %s (%d rows, %d columns)",
              output_path, len(merged), len(merged.columns))
@@ -337,12 +338,13 @@ def download_cot_data(instrument) -> pd.DataFrame:
     return combined
 
 
-def save_cot_data(df: pd.DataFrame) -> Path:
+def save_cot_data(df: pd.DataFrame, instrument=None) -> Path:
     """Save COT data to CSV."""
     if df.empty:
         return Path()
 
-    output_path = OUTPUT_DIR / "cftc_cot_crude_oil.csv"
+    suffix = f"_{instrument.symbol.lower()}" if instrument else "_crude_oil"
+    output_path = OUTPUT_DIR / f"cftc_cot{suffix}.csv"
     df.to_csv(output_path, index=False)
     log.info("Saved COT data to %s (%d rows)", output_path, len(df))
 

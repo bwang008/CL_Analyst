@@ -2372,7 +2372,7 @@ class LiveTrader:
                 )
 
                 try:
-                    chunk_df = self.data_client.fetch_historical_bars_by_duration(
+                    chunk_df = await self.data_client.fetch_historical_bars_by_duration_async(
                         duration_str=duration_str,
                         continuous=True,
                         bar_size="5 mins",
@@ -2435,7 +2435,7 @@ class LiveTrader:
                 )
 
                 try:
-                    chunk_df = self.data_client.fetch_historical_bars_by_duration(
+                    chunk_df = await self.data_client.fetch_historical_bars_by_duration_async(
                         duration_str=duration_str,
                         continuous=True,
                         bar_size="1 hour",

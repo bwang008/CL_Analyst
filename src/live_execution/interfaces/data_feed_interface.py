@@ -40,6 +40,18 @@ class DataFeedClient(ABC):
         pass
 
     @abstractmethod
+    async def fetch_historical_bars_by_duration_async(
+        self,
+        duration_str: str,
+        continuous: bool = True,
+        contract_month: Optional[str] = None,
+        bar_size: str = "5 mins",
+        what_to_show: str = "TRADES",
+        use_rth: bool = False
+    ) -> pd.DataFrame:
+        pass
+
+    @abstractmethod
     def subscribe_live_bars(
         self,
         symbol: str,

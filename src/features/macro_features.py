@@ -193,8 +193,8 @@ class MacroFeatureEngine:
                         download_fred_data,
                         save_fred_data,
                     )
-                    fred_data = download_fred_data(api_key)
-                    save_fred_data(fred_data)
+                    fred_data = download_fred_data(api_key, instrument=self.instrument)
+                    save_fred_data(fred_data, instrument=self.instrument)
                     # Clear cached data so next merge_all() reloads
                     self._fred_df = None
                     log.info("FRED data refreshed successfully")
@@ -226,8 +226,8 @@ class MacroFeatureEngine:
                     download_cot_data,
                     save_cot_data,
                 )
-                cot_data = download_cot_data()
-                save_cot_data(cot_data)
+                cot_data = download_cot_data(self.instrument)
+                save_cot_data(cot_data, instrument=self.instrument)
                 # Clear cached data so next merge_all() reloads
                 self._cot_df = None
                 log.info("COT data refreshed successfully")
