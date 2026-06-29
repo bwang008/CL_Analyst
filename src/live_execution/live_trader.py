@@ -570,8 +570,8 @@ class LiveTrader:
                 if payload != self._last_heartbeat_payload:
                     self._telegram.send(f"*1-Hour Heartbeat*\n\n" + payload)
                     self._last_heartbeat_payload = payload
-            except Exception:
-                pass  # Never let heartbeat crash the thread
+            except Exception as e:
+                log.exception("Error in heartbeat thread: %s", e)
 
     def start(self) -> None:
         """Connect to IBKR, warm-start via DataManager, and enter the event loop.
