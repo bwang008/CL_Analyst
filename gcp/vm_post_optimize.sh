@@ -150,12 +150,43 @@ mkdir -p "$BATCH_DIR"
 gsutil cp "$BUCKET/$GCS_OPT_PREFIX/batch_progress.json" "$BATCH_DIR/batch_progress.json" 2>&1 | tee -a "$LOG" || { echo "  FATAL: batch_progress.json download failed!" | tee -a "$LOG"; exit 1; }
 gsutil cp "$BUCKET/$GCS_OPT_PREFIX/manifest.json" "$BATCH_DIR/manifest.json" 2>&1 | tee -a "$LOG" || { echo "  FATAL: manifest.json download failed!" | tee -a "$LOG"; exit 1; }
 
-# Extract OHLCV GCS path from manifest
-OHLCV_GCS=$(python3 -c "import json; m=json.load(open('$BATCH_DIR/manifest.json')); print(m.get('defaults',{}).get('gcs_data_path',''))")
+# Extract OHLCV GCS path + strategy/exec/slippage from manifest.
+# Supports v2 manifest (baseline.* structure) and legacy (defaults.* structure).
+_PARSED=$(python3 - "$BATCH_DIR/manifest.json" <<'PYEOF'
+import json, os, sys
+m = json.load(open(sys.argv[1]))
+b = m.get("baseline")
+if b:  # v2 manifest format
+    sym = (b.get("symbol") or "").strip()
+    dv = (b.get("data_workflow", {}) or {}).get("dataset_version", "") or ""
+    # Mirror sweep deploy/orchestrator: avoid redundant symbol prefix
+    if dv.upper().startswith(sym.upper()):
+        dataset_name = f"{dv}.parquet"
+    else:
+        dataset_name = f"{sym}_{dv}.parquet"
+    ohlcv = f"gs://cltrainer-optuna-results/data/{dataset_name}"
+    ew = b.get("execution_workflow", {}) or {}
+    strat = os.path.basename(ew.get("strategy_config_path") or "hourly_ensemble_010.json")
+    exec_data = ew.get("execution_data_path") or ""
+    slip = ew.get("slippage_multiplier", 0)
+else:  # legacy manifest format
+    d = m.get("defaults", {}) or {}
+    ohlcv = d.get("gcs_data_path", "") or ""
+    strat = d.get("strategy_config", "hourly_ensemble_010.json")
+    exec_data = d.get("exec_data", "") or ""
+    slip = d.get("slippage_per_side", "0")
+print(ohlcv)
+print(strat)
+print(exec_data)
+print(slip if slip is not None else 0)
+PYEOF
+)
+mapfile -t _MF <<< "$_PARSED"
+OHLCV_GCS="${_MF[0]}"
+STRATEGY_CONFIG="${_MF[1]}"
+EXEC_DATA_GCS="${_MF[2]}"
+SLIPPAGE_PER_SIDE="${_MF[3]}"
 OHLCV_BASENAME=$(basename "$OHLCV_GCS")
-STRATEGY_CONFIG=$(python3 -c "import json; m=json.load(open('$BATCH_DIR/manifest.json')); print(m.get('defaults',{}).get('strategy_config','hourly_ensemble_010.json'))")
-EXEC_DATA_GCS=$(python3 -c "import json; m=json.load(open('$BATCH_DIR/manifest.json')); print(m.get('defaults',{}).get('exec_data',''))")
-SLIPPAGE_PER_SIDE=$(python3 -c "import json; m=json.load(open('$BATCH_DIR/manifest.json')); print(m.get('defaults',{}).get('slippage_per_side','0'))")
 echo "  OHLCV GCS path: $OHLCV_GCS" | tee -a "$LOG"
 echo "  Strategy config: $STRATEGY_CONFIG" | tee -a "$LOG"
 
