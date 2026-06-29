@@ -1,12 +1,12 @@
 """
-E2E Alpha Factory Pipeline — VM Orchestrator.
+E2E Alpha Factory Pipeline - VM Orchestrator.
 
 Runs after Optuna search completes. Handles:
   1. Extract best_params from each Optuna study (.db)
-  2. Train final LightGBM models on full train split → save .pkl
+  2. Train final LightGBM models on full train split -> save .pkl
   3. Generate OOS predictions on vault/test data
-  4. Run BacktestEngine on predictions → save backtest reports
-  5. Package all artifacts → zip → upload to GCS → shutdown VM
+  4. Run BacktestEngine on predictions -> save backtest reports
+  5. Package all artifacts -> zip -> upload to GCS -> shutdown VM
 
 This script is self-contained and runs on the GCP VM using only
 packages available in the optuna-env (lightgbm, optuna, pandas,
@@ -480,17 +480,17 @@ def run_pipeline(
         df_val = None
         df_vault = df[df.index >= cutoff].copy()
         print(f"  Split mode:  2-way (default)")
-        print(f"  Train:   {len(df_train):,} rows → {df_train.index.max().date()}")
-        print(f"  Vault:   {len(df_vault):,} rows → {df_vault.index.max().date()}")
+        print(f"  Train:   {len(df_train):,} rows -> {df_train.index.max().date()}")
+        print(f"  Vault:   {len(df_vault):,} rows -> {df_vault.index.max().date()}")
     else:
         # Explicit 3-way split — execution optimizer runs on val, backtest on vault
         df_train = df[df.index < cutoff].copy()
         df_val = df[(df.index >= cutoff) & (df.index < holdout_cutoff)].copy()
         df_vault = df[df.index >= holdout_cutoff].copy()
         print(f"  Split mode:  3-way (holdout_cutoff_date={holdout_cutoff.date()})")
-        print(f"  Train:   {len(df_train):,} rows → {df_train.index.max().date()}")
-        print(f"  Val:     {len(df_val):,} rows → {df_val.index.max().date()}")
-        print(f"  Holdout: {len(df_vault):,} rows → {df_vault.index.max().date()}")
+        print(f"  Train:   {len(df_train):,} rows -> {df_train.index.max().date()}")
+        print(f"  Val:     {len(df_val):,} rows -> {df_val.index.max().date()}")
+        print(f"  Holdout: {len(df_vault):,} rows -> {df_vault.index.max().date()}")
     print(f"  Features: {len(feature_cols)}")
 
     # Drop rows with NaN targets from all active splits
@@ -522,7 +522,7 @@ def run_pipeline(
             # Step 2: Extract best params from Optuna study
             print(f"\n[2/5] Extracting best params for {combo_name}...")
 
-            # Build list of candidate study names (most specific → least specific)
+            # Build list of candidate study names (most specific -> least specific)
             candidate_names = []
             if study_prefix:
                 # Canary/prefixed runs use: prefix_direction_metric
@@ -632,11 +632,17 @@ def run_pipeline(
             all_reports[combo_name] = report
 
             # Derive dataset tag from data filename
-            # e.g. "cl-5m_bk_set_10.parquet" → "set_10", "cl-5m_bk_HourSet_01.parquet" → "HourSet_01"
+            data_basename = os.path.splitext(os.path.basename(data_path))[0]
+            # Strip legacy "bk_" or modern "{symbol}_" prefixes for cleaner bundle names
             import re
-            data_basename = os.path.splitext(os.path.basename(data_path))[0]  # "cl-5m_bk_set_10"
             match = re.search(r'bk_(.+)$', data_basename)
-            dataset_tag = match.group(1) if match else data_basename
+            if match:
+                dataset_tag = match.group(1)
+            elif data_basename.upper().startswith(master_config.symbol.upper() + "_"):
+                dataset_tag = data_basename[len(master_config.symbol) + 1:]
+            else:
+                dataset_tag = data_basename
+            
             bundle_name = f"E2E_{dataset_tag}_{direction}_{metric_name}"
             bundle_dir = os.path.join(output_dir, "registry", bundle_name)
             create_registry_bundle(
@@ -658,21 +664,21 @@ def run_pipeline(
     # ---- Summary of individual backtests ----
     elapsed = time.perf_counter() - start_time
     print(f"\n{'='*70}")
-    print(f"INDIVIDUAL BACKTESTS COMPLETE — {elapsed:.0f}s ({elapsed/60:.1f} min)")
+    print(f"INDIVIDUAL BACKTESTS COMPLETE - {elapsed:.0f}s ({elapsed/60:.1f} min)")
     print(f"{'='*70}")
     print(f"\nPer-Model Backtest Summary:")
-    print(f"{'─'*60}")
+    print(f"{'-'*60}")
     print(f"{'Model':<30} {'Trades':>7} {'WR':>6} {'PF':>8} {'PnL':>12}")
-    print(f"{'─'*60}")
+    print(f"{'-'*60}")
     for name, rpt in all_reports.items():
         print(f"{name:<30} {rpt['trade_count']:>7} {rpt['win_rate']:>5.1f}% "
               f"{rpt['profit_factor']:>8.4f} ${rpt['total_pnl']:>10,.2f}")
-    print(f"{'─'*60}")
+    print(f"{'-'*60}")
 
     # ---- Step 4c: Ensemble backtest (combine long + short per metric) ----
     # Group OOS predictions by metric so we can create ensemble configs
     ensemble_reports = {}
-    preds_by_metric = {}  # metric → {direction → predictions_path}
+    preds_by_metric = {}  # metric -> {direction -> predictions_path}
     val_preds_by_metric = {}
     for target_name, direction in targets:
         for metric_name in metrics:
@@ -709,7 +715,12 @@ def run_pipeline(
         import re
         data_basename = os.path.splitext(os.path.basename(data_path))[0]
         match = re.search(r'bk_(.+)$', data_basename)
-        dataset_tag = match.group(1) if match else data_basename
+        if match:
+            dataset_tag = match.group(1)
+        elif data_basename.upper().startswith(master_config.symbol.upper() + "_"):
+            dataset_tag = data_basename[len(master_config.symbol) + 1:]
+        else:
+            dataset_tag = data_basename
 
         ensemble_cfg["models"] = {
             "long": {
@@ -910,16 +921,16 @@ def run_pipeline(
     # ---- Final summary including ensembles ----
     elapsed = time.perf_counter() - start_time
     print(f"\n{'='*70}")
-    print(f"E2E PIPELINE COMPLETE — {elapsed:.0f}s ({elapsed/60:.1f} min)")
+    print(f"E2E PIPELINE COMPLETE - {elapsed/60:.1f} min")
     print(f"{'='*70}")
     print(f"\nFull Backtest Summary (Individual + Ensemble):")
-    print(f"{'─'*60}")
+    print(f"{'-'*60}")
     print(f"{'Model':<30} {'Trades':>7} {'WR':>6} {'PF':>8} {'PnL':>12}")
-    print(f"{'─'*60}")
+    print(f"{'-'*60}")
     for name, rpt in all_reports.items():
         print(f"{name:<30} {rpt['trade_count']:>7} {rpt['win_rate']:>5.1f}% "
               f"{rpt['profit_factor']:>8.4f} ${rpt['total_pnl']:>10,.2f}")
-    print(f"{'─'*60}")
+    print(f"{'-'*60}")
 
     # Save summary JSON
     summary_path = os.path.join(output_dir, "pipeline_summary.json")
@@ -1060,7 +1071,13 @@ def main():
 
     # Derive data path from data_workflow dataset_version
     from src.data_paths import get_data_root
-    data_path = str(get_data_root() / "processed" / f"{master_config.symbol}_{master_config.data_workflow.dataset_version}.parquet")
+    raw_version = master_config.data_workflow.dataset_version
+    if raw_version.upper().startswith(master_config.symbol.upper()):
+        dataset_name = f"{raw_version}.parquet"
+    else:
+        dataset_name = f"{master_config.symbol}_{raw_version}.parquet"
+        
+    data_path = str(get_data_root() / "processed" / dataset_name)
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"Dataset not found at derived path: {data_path}")
 
@@ -1070,16 +1087,7 @@ def main():
     base_slippage_points = instrument.slippage_ticks * instrument.tick_size
     resolved_slippage = base_slippage_points * master_config.execution_workflow.slippage_multiplier
 
-    # Build targets array expected by run_pipeline: list of tuples (name, direction)
-    targets_arg = []
-    for t_col in master_config.training_workflow.target_columns:
-        if t_col.endswith("_LONG"):
-            targets_arg.append((t_col, "LONG"))
-        elif t_col.endswith("_SHORT"):
-            targets_arg.append((t_col, "SHORT"))
-        else:
-            print(f"Warning: could not infer direction for target {t_col}. Assuming LONG.")
-            targets_arg.append((t_col, "LONG"))
+    targets_arg = master_config.training_workflow.target_columns
 
     print(f"============================================================")
     print(f" E2E Pipeline (Parsed MasterConfig)")

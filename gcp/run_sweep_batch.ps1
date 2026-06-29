@@ -360,7 +360,9 @@ if ($LASTEXITCODE -ne 0) {
 
 $orchestratorData = $pythonOut | ConvertFrom-Json
 $limits = $orchestratorData.infrastructure_limits
+$optuna = $orchestratorData.optuna_config
 $experiments = $orchestratorData.experiments
+$postOptTrials = if ($optuna -and $optuna.post_optimizer_trials) { $optuna.post_optimizer_trials } else { 3 }
 
 # Apply MaxConcurrentVcpus override or read from manifest infrastructure
 $maxVcpus    = if ($MaxConcurrentVcpus -gt 0) { $MaxConcurrentVcpus } `
@@ -378,6 +380,8 @@ Write-Host "============================================================" -Foreg
 Write-Host "  Batch ID:      $BatchId"
 Write-Host "  Manifest:      $manifestFull"
 Write-Host "  Experiments:   $($experiments.Count)"
+Write-Host "  Machine Type:  $machineType"
+Write-Host "  Provisioning:  $provisioning"
 Write-Host "  Max vCPUs:     $maxVcpus  (allows $([math]::Floor($maxVcpus / $vcpusPerVm)) concurrent VMs)"
 $maxVmsDisplay = if ($maxVms -gt 0) { "$maxVms (IP/VM cap)" } else { 'uncapped (vCPU-only gating)' }
 Write-Host "  Max VMs:       $maxVmsDisplay"
@@ -387,6 +391,8 @@ $tgStr = if ($DisableTelegram) { $false } else { $true }
 Write-Host "  Dry Run:       $DryRun"
 Write-Host "  Telegram:      $tgStr"
 Write-Host "  Output Dir:    $BatchDir"
+$zoneDisplay = ($Zone -split ',') | ForEach-Object { $_.Trim() }
+Write-Host "  Zones:         $($zoneDisplay -join ', ')" -ForegroundColor DarkCyan
 Write-Host "============================================================" -ForegroundColor Magenta
 Write-Host ""
 
@@ -435,10 +441,12 @@ $batchState = @{
 }
 Save-Progress $batchState
 
-Send-BatchTelegram ("[STARTING] *Batch Started*`n" +
+Send-BatchTelegram ("[STARTING] Batch Started`n" +
     "Experiments: $($experiments.Count)`n" +
-    "Max concurrent: $([math]::Floor($maxVcpus / $vcpusPerVm)) VMs`n" +
-    "Timeout per experiment: ${timeoutMins}min")
+    "Machine: $machineType / $provisioning`n" +
+    "Max concurrent: $([math]::Floor($maxVcpus / $vcpusPerVm)) VMs ($maxVcpus vCPUs)`n" +
+    "Timeout per experiment: ${timeoutMins}min`n" +
+    "Zones: $(($Zone -split ',').Count) configured")
 
 # ============================================================
 # BUILD EXPERIMENT QUEUE
@@ -518,6 +526,7 @@ try {
             $deployExit = 1
             $deployOutput = $null
             $actualZone = $null
+            $zoneErrors = @()  # Accumulate per-zone error details for diagnostics
 
             foreach ($z in $zoneList) {
                 $z = $z.Trim()
@@ -540,30 +549,88 @@ try {
                     $actualZone = $z
                     break
                 } else {
-                    Write-Host "  Failed to deploy in zone $z (exit $deployExit)." -ForegroundColor Yellow
+                    # Classify the error for structured diagnostics
+                    $zoneErrText = ($deployOutput | Out-String)
+                    $errorCategory = "UNKNOWN"
+                    if ($zoneErrText -match "Quota.*exceeded|quota.*limit") { $errorCategory = "QUOTA_EXCEEDED" }
+                    elseif ($zoneErrText -match "ConnectionError|RemoteDisconnected|gcloud crashed") { $errorCategory = "GCP_API_ERROR" }
+                    elseif ($zoneErrText -match "ZONE_RESOURCE_POOL_EXHAUSTED|stockout|does not have enough resources") { $errorCategory = "RESOURCE_EXHAUSTED" }
+                    elseif ($zoneErrText -match "already exists") { $errorCategory = "VM_ALREADY_EXISTS" }
+                    elseif ($zoneErrText -match "startup.*timeout|READY") { $errorCategory = "STARTUP_TIMEOUT" }
+
+                    $zoneErrors += @{
+                        Zone     = $z
+                        ExitCode = $deployExit
+                        Category = $errorCategory
+                        Output   = ($deployOutput | Select-Object -Last 30) -join "`n"
+                    }
+
+                    Write-Host "  FAILED zone $z (exit $deployExit, category: $errorCategory)" -ForegroundColor Yellow
+                    ($deployOutput | Select-Object -Last 5) | ForEach-Object {
+                        Write-Host "    $_" -ForegroundColor DarkYellow
+                    }
+
                     # Clean up zombie VM - it may have been created before the deploy step failed
-                    Write-Host "  Cleaning up zombie VM in zone $z to prevent leaks..." -ForegroundColor Yellow
+                    Write-Host "  Cleaning up zombie VM in zone $z ..." -ForegroundColor Yellow
                     gcloud compute instances delete $exp.VmName --zone=$z --quiet 2>$null
                 }
             }
 
             if ($deployExit -ne 0) {
-                $errText = ($deployOutput | Select-Object -Last 10) -join "`n"
-                Write-Host "  DEPLOY FAILED in all zones (last exit $deployExit):" -ForegroundColor Red
-                Write-Host $errText -ForegroundColor Red
-                Send-BatchTelegram ("[FAILED] *Deploy Failed: $($exp.Label)*`n" +
-                    "VM: ``$($exp.VmName)```n" +
-                    "Exit code: $deployExit`n" +
-                    "``````$errText``````")
-                # Always attempt to delete the VM - it may have been created before the
-                # verification step failed. Prevents VM leaks.
+                # --- Save deploy diagnostics log to batch directory ---
+                $diagLogDir = Join-Path $BatchDir "deploy_diagnostics"
+                if (-not (Test-Path $diagLogDir)) { New-Item -ItemType Directory -Path $diagLogDir -Force | Out-Null }
+                $safeLabel = ($exp.Label -replace '[^a-zA-Z0-9_-]', '_')
+                $diagLogPath = Join-Path $diagLogDir "deploy_${safeLabel}.log"
+                $diagLines = @(
+                    "Deploy Diagnostics: $($exp.Label)",
+                    "Timestamp: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
+                    "VM Name: $($exp.VmName)",
+                    "Machine Type: $($exp.MachineType)",
+                    "Provisioning: $($exp.Provisioning)",
+                    "Config Path: $($exp.ConfigPath)",
+                    "Zones Attempted: $($zoneErrors.Count)",
+                    ("=" * 60)
+                )
+                foreach ($ze in $zoneErrors) {
+                    $diagLines += ""
+                    $diagLines += "--- Zone: $($ze.Zone) | Exit: $($ze.ExitCode) | Category: $($ze.Category) ---"
+                    $diagLines += $ze.Output
+                }
+                $diagLines -join "`r`n" | Out-File -FilePath $diagLogPath -Encoding utf8 -Force
+                Write-Host "  Deploy diagnostics saved: $diagLogPath" -ForegroundColor DarkGray
+
+                # --- Detect dominant error pattern across all zones ---
+                $categories = $zoneErrors | ForEach-Object { $_.Category } | Group-Object | Sort-Object Count -Descending
+                $dominantError = if ($categories) { $categories[0].Name } else { "UNKNOWN" }
+
+                # --- Console output with zone-by-zone summary ---
+                Write-Host "  DEPLOY FAILED in all $($zoneErrors.Count) zones (dominant error: $dominantError):" -ForegroundColor Red
+                foreach ($ze in $zoneErrors) {
+                    Write-Host "    $($ze.Zone): $($ze.Category) (exit $($ze.ExitCode))" -ForegroundColor Red
+                }
+
+                # --- Telegram: structured failure report with zone details ---
+                $zoneSummary = ($zoneErrors | ForEach-Object { "  $($_.Zone): $($_.Category)" }) -join "`n"
+                $lastErrSnippet = ($deployOutput | Select-Object -Last 50) -join "`n"
+                # Truncate Telegram message to avoid API limits (max ~4000 chars)
+                if ($lastErrSnippet.Length -gt 1500) { $lastErrSnippet = $lastErrSnippet.Substring(0, 1500) + "`n... (truncated)" }
+                Send-BatchTelegram ("[DEPLOY_FAILED] $($exp.Label)`n" +
+                    "VM: $($exp.VmName)`n" +
+                    "Machine: $($exp.MachineType) / $($exp.Provisioning)`n" +
+                    "Zones tried: $($zoneErrors.Count)`n" +
+                    "Dominant error: $dominantError`n" +
+                    "---`n$zoneSummary`n" +
+                    "---`nLast zone output:`n$lastErrSnippet")
+
+                # Always attempt to delete the VM to free quota
                 if ($actualZone) {
                     Remove-ExperimentVm -VmName $exp.VmName -VmZone $actualZone
                 } else {
                     Remove-ExperimentVm -VmName $exp.VmName -VmZone $zoneList[0].Trim()
                 }
                 $exp.Status       = "DEPLOY_FAILED"
-                $exp.FailureReason = "Deploy exit code $deployExit"
+                $exp.FailureReason = "All $($zoneErrors.Count) zones failed ($dominantError). Last: $($zoneErrors[-1].Zone) exit $deployExit"
                 $batchState.failed++
                 $batchState.experiments += $exp
                 Save-Progress $batchState

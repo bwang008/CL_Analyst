@@ -115,6 +115,10 @@ def main():
         })
 
     # 8. Output Structured Results to stdout
+    optuna_dump = None
+    if batch_sweep.baseline.training_workflow and batch_sweep.baseline.training_workflow.optuna:
+        optuna_dump = batch_sweep.baseline.training_workflow.optuna.model_dump()
+
     output_result = {
         "infrastructure_limits": {
             "max_concurrent_vms": batch_sweep.infrastructure.max_concurrent_vms,
@@ -124,6 +128,7 @@ def main():
             "provisioning_model": batch_sweep.infrastructure.provisioning_model,
             "timeout_minutes": batch_sweep.infrastructure.timeout_minutes,
         },
+        "optuna_config": optuna_dump,
         "experiments": experiments_output
     }
 

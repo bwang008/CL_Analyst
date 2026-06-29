@@ -21,7 +21,6 @@ def main():
     parser = argparse.ArgumentParser(description="Python E2E Orchestrator")
     parser.add_argument("--master-config", required=True)
     parser.add_argument("--gcs-data-bucket", default="gs://cltrainer-data/processed")
-    parser.add_argument("--n-trials", type=int, default=100)
     parser.add_argument("--worker-threads", type=int, default=11)
     parser.add_argument("--db-dir", default="models/optuna_studies")
     args, unknown_args = parser.parse_known_args()
@@ -39,7 +38,13 @@ def main():
         sys.exit(1)
 
     # 1. Download Dataset
-    dataset_name = f"{master_config.symbol}_{master_config.data_workflow.dataset_version}.parquet"
+    raw_version = master_config.data_workflow.dataset_version
+    # Avoid redundant prefixing if version already starts with symbol
+    if raw_version.upper().startswith(master_config.symbol.upper()):
+        dataset_name = f"{raw_version}.parquet"
+    else:
+        dataset_name = f"{master_config.symbol}_{raw_version}.parquet"
+
     data_path = get_data_root() / "processed" / dataset_name
     data_path.parent.mkdir(parents=True, exist_ok=True)
     
@@ -71,8 +76,6 @@ def main():
             sys.executable, "agent/optuna_lgbm_search_v2.py",
             "--master-config", args.master_config,
             "--target", target,
-            "--n-trials", str(args.n_trials),
-            "--n-jobs", "1",
             "--study-name", study_name,
             "--db-dir", args.db_dir,
             "--worker-id", str(worker_id)

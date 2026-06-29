@@ -25,6 +25,7 @@ Author: CL Analyst
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from dataclasses import dataclass, field
@@ -33,6 +34,9 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+
+from agent.backtest_engine import load_ohlcv_dual
+from src.live_execution.strategy_config import StrategyConfig
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
@@ -293,6 +297,7 @@ class CLConcurrentPositionBacktester:
         signals_df: pd.DataFrame,
         ohlcv_df: pd.DataFrame,
         *,
+        ohlcv_exec_df: Optional[pd.DataFrame] = None,
         label: str = "",
         signal_side: str = "auto",
         signal_col: Optional[str] = None,
@@ -302,6 +307,7 @@ class CLConcurrentPositionBacktester:
         Args:
             signals_df: DataFrame with 'prob_Buy' or 'Predicted' column.
             ohlcv_df: Full OHLCV DataFrame.
+            ohlcv_exec_df: Optional DataFrame with unadjusted execution prices.
             label: Run label for display.
 
         Returns:
@@ -435,13 +441,24 @@ class CLConcurrentPositionBacktester:
         max_concurrent = 0
         concurrent_hist: dict[int, int] = {}
 
+        if ohlcv_exec_df is not None:
+            ohlcv["exec_Open"] = ohlcv_exec_df["Open"]
+            ohlcv["exec_High"] = ohlcv_exec_df["High"]
+            ohlcv["exec_Low"] = ohlcv_exec_df["Low"]
+            ohlcv["exec_Close"] = ohlcv_exec_df["Close"]
+        else:
+            ohlcv["exec_Open"] = ohlcv["Open"]
+            ohlcv["exec_High"] = ohlcv["High"]
+            ohlcv["exec_Low"] = ohlcv["Low"]
+            ohlcv["exec_Close"] = ohlcv["Close"]
+
         for dt, bar in ohlcv.iterrows():
             ts = pd.Timestamp(dt)
             atr = bar["_atr"]
-            bar_open = bar["Open"]
-            bar_high = bar["High"]
-            bar_low = bar["Low"]
-            bar_close = bar["Close"]
+            bar_open = bar["exec_Open"]
+            bar_high = bar["exec_High"]
+            bar_low = bar["exec_Low"]
+            bar_close = bar["exec_Close"]
 
             # --- Manage existing positions ---
             still_open: list[OpenPosition] = []
@@ -686,44 +703,7 @@ def load_predictions(path: str) -> pd.DataFrame:
     return pd.read_csv(path, index_col=0, parse_dates=True, on_bad_lines="warn")
 
 
-def load_ohlcv(path: str) -> pd.DataFrame:
-    """Load OHLCV data from parquet or CSV with raw CSV fallback."""
-    if path.endswith(".parquet"):
-        df = pd.read_parquet(path)
-    else:
-        df = pd.read_csv(path, index_col=0, parse_dates=True, sep=None, engine="python")
 
-    rename_map = {"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}
-    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
-
-    if "RAW_Close" in df.columns:
-        for col in ["Open", "High", "Low"]:
-            raw_col = f"RAW_{col}"
-            if raw_col in df.columns:
-                df[col] = df[raw_col]
-        df["Close"] = df["RAW_Close"]
-
-    required = {"Open", "High", "Low", "Close", "Volume"}
-    missing = required - set(df.columns)
-    if missing:
-        raw_candidates = [
-            os.path.join(PROJECT_ROOT, "data", "raw", "cl-5m_bk.csv"),
-            os.path.join(PROJECT_ROOT, "data", "raw", "CL.csv"),
-        ]
-        for raw_path in raw_candidates:
-            if os.path.exists(raw_path):
-                print(f"  Falling back to raw CSV: {raw_path}")
-                df = pd.read_csv(
-                    raw_path, sep=";", header=None,
-                    names=["Date", "Time", "Open", "High", "Low", "Close", "Volume"],
-                )
-                df["DateTime"] = pd.to_datetime(df["Date"] + " " + df["Time"], dayfirst=True)
-                df = df.set_index("DateTime").drop(columns=["Date", "Time"])
-                break
-        else:
-            raise FileNotFoundError(f"OHLCV missing {missing}, no raw CSV found.")
-
-    return df
 
 
 # ---------------------------------------------------------------------------
@@ -763,6 +743,11 @@ def main() -> None:
     parser.add_argument(
         "--data",
         default=os.getenv("CL_OHLCV_PATH", "data/processed/CL_set_06.parquet"),
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Path to a StrategyConfig JSON file for dynamic defaults.",
     )
     parser.add_argument("--threshold", type=float, default=0.50)
     parser.add_argument("--tp-mult", type=float, default=7.0)
@@ -821,8 +806,35 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # Dynamic Defaults from config
+    max_horizon_default = 288
+    trailing_atr_mult_default = 1.0
+    
+    if args.config and os.path.exists(args.config):
+        try:
+            with open(args.config, "r") as f:
+                cfg_data = json.load(f)
+            strategy = StrategyConfig.from_dict(cfg_data)
+            
+            # Apply dynamic defaults only if not explicitly overridden by CLI
+            # Since argparse doesn't distinguish well between default and provided,
+            # we check sys.argv
+            if "--threshold" not in sys.argv:
+                args.threshold = strategy.entry_threshold
+            if "--tp-mult" not in sys.argv:
+                args.tp_mult = strategy.tp_atr_mult
+            if "--sl-mult" not in sys.argv:
+                args.sl_mult = strategy.sl_atr_mult
+                
+            max_horizon_default = strategy.max_hold_bars
+            trailing_atr_mult_default = strategy.trailing_atr_mult
+            
+            print(f"Loaded dynamic defaults from config: {args.config}")
+        except Exception as e:
+            print(f"Warning: Failed to load config {args.config}: {e}")
+
     preds = load_predictions(args.predictions)
-    ohlcv = load_ohlcv(args.data)
+    ohlcv, ohlcv_exec = load_ohlcv_dual(args.data)
 
     if args.grid:
         thresholds = _parse_float_list(args.grid_thresholds, name="grid-thresholds")
@@ -848,6 +860,8 @@ def main() -> None:
                         tp_atr_mult=tp_mult,
                         sl_atr_mult=sl_mult,
                         prob_threshold=thresh,
+                        max_horizon=max_horizon_default,
+                        trailing_atr_mult=trailing_atr_mult_default,
                         commission_per_side=args.commission_per_side,
                         slippage_per_side=args.slippage_per_side,
                         contract_multiplier=args.contract_multiplier,
@@ -856,7 +870,8 @@ def main() -> None:
                     result = bt.run(
                         preds,
                         ohlcv,
-                        label=f"t={thresh:.2f}|tp={tp_mult:.2f}|sl={sl_mult:.2f}",
+                        ohlcv_exec_df=ohlcv_exec,
+                        label=f"{thresh:.2f}_{tp_mult:.1f}_{sl_mult:.1f}",
                         signal_side=args.signal_side,
                         signal_col=args.signal_col,
                     )
@@ -911,6 +926,8 @@ def main() -> None:
                 tp_atr_mult=args.tp_mult,
                 sl_atr_mult=args.sl_mult,
                 prob_threshold=thresh,
+                max_horizon=max_horizon_default,
+                trailing_atr_mult=trailing_atr_mult_default,
                 commission_per_side=args.commission_per_side,
                 slippage_per_side=args.slippage_per_side,
                 contract_multiplier=args.contract_multiplier,
@@ -919,6 +936,7 @@ def main() -> None:
             result = bt.run(
                 preds,
                 ohlcv,
+                ohlcv_exec_df=ohlcv_exec,
                 label=f"t={thresh:.2f}",
                 signal_side=args.signal_side,
                 signal_col=args.signal_col,
@@ -948,6 +966,8 @@ def main() -> None:
             tp_atr_mult=args.tp_mult,
             sl_atr_mult=args.sl_mult,
             prob_threshold=args.threshold,
+            max_horizon=max_horizon_default,
+            trailing_atr_mult=trailing_atr_mult_default,
             commission_per_side=args.commission_per_side,
             slippage_per_side=args.slippage_per_side,
             contract_multiplier=args.contract_multiplier,
@@ -958,6 +978,7 @@ def main() -> None:
         result = bt.run(
             preds,
             ohlcv,
+            ohlcv_exec_df=ohlcv_exec,
             label=f"Concurrent (t={args.threshold})",
             signal_side=args.signal_side,
             signal_col=args.signal_col,

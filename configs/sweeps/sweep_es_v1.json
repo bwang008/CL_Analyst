@@ -24,10 +24,14 @@
       "atr_period": 14,
       "definitions": [
         {
-          "type": "triple_barrier",
-          "tp_multiplier": 2.0,
+          "type": "triple_barrier_grid",
+          "tp_multipliers": [
+            2.0
+          ],
           "sl_multiplier": 1.0,
-          "horizon": 24
+          "horizons": [
+            24
+          ]
         }
       ]
     }
@@ -42,7 +46,8 @@
     "gcs_base_dir": "gs://cltrainer-optuna-results/sweeps/es_v1"
   },
   "execution_workflow": {
+    "strategy_config_path": "configs/strategies/HS14B_Sharpe_E01_06262026.json",
     "slippage_multiplier": 1.0,
-    "strategy_config_path": "configs/data/run_cl_hourset14a.json"
+    "execution_data_path": "gs://cltrainer-data/raw/es_exec_data.parquet"
   }
 }

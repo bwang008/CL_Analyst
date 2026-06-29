@@ -1,0 +1,1232 @@
+﻿commit 4a01e5c3fae3a663f22aba675aa8f00ee851ec12
+Author: Benjamin W <bwang008@gmail.com>
+Date:   Wed Jun 24 15:20:28 2026 -0700
+
+    feat: add post-optimization suite for automated strategy refinement and ensemble batch reporting
+
+diff --git a/gcp/vm_post_optimize.sh b/gcp/vm_post_optimize.sh
+index 7f25b1b..ec8ea74 100644
+--- a/gcp/vm_post_optimize.sh
++++ b/gcp/vm_post_optimize.sh
+@@ -290,6 +290,12 @@ if [ "$OPT_MODE" = "ensemble" ]; then
+         --top-n 8 \
+         2>&1 | tee -a "$LOG"
+ 
++    PAIR_COUNT=$(python3 -c "import json, os; print(len(json.load(open('$BATCH_DIR/top_8_ensembles.json')))) if os.path.exists('$BATCH_DIR/top_8_ensembles.json') else print(0)")
++    if [ "$PAIR_COUNT" -eq 0 ]; then
++        echo "  FATAL ERROR: select_top_ensembles.py produced 0 pairs! Aborting to prevent silent failure." | tee -a "$LOG"
++        exit 1
++    fi
++
+     # --- [4/5] Run batch_post_optimizer (ensemble mode) ---
+     echo "" | tee -a "$LOG"
+     echo "[4/5] Running batch post-optimizer on Top 8 (ensemble mode)..." | tee -a "$LOG"
+@@ -335,6 +341,12 @@ else
+     # 4 pairs is lightweight (~5-10 min on the warm VM).
+     TOP_PAIRS="$BATCH_DIR/top_pairs.json"
+     if [ -f "$TOP_PAIRS" ]; then
++        PAIR_COUNT=$(python3 -c "import json; print(len(json.load(open('$TOP_PAIRS'))))")
++        if [ "$PAIR_COUNT" -eq 0 ]; then
++            echo "  FATAL ERROR: unified_pair_optimizer.py produced 0 pairs! This indicates a failure in parsing or individual optimization. Aborting." | tee -a "$LOG"
++            exit 1
++        fi
++
+         echo "" | tee -a "$LOG"
+         echo "[4c/5] Running ensemble optimization on VM (top pairs)..." | tee -a "$LOG"
+ 
+
+commit 3c1e10f9bf3c9bf34fd8f7e6f1022fbbd3dcae94
+Author: Benjamin W <bwang008@gmail.com>
+Date:   Sun Jun 21 21:45:19 2026 -0700
+
+    feat: add new OOS prediction datasets, deployment scripts, and PnL calculation utility
+
+diff --git a/gcp/vm_post_optimize.sh b/gcp/vm_post_optimize.sh
+index 24ee90c..7f25b1b 100644
+--- a/gcp/vm_post_optimize.sh
++++ b/gcp/vm_post_optimize.sh
+@@ -330,8 +330,47 @@ else
+     echo "[4b/5] Running Unified Selection & Pairing Engine..." | tee -a "$LOG"
+     python agent/unified_pair_optimizer.py --batch-dir "$BATCH_DIR" 2>&1 | tee -a "$LOG"
+ 
+-    # Note: Ensemble optimization (step 4c) runs locally after VM shutdown
+-    # to avoid paying for a large VM during a lightweight job (4 pairs)
++    # --- [4c/5] Run ensemble optimization on VM ---
++    # Runs on the same VM that just completed individual optimization.
++    # 4 pairs is lightweight (~5-10 min on the warm VM).
++    TOP_PAIRS="$BATCH_DIR/top_pairs.json"
++    if [ -f "$TOP_PAIRS" ]; then
++        echo "" | tee -a "$LOG"
++        echo "[4c/5] Running ensemble optimization on VM (top pairs)..." | tee -a "$LOG"
++
++        EXEC_ENS_ARGS=""
++        if [ -n "$EXEC_DATA_PATH" ]; then
++            EXEC_ENS_ARGS="--exec-data $EXEC_DATA_PATH"
++        fi
++        if (( $(echo "$SLIPPAGE_PER_SIDE > 0" | bc -l) )); then
++            EXEC_ENS_ARGS="$EXEC_ENS_ARGS --slippage-per-side $SLIPPAGE_PER_SIDE"
++        fi
++
++        python agent/batch_post_optimizer.py \
++            --batch-dir "$BATCH_DIR" \
++            --target-pairs-json "$TOP_PAIRS" \
++            --n-trials "$N_TRIALS" \
++            --holdout-months "$HOLDOUT_MONTHS" \
++            --workers 4 \
++            --objective "$OBJECTIVE" \
++            --no-filter \
++            $EXEC_ENS_ARGS \
++            2>&1 | tee -a "$LOG"
++
++        # Generate ensemble backtest artifacts (markdown reports)
++        echo "  Generating ensemble backtest artifacts..." | tee -a "$LOG"
++        ENS_ART_ARGS="--batch-dir $BATCH_DIR --data data/processed/$OHLCV_BASENAME"
++        if [ -n "$EXEC_DATA_PATH" ]; then
++            ENS_ART_ARGS="$ENS_ART_ARGS --exec-data $EXEC_DATA_PATH"
++        fi
++        if (( $(echo "$SLIPPAGE_PER_SIDE > 0" | bc -l) )); then
++            ENS_ART_ARGS="$ENS_ART_ARGS --slippage-per-side $SLIPPAGE_PER_SIDE"
++        fi
++        python agent/generate_ensemble_artifacts.py $ENS_ART_ARGS 2>&1 | tee -a "$LOG"
++        echo "  Ensemble optimization complete." | tee -a "$LOG"
++    else
++        echo "  No top_pairs.json — skipping ensemble optimization." | tee -a "$LOG"
++    fi
+ fi
+ 
+ OPT_EXIT=$?
+@@ -376,6 +415,20 @@ if [ -d "$BATCH_DIR/configs" ]; then
+     echo "  Uploaded batch configs" | tee -a "$LOG"
+ fi
+ 
++# Upload ensemble backtest artifacts (MDs, JSONs, predictions)
++for f in "$BATCH_DIR"/*ensemble_backtests*.md; do
++    [ -f "$f" ] && gsutil cp "$f" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
++done
++# Upload all JSON configs from batch dir (includes optimized ensemble configs)
++for f in "$BATCH_DIR"/*.json; do
++    [ -f "$f" ] && gsutil cp "$f" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
++done
++# Upload ensemble predictions directory
++if [ -d "$BATCH_DIR/predictions" ]; then
++    gsutil -m cp -r "$BATCH_DIR/predictions" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
++    echo "  Uploaded ensemble predictions" | tee -a "$LOG"
++fi
++
+ # Upload log
+ gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
+ 
+
+commit c5111ca1ca1e2a93b50cb60a6cca6f79e5a8f21c
+Author: Benjamin W <bwang008@gmail.com>
+Date:   Tue Jun 16 04:12:57 2026 -0700
+
+    BIG UPDATE: Finished production runs for HS11, created new dataset HS13A HS13B capturing new short targets to train on and try to find alpha. Current short targets are not doing well.
+    
+    Theory is that the HS10 models performed better for shorts, so maybe HS13B will as well, but we need HS13A to compare as a baseline
+    
+    So far we patched up a lot of bugs as well in the live trader, making the data-execution split has made a lot of bugs, also had to refactor the backtest and batch workflow to handle the new exec-data rules for raw data execution using ratio.
+    
+    Now we are committing before fully updating live_trader again in order to support the new ratio-adjusted dataset models so it knows to run the inference on ratio-adjusted data, use a ratio-adjusted cache, and front month for price execution.
+    
+    I expect many more bugs after this one, so this is the last good checkpoint.
+
+diff --git a/gcp/vm_post_optimize.sh b/gcp/vm_post_optimize.sh
+index 2eb9260..24ee90c 100644
+--- a/gcp/vm_post_optimize.sh
++++ b/gcp/vm_post_optimize.sh
+@@ -154,6 +154,8 @@ gsutil cp "$BUCKET/$GCS_OPT_PREFIX/manifest.json" "$BATCH_DIR/manifest.json" 2>&
+ OHLCV_GCS=$(python3 -c "import json; m=json.load(open('$BATCH_DIR/manifest.json')); print(m.get('defaults',{}).get('gcs_data_path',''))")
+ OHLCV_BASENAME=$(basename "$OHLCV_GCS")
+ STRATEGY_CONFIG=$(python3 -c "import json; m=json.load(open('$BATCH_DIR/manifest.json')); print(m.get('defaults',{}).get('strategy_config','hourly_ensemble_010.json'))")
++EXEC_DATA_GCS=$(python3 -c "import json; m=json.load(open('$BATCH_DIR/manifest.json')); print(m.get('defaults',{}).get('exec_data',''))")
++SLIPPAGE_PER_SIDE=$(python3 -c "import json; m=json.load(open('$BATCH_DIR/manifest.json')); print(m.get('defaults',{}).get('slippage_per_side','0'))")
+ echo "  OHLCV GCS path: $OHLCV_GCS" | tee -a "$LOG"
+ echo "  Strategy config: $STRATEGY_CONFIG" | tee -a "$LOG"
+ 
+@@ -169,6 +171,24 @@ mkdir -p data/processed
+ gsutil cp "$OHLCV_GCS" "data/processed/$OHLCV_BASENAME" 2>&1 | tee -a "$LOG"
+ echo "  OHLCV data ready ($(du -h data/processed/$OHLCV_BASENAME | cut -f1))" | tee -a "$LOG"
+ 
++EXEC_DATA_PATH=""
++if [ -n "$EXEC_DATA_GCS" ] && [[ "$EXEC_DATA_GCS" == gs://* ]]; then
++    EXEC_DATA_BASENAME=$(basename "$EXEC_DATA_GCS")
++    gsutil cp "$EXEC_DATA_GCS" "data/processed/$EXEC_DATA_BASENAME" 2>&1 | tee -a "$LOG"
++    EXEC_DATA_PATH="data/processed/$EXEC_DATA_BASENAME"
++    echo "  EXEC_DATA ready ($(du -h $EXEC_DATA_PATH | cut -f1))" | tee -a "$LOG"
++elif [ -n "$EXEC_DATA_GCS" ]; then
++    EXEC_DATA_PATH="$EXEC_DATA_GCS"
++fi
++
++OPT_ARGS=""
++if [ -n "$EXEC_DATA_PATH" ]; then
++    OPT_ARGS="--exec-data $EXEC_DATA_PATH"
++fi
++if (( $(echo "$SLIPPAGE_PER_SIDE > 0" | bc -l) )); then
++    OPT_ARGS="$OPT_ARGS --slippage-per-side $SLIPPAGE_PER_SIDE"
++fi
++
+ # --- [3/5] Download all experiment artifacts from GCS ---
+ echo "" | tee -a "$LOG"
+ echo "[3/5] Downloading experiment artifacts from GCS..." | tee -a "$LOG"
+@@ -273,7 +293,7 @@ if [ "$OPT_MODE" = "ensemble" ]; then
+     # --- [4/5] Run batch_post_optimizer (ensemble mode) ---
+     echo "" | tee -a "$LOG"
+     echo "[4/5] Running batch post-optimizer on Top 8 (ensemble mode)..." | tee -a "$LOG"
+-    echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --target-pairs-json $BATCH_DIR/top_8_ensembles.json --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter" | tee -a "$LOG"
++    echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --target-pairs-json $BATCH_DIR/top_8_ensembles.json --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter $OPT_ARGS" | tee -a "$LOG"
+ 
+     python agent/batch_post_optimizer.py \
+         --batch-dir "$BATCH_DIR" \
+@@ -283,6 +303,7 @@ if [ "$OPT_MODE" = "ensemble" ]; then
+         --workers "$WORKERS" \
+         --objective "$OBJECTIVE" \
+         --no-filter \
++        $OPT_ARGS \
+         2>&1 | tee -a "$LOG"
+ else
+     # --- [3b/5] SKIPPED (individual mode) ---
+@@ -292,7 +313,7 @@ else
+     # --- [4/5] Run batch_post_optimizer (individual mode — per-side Long/Short) ---
+     echo "" | tee -a "$LOG"
+     echo "[4/5] Running batch post-optimizer (individual mode — per-side Long/Short)..." | tee -a "$LOG"
+-    echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter" | tee -a "$LOG"
++    echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter $OPT_ARGS" | tee -a "$LOG"
+ 
+     python agent/batch_post_optimizer.py \
+         --batch-dir "$BATCH_DIR" \
+@@ -301,6 +322,7 @@ else
+         --workers "$WORKERS" \
+         --objective "$OBJECTIVE" \
+         --no-filter \
++        $OPT_ARGS \
+         2>&1 | tee -a "$LOG"
+ 
+     # --- [4b/5] Unified Selection & Pairing Engine ---
+@@ -308,19 +330,8 @@ else
+     echo "[4b/5] Running Unified Selection & Pairing Engine..." | tee -a "$LOG"
+     python agent/unified_pair_optimizer.py --batch-dir "$BATCH_DIR" 2>&1 | tee -a "$LOG"
+ 
+-    if [ -f "$BATCH_DIR/top_pairs.json" ]; then
+-        echo "" | tee -a "$LOG"
+-        echo "[4c/5] Running batch post-optimizer on unified pairs (ensemble mode)..." | tee -a "$LOG"
+-        python agent/batch_post_optimizer.py \
+-            --batch-dir "$BATCH_DIR" \
+-            --target-pairs-json "$BATCH_DIR/top_pairs.json" \
+-            --n-trials "$N_TRIALS" \
+-            --holdout-months "$HOLDOUT_MONTHS" \
+-            --workers "$WORKERS" \
+-            --objective "both" \
+-            --no-filter \
+-            2>&1 | tee -a "$LOG"
+-    fi
++    # Note: Ensemble optimization (step 4c) runs locally after VM shutdown
++    # to avoid paying for a large VM during a lightweight job (4 pairs)
+ fi
+ 
+ OPT_EXIT=$?
+
+commit 8bbc08bf38172dd5c8860fa38605228488c69253
+Author: Benjamin W <bwang008@gmail.com>
+Date:   Sun Jun 14 23:56:56 2026 -0700
+
+    feat: implement live IBKR execution modules, strategy optimization agents, and updated out-of-sample prediction data.
+
+diff --git a/gcp/vm_post_optimize.sh b/gcp/vm_post_optimize.sh
+index c443b51..2eb9260 100644
+--- a/gcp/vm_post_optimize.sh
++++ b/gcp/vm_post_optimize.sh
+@@ -302,6 +302,25 @@ else
+         --objective "$OBJECTIVE" \
+         --no-filter \
+         2>&1 | tee -a "$LOG"
++
++    # --- [4b/5] Unified Selection & Pairing Engine ---
++    echo "" | tee -a "$LOG"
++    echo "[4b/5] Running Unified Selection & Pairing Engine..." | tee -a "$LOG"
++    python agent/unified_pair_optimizer.py --batch-dir "$BATCH_DIR" 2>&1 | tee -a "$LOG"
++
++    if [ -f "$BATCH_DIR/top_pairs.json" ]; then
++        echo "" | tee -a "$LOG"
++        echo "[4c/5] Running batch post-optimizer on unified pairs (ensemble mode)..." | tee -a "$LOG"
++        python agent/batch_post_optimizer.py \
++            --batch-dir "$BATCH_DIR" \
++            --target-pairs-json "$BATCH_DIR/top_pairs.json" \
++            --n-trials "$N_TRIALS" \
++            --holdout-months "$HOLDOUT_MONTHS" \
++            --workers "$WORKERS" \
++            --objective "both" \
++            --no-filter \
++            2>&1 | tee -a "$LOG"
++    fi
+ fi
+ 
+ OPT_EXIT=$?
+@@ -329,6 +348,7 @@ for f in "$BATCH_DIR"/optimization_results_*.json; do
+ done
+ [ -f "$BATCH_DIR/batch_ensemble_pre_opt.md" ] && gsutil cp "$BATCH_DIR/batch_ensemble_pre_opt.md" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+ [ -f "$BATCH_DIR/top_8_ensembles.json" ] && gsutil cp "$BATCH_DIR/top_8_ensembles.json" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
++[ -f "$BATCH_DIR/top_pairs.json" ] && gsutil cp "$BATCH_DIR/top_pairs.json" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+ 
+ # Legacy fallback uploads
+ [ -f "$BATCH_DIR/batch_summary_optimized.md" ] && gsutil cp "$BATCH_DIR/batch_summary_optimized.md" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+
+commit b5769d986ac54580b70d1675de38f1d5267d78af
+Author: Benjamin W <bwang008@gmail.com>
+Date:   Thu Jun 11 01:34:25 2026 -0700
+
+    feat: add systemd service unit for live trading and VM post-optimizer automation script
+
+diff --git a/gcp/vm_post_optimize.sh b/gcp/vm_post_optimize.sh
+index 8ae5233..c443b51 100644
+--- a/gcp/vm_post_optimize.sh
++++ b/gcp/vm_post_optimize.sh
+@@ -101,6 +101,7 @@ WORKERS=0
+ SHUTDOWN=false
+ OBJECTIVE="both"
+ SWEEP_MODE="backtest"
++OPT_MODE="individual"
+ BUCKET="gs://cltrainer-optuna-results"
+ LOG="post_optimize_$(date +%Y%m%d_%H%M%S).log"
+ 
+@@ -113,6 +114,7 @@ for arg in "$@"; do
+         --workers=*) WORKERS="${arg#*=}" ;;
+         --objective=*) OBJECTIVE="${arg#*=}" ;;
+         --sweep-mode=*) SWEEP_MODE="${arg#*=}" ;;
++        --opt-mode=*) OPT_MODE="${arg#*=}" ;;
+         --shutdown) SHUTDOWN=true ;;
+     esac
+ done
+@@ -135,6 +137,7 @@ echo "  Holdout:       $HOLDOUT_MONTHS months" | tee -a "$LOG"
+ echo "  Workers:       $WORKERS" | tee -a "$LOG"
+ echo "  Objective:     $OBJECTIVE" | tee -a "$LOG"
+ echo "  Sweep Mode:    $SWEEP_MODE" | tee -a "$LOG"
++echo "  Opt Mode:      $OPT_MODE" | tee -a "$LOG"
+ echo "  Bucket:        $BUCKET" | tee -a "$LOG"
+ echo "  CPUs:          $(nproc)" | tee -a "$LOG"
+ echo "============================================================" | tee -a "$LOG"
+@@ -234,52 +237,72 @@ if [ "$ARTIFACT_COUNT" -eq 0 ]; then
+     exit 1
+ fi
+ 
+-# --- [3b/5] Sweep Ensembles ---
+-echo "" | tee -a "$LOG"
+-echo "[3b/5] Sweeping Ensembles (Baseline Config)..." | tee -a "$LOG"
+-SWEEP_ARGS="--base-config configs/strategies/$STRATEGY_CONFIG \
+-    --data data/processed/$OHLCV_BASENAME \
+-    --long-dir reports/ \
+-    --short-dir reports/ \
+-    --long-prefix _long_ \
+-    --short-prefix _short_ \
+-    --output-md $BATCH_DIR/batch_ensemble_pre_opt.md \
+-    --mode $SWEEP_MODE \
+-    --holdout-months $HOLDOUT_MONTHS"
+-echo "  Sweep command: python agent/sweep_ensembles.py $SWEEP_ARGS" | tee -a "$LOG"
+-python agent/sweep_ensembles.py \
+-    --base-config configs/strategies/$STRATEGY_CONFIG \
+-    --data data/processed/$OHLCV_BASENAME \
+-    --long-dir reports/ \
+-    --short-dir reports/ \
+-    --long-prefix "_long_" \
+-    --short-prefix "_short_" \
+-    --output-md "$BATCH_DIR/batch_ensemble_pre_opt.md" \
+-    --mode "$SWEEP_MODE" \
+-    --holdout-months "$HOLDOUT_MONTHS" \
+-    2>&1 | tee -a "$LOG"
+-
+-echo "  Selecting Top 8 Ensembles..." | tee -a "$LOG"
+-python agent/select_top_ensembles.py \
+-    --md-report "$BATCH_DIR/batch_ensemble_pre_opt.md" \
+-    --output-json "$BATCH_DIR/top_8_ensembles.json" \
+-    --top-n 8 \
+-    2>&1 | tee -a "$LOG"
+-
+-# --- [4/5] Run batch_post_optimizer ---
+-echo "" | tee -a "$LOG"
+-echo "[4/5] Running batch post-optimizer on Top 8..." | tee -a "$LOG"
+-echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --target-pairs-json $BATCH_DIR/top_8_ensembles.json --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter" | tee -a "$LOG"
+-
+-python agent/batch_post_optimizer.py \
+-    --batch-dir "$BATCH_DIR" \
+-    --target-pairs-json "$BATCH_DIR/top_8_ensembles.json" \
+-    --n-trials "$N_TRIALS" \
+-    --holdout-months "$HOLDOUT_MONTHS" \
+-    --workers "$WORKERS" \
+-    --objective "$OBJECTIVE" \
+-    --no-filter \
+-    2>&1 | tee -a "$LOG"
++if [ "$OPT_MODE" = "ensemble" ]; then
++    # --- [3b/5] Sweep Ensembles ---
++    echo "" | tee -a "$LOG"
++    echo "[3b/5] Sweeping Ensembles (Baseline Config)..." | tee -a "$LOG"
++    SWEEP_ARGS="--base-config configs/strategies/$STRATEGY_CONFIG \
++        --data data/processed/$OHLCV_BASENAME \
++        --long-dir reports/ \
++        --short-dir reports/ \
++        --long-prefix _long_ \
++        --short-prefix _short_ \
++        --output-md $BATCH_DIR/batch_ensemble_pre_opt.md \
++        --mode $SWEEP_MODE \
++        --holdout-months $HOLDOUT_MONTHS"
++    echo "  Sweep command: python agent/sweep_ensembles.py $SWEEP_ARGS" | tee -a "$LOG"
++    python agent/sweep_ensembles.py \
++        --base-config configs/strategies/$STRATEGY_CONFIG \
++        --data data/processed/$OHLCV_BASENAME \
++        --long-dir reports/ \
++        --short-dir reports/ \
++        --long-prefix "_long_" \
++        --short-prefix "_short_" \
++        --output-md "$BATCH_DIR/batch_ensemble_pre_opt.md" \
++        --mode "$SWEEP_MODE" \
++        --holdout-months "$HOLDOUT_MONTHS" \
++        2>&1 | tee -a "$LOG"
++
++    echo "  Selecting Top 8 Ensembles..." | tee -a "$LOG"
++    python agent/select_top_ensembles.py \
++        --md-report "$BATCH_DIR/batch_ensemble_pre_opt.md" \
++        --output-json "$BATCH_DIR/top_8_ensembles.json" \
++        --top-n 8 \
++        2>&1 | tee -a "$LOG"
++
++    # --- [4/5] Run batch_post_optimizer (ensemble mode) ---
++    echo "" | tee -a "$LOG"
++    echo "[4/5] Running batch post-optimizer on Top 8 (ensemble mode)..." | tee -a "$LOG"
++    echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --target-pairs-json $BATCH_DIR/top_8_ensembles.json --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter" | tee -a "$LOG"
++
++    python agent/batch_post_optimizer.py \
++        --batch-dir "$BATCH_DIR" \
++        --target-pairs-json "$BATCH_DIR/top_8_ensembles.json" \
++        --n-trials "$N_TRIALS" \
++        --holdout-months "$HOLDOUT_MONTHS" \
++        --workers "$WORKERS" \
++        --objective "$OBJECTIVE" \
++        --no-filter \
++        2>&1 | tee -a "$LOG"
++else
++    # --- [3b/5] SKIPPED (individual mode) ---
++    echo "" | tee -a "$LOG"
++    echo "[3b/5] Skipped — individual mode (no ensemble sweep/selection)" | tee -a "$LOG"
++
++    # --- [4/5] Run batch_post_optimizer (individual mode — per-side Long/Short) ---
++    echo "" | tee -a "$LOG"
++    echo "[4/5] Running batch post-optimizer (individual mode — per-side Long/Short)..." | tee -a "$LOG"
++    echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter" | tee -a "$LOG"
++
++    python agent/batch_post_optimizer.py \
++        --batch-dir "$BATCH_DIR" \
++        --n-trials "$N_TRIALS" \
++        --holdout-months "$HOLDOUT_MONTHS" \
++        --workers "$WORKERS" \
++        --objective "$OBJECTIVE" \
++        --no-filter \
++        2>&1 | tee -a "$LOG"
++fi
+ 
+ OPT_EXIT=$?
+ 
+
+commit 21f0ece15eb60cfb9524f106c59a98513ac14f1b
+Author: Benjamin W <bwang008@gmail.com>
+Date:   Tue Jun 9 21:35:54 2026 -0700
+
+    feat: implement GCP-based ensemble optimization workflow with automated VM deployment and batch processing scripts
+
+diff --git a/gcp/vm_post_optimize.sh b/gcp/vm_post_optimize.sh
+index 78ded22..8ae5233 100644
+--- a/gcp/vm_post_optimize.sh
++++ b/gcp/vm_post_optimize.sh
+@@ -70,16 +70,22 @@ except Exception as e:
+ }
+ trap cleanup EXIT
+ 
+-# Activate environment (guard against non-interactive shell issues with set -e)
+-if [ ! -f /opt/optuna-env/bin/activate ]; then
+-    echo "ERROR: /opt/optuna-env/bin/activate not found! Startup script may not have completed."
+-    echo "Waiting 60s for startup to finish..."
+-    sleep 60
+-    if [ ! -f /opt/optuna-env/bin/activate ]; then
+-        echo "FATAL: venv still not found after waiting. Exiting."
++# Wait for startup script to finish if it hasn't already (guards against early SSH execution)
++if [ ! -f /tmp/startup_done ]; then
++    echo "Waiting for startup script to complete..." | tee -a "$LOG"
++    for i in {1..60}; do
++        if [ -f /tmp/startup_done ]; then
++            break
++        fi
++        sleep 10
++    done
++    if [ ! -f /tmp/startup_done ]; then
++        echo "FATAL: Startup script did not complete in time." | tee -a "$LOG"
+         exit 1
+     fi
+ fi
++
++# Activate environment (guard against non-interactive shell issues with set -e)
+ set +e
+ source /opt/optuna-env/bin/activate
+ set -e
+@@ -94,6 +100,7 @@ HOLDOUT_MONTHS=4
+ WORKERS=0
+ SHUTDOWN=false
+ OBJECTIVE="both"
++SWEEP_MODE="backtest"
+ BUCKET="gs://cltrainer-optuna-results"
+ LOG="post_optimize_$(date +%Y%m%d_%H%M%S).log"
+ 
+@@ -105,6 +112,7 @@ for arg in "$@"; do
+         --holdout-months=*) HOLDOUT_MONTHS="${arg#*=}" ;;
+         --workers=*) WORKERS="${arg#*=}" ;;
+         --objective=*) OBJECTIVE="${arg#*=}" ;;
++        --sweep-mode=*) SWEEP_MODE="${arg#*=}" ;;
+         --shutdown) SHUTDOWN=true ;;
+     esac
+ done
+@@ -126,6 +134,7 @@ echo "  N Trials:      $N_TRIALS" | tee -a "$LOG"
+ echo "  Holdout:       $HOLDOUT_MONTHS months" | tee -a "$LOG"
+ echo "  Workers:       $WORKERS" | tee -a "$LOG"
+ echo "  Objective:     $OBJECTIVE" | tee -a "$LOG"
++echo "  Sweep Mode:    $SWEEP_MODE" | tee -a "$LOG"
+ echo "  Bucket:        $BUCKET" | tee -a "$LOG"
+ echo "  CPUs:          $(nproc)" | tee -a "$LOG"
+ echo "============================================================" | tee -a "$LOG"
+@@ -228,6 +237,16 @@ fi
+ # --- [3b/5] Sweep Ensembles ---
+ echo "" | tee -a "$LOG"
+ echo "[3b/5] Sweeping Ensembles (Baseline Config)..." | tee -a "$LOG"
++SWEEP_ARGS="--base-config configs/strategies/$STRATEGY_CONFIG \
++    --data data/processed/$OHLCV_BASENAME \
++    --long-dir reports/ \
++    --short-dir reports/ \
++    --long-prefix _long_ \
++    --short-prefix _short_ \
++    --output-md $BATCH_DIR/batch_ensemble_pre_opt.md \
++    --mode $SWEEP_MODE \
++    --holdout-months $HOLDOUT_MONTHS"
++echo "  Sweep command: python agent/sweep_ensembles.py $SWEEP_ARGS" | tee -a "$LOG"
+ python agent/sweep_ensembles.py \
+     --base-config configs/strategies/$STRATEGY_CONFIG \
+     --data data/processed/$OHLCV_BASENAME \
+@@ -236,6 +255,8 @@ python agent/sweep_ensembles.py \
+     --long-prefix "_long_" \
+     --short-prefix "_short_" \
+     --output-md "$BATCH_DIR/batch_ensemble_pre_opt.md" \
++    --mode "$SWEEP_MODE" \
++    --holdout-months "$HOLDOUT_MONTHS" \
+     2>&1 | tee -a "$LOG"
+ 
+ echo "  Selecting Top 8 Ensembles..." | tee -a "$LOG"
+
+commit a0e8c1da49541ca3df71ee69e9dd7a62a294d4ba
+Author: Benjamin W <bwang008@gmail.com>
+Date:   Tue Jun 9 11:23:14 2026 -0700
+
+    feat: add post-optimizer automation script, new batch canary configs, and update documentation with execution prompts
+
+diff --git a/gcp/vm_post_optimize.sh b/gcp/vm_post_optimize.sh
+index a396c1e..78ded22 100644
+--- a/gcp/vm_post_optimize.sh
++++ b/gcp/vm_post_optimize.sh
+@@ -242,7 +242,7 @@ echo "  Selecting Top 8 Ensembles..." | tee -a "$LOG"
+ python agent/select_top_ensembles.py \
+     --md-report "$BATCH_DIR/batch_ensemble_pre_opt.md" \
+     --output-json "$BATCH_DIR/top_8_ensembles.json" \
+-    --top-n 4 \
++    --top-n 8 \
+     2>&1 | tee -a "$LOG"
+ 
+ # --- [4/5] Run batch_post_optimizer ---
+
+commit 729f61b7721391ec6974084e0224f7f556b9ceab
+Author: Benjamin W <bwang008@gmail.com>
+Date:   Tue Jun 9 09:24:26 2026 -0700
+
+    CHECKPOINT: Went through a long session with the agents to try to implement the new ensemble optimization method. It was a very buggy process and the results from the new hourset_10 stink. I need to re-run the canary again using HourSet_09 to verify that the pipeline is fine and HourSet_10 is just garbage.
+
+diff --git a/gcp/vm_post_optimize.sh b/gcp/vm_post_optimize.sh
+index 3ea90cc..a396c1e 100644
+--- a/gcp/vm_post_optimize.sh
++++ b/gcp/vm_post_optimize.sh
+@@ -18,7 +18,7 @@
+ #   --shutdown             Auto-shutdown VM after completion
+ # =============================================================================
+ 
+-set -eo pipefail
++set -e
+ 
+ export PYTHONIOENCODING=utf8
+ 
+@@ -38,14 +38,15 @@ try:
+     token = env.get('TELEGRAM_BOT_TOKEN')
+     chat_id = env.get('TELEGRAM_CHAT_ID')
+     if token and chat_id:
+-        msg = f'🚨 <b>[VM CRASH] {os.path.basename(sys.argv[1])}</b>\nExit Code: {sys.argv[2]}\n\n<b>Log Tail:</b>\n<pre>{sys.argv[3]}</pre>'
++        batch = sys.argv[4] if len(sys.argv) > 4 else 'unknown'
++        msg = f'🚨 <b>[VM CRASH] Post-Optimizer</b>\nBatch: <code>{batch}</code>\nExit Code: {sys.argv[2]}\n\n<b>Log Tail:</b>\n<pre>{sys.argv[3]}</pre>'
+         req = urllib.request.Request(f'https://api.telegram.org/bot{token}/sendMessage', 
+             data=json.dumps({'chat_id': chat_id, 'text': msg, 'parse_mode': 'HTML'}).encode('utf-8'),
+             headers={'Content-Type': 'application/json'})
+         urllib.request.urlopen(req, timeout=10)
+ except Exception as e:
+     print('Failed to send telegram:', e)
+-" "$0" "$exit_code" "$(tail -n 15 "$LOG" 2>/dev/null)" || true
++" "$0" "$exit_code" "$(tail -n 15 "$LOG" 2>/dev/null)" "$BATCH_ID" || true
+     fi
+     
+     # Upload logs before dying
+@@ -69,8 +70,19 @@ except Exception as e:
+ }
+ trap cleanup EXIT
+ 
+-# Activate environment
++# Activate environment (guard against non-interactive shell issues with set -e)
++if [ ! -f /opt/optuna-env/bin/activate ]; then
++    echo "ERROR: /opt/optuna-env/bin/activate not found! Startup script may not have completed."
++    echo "Waiting 60s for startup to finish..."
++    sleep 60
++    if [ ! -f /opt/optuna-env/bin/activate ]; then
++        echo "FATAL: venv still not found after waiting. Exiting."
++        exit 1
++    fi
++fi
++set +e
+ source /opt/optuna-env/bin/activate
++set -e
+ 
+ PROJECT_DIR="/home/$(whoami)/project"
+ cd "$PROJECT_DIR"
+@@ -123,8 +135,8 @@ echo "" | tee -a "$LOG"
+ echo "[1/5] Downloading batch metadata from GCS..." | tee -a "$LOG"
+ BATCH_DIR="reports/batch_runs/$BATCH_ID"
+ mkdir -p "$BATCH_DIR"
+-gsutil cp "$BUCKET/$GCS_OPT_PREFIX/batch_progress.json" "$BATCH_DIR/batch_progress.json" 2>&1 | tee -a "$LOG"
+-gsutil cp "$BUCKET/$GCS_OPT_PREFIX/manifest.json" "$BATCH_DIR/manifest.json" 2>&1 | tee -a "$LOG"
++gsutil cp "$BUCKET/$GCS_OPT_PREFIX/batch_progress.json" "$BATCH_DIR/batch_progress.json" 2>&1 | tee -a "$LOG" || { echo "  FATAL: batch_progress.json download failed!" | tee -a "$LOG"; exit 1; }
++gsutil cp "$BUCKET/$GCS_OPT_PREFIX/manifest.json" "$BATCH_DIR/manifest.json" 2>&1 | tee -a "$LOG" || { echo "  FATAL: manifest.json download failed!" | tee -a "$LOG"; exit 1; }
+ 
+ # Extract OHLCV GCS path from manifest
+ OHLCV_GCS=$(python3 -c "import json; m=json.load(open('$BATCH_DIR/manifest.json')); print(m.get('defaults',{}).get('gcs_data_path',''))")
+@@ -230,7 +242,7 @@ echo "  Selecting Top 8 Ensembles..." | tee -a "$LOG"
+ python agent/select_top_ensembles.py \
+     --md-report "$BATCH_DIR/batch_ensemble_pre_opt.md" \
+     --output-json "$BATCH_DIR/top_8_ensembles.json" \
+-    --top-n 8 \
++    --top-n 4 \
+     2>&1 | tee -a "$LOG"
+ 
+ # --- [4/5] Run batch_post_optimizer ---
+
+commit 53bb9738eee5f06294956b5432c259ff49349d4b
+Author: Benjamin W <bwang008@gmail.com>
+Date:   Mon Jun 8 22:19:07 2026 -0700
+
+    feat: implement live execution engine and associated infrastructure for GCP deployment and sweep management
+
+diff --git a/gcp/vm_post_optimize.sh b/gcp/vm_post_optimize.sh
+index 77587ed..3ea90cc 100644
+--- a/gcp/vm_post_optimize.sh
++++ b/gcp/vm_post_optimize.sh
+@@ -28,6 +28,24 @@ cleanup() {
+         echo "============================================================" | tee -a "$LOG"
+         echo " TRAP TRIGGERED: Script exited with code $exit_code" | tee -a "$LOG"
+         echo "============================================================" | tee -a "$LOG"
++        
++        # Send Telegram alert
++        python3 -c "
++import os, sys, urllib.request, json
++try:
++    with open('/home/$(whoami)/project/.env') as f:
++        env = dict(line.strip().split('=', 1) for line in f if '=' in line and not line.startswith('#'))
++    token = env.get('TELEGRAM_BOT_TOKEN')
++    chat_id = env.get('TELEGRAM_CHAT_ID')
++    if token and chat_id:
++        msg = f'🚨 <b>[VM CRASH] {os.path.basename(sys.argv[1])}</b>\nExit Code: {sys.argv[2]}\n\n<b>Log Tail:</b>\n<pre>{sys.argv[3]}</pre>'
++        req = urllib.request.Request(f'https://api.telegram.org/bot{token}/sendMessage', 
++            data=json.dumps({'chat_id': chat_id, 'text': msg, 'parse_mode': 'HTML'}).encode('utf-8'),
++            headers={'Content-Type': 'application/json'})
++        urllib.request.urlopen(req, timeout=10)
++except Exception as e:
++    print('Failed to send telegram:', e)
++" "$0" "$exit_code" "$(tail -n 15 "$LOG" 2>/dev/null)" || true
+     fi
+     
+     # Upload logs before dying
+@@ -203,6 +221,8 @@ python agent/sweep_ensembles.py \
+     --data data/processed/$OHLCV_BASENAME \
+     --long-dir reports/ \
+     --short-dir reports/ \
++    --long-prefix "_long_" \
++    --short-prefix "_short_" \
+     --output-md "$BATCH_DIR/batch_ensemble_pre_opt.md" \
+     2>&1 | tee -a "$LOG"
+ 
+
+commit e2a18ada7b2f825ce7972145cf1a2cfec0c61730
+Author: Benjamin W <bwang008@gmail.com>
+Date:   Mon Jun 8 21:22:21 2026 -0700
+
+    feat: add scripts and configurations for automated GCP batch experiment deployment, execution, and result collection
+
+diff --git a/gcp/vm_post_optimize.sh b/gcp/vm_post_optimize.sh
+index 9e096c3..77587ed 100644
+--- a/gcp/vm_post_optimize.sh
++++ b/gcp/vm_post_optimize.sh
+@@ -22,6 +22,35 @@ set -eo pipefail
+ 
+ export PYTHONIOENCODING=utf8
+ 
++cleanup() {
++    local exit_code=$?
++    if [ $exit_code -ne 0 ]; then
++        echo "============================================================" | tee -a "$LOG"
++        echo " TRAP TRIGGERED: Script exited with code $exit_code" | tee -a "$LOG"
++        echo "============================================================" | tee -a "$LOG"
++    fi
++    
++    # Upload logs before dying
++    if [ -n "$GCS_OPT_PREFIX" ] && [ -n "$LOG" ]; then
++        echo "Uploading final logs to gs://$BUCKET/$GCS_OPT_PREFIX/logs/"
++        gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
++    fi
++
++    # Delete VM if requested
++    if [ "$SHUTDOWN" = true ]; then
++        echo "Self-deleting optimizer VM in 15 seconds..." | tee -a "$LOG"
++        sleep 15
++        VM_NAME=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/name || echo "")
++        VM_ZONE=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/zone | awk -F/ '{print $NF}' || echo "")
++        if [ -n "$VM_NAME" ] && [ -n "$VM_ZONE" ]; then
++            gcloud compute instances delete "$VM_NAME" --zone="$VM_ZONE" --quiet 2>/dev/null || sudo shutdown -h now
++        else
++            sudo shutdown -h now
++        fi
++    fi
++}
++trap cleanup EXIT
++
+ # Activate environment
+ source /opt/optuna-env/bin/activate
+ 
+@@ -82,11 +111,12 @@ gsutil cp "$BUCKET/$GCS_OPT_PREFIX/manifest.json" "$BATCH_DIR/manifest.json" 2>&
+ # Extract OHLCV GCS path from manifest
+ OHLCV_GCS=$(python3 -c "import json; m=json.load(open('$BATCH_DIR/manifest.json')); print(m.get('defaults',{}).get('gcs_data_path',''))")
+ OHLCV_BASENAME=$(basename "$OHLCV_GCS")
++STRATEGY_CONFIG=$(python3 -c "import json; m=json.load(open('$BATCH_DIR/manifest.json')); print(m.get('defaults',{}).get('strategy_config','hourly_ensemble_010.json'))")
+ echo "  OHLCV GCS path: $OHLCV_GCS" | tee -a "$LOG"
++echo "  Strategy config: $STRATEGY_CONFIG" | tee -a "$LOG"
+ 
+ if [ -z "$OHLCV_GCS" ]; then
+     echo "  ERROR: No gcs_data_path found in manifest!" | tee -a "$LOG"
+-    gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
+     exit 1
+ fi
+ 
+@@ -162,17 +192,35 @@ echo "  Found $CONFIG_COUNT ensemble configs" | tee -a "$LOG"
+ 
+ if [ "$ARTIFACT_COUNT" -eq 0 ]; then
+     echo "  ERROR: No prediction CSVs found! Check GCS artifacts." | tee -a "$LOG"
+-    gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
+     exit 1
+ fi
+ 
++# --- [3b/5] Sweep Ensembles ---
++echo "" | tee -a "$LOG"
++echo "[3b/5] Sweeping Ensembles (Baseline Config)..." | tee -a "$LOG"
++python agent/sweep_ensembles.py \
++    --base-config configs/strategies/$STRATEGY_CONFIG \
++    --data data/processed/$OHLCV_BASENAME \
++    --long-dir reports/ \
++    --short-dir reports/ \
++    --output-md "$BATCH_DIR/batch_ensemble_pre_opt.md" \
++    2>&1 | tee -a "$LOG"
++
++echo "  Selecting Top 8 Ensembles..." | tee -a "$LOG"
++python agent/select_top_ensembles.py \
++    --md-report "$BATCH_DIR/batch_ensemble_pre_opt.md" \
++    --output-json "$BATCH_DIR/top_8_ensembles.json" \
++    --top-n 8 \
++    2>&1 | tee -a "$LOG"
++
+ # --- [4/5] Run batch_post_optimizer ---
+ echo "" | tee -a "$LOG"
+-echo "[4/5] Running batch post-optimizer..." | tee -a "$LOG"
+-echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter" | tee -a "$LOG"
++echo "[4/5] Running batch post-optimizer on Top 8..." | tee -a "$LOG"
++echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --target-pairs-json $BATCH_DIR/top_8_ensembles.json --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter" | tee -a "$LOG"
+ 
+ python agent/batch_post_optimizer.py \
+     --batch-dir "$BATCH_DIR" \
++    --target-pairs-json "$BATCH_DIR/top_8_ensembles.json" \
+     --n-trials "$N_TRIALS" \
+     --holdout-months "$HOLDOUT_MONTHS" \
+     --workers "$WORKERS" \
+@@ -203,6 +251,9 @@ done
+ for f in "$BATCH_DIR"/optimization_results_*.json; do
+     [ -f "$f" ] && gsutil cp "$f" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+ done
++[ -f "$BATCH_DIR/batch_ensemble_pre_opt.md" ] && gsutil cp "$BATCH_DIR/batch_ensemble_pre_opt.md" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
++[ -f "$BATCH_DIR/top_8_ensembles.json" ] && gsutil cp "$BATCH_DIR/top_8_ensembles.json" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
++
+ # Legacy fallback uploads
+ [ -f "$BATCH_DIR/batch_summary_optimized.md" ] && gsutil cp "$BATCH_DIR/batch_summary_optimized.md" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+ [ -f "$BATCH_DIR/optimization_results.json" ] && gsutil cp "$BATCH_DIR/optimization_results.json" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+@@ -231,17 +282,3 @@ echo "  GCS results:   $BUCKET/$GCS_OPT_PREFIX/" | tee -a "$LOG"
+ echo "  Batch configs: $BATCH_DIR/configs/" | tee -a "$LOG"
+ echo "============================================================" | tee -a "$LOG"
+ 
+-# Final log upload
+-gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
+-
+-# Delete VM if requested (not just shutdown — fully remove to avoid disk charges)
+-if [ "$SHUTDOWN" = true ]; then
+-    echo "Self-deleting optimizer VM in 15 seconds..." | tee -a "$LOG"
+-    gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
+-    sleep 15
+-    # Self-delete: VM removes itself from GCP entirely
+-    VM_NAME=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/name)
+-    VM_ZONE=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/zone | awk -F/ '{print $NF}')
+-    gcloud compute instances delete "$VM_NAME" --zone="$VM_ZONE" --quiet 2>/dev/null || sudo shutdown -h now
+-fi
+-
+
+commit 0095e4c940e61ece462655eadfc4c0650883905a
+Author: Benjamin W <bwang008@gmail.com>
+Date:   Sat May 23 18:53:23 2026 -0700
+
+    feat: implement ensemble strategy framework with IBKR integration and deployment infrastructure
+
+diff --git a/gcp/vm_post_optimize.sh b/gcp/vm_post_optimize.sh
+index ef252fd..9e096c3 100644
+--- a/gcp/vm_post_optimize.sh
++++ b/gcp/vm_post_optimize.sh
+@@ -234,10 +234,14 @@ echo "============================================================" | tee -a "$L
+ # Final log upload
+ gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
+ 
+-# Shutdown VM if requested
++# Delete VM if requested (not just shutdown — fully remove to avoid disk charges)
+ if [ "$SHUTDOWN" = true ]; then
+-    echo "Shutting down optimizer VM in 15 seconds..." | tee -a "$LOG"
++    echo "Self-deleting optimizer VM in 15 seconds..." | tee -a "$LOG"
+     gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
+     sleep 15
+-    sudo shutdown -h now
++    # Self-delete: VM removes itself from GCP entirely
++    VM_NAME=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/name)
++    VM_ZONE=$(curl -s -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/zone | awk -F/ '{print $NF}')
++    gcloud compute instances delete "$VM_NAME" --zone="$VM_ZONE" --quiet 2>/dev/null || sudo shutdown -h now
+ fi
++
+
+commit b4ee6f109b91c0f58fb1deae28b268d5aeab8205
+Author: Benjamin W <bwang008@gmail.com>
+Date:   Wed May 20 00:38:47 2026 -0700
+
+    feat: add batch optimization orchestration and deployment automation tools
+
+diff --git a/gcp/vm_post_optimize.sh b/gcp/vm_post_optimize.sh
+index 15ba426..ef252fd 100644
+--- a/gcp/vm_post_optimize.sh
++++ b/gcp/vm_post_optimize.sh
+@@ -32,7 +32,7 @@ cd "$PROJECT_DIR"
+ BATCH_ID=""
+ N_TRIALS=500
+ HOLDOUT_MONTHS=4
+-WORKERS=$(nproc)
++WORKERS=0
+ SHUTDOWN=false
+ OBJECTIVE="both"
+ BUCKET="gs://cltrainer-optuna-results"
+
+commit a3716167a6fadf3f1b844e6697da3c8c78297d3e
+Author: Benjamin W <bwang008@gmail.com>
+Date:   Tue May 19 23:29:04 2026 -0700
+
+    refactor: implement memory-efficient strategy optimizer with trade floor penalties and automated candidate reporting
+
+diff --git a/gcp/vm_post_optimize.sh b/gcp/vm_post_optimize.sh
+index fb8ab03..15ba426 100644
+--- a/gcp/vm_post_optimize.sh
++++ b/gcp/vm_post_optimize.sh
+@@ -30,10 +30,11 @@ cd "$PROJECT_DIR"
+ 
+ # Defaults
+ BATCH_ID=""
+-N_TRIALS=1000
++N_TRIALS=500
+ HOLDOUT_MONTHS=4
+ WORKERS=$(nproc)
+ SHUTDOWN=false
++OBJECTIVE="both"
+ BUCKET="gs://cltrainer-optuna-results"
+ LOG="post_optimize_$(date +%Y%m%d_%H%M%S).log"
+ 
+@@ -44,6 +45,7 @@ for arg in "$@"; do
+         --n-trials=*) N_TRIALS="${arg#*=}" ;;
+         --holdout-months=*) HOLDOUT_MONTHS="${arg#*=}" ;;
+         --workers=*) WORKERS="${arg#*=}" ;;
++        --objective=*) OBJECTIVE="${arg#*=}" ;;
+         --shutdown) SHUTDOWN=true ;;
+     esac
+ done
+@@ -64,6 +66,7 @@ echo "  Batch ID:      $BATCH_ID" | tee -a "$LOG"
+ echo "  N Trials:      $N_TRIALS" | tee -a "$LOG"
+ echo "  Holdout:       $HOLDOUT_MONTHS months" | tee -a "$LOG"
+ echo "  Workers:       $WORKERS" | tee -a "$LOG"
++echo "  Objective:     $OBJECTIVE" | tee -a "$LOG"
+ echo "  Bucket:        $BUCKET" | tee -a "$LOG"
+ echo "  CPUs:          $(nproc)" | tee -a "$LOG"
+ echo "============================================================" | tee -a "$LOG"
+@@ -166,13 +169,14 @@ fi
+ # --- [4/5] Run batch_post_optimizer ---
+ echo "" | tee -a "$LOG"
+ echo "[4/5] Running batch post-optimizer..." | tee -a "$LOG"
+-echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --no-filter" | tee -a "$LOG"
++echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter" | tee -a "$LOG"
+ 
+ python agent/batch_post_optimizer.py \
+     --batch-dir "$BATCH_DIR" \
+     --n-trials "$N_TRIALS" \
+     --holdout-months "$HOLDOUT_MONTHS" \
+     --workers "$WORKERS" \
++    --objective "$OBJECTIVE" \
+     --no-filter \
+     2>&1 | tee -a "$LOG"
+ 
+@@ -185,15 +189,23 @@ echo "[4b/6] Generating strategy configs from optimization results..." | tee -a
+ python agent/generate_batch_configs.py \
+     --batch-dir "$BATCH_DIR" \
+     --min-trades 10 \
++    --objective "$OBJECTIVE" \
+     2>&1 | tee -a "$LOG" || echo "  WARNING: Config generation failed (non-fatal)" | tee -a "$LOG"
+ 
+ # --- [5/6] Upload results to GCS ---
+ echo "" | tee -a "$LOG"
+ echo "[5/6] Uploading results to GCS..." | tee -a "$LOG"
+ 
+-# Upload optimized report and results JSON
+-gsutil cp "$BATCH_DIR/batch_summary_optimized.md" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+-gsutil cp "$BATCH_DIR/optimization_results.json" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
++# Upload optimized reports and results JSONs (glob for all objectives)
++for f in "$BATCH_DIR"/batch_summary_optimized_*.md; do
++    [ -f "$f" ] && gsutil cp "$f" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
++done
++for f in "$BATCH_DIR"/optimization_results_*.json; do
++    [ -f "$f" ] && gsutil cp "$f" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
++done
++# Legacy fallback uploads
++[ -f "$BATCH_DIR/batch_summary_optimized.md" ] && gsutil cp "$BATCH_DIR/batch_summary_optimized.md" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
++[ -f "$BATCH_DIR/optimization_results.json" ] && gsutil cp "$BATCH_DIR/optimization_results.json" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+ 
+ # Upload all optimized config JSONs (legacy per-experiment configs)
+ find reports/ -name "*_opt.json" -path "*/canary_output/*" -exec gsutil cp {} "$BUCKET/$GCS_OPT_PREFIX/configs/" \; 2>&1 | tee -a "$LOG" || true
+
+commit 96279d9783bbea8065b982e2572acca787f1a2e7
+Author: Benjamin W <bwang008@gmail.com>
+Date:   Sat May 16 12:17:20 2026 -0700
+
+    feat: add post-optimization workflow, deployment scripts, and new strategy sweep configurations
+
+diff --git a/gcp/vm_post_optimize.sh b/gcp/vm_post_optimize.sh
+index d5d6184..fb8ab03 100644
+--- a/gcp/vm_post_optimize.sh
++++ b/gcp/vm_post_optimize.sh
+@@ -178,19 +178,34 @@ python agent/batch_post_optimizer.py \
+ 
+ OPT_EXIT=$?
+ 
+-# --- [5/5] Upload results to GCS ---
++# --- [4b/6] Generate correctly-formatted strategy configs ---
+ echo "" | tee -a "$LOG"
+-echo "[5/5] Uploading results to GCS..." | tee -a "$LOG"
++echo "[4b/6] Generating strategy configs from optimization results..." | tee -a "$LOG"
++
++python agent/generate_batch_configs.py \
++    --batch-dir "$BATCH_DIR" \
++    --min-trades 10 \
++    2>&1 | tee -a "$LOG" || echo "  WARNING: Config generation failed (non-fatal)" | tee -a "$LOG"
++
++# --- [5/6] Upload results to GCS ---
++echo "" | tee -a "$LOG"
++echo "[5/6] Uploading results to GCS..." | tee -a "$LOG"
+ 
+ # Upload optimized report and results JSON
+ gsutil cp "$BATCH_DIR/batch_summary_optimized.md" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+ gsutil cp "$BATCH_DIR/optimization_results.json" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+ 
+-# Upload all optimized config JSONs
++# Upload all optimized config JSONs (legacy per-experiment configs)
+ find reports/ -name "*_opt.json" -path "*/canary_output/*" -exec gsutil cp {} "$BUCKET/$GCS_OPT_PREFIX/configs/" \; 2>&1 | tee -a "$LOG" || true
+ find reports/ -name "*_opt_long.json" -path "*/canary_output/*" -exec gsutil cp {} "$BUCKET/$GCS_OPT_PREFIX/configs/" \; 2>&1 | tee -a "$LOG" || true
+ find reports/ -name "*_opt_short.json" -path "*/canary_output/*" -exec gsutil cp {} "$BUCKET/$GCS_OPT_PREFIX/configs/" \; 2>&1 | tee -a "$LOG" || true
+ 
++# Upload generated batch configs (correctly-formatted with all top-level keys)
++if [ -d "$BATCH_DIR/configs" ]; then
++    gsutil -m cp "$BATCH_DIR/configs/*.json" "$BUCKET/$GCS_OPT_PREFIX/batch_configs/" 2>&1 | tee -a "$LOG" || true
++    echo "  Uploaded batch configs" | tee -a "$LOG"
++fi
++
+ # Upload log
+ gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
+ 
+@@ -201,6 +216,7 @@ echo " POST-OPTIMIZER COMPLETE" | tee -a "$LOG"
+ echo "  Exit code:     $OPT_EXIT" | tee -a "$LOG"
+ echo "  Wall time:     $((TOTAL_ELAPSED / 3600))h $((TOTAL_ELAPSED % 3600 / 60))m" | tee -a "$LOG"
+ echo "  GCS results:   $BUCKET/$GCS_OPT_PREFIX/" | tee -a "$LOG"
++echo "  Batch configs: $BATCH_DIR/configs/" | tee -a "$LOG"
+ echo "============================================================" | tee -a "$LOG"
+ 
+ # Final log upload
+
+commit 8f9f35dd2dafec528117f141d299258fc15d6e6c
+Author: Benjamin W <bwang008@gmail.com>
+Date:   Sat May 16 02:09:53 2026 -0700
+
+    feat: implement Optuna LightGBM walk-forward search pipeline with GCP deployment automation scripts.
+
+diff --git a/gcp/vm_post_optimize.sh b/gcp/vm_post_optimize.sh
+index 9bfd492..d5d6184 100644
+--- a/gcp/vm_post_optimize.sh
++++ b/gcp/vm_post_optimize.sh
+@@ -1,4 +1,4 @@
+-﻿#!/bin/bash
++#!/bin/bash
+ # =============================================================================
+ # Post-Optimizer VM Run Script
+ #
+@@ -32,7 +32,7 @@ cd "$PROJECT_DIR"
+ BATCH_ID=""
+ N_TRIALS=1000
+ HOLDOUT_MONTHS=4
+-WORKERS=24
++WORKERS=$(nproc)
+ SHUTDOWN=false
+ BUCKET="gs://cltrainer-optuna-results"
+ LOG="post_optimize_$(date +%Y%m%d_%H%M%S).log"
+
+commit 5f6335cfad1b82d941625e58887677b787400099
+Author: Benjamin W <bwang008@gmail.com>
+Date:   Thu May 14 12:20:26 2026 -0700
+
+    feat: implement automated GCP cloud optimization infrastructure including deployment scripts, monitor, and post-optimizer execution support.
+
+diff --git a/gcp/vm_post_optimize.sh b/gcp/vm_post_optimize.sh
+new file mode 100644
+index 0000000..9bfd492
+--- /dev/null
++++ b/gcp/vm_post_optimize.sh
+@@ -0,0 +1,215 @@
++﻿#!/bin/bash
++# =============================================================================
++# Post-Optimizer VM Run Script
++#
++# Runs batch_post_optimizer.py on a cloud VM with full parallelism.
++# Downloads all experiment artifacts from GCS, runs optimization, and
++# uploads results back to GCS.
++#
++# Usage (called by gcp_deploy_optimizer.ps1):
++#   bash gcp/vm_post_optimize.sh --batch-id=batch_20260513_1941 \
++#       --n-trials=1000 --holdout-months=4 --workers=24 [--shutdown]
++#
++# Arguments:
++#   --batch-id=<id>        Batch ID to optimize
++#   --n-trials=<n>         Optuna trials per optimization (default: 1000)
++#   --holdout-months=<n>   Holdout months for validation (default: 4)
++#   --workers=<n>          Parallel workers (default: 24)
++#   --shutdown             Auto-shutdown VM after completion
++# =============================================================================
++
++set -eo pipefail
++
++export PYTHONIOENCODING=utf8
++
++# Activate environment
++source /opt/optuna-env/bin/activate
++
++PROJECT_DIR="/home/$(whoami)/project"
++cd "$PROJECT_DIR"
++
++# Defaults
++BATCH_ID=""
++N_TRIALS=1000
++HOLDOUT_MONTHS=4
++WORKERS=24
++SHUTDOWN=false
++BUCKET="gs://cltrainer-optuna-results"
++LOG="post_optimize_$(date +%Y%m%d_%H%M%S).log"
++
++# Parse args
++for arg in "$@"; do
++    case "$arg" in
++        --batch-id=*) BATCH_ID="${arg#*=}" ;;
++        --n-trials=*) N_TRIALS="${arg#*=}" ;;
++        --holdout-months=*) HOLDOUT_MONTHS="${arg#*=}" ;;
++        --workers=*) WORKERS="${arg#*=}" ;;
++        --shutdown) SHUTDOWN=true ;;
++    esac
++done
++
++if [ -z "$BATCH_ID" ]; then
++    echo "ERROR: --batch-id is required" | tee -a "$LOG"
++    exit 1
++fi
++
++GCS_OPT_PREFIX="batch_optimizer/$BATCH_ID"
++START_TIME=$(date +%s)
++
++echo "" | tee -a "$LOG"
++echo "============================================================" | tee -a "$LOG"
++echo " POST-OPTIMIZER VM RUN" | tee -a "$LOG"
++echo "============================================================" | tee -a "$LOG"
++echo "  Batch ID:      $BATCH_ID" | tee -a "$LOG"
++echo "  N Trials:      $N_TRIALS" | tee -a "$LOG"
++echo "  Holdout:       $HOLDOUT_MONTHS months" | tee -a "$LOG"
++echo "  Workers:       $WORKERS" | tee -a "$LOG"
++echo "  Bucket:        $BUCKET" | tee -a "$LOG"
++echo "  CPUs:          $(nproc)" | tee -a "$LOG"
++echo "============================================================" | tee -a "$LOG"
++
++# --- [1/5] Download batch metadata ---
++echo "" | tee -a "$LOG"
++echo "[1/5] Downloading batch metadata from GCS..." | tee -a "$LOG"
++BATCH_DIR="reports/batch_runs/$BATCH_ID"
++mkdir -p "$BATCH_DIR"
++gsutil cp "$BUCKET/$GCS_OPT_PREFIX/batch_progress.json" "$BATCH_DIR/batch_progress.json" 2>&1 | tee -a "$LOG"
++gsutil cp "$BUCKET/$GCS_OPT_PREFIX/manifest.json" "$BATCH_DIR/manifest.json" 2>&1 | tee -a "$LOG"
++
++# Extract OHLCV GCS path from manifest
++OHLCV_GCS=$(python3 -c "import json; m=json.load(open('$BATCH_DIR/manifest.json')); print(m.get('defaults',{}).get('gcs_data_path',''))")
++OHLCV_BASENAME=$(basename "$OHLCV_GCS")
++echo "  OHLCV GCS path: $OHLCV_GCS" | tee -a "$LOG"
++
++if [ -z "$OHLCV_GCS" ]; then
++    echo "  ERROR: No gcs_data_path found in manifest!" | tee -a "$LOG"
++    gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
++    exit 1
++fi
++
++# --- [2/5] Download OHLCV data ---
++echo "" | tee -a "$LOG"
++echo "[2/5] Downloading OHLCV data from GCS..." | tee -a "$LOG"
++mkdir -p data/processed
++gsutil cp "$OHLCV_GCS" "data/processed/$OHLCV_BASENAME" 2>&1 | tee -a "$LOG"
++echo "  OHLCV data ready ($(du -h data/processed/$OHLCV_BASENAME | cut -f1))" | tee -a "$LOG"
++
++# --- [3/5] Download all experiment artifacts from GCS ---
++echo "" | tee -a "$LOG"
++echo "[3/5] Downloading experiment artifacts from GCS..." | tee -a "$LOG"
++
++# Parse batch_progress.json and download each experiment's artifacts
++python3 -c "
++import json, os, subprocess, sys
++
++bp = json.load(open('$BATCH_DIR/batch_progress.json', encoding='utf-8-sig'))
++experiments = bp.get('experiments', [])
++project_dir = '$PROJECT_DIR'
++bucket = '$BUCKET'
++
++for exp in experiments:
++    if exp.get('status') != 'COMPLETED':
++        continue
++    prefix = exp.get('gcs_prefix', '')
++    if not prefix:
++        continue
++    
++    # Create local directory matching batch_progress layout
++    local_dir = os.path.join(project_dir, 'reports', prefix)
++    canary_dir = os.path.join(local_dir, 'registry', 'canary_output')
++    os.makedirs(canary_dir, exist_ok=True)
++    
++    # Download production artifacts zip
++    gcs_zip = f'{bucket}/{prefix}/production/'
++    print(f'  Downloading artifacts for {prefix}...')
++    subprocess.run(['gsutil', '-m', 'cp', '-r', f'{gcs_zip}*.zip', local_dir], 
++                    capture_output=True)
++    
++    # Unzip into registry/canary_output
++    import glob
++    for zf in glob.glob(os.path.join(local_dir, '*.zip')):
++        subprocess.run(['unzip', '-o', '-q', zf, '-d', os.path.join(local_dir, 'registry')],
++                        capture_output=True)
++        print(f'    Unpacked: {os.path.basename(zf)}')
++    
++    # Also download pipeline_summary.json
++    subprocess.run(['gsutil', 'cp', f'{bucket}/{prefix}/pipeline_summary.json', 
++                     os.path.join(local_dir, 'pipeline_summary.json')], capture_output=True)
++    # Copy to canary_output too for compatibility
++    summary_src = os.path.join(local_dir, 'pipeline_summary.json')
++    if os.path.exists(summary_src):
++        import shutil
++        shutil.copy2(summary_src, canary_dir)
++    
++    # Update local_dir in batch_progress to Linux path
++    exp['local_dir'] = local_dir
++
++# Rewrite batch_progress.json with Linux paths
++with open('$BATCH_DIR/batch_progress.json', 'w') as f:
++    json.dump(bp, f, indent=2)
++print(f'  Updated batch_progress.json with {len(experiments)} experiments (Linux paths)')
++" 2>&1 | tee -a "$LOG"
++
++# Verify artifacts
++ARTIFACT_COUNT=$(find reports/ -name "*.csv" -path "*/canary_output/*" | wc -l)
++echo "  Found $ARTIFACT_COUNT prediction CSVs" | tee -a "$LOG"
++
++CONFIG_COUNT=$(find reports/ -name "*.json" -path "*/canary_output/*" -not -name "pipeline_*" | wc -l)
++echo "  Found $CONFIG_COUNT ensemble configs" | tee -a "$LOG"
++
++if [ "$ARTIFACT_COUNT" -eq 0 ]; then
++    echo "  ERROR: No prediction CSVs found! Check GCS artifacts." | tee -a "$LOG"
++    gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
++    exit 1
++fi
++
++# --- [4/5] Run batch_post_optimizer ---
++echo "" | tee -a "$LOG"
++echo "[4/5] Running batch post-optimizer..." | tee -a "$LOG"
++echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --no-filter" | tee -a "$LOG"
++
++python agent/batch_post_optimizer.py \
++    --batch-dir "$BATCH_DIR" \
++    --n-trials "$N_TRIALS" \
++    --holdout-months "$HOLDOUT_MONTHS" \
++    --workers "$WORKERS" \
++    --no-filter \
++    2>&1 | tee -a "$LOG"
++
++OPT_EXIT=$?
++
++# --- [5/5] Upload results to GCS ---
++echo "" | tee -a "$LOG"
++echo "[5/5] Uploading results to GCS..." | tee -a "$LOG"
++
++# Upload optimized report and results JSON
++gsutil cp "$BATCH_DIR/batch_summary_optimized.md" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
++gsutil cp "$BATCH_DIR/optimization_results.json" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
++
++# Upload all optimized config JSONs
++find reports/ -name "*_opt.json" -path "*/canary_output/*" -exec gsutil cp {} "$BUCKET/$GCS_OPT_PREFIX/configs/" \; 2>&1 | tee -a "$LOG" || true
++find reports/ -name "*_opt_long.json" -path "*/canary_output/*" -exec gsutil cp {} "$BUCKET/$GCS_OPT_PREFIX/configs/" \; 2>&1 | tee -a "$LOG" || true
++find reports/ -name "*_opt_short.json" -path "*/canary_output/*" -exec gsutil cp {} "$BUCKET/$GCS_OPT_PREFIX/configs/" \; 2>&1 | tee -a "$LOG" || true
++
++# Upload log
++gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
++
++TOTAL_ELAPSED=$(( $(date +%s) - START_TIME ))
++echo "" | tee -a "$LOG"
++echo "============================================================" | tee -a "$LOG"
++echo " POST-OPTIMIZER COMPLETE" | tee -a "$LOG"
++echo "  Exit code:     $OPT_EXIT" | tee -a "$LOG"
++echo "  Wall time:     $((TOTAL_ELAPSED / 3600))h $((TOTAL_ELAPSED % 3600 / 60))m" | tee -a "$LOG"
++echo "  GCS results:   $BUCKET/$GCS_OPT_PREFIX/" | tee -a "$LOG"
++echo "============================================================" | tee -a "$LOG"
++
++# Final log upload
++gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
++
++# Shutdown VM if requested
++if [ "$SHUTDOWN" = true ]; then
++    echo "Shutting down optimizer VM in 15 seconds..." | tee -a "$LOG"
++    gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || true
++    sleep 15
++    sudo shutdown -h now
++fi

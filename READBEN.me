@@ -236,3 +236,36 @@ gcloud compute instances list --format=json(name,zone,machineType,status,schedul
 
 ### PROMPT Canaary HS10
 "Please execute the /run-cloud-batch workflow. Use the manifest path: configs\sweep_batch_hourset10_canary.json. Run it across the standard zones: us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f. Make sure to monitor it continuously until the post-optimizer finishes and the markdown reports are downloaded to my machine. This should sweep all 8 targets and optimize the top 8 ensembles."
+
+==========================================
+# NEW DATA GENERATION & V2 ORCHESTRATOR INSTRUCTIONS
+
+## 1. Are Legacy Manifests Obsolete?
+YES. All legacy manifests (e.g. `sweep_batch_short_hourset14a_canary_cut.json`) are now obsolete. They must be migrated to the strict V2 Pydantic schema (`BatchSweepConfig`) before they can be used. The new format requires a `base_config` (which holds a `MasterConfig`) and an `infrastructure` block for queue limits. (See `configs/canary_batch_manifest_small.json` for an example of the new format).
+
+## 2. Does `/run-cloud-batch` Need to be Updated?
+No! The underlying scripts (`run_sweep_batch.ps1`) have already been fully updated by the teamwork subagents to act as a "dumb transport" for the Python orchestrator. The PowerShell command to launch a batch remains exactly the same.
+
+## 3. The New Agent Prompt for Cloud Batches
+When asking an agent to run a batch, you just need to ensure the manifest is in the V2 format. 
+**Example Prompt:**
+"Please execute the `/run-cloud-batch` workflow using `configs/sweep_batch_manifest_PRODUCTION.json`. Run it across the standard zones and monitor it until the post-optimizer finishes. Ensure the manifest conforms to the V2 Pydantic schema first."
+
+## 4. End-to-End Pipeline for a New Symbol (e.g., ES)
+
+If you want to train a model on a completely new symbol, follow this 3-step architecture:
+
+### Step 4A: Download Raw Data
+Use the `/grab-data` workflow to download and convert the raw Databento data. This step does *not* use a JSON manifest.
+**Command:** `python -m src.data.databento_data_builder convert <path-to-raw.csv> --symbol ES --outdir C:\CL_Analyst_Data\data\raw\DataBentoSample\ES`
+
+### Step 4B: Generate the Feature Dataset (The `MasterConfig` Step)
+Create a standalone Pydantic `MasterConfig` file (e.g., `configs/master/ES_master.json`). This file defines exactly which features (windows, macro data, etc.) to generate.
+*(Note: I have created an example file for you at `configs/master/CL_master.json`)*.
+Run the feature generator using your new master config:
+**Command:** `python scripts/regenerate_features.py --config configs/master/ES_master.json`
+*This outputs your finalized parquet file (e.g., `ES_HourSet_01.parquet`).*
+
+### Step 4C: Run the Cloud Batch
+Create a batch manifest (e.g., `configs/sweep_batch_manifest_ES_canary.json`) conforming to the V2 `BatchSweepConfig` schema. Set the `gcs_base_dir` to point to the new parquet file you just uploaded to GCP.
+**Command:** `.\gcp\run_sweep_batch.ps1 -ManifestPath configs\sweep_batch_manifest_ES_canary.json`

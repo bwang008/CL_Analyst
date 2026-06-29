@@ -109,6 +109,10 @@ if (-not $SkipProvision) {
         Write-Host "  VM created!" -ForegroundColor Green
     }
     
+    # NOTE: SSH host key acceptance is handled by gcloud config:
+    #   gcloud config set ssh/putty_force_connect True
+    # This makes --quiet auto-accept PLink host key prompts on Windows.
+
     # Wait for startup script
     Write-Host "  Waiting for startup script to complete..."
     $maxWait = 600; $elapsed = 0
@@ -134,7 +138,7 @@ if (-not $SkipProvision) {
 # --- [2/6] Create directory structure ---
 Write-Host "`n[2/6] Creating directory structure..."
 gcloud compute ssh $VmName --zone=$Zone --quiet `
-    --command="mkdir -p $RemoteProject/agent $RemoteProject/src/live_execution/strategies $RemoteProject/src/features $RemoteProject/gcp $RemoteProject/configs/strategies $RemoteProject/configs/sweeps $RemoteProject/models/optuna_studies $RemoteProject/reports $RemoteHome/data" 2>$null
+    --command="mkdir -p $RemoteProject/agent $RemoteProject/src/live_execution/strategies $RemoteProject/src/features $RemoteProject/src/config $RemoteProject/src/core $RemoteProject/gcp $RemoteProject/configs/strategies $RemoteProject/configs/sweeps $RemoteProject/models/optuna_studies $RemoteProject/reports $RemoteHome/data" 2>$null
 
 # --- [3/6] Upload code ---
 Write-Host "`n[3/6] Uploading code..."
@@ -158,6 +162,8 @@ $codeFiles = @(
     @{ Local = "src\live_execution\strategies\buy70_sized_manatee.py"; Remote = "src/live_execution/strategies/" },
     @{ Local = "src\features\__init__.py";       Remote = "src/features/" },
     @{ Local = "src\features\feature_buckets.py"; Remote = "src/features/" },
+    @{ Local = "src\config\schemas.py";           Remote = "src/config/" },
+    @{ Local = "src\core\instrument_master.py";   Remote = "src/core/" },
     @{ Local = "gcp\vm_sweep_run.sh";           Remote = "gcp/" },
     @{ Local = "gcp\vm_e2e_pipeline.py";         Remote = "gcp/" },
     @{ Local = "gcp\orchestrator.py";            Remote = "gcp/" }
@@ -232,7 +238,7 @@ Write-Host "`n[5/6] Launching sweep pipeline in tmux..."
 $launchCmd = "tmux kill-session -t sweep 2>/dev/null; tmux new-session -d -s sweep 'bash $RemoteProject/gcp/vm_sweep_run.sh --master-config=configs/sweeps/$(Split-Path -Leaf $MasterConfig) --gcs-data-bucket=gs://cltrainer-data/processed'"
 
 # Execute and capture both streams with explicit exit code handling
-$launchOutput = gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd 2>&1
+$launchOutput = gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd --quiet 2>&1
 $sshExitCode = $LASTEXITCODE
 
 if ($sshExitCode -ne 0) {

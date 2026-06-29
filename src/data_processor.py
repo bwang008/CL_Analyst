@@ -3274,6 +3274,22 @@ class DataProcessor:
         # ── Step 7: Final processing ──────────────────────────────────
         df = self.normalize_features(df)
         print(f"  [85%] Features normalized")
+        
+        # ── Step 7.5: JSON Feature Pruning ────────────────────────────
+        if cfg.features.drop_features:
+            cols_to_drop = set()
+            for pattern in cfg.features.drop_features:
+                if pattern.endswith("*"):
+                    prefix = pattern[:-1]
+                    cols_to_drop.update([c for c in df.columns if c.startswith(prefix)])
+                else:
+                    if pattern in df.columns:
+                        cols_to_drop.add(pattern)
+            
+            # Ensure we don't drop target or OHLCV columns by accident if wildcard was too broad
+            safe_to_drop = [c for c in cols_to_drop if c in df.columns and not c.startswith("TARGET_") and c not in ["Open", "High", "Low", "Close", "Volume", "DateTime"]]
+            df = df.drop(columns=safe_to_drop)
+            print(f"  [-] Dropped {len(safe_to_drop)} features via JSON config rules")
 
         # Configs can specify warmup, but defaults are fine for now
         warmup = 2200 if cfg.resolution == "1h" else 600

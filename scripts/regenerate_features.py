@@ -59,6 +59,13 @@ def main():
         print("-" * 40)
         print(df.describe().T.head(20)) # Print just the head so it doesn't flood the terminal
         
+        out_dir = Path(PROJECT_ROOT) / master_config.data_workflow.output_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        filename = master_config.data_workflow.output_filename or f"{master_config.symbol}_{master_config.data_workflow.dataset_version}.parquet"
+        out_path = out_dir / filename
+        df.to_parquet(out_path)
+        print(f"\n[SUCCESS] Saved {len(df)} rows and {len(df.columns)} columns to {out_path}")
+        
     except Exception as e:
         print(f"Error during processing: {e}")
         sys.exit(1)

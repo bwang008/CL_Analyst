@@ -34,6 +34,8 @@ class FeatureConfig(BaseModel):
     include_dma: bool = True
     include_ichimoku: bool = True
     include_term_structure: bool = True
+    drop_features: List[str] = Field(default_factory=list)
+    keep_features: List[str] = Field(default_factory=list)
 
     @field_validator("windows")
     @classmethod
@@ -52,14 +54,35 @@ class FeatureConfig(BaseModel):
 class DataWorkflowConfig(BaseModel):
     dataset_version: str
     resolution: str = "1h"
+    output_dir: str = "data/processed"
+    output_filename: Optional[str] = None
     features: FeatureConfig = Field(default_factory=FeatureConfig)
     targets: TargetConfig
+
+class OptunaConfig(BaseModel):
+    n_trials: int = 200
+    max_depth_min: int = 3
+    max_depth_max: int = 10
+    num_leaves_min: int = 15
+    num_leaves_max: int = 100
+    max_n_estimators: int = 2000
+    early_stopping_rounds: int = 25
+    max_folds: int = 5
+    learning_rate_min: float = 0.005
+    learning_rate_max: float = 0.02
+    min_child_samples_min: int = 150
+    min_child_samples_max: int = 400
+    feature_fraction_min: float = 0.3
+    feature_fraction_max: float = 1.0
+    post_optimizer_trials: int = 3
+    post_optimizer_holdout_months: int = 6
 
 class TrainingWorkflowConfig(BaseModel):
     train_cutoff_date: str
     holdout_cutoff_date: Optional[str] = None
     target_columns: List[str]
     gcs_base_dir: str
+    optuna: OptunaConfig = Field(default_factory=OptunaConfig)
 
 class ExecutionWorkflowConfig(BaseModel):
     slippage_multiplier: float = 1.0

@@ -147,11 +147,16 @@ def _write_worker_status(trials_done: int, total_trials: int, status: str = "run
 _EXPERIMENT_LOG_PATH = os.path.join(PROJECT_ROOT, "agent", "experiment_log.json")
 
 
+import filelock
+
 def load_experiment_log():
     """Load the experiment log, or create a fresh one."""
     if os.path.exists(_EXPERIMENT_LOG_PATH):
-        with open(_EXPERIMENT_LOG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(_EXPERIMENT_LOG_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {"experiments": []}
     return {"experiments": []}
 
 
@@ -163,11 +168,13 @@ def generate_experiment_id(log_data):
 
 def _append_to_log(record):
     """Append an experiment record to the log file."""
-    log_data = load_experiment_log()
-    log_data["experiments"].append(record)
+    lock_path = _EXPERIMENT_LOG_PATH + ".lock"
     os.makedirs(os.path.dirname(_EXPERIMENT_LOG_PATH), exist_ok=True)
-    with open(_EXPERIMENT_LOG_PATH, "w", encoding="utf-8") as f:
-        json.dump(log_data, f, indent=2, default=str)
+    with filelock.FileLock(lock_path):
+        log_data = load_experiment_log()
+        log_data["experiments"].append(record)
+        with open(_EXPERIMENT_LOG_PATH, "w", encoding="utf-8") as f:
+            json.dump(log_data, f, indent=2, default=str)
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -771,8 +778,8 @@ def run_search(
     n_gym = len(X)
     gym_index = X.index  # lightweight reference for fold time display
 
-    print(f"  Gym:   {n_gym:,} rows ({gym_index.min()} → {gym_index.max()})")
-    print(f"  Vault: {len(df_vault):,} rows ({df_vault.index.min()} → {df_vault.index.max()}) [UNTOUCHED]")
+    print(f"  Gym:   {n_gym:,} rows ({gym_index.min()} -> {gym_index.max()})")
+    print(f"  Vault: {len(df_vault):,} rows ({df_vault.index.min()} -> {df_vault.index.max()}) [UNTOUCHED]")
     print(f"  Features: {len(feature_cols)} (float32)")
     print(f"  Target distribution (gym): {y.value_counts().to_dict()}")
 
@@ -792,7 +799,7 @@ def run_search(
         train_end_dt = gym_index[min(te - 1, n_gym - 1)]
         val_start_dt = gym_index[min(vs, n_gym - 1)]
         val_end_dt = gym_index[min(ve - 1, n_gym - 1)]
-        print(f"    Fold {i}: train→{train_end_dt.date()} | val {val_start_dt.date()}→{val_end_dt.date()}")
+        print(f"    Fold {i}: train->{train_end_dt.date()} | val {val_start_dt.date()}->{val_end_dt.date()}")
 
     # ---- Load OHLCV if sharpe mode ----
     ohlcv_gym = None
@@ -1082,10 +1089,6 @@ def main():
         help="Optimization metric: logloss, f0.5, average_precision, f1, or sharpe (default: logloss)",
     )
     parser.add_argument(
-        "--n-trials", type=int, default=100,
-        help="Number of Optuna trials (default: 100)",
-    )
-    parser.add_argument(
         "--balance-mode", default="downsample",
         choices=["downsample", "none"],
         help="Class balancing mode (default: downsample)",
@@ -1108,47 +1111,9 @@ def main():
              "LightGBM num_threads auto-scales to cpu_count/n_jobs.",
     )
     parser.add_argument(
-        "--max-depth-range", type=int, nargs=2, default=[4, 10],
-        metavar=("MIN", "MAX"),
-        help="Search range for max_depth (default: 4 10)",
-    )
-    parser.add_argument(
-        "--num-leaves-range", type=int, nargs=2, default=[15, 90],
-        metavar=("MIN", "MAX"),
-        help="Search range for num_leaves (default: 15 90)",
-    )
-    parser.add_argument(
-        "--max-n-estimators", type=int, default=3000,
-        help="Maximum n_estimators for search (default: 3000)",
-    )
-    parser.add_argument(
-        "--early-stopping-rounds", type=int, default=100,
-        help="Early stopping rounds (default: 100)",
-    )
-    parser.add_argument(
-        "--learning-rate-range", type=float, nargs=2, default=[0.005, 0.02],
-        metavar=("MIN", "MAX"),
-        help="Search range for learning_rate (default: 0.005 0.02)",
-    )
-    parser.add_argument(
-        "--min-child-samples-range", type=int, nargs=2, default=[150, 400],
-        metavar=("MIN", "MAX"),
-        help="Search range for min_child_samples (default: 150 400)",
-    )
-    parser.add_argument(
-        "--feature-fraction-range", type=float, nargs=2, default=[0.4, 0.8],
-        metavar=("MIN", "MAX"),
-        help="Search range for feature_fraction (default: 0.4 0.8)",
-    )
-    parser.add_argument(
         "--num-threads", type=int, default=8,
         help="LightGBM num_threads per worker (default: 8). "
              "Total cores used = n_jobs × num_threads.",
-    )
-    parser.add_argument(
-        "--max-folds", type=int, default=10,
-        help="Maximum number of walk-forward folds to sample (default: 10). "
-             "Fewer folds = faster searches with slightly noisier estimates.",
     )
     parser.add_argument(
         "--worker-id", type=int, default=0,
@@ -1198,7 +1163,13 @@ def main():
 
     # Derive data path from data_workflow dataset_version
     from src.data_paths import get_data_root
-    data_path = str(get_data_root() / "processed" / f"{master_config.symbol}_{master_config.data_workflow.dataset_version}.parquet")
+    raw_version = master_config.data_workflow.dataset_version
+    if raw_version.upper().startswith(master_config.symbol.upper()):
+        dataset_name = f"{raw_version}.parquet"
+    else:
+        dataset_name = f"{master_config.symbol}_{raw_version}.parquet"
+        
+    data_path = str(get_data_root() / "processed" / dataset_name)
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"Dataset not found at derived path: {data_path}")
 
@@ -1209,16 +1180,19 @@ def main():
     else:
         args.strategy_config = None
 
+    # Parse Optuna configs from JSON
+    opt = master_config.training_workflow.optuna
+
     # Set global worker ID and total trials for logging
     global _worker_id, _total_trials
     _worker_id = args.worker_id
-    _total_trials = args.n_trials
+    _total_trials = opt.n_trials
 
     run_search(
         data_path=args.data,
         target_name=args.target,
         ml_metric=args.ml_metric,
-        n_trials=args.n_trials,
+        n_trials=opt.n_trials,
         n_jobs=args.n_jobs,
         balance_mode=args.balance_mode,
         strategy_config_path=args.strategy_config,
@@ -1227,16 +1201,16 @@ def main():
         study_name=args.study_name,
         db_dir=args.db_dir,
         num_threads=args.num_threads,
-        max_depth_range=tuple(args.max_depth_range),
-        num_leaves_range=tuple(args.num_leaves_range),
-        max_n_estimators=args.max_n_estimators,
-        early_stopping_rounds=args.early_stopping_rounds,
-        max_folds=args.max_folds,
+        max_depth_range=(opt.max_depth_min, opt.max_depth_max),
+        num_leaves_range=(opt.num_leaves_min, opt.num_leaves_max),
+        max_n_estimators=opt.max_n_estimators,
+        early_stopping_rounds=opt.early_stopping_rounds,
+        max_folds=opt.max_folds,
         objective_type=args.objective,
         use_buckets=args.use_buckets,
-        learning_rate_range=tuple(args.learning_rate_range),
-        min_child_samples_range=tuple(args.min_child_samples_range),
-        feature_fraction_range=tuple(args.feature_fraction_range),
+        learning_rate_range=(opt.learning_rate_min, opt.learning_rate_max),
+        min_child_samples_range=(opt.min_child_samples_min, opt.min_child_samples_max),
+        feature_fraction_range=(opt.feature_fraction_min, opt.feature_fraction_max),
         exec_ohlcv_path=args.exec_data,
     )
 
