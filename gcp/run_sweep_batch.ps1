@@ -46,8 +46,8 @@ $ProjectDir = Split-Path -Parent $ScriptDir
 $gcloudBin = "C:\Users\bwang\AppData\Local\Google\Cloud SDK\google-cloud-sdk\bin"
 if ($env:PATH -notlike "*$gcloudBin*") { $env:PATH = "$gcloudBin;$env:PATH" }
 
-$BatchTimestamp = Get-Date -Format "yyyyMMdd_HHmm"
-$BatchId        = "batch_$BatchTimestamp"
+$BatchTimestamp = Get-Date -Format "yyyyMMdd-HHmm"
+$BatchId        = "batch_$($BatchTimestamp -replace '-','_')"
 $BatchDir       = Join-Path $ProjectDir "reports\batch_runs\$BatchId"
 $ProgressFile   = Join-Path $BatchDir "batch_progress.json"
 
@@ -342,7 +342,7 @@ function Remove-ExperimentVm {
 
 
 # ============================================================
-# LOAD MANIFEST
+# LOAD AND VALIDATE MANIFEST USING PYTHON ORCHESTRATOR
 # ============================================================
 
 $manifestFull = Join-Path $ProjectDir $ManifestPath
@@ -351,19 +351,25 @@ if (-not (Test-Path $manifestFull)) {
     exit 1
 }
 
-$manifest  = Get-Content $manifestFull -Raw | ConvertFrom-Json
-$defaults  = $manifest.defaults
-$expList   = $manifest.experiments
+Write-Host "Executing Python Batch Orchestrator schema validation & config generation..." -ForegroundColor Cyan
+$pythonOut = & python gcp/batch_orchestrator.py --batch-manifest $ManifestPath
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "ERROR: Python Orchestrator failed." -ForegroundColor Red
+    exit 1
+}
 
-# Apply MaxConcurrentVcpus override or read from manifest
+$orchestratorData = $pythonOut | ConvertFrom-Json
+$limits = $orchestratorData.infrastructure_limits
+$experiments = $orchestratorData.experiments
+
+# Apply MaxConcurrentVcpus override or read from manifest infrastructure
 $maxVcpus    = if ($MaxConcurrentVcpus -gt 0) { $MaxConcurrentVcpus } `
-               elseif ($defaults.max_concurrent_vcpus) { [int]$defaults.max_concurrent_vcpus } `
-               else { 100 }
-$vcpusPerVm  = if ($defaults.vcpus_per_vm) { [int]$defaults.vcpus_per_vm } else { 48 }
-$maxVms      = if ($defaults.max_concurrent_vms) { [int]$defaults.max_concurrent_vms } else { 0 }  # 0 = no VM count cap, use vCPU cap only
-$timeoutMins = if ($defaults.timeout_minutes) { [int]$defaults.timeout_minutes } else { 90 }
-$postOptTrials  = if ($defaults.post_optimizer_trials) { [int]$defaults.post_optimizer_trials } else { 1000 }
-$postOptHoldout = if ($defaults.post_optimizer_holdout_months) { [int]$defaults.post_optimizer_holdout_months } else { 4 }
+               else { [int]$limits.max_concurrent_vcpus }
+$vcpusPerVm  = [int]$limits.vcpus_per_vm
+$maxVms      = [int]$limits.max_concurrent_vms
+$timeoutMins = [int]$limits.timeout_minutes
+$machineType = $limits.machine_type
+$provisioning = $limits.provisioning_model
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Magenta
@@ -371,7 +377,7 @@ Write-Host " CANARY BATCH ORCHESTRATOR" -ForegroundColor Magenta
 Write-Host "============================================================" -ForegroundColor Magenta
 Write-Host "  Batch ID:      $BatchId"
 Write-Host "  Manifest:      $manifestFull"
-Write-Host "  Experiments:   $($expList.Count)"
+Write-Host "  Experiments:   $($experiments.Count)"
 Write-Host "  Max vCPUs:     $maxVcpus  (allows $([math]::Floor($maxVcpus / $vcpusPerVm)) concurrent VMs)"
 $maxVmsDisplay = if ($maxVms -gt 0) { "$maxVms (IP/VM cap)" } else { 'uncapped (vCPU-only gating)' }
 Write-Host "  Max VMs:       $maxVmsDisplay"
@@ -388,25 +394,21 @@ Write-Host ""
 if ($DryRun) {
     Write-Host "=== DRY RUN - No VMs will be created ===" -ForegroundColor Cyan
     $idx = 0
-    foreach ($exp in $expList) {
+    foreach ($exp in $experiments) {
         $idx++
-        $label        = if ($exp.label) { $exp.label } else { "Exp-$idx" }
+        $label        = $exp.label
         $basePrefix   = $exp.gcs_prefix
-        $vmName       = "optuna-sweep-$($basePrefix -replace '_','-')"
+        $vmName       = "optuna-sweep-$($basePrefix -replace '_','-')-$($BatchTimestamp -replace '-','-')"
         $tsPrefix     = "${basePrefix}_${BatchTimestamp}"
-        $machineType  = if ($exp.machine_type)       { $exp.machine_type }       else { $defaults.machine_type }
-        $targetLong   = if ($exp.target_long)        { $exp.target_long }        else { "" }
-        $targetShort  = if ($exp.target_short)       { $exp.target_short }       else { "" }
-        Write-Host "  [$idx/$($expList.Count)] $label" -ForegroundColor Cyan
+        Write-Host "  [$idx/$($experiments.Count)] $label" -ForegroundColor Cyan
         Write-Host "    VM:          $vmName"
         Write-Host "    GCS prefix:  $tsPrefix"
         Write-Host "    Machine:     $machineType"
-        Write-Host "    Target L:    $targetLong"
-        Write-Host "    Target S:    $targetShort"
         Write-Host "    Local out:   reports\$tsPrefix"
+        Write-Host "    Config Path: $($exp.config_path)"
     }
     Write-Host ""
-    Send-BatchTelegram "[DRY-RUN] *Dry Run Validated*`n$($expList.Count) experiments in manifest.`n_No VMs were created._"
+    Send-BatchTelegram "[DRY-RUN] *Dry Run Validated*`n$($experiments.Count) experiments in manifest.`n_No VMs were created._"
     Write-Host "Dry run complete." -ForegroundColor Green
     exit 0
 }
@@ -416,10 +418,8 @@ if ($DryRun) {
 # ============================================================
 
 if (-not (Test-Path $BatchDir)) { New-Item -ItemType Directory -Path $BatchDir -Force | Out-Null }
-# Log tracking arrays and flags
 $ScriptStartTracker = Get-Date
 
-# Initialize state object representing the batch process
 $savedManifestPath = Join-Path $BatchDir "manifest.json"
 Copy-Item $ManifestPath $savedManifestPath -Force
 
@@ -427,7 +427,7 @@ $batchState = @{
     batch_id    = $BatchId
     manifest    = "manifest.json"
     started_at  = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-    total       = $expList.Count
+    total       = $experiments.Count
     completed   = 0
     failed      = 0
     skipped     = 0
@@ -436,7 +436,7 @@ $batchState = @{
 Save-Progress $batchState
 
 Send-BatchTelegram ("[STARTING] *Batch Started*`n" +
-    "Experiments: $($expList.Count)`n" +
+    "Experiments: $($experiments.Count)`n" +
     "Max concurrent: $([math]::Floor($maxVcpus / $vcpusPerVm)) VMs`n" +
     "Timeout per experiment: ${timeoutMins}min")
 
@@ -446,46 +446,23 @@ Send-BatchTelegram ("[STARTING] *Batch Started*`n" +
 
 $queue       = [System.Collections.Queue]::new()
 $expIndex    = 0
-foreach ($exp in $expList) {
+foreach ($exp in $experiments) {
     $expIndex++
     $basePrefix  = $exp.gcs_prefix
     $tsPrefix    = "${basePrefix}_${BatchTimestamp}"
-    $vmName      = "optuna-sweep-$($basePrefix -replace '_','-')"
+    $vmName      = "optuna-sweep-$($basePrefix -replace '_','-')-$($BatchTimestamp -replace '-','-')"
     $localDir    = Join-Path $ProjectDir "reports\$tsPrefix"
-    $label       = if ($exp.label) { $exp.label } else { "Exp-$expIndex" }
     $queue.Enqueue(@{
         Index        = $expIndex
-        Label        = $label
+        Label        = $exp.label
         VmName       = $vmName
         BasePrefix   = $basePrefix
         GcsPrefix    = $tsPrefix
         LocalDir     = $localDir
-        MachineType  = if ($exp.machine_type)       { $exp.machine_type }       else { $defaults.machine_type       }
-        Provisioning = if ($exp.provisioning_model)  { $exp.provisioning_model  } else { $defaults.provisioning_model }
-        GcsDataPath  = if ($exp.gcs_data_path)       { $exp.gcs_data_path       } else { $defaults.gcs_data_path      }
-        StrategyConf = if ($exp.strategy_config)     { $exp.strategy_config     } else { $defaults.strategy_config    }
-        Metrics      = if ($exp.metrics)             { $exp.metrics             } else { $defaults.metrics            }
-        TargetLong   = if ($exp.target_long)         { $exp.target_long         } else { ""                           }
-        TargetShort  = if ($exp.target_short)        { $exp.target_short        } else { ""                           }
-        UseBuckets   = if ($exp.use_buckets -ne $null) { $exp.use_buckets       } else { $defaults.use_buckets        }
-        ExecData     = if ($exp.exec_data)           { $exp.exec_data           } elseif ($defaults.exec_data)           { $defaults.exec_data           } else { "" }
-        Slippage     = if ($exp.slippage_per_side)   { [double]$exp.slippage_per_side } elseif ($defaults.slippage_per_side) { [double]$defaults.slippage_per_side } else { 0 }
-        TimeoutMins  = if ($exp.timeout_minutes)     { [int]$exp.timeout_minutes } else { $timeoutMins                }
-        # Search space params (0 = use shell script defaults)
-        NTrials              = if ($exp.n_trials)              { [int]$exp.n_trials              } elseif ($defaults.n_trials)              { [int]$defaults.n_trials              } else { 0 }
-        MaxDepthMin          = if ($exp.max_depth_min)          { [int]$exp.max_depth_min          } elseif ($defaults.max_depth_min)          { [int]$defaults.max_depth_min          } else { 0 }
-        MaxDepthMax          = if ($exp.max_depth_max)          { [int]$exp.max_depth_max          } elseif ($defaults.max_depth_max)          { [int]$defaults.max_depth_max          } else { 0 }
-        NumLeavesMin         = if ($exp.num_leaves_min)         { [int]$exp.num_leaves_min         } elseif ($defaults.num_leaves_min)         { [int]$defaults.num_leaves_min         } else { 0 }
-        NumLeavesMax         = if ($exp.num_leaves_max)         { [int]$exp.num_leaves_max         } elseif ($defaults.num_leaves_max)         { [int]$defaults.num_leaves_max         } else { 0 }
-        MaxNEstimators       = if ($exp.max_n_estimators)       { [int]$exp.max_n_estimators       } elseif ($defaults.max_n_estimators)       { [int]$defaults.max_n_estimators       } else { 0 }
-        EarlyStoppingRounds  = if ($exp.early_stopping_rounds)  { [int]$exp.early_stopping_rounds  } elseif ($defaults.early_stopping_rounds)  { [int]$defaults.early_stopping_rounds  } else { 0 }
-        MaxFolds             = if ($exp.max_folds)              { [int]$exp.max_folds              } elseif ($defaults.max_folds)              { [int]$defaults.max_folds              } else { 0 }
-        LearningRateMin      = if ($exp.learning_rate_min)      { [double]$exp.learning_rate_min      } elseif ($defaults.learning_rate_min)      { [double]$defaults.learning_rate_min      } else { 0 }
-        LearningRateMax      = if ($exp.learning_rate_max)      { [double]$exp.learning_rate_max      } elseif ($defaults.learning_rate_max)      { [double]$defaults.learning_rate_max      } else { 0 }
-        MinChildSamplesMin   = if ($exp.min_child_samples_min)  { [int]$exp.min_child_samples_min  } elseif ($defaults.min_child_samples_min)  { [int]$defaults.min_child_samples_min  } else { 0 }
-        MinChildSamplesMax   = if ($exp.min_child_samples_max)  { [int]$exp.min_child_samples_max  } elseif ($defaults.min_child_samples_max)  { [int]$defaults.min_child_samples_max  } else { 0 }
-        FeatureFractionMin   = if ($exp.feature_fraction_min)   { [double]$exp.feature_fraction_min   } elseif ($defaults.feature_fraction_min)   { [double]$defaults.feature_fraction_min   } else { 0 }
-        FeatureFractionMax   = if ($exp.feature_fraction_max)   { [double]$exp.feature_fraction_max   } elseif ($defaults.feature_fraction_max)   { [double]$defaults.feature_fraction_max   } else { 0 }
+        MachineType  = $machineType
+        Provisioning = $provisioning
+        ConfigPath   = $exp.config_path
+        TimeoutMins  = $timeoutMins
         StartTime    = $null
         Job          = $null
         Status       = "QUEUED"
@@ -502,277 +479,196 @@ foreach ($exp in $expList) {
 $activeSlots = [System.Collections.ArrayList]::new()
 $allDone     = $false
 
-while (-not $allDone) {
+try {
+    while (-not $allDone) {
 
-    # --- Try to fire new VMs if quota allows ---
-    while ($queue.Count -gt 0) {
-        $usedCpus = Get-UsedVcpus
-        if ($usedCpus + $vcpusPerVm -gt $maxVcpus) {
-            $quotaMsg = "[$(Get-Date -F 'HH:mm:ss')] vCPU cap reached ($usedCpus/$maxVcpus vCPU in use). Waiting for a slot..."
-            Write-Host $quotaMsg -ForegroundColor Gray
-            break
-        }
-        # Check VM count cap (IP address quota protection)
-        if ($maxVms -gt 0 -and $activeSlots.Count -ge $maxVms) {
-            Write-Host "[$(Get-Date -F 'HH:mm:ss')] VM cap reached ($($activeSlots.Count)/$maxVms VMs). Waiting for a slot..." -ForegroundColor Gray
-            break
-        }
-
-        $exp = $queue.Dequeue()
-        Write-Host ""
-        Write-Host "------------------------------------------------------------" -ForegroundColor Cyan
-        Write-Host " LAUNCHING [$($exp.Index)/$($expList.Count)]: $($exp.Label)" -ForegroundColor Cyan
-        Write-Host "  VM:        $($exp.VmName)"
-        Write-Host "  GCS:       gs://cltrainer-optuna-results/$($exp.GcsPrefix)/"
-        Write-Host "  Local:     $($exp.LocalDir)"
-        Write-Host "------------------------------------------------------------" -ForegroundColor Cyan
-
-        # Delete any pre-existing VM with this name (clean slate)
-        $existing = gcloud compute instances describe $exp.VmName --zone=$Zone --format="get(status)" 2>$null
-        if ($existing) {
-            Write-Host "  Pre-existing VM found ($existing). Deleting for clean slate..." -ForegroundColor Yellow
-            gcloud compute instances delete $exp.VmName --zone=$Zone --quiet 2>$null
-            Start-Sleep -Seconds 10
-        }
-
-        # Deploy VM across fallback zones
-        $zoneList = $Zone -split ','
-        $deployExit = 1
-        $deployOutput = $null
-
-        foreach ($z in $zoneList) {
-            $z = $z.Trim()
-            $deployArgs = @(
-                "-NoProfile", "-ExecutionPolicy", "Bypass",
-                "-File", (Join-Path $ScriptDir "gcp_deploy_sweep.ps1"),
-                "-VmName",      $exp.VmName,
-                "-MachineType", $exp.MachineType,
-                "-Zone",        $z,
-                "-GcsDataPath", $exp.GcsDataPath,
-                "-StrategyConfig", $exp.StrategyConf,
-                "-Metrics",     $exp.Metrics,
-                "-JobName",     $exp.GcsPrefix,
-                "-ProvisioningModel", $exp.Provisioning
-            )
-            if ($exp.TargetLong)  { $deployArgs += @("-TargetLong",  $exp.TargetLong)  }
-            if ($exp.TargetShort) { $deployArgs += @("-TargetShort", $exp.TargetShort) }
-            if ($exp.UseBuckets)  { $deployArgs += @("-UseBuckets") }
-            if ($exp.ExecData)    { $deployArgs += @("-ExecData", $exp.ExecData) }
-            if ($exp.Slippage -gt 0) { $deployArgs += @("-Slippage", $exp.Slippage) }
-            # Search space overrides from manifest
-            if ($exp.NTrials -gt 0)             { $deployArgs += @("-NTrials",             $exp.NTrials) }
-            if ($exp.MaxDepthMin -gt 0)         { $deployArgs += @("-MaxDepthMin",         $exp.MaxDepthMin) }
-            if ($exp.MaxDepthMax -gt 0)         { $deployArgs += @("-MaxDepthMax",         $exp.MaxDepthMax) }
-            if ($exp.NumLeavesMin -gt 0)        { $deployArgs += @("-NumLeavesMin",        $exp.NumLeavesMin) }
-            if ($exp.NumLeavesMax -gt 0)        { $deployArgs += @("-NumLeavesMax",        $exp.NumLeavesMax) }
-            if ($exp.MaxNEstimators -gt 0)      { $deployArgs += @("-MaxNEstimators",      $exp.MaxNEstimators) }
-            if ($exp.EarlyStoppingRounds -gt 0) { $deployArgs += @("-EarlyStoppingRounds", $exp.EarlyStoppingRounds) }
-            if ($exp.MaxFolds -gt 0)            { $deployArgs += @("-MaxFolds",            $exp.MaxFolds) }
-            if ($exp.LearningRateMin -gt 0)     { $deployArgs += @("-LearningRateMin",     $exp.LearningRateMin) }
-            if ($exp.LearningRateMax -gt 0)     { $deployArgs += @("-LearningRateMax",     $exp.LearningRateMax) }
-            if ($exp.MinChildSamplesMin -gt 0)  { $deployArgs += @("-MinChildSamplesMin",  $exp.MinChildSamplesMin) }
-            if ($exp.MinChildSamplesMax -gt 0)  { $deployArgs += @("-MinChildSamplesMax",  $exp.MinChildSamplesMax) }
-            if ($exp.FeatureFractionMin -gt 0)  { $deployArgs += @("-FeatureFractionMin",  $exp.FeatureFractionMin) }
-            if ($exp.FeatureFractionMax -gt 0)  { $deployArgs += @("-FeatureFractionMax",  $exp.FeatureFractionMax) }
-
-            Write-Host "  Deploying VM in zone $z..." -ForegroundColor Yellow
-            $deployOutput = & powershell @deployArgs 2>&1
-            $deployExit   = $LASTEXITCODE
-
-            if ($deployExit -eq 0) {
-                $actualZone = $z
+        # --- Try to fire new VMs if quota allows ---
+        while ($queue.Count -gt 0) {
+            $usedCpus = Get-UsedVcpus
+            if ($usedCpus + $vcpusPerVm -gt $maxVcpus) {
+                $quotaMsg = "[$(Get-Date -F 'HH:mm:ss')] vCPU cap reached ($usedCpus/$maxVcpus vCPU in use). Waiting for a slot..."
+                Write-Host $quotaMsg -ForegroundColor Gray
                 break
-            } else {
-                Write-Host "  Failed to deploy in zone $z (exit $deployExit)." -ForegroundColor Yellow
-                # Clean up zombie VM - it may have been created before the deploy step failed
-                Write-Host "  Cleaning up zombie VM in zone $z..." -ForegroundColor Yellow
-                gcloud compute instances delete $exp.VmName --zone=$z --quiet 2>$null
             }
-        }
+            # Check VM count cap (IP address quota protection)
+            if ($maxVms -gt 0 -and $activeSlots.Count -ge $maxVms) {
+                Write-Host "[$(Get-Date -F 'HH:mm:ss')] VM cap reached ($($activeSlots.Count)/$maxVms VMs). Waiting for a slot..." -ForegroundColor Gray
+                break
+            }
 
-        if ($deployExit -ne 0) {
-            $errText = ($deployOutput | Select-Object -Last 10) -join "`n"
-            Write-Host "  DEPLOY FAILED in all zones (last exit $deployExit):" -ForegroundColor Red
-            Write-Host $errText -ForegroundColor Red
-            Send-BatchTelegram ("[FAILED] *Deploy Failed: $($exp.Label)*`n" +
-                "VM: ``$($exp.VmName)```n" +
-                "Exit code: $deployExit`n" +
-                "``````$errText``````")
-            # Always attempt to delete the VM - it may have been created before the
-            # verification step failed (e.g. tmux race condition). Prevents VM leaks.
-            Remove-ExperimentVm -VmName $exp.VmName -VmZone $actualZone
-            $exp.Status       = "DEPLOY_FAILED"
-            $exp.FailureReason = "Deploy exit code $deployExit"
-            $batchState.failed++
-            $batchState.experiments += $exp
-            Save-Progress $batchState
-            continue
-        }
-
-        Write-Host "  VM deployed. Starting monitor background job..." -ForegroundColor Green
-
-        # Start monitor as background PS job
-        $monScript    = Join-Path $ScriptDir "gcp_monitor.ps1"
-        $vmName_      = $exp.VmName
-        $gcsPrefix_   = $exp.GcsPrefix
-        $label_       = $exp.Label
-        $batchId_     = $BatchId
-        $expIdx_      = $exp.Index
-        $expTotal_    = $expList.Count
-        $tgEnabled_   = if ($DisableTelegram) { $false } else { $true }
-        $pollSecs_    = 90    # 90-second poll - fast enough to catch early-stopping completions
-        $projDir_     = $ProjectDir
-        $gcpBin_      = $gcloudBin
-        $exitCodeFile_= Join-Path $env:TEMP "monitor_exit_$($exp.VmName)_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
-        $actualZone_  = $actualZone
-
-        $job = Start-Job -ScriptBlock {
-            param($monScript, $vmName, $gcsPrefix, $label, $batchId, $expIdx, $expTotal, $tgEnabled, $pollSecs, $projDir, $gcpBin, $exitCodeFile, $vmZone)
-            $env:PATH = "$gcpBin;$env:PATH"
-            Set-Location $projDir
-            # Build args array - cannot pass [switch] through -ArgumentList, so conditionally add -DisableTelegram
-            $monArgs = @(
-                "-NoProfile", "-ExecutionPolicy", "Bypass",
-                "-File", $monScript,
-                "-VmName", $vmName,
-                "-Zone", $vmZone,
-                "-GcsPrefix", $gcsPrefix,
-                "-ExperimentLabel", $label,
-                "-BatchId", $batchId,
-                "-ExperimentIndex", $expIdx,
-                "-BatchTotal", $expTotal,
-                "-PollIntervalSeconds", $pollSecs,
-                "-ExitCodeFile", $exitCodeFile
-            )
-            if (-not $tgEnabled) { $monArgs += "-DisableTelegram" }
-            & powershell @monArgs
-            return $LASTEXITCODE
-        } -ArgumentList $monScript, $vmName_, $gcsPrefix_, $label_, $batchId_, $expIdx_, $expTotal_, $tgEnabled_, $pollSecs_, $projDir_, $gcloudBin, $exitCodeFile_, $actualZone_
-
-        $exp.StartTime    = Get-Date
-        $exp.Job          = $job
-        $exp.Status       = "RUNNING"
-        $exp.ExitCodeFile = $exitCodeFile_
-        $exp.ActualZone   = $actualZone
-        [void]$activeSlots.Add($exp)
-        Write-Host "  Monitor job started (PS Job ID: $($job.Id))" -ForegroundColor Green
-    }
-
-    # --- Poll active jobs for completion ---
-    $completed = @()
-    foreach ($slot in $activeSlots) {
-        $job     = $slot.Job
-        $elapsed = ((Get-Date) - $slot.StartTime).TotalMinutes
-
-        # Check timeout
-        if ($elapsed -gt $slot.TimeoutMins) {
+            $exp = $queue.Dequeue()
             Write-Host ""
-            Write-Host "  TIMEOUT: $($slot.Label) exceeded ${elapsed:N0}min (limit: $($slot.TimeoutMins)min). Initiating teardown." -ForegroundColor Red
-            Stop-Job $job -ErrorAction SilentlyContinue
-            Remove-Job $job -Force -ErrorAction SilentlyContinue
+            Write-Host "------------------------------------------------------------" -ForegroundColor Cyan
+            Write-Host " LAUNCHING [$($exp.Index)/$($experiments.Count)]: $($exp.Label)" -ForegroundColor Cyan
+            Write-Host "  VM:        $($exp.VmName)"
+            Write-Host "  GCS:       gs://cltrainer-optuna-results/$($exp.GcsPrefix)/"
+            Write-Host "  Local:     $($exp.LocalDir)"
+            Write-Host "------------------------------------------------------------" -ForegroundColor Cyan
 
-            try {
-                # CRITICAL: Do not let salvage operations hang the orchestrator.
-                # Wrap in a background job with a strict temporal bound.
-                $salvageJob = Start-Job -ScriptBlock {
-                    param($LocalDir, $GcsPrefix, $VmName, $VmZone)
-                    if (-not (Test-Path $LocalDir)) { New-Item -ItemType Directory -Path $LocalDir -Force | Out-Null }
-                    $gcsBase = "gs://cltrainer-optuna-results/$GcsPrefix"
-                    gcloud storage cp "$gcsBase/pipeline_summary.json" "$LocalDir\pipeline_summary.json" 2>$null
-                    $canaryDir = Join-Path $LocalDir "registry\canary_output"
-                    if (-not (Test-Path $canaryDir)) { New-Item -ItemType Directory -Path $canaryDir -Force | Out-Null }
-                    gcloud storage cp -r "$gcsBase/production/*" "$canaryDir\" 2>$null
-                    # Capture serial console (survives VM crash, lost after deletion)
-                    $diagDir = Join-Path $LocalDir "crash_diagnostics"
-                    if (-not (Test-Path $diagDir)) { New-Item -ItemType Directory -Path $diagDir -Force | Out-Null }
-                    $serialOut = gcloud compute instances get-serial-port-output $VmName --zone=$VmZone 2>$null
-                    if ($serialOut) { $serialOut | Out-File -FilePath (Join-Path $diagDir "serial_console.log") -Encoding utf8 }
-                } -ArgumentList $slot.LocalDir, $slot.GcsPrefix, $slot.VmName, $slot.ActualZone
-
-                # Wait maximum 2 minutes for salvage - then forcibly stop it
-                Wait-Job $salvageJob -Timeout 120 | Out-Null
-                Stop-Job $salvageJob -ErrorAction SilentlyContinue
-                Remove-Job $salvageJob -Force -ErrorAction SilentlyContinue
-            } catch {
-                Write-Host "  WARNING: Artifact salvage failed during timeout handling." -ForegroundColor Yellow
-            } finally {
-                # GUARANTEED EXECUTION: Destroy the VM to free quota and stop billing
-                Remove-ExperimentVm -VmName $slot.VmName -VmZone $slot.ActualZone
+            # Delete any pre-existing VM with this name (clean slate)
+            $existing = gcloud compute instances describe $exp.VmName --zone=$Zone --format="get(status)" 2>$null
+            if ($existing) {
+                Write-Host "  Pre-existing VM found ($existing). Deleting for clean slate..." -ForegroundColor Yellow
+                gcloud compute instances delete $exp.VmName --zone=$Zone --quiet 2>$null
+                Start-Sleep -Seconds 10
             }
 
-            Send-BatchTelegram ("[TIMEOUT] *Timeout: $($slot.Label)*`n" +
-                "Exceeded $($slot.TimeoutMins)min limit`nVM deleted. Salvage attempted.")
-            $slot.Status       = "TIMEOUT"
-            $slot.FailureReason = "Exceeded timeout ($($slot.TimeoutMins)min)"
-            $batchState.failed++
-            
-            Write-Host ""
-            Write-Host "  [FATAL] A VM timed out ($($slot.Label)). Fail-Fast triggered!" -ForegroundColor Red
-            foreach ($active in $activeSlots) {
-                if ($active.VmName -ne $slot.VmName) {
-                    Write-Host "  [CLEANUP] Stopping other active VM: $($active.VmName)" -ForegroundColor Yellow
-                    Stop-Job $active.Job -ErrorAction SilentlyContinue
-                    Remove-ExperimentVm -VmName $active.VmName -VmZone $active.ActualZone
-                }
-            }
-            $batchState["completed_at"] = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-            Save-Progress $batchState
-            throw "Batch aborted due to timeout in experiment: $($slot.Label)"
-        }
+            # Deploy VM across fallback zones
+            $zoneList = $Zone -split ','
+            $deployExit = 1
+            $deployOutput = $null
+            $actualZone = $null
 
-        if ($job.State -in @("Completed", "Failed", "Stopped")) {
-            $jobOutput  = Receive-Job $job -ErrorAction SilentlyContinue
-            # Read exit code from temp file written by the monitor
-            $exitCode = 1
-            if ($slot.ExitCodeFile -and (Test-Path $slot.ExitCodeFile)) {
-                $raw = (Get-Content $slot.ExitCodeFile -Raw).Trim()
-                if ($raw -match '^\d+$') { $exitCode = [int]$raw }
-                Remove-Item $slot.ExitCodeFile -Force -ErrorAction SilentlyContinue
-            }
-            Remove-Job $job -Force -ErrorAction SilentlyContinue
+            foreach ($z in $zoneList) {
+                $z = $z.Trim()
+                $deployArgs = @(
+                    "-NoProfile", "-ExecutionPolicy", "Bypass",
+                    "-File", (Join-Path $ScriptDir "gcp_deploy_sweep.ps1"),
+                    "-VmName",            $exp.VmName,
+                    "-MasterConfig",      $exp.ConfigPath,
+                    "-Zone",              $z,
+                    "-MachineType",       $exp.MachineType,
+                    "-ProvisioningModel", $exp.Provisioning,
+                    "-JobName",           $exp.GcsPrefix
+                )
 
-            Write-Host ""
-            Write-Host "  Monitor finished for: $($slot.Label) (exit: $exitCode)" -ForegroundColor $(if ($exitCode -eq 0) { "Green" } else { "Yellow" })
+                Write-Host "  Deploying VM in zone $z..." -ForegroundColor Yellow
+                $deployOutput = & powershell @deployArgs 2>&1
+                $deployExit   = $LASTEXITCODE
 
-            # --- ARTIFACT VERIFICATION GATE ---
-            $localDir  = $slot.LocalDir
-            $gcsBase   = "gs://cltrainer-optuna-results/$($slot.GcsPrefix)"
-            $artOk     = Test-ArtifactsDownloaded -LocalDir $localDir -GcsBase $gcsBase -MaxRetries 3
-
-            if (-not $artOk) {
-                Send-BatchTelegram ("[WARNING] *Artifact Download Failed: $($slot.Label)*`n" +
-                    "pipeline_summary.json or logs not found locally after 3 retries.`n" +
-                    "VM will be deleted to free quota.")
-            }
-            $slot.ArtifactOk = $artOk
-
-            # --- CRASH DIAGNOSTICS (before deletion, only on failure) ---
-            if ($exitCode -ne 0 -or -not $artOk) {
-                Save-CrashDiagnostics -VmName $slot.VmName -VmZone $slot.ActualZone `
-                    -GcsPrefix $slot.GcsPrefix -LocalDir $slot.LocalDir
-            }
-
-            # --- DELETE VM (quota freed here) ---
-            Remove-ExperimentVm -VmName $slot.VmName -VmZone $slot.ActualZone
-
-            # --- Update status ---
-            if ($exitCode -eq 0 -and $artOk) {
-                $slot.Status  = "COMPLETED"
-                $batchState.completed++
-            } else {
-                $slot.Status       = "FAILED"
-                if (-not $artOk) {
-                    $slot.FailureReason = "Artifact download failed"
-                } elseif ($exitCode -eq 2) {
-                    $slot.FailureReason = "No log found (VM died before output)"
+                if ($deployExit -eq 0) {
+                    $actualZone = $z
+                    break
                 } else {
-                    $slot.FailureReason = "E2E pipeline incomplete (exit $exitCode)"
+                    Write-Host "  Failed to deploy in zone $z (exit $deployExit)." -ForegroundColor Yellow
+                    # Clean up zombie VM - it may have been created before the deploy step failed
+                    Write-Host "  Cleaning up zombie VM in zone $z to prevent leaks..." -ForegroundColor Yellow
+                    gcloud compute instances delete $exp.VmName --zone=$z --quiet 2>$null
                 }
-                $batchState.failed++
-                $slot.ExitCode = $exitCode
+            }
 
+            if ($deployExit -ne 0) {
+                $errText = ($deployOutput | Select-Object -Last 10) -join "`n"
+                Write-Host "  DEPLOY FAILED in all zones (last exit $deployExit):" -ForegroundColor Red
+                Write-Host $errText -ForegroundColor Red
+                Send-BatchTelegram ("[FAILED] *Deploy Failed: $($exp.Label)*`n" +
+                    "VM: ``$($exp.VmName)```n" +
+                    "Exit code: $deployExit`n" +
+                    "``````$errText``````")
+                # Always attempt to delete the VM - it may have been created before the
+                # verification step failed. Prevents VM leaks.
+                if ($actualZone) {
+                    Remove-ExperimentVm -VmName $exp.VmName -VmZone $actualZone
+                } else {
+                    Remove-ExperimentVm -VmName $exp.VmName -VmZone $zoneList[0].Trim()
+                }
+                $exp.Status       = "DEPLOY_FAILED"
+                $exp.FailureReason = "Deploy exit code $deployExit"
+                $batchState.failed++
+                $batchState.experiments += $exp
+                Save-Progress $batchState
+                continue
+            }
+
+            Write-Host "  VM deployed. Starting monitor background job..." -ForegroundColor Green
+
+            # Start monitor as background PS job
+            $monScript    = Join-Path $ScriptDir "gcp_monitor.ps1"
+            $vmName_      = $exp.VmName
+            $gcsPrefix_   = $exp.GcsPrefix
+            $label_       = $exp.Label
+            $batchId_     = $BatchId
+            $expIdx_      = $exp.Index
+            $expTotal_    = $experiments.Count
+            $tgEnabled_   = if ($DisableTelegram) { $false } else { $true }
+            $pollSecs_    = 90    # 90-second poll - fast enough to catch early-stopping completions
+            $projDir_     = $ProjectDir
+            $gcpBin_      = $gcloudBin
+            $exitCodeFile_= Join-Path $env:TEMP "monitor_exit_$($exp.VmName)_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+            $actualZone_  = $actualZone
+
+            $job = Start-Job -ScriptBlock {
+                param($monScript, $vmName, $gcsPrefix, $label, $batchId, $expIdx, $expTotal, $tgEnabled, $pollSecs, $projDir, $gcpBin, $exitCodeFile, $vmZone)
+                $env:PATH = "$gcpBin;$env:PATH"
+                Set-Location $projDir
+                # Build args array - cannot pass [switch] through -ArgumentList, so conditionally add -DisableTelegram
+                $monArgs = @(
+                    "-NoProfile", "-ExecutionPolicy", "Bypass",
+                    "-File", $monScript,
+                    "-VmName", $vmName,
+                    "-Zone", $vmZone,
+                    "-GcsPrefix", $gcsPrefix,
+                    "-ExperimentLabel", $label,
+                    "-BatchId", $batchId,
+                    "-ExperimentIndex", $expIdx,
+                    "-BatchTotal", $expTotal,
+                    "-PollIntervalSeconds", $pollSecs,
+                    "-ExitCodeFile", $exitCodeFile
+                )
+                if (-not $tgEnabled) { $monArgs += "-DisableTelegram" }
+                & powershell @monArgs
+                return $LASTEXITCODE
+            } -ArgumentList $monScript, $vmName_, $gcsPrefix_, $label_, $batchId_, $expIdx_, $expTotal_, $tgEnabled_, $pollSecs_, $projDir_, $gcloudBin, $exitCodeFile_, $actualZone_
+
+            $exp.StartTime    = Get-Date
+            $exp.Job          = $job
+            $exp.Status       = "RUNNING"
+            $exp.ExitCodeFile = $exitCodeFile_
+            $exp.ActualZone   = $actualZone
+            [void]$activeSlots.Add($exp)
+            Write-Host "  Monitor job started (PS Job ID: $($job.Id))" -ForegroundColor Green
+        }
+
+        # --- Poll active jobs for completion ---
+        $completed = @()
+        foreach ($slot in $activeSlots) {
+            $job     = $slot.Job
+            $elapsed = ((Get-Date) - $slot.StartTime).TotalMinutes
+
+            # Check timeout
+            if ($elapsed -gt $slot.TimeoutMins) {
                 Write-Host ""
-                Write-Host "  [FATAL] A VM failed ($($slot.Label)). Fail-Fast triggered!" -ForegroundColor Red
+                Write-Host "  TIMEOUT: $($slot.Label) exceeded ${elapsed:N0}min (limit: $($slot.TimeoutMins)min). Initiating teardown." -ForegroundColor Red
+                Stop-Job $job -ErrorAction SilentlyContinue
+                Remove-Job $job -Force -ErrorAction SilentlyContinue
+
+                try {
+                    # CRITICAL: Do not let salvage operations hang the orchestrator.
+                    # Wrap in a background job with a strict temporal bound.
+                    $salvageJob = Start-Job -ScriptBlock {
+                        param($LocalDir, $GcsPrefix, $VmName, $VmZone)
+                        if (-not (Test-Path $LocalDir)) { New-Item -ItemType Directory -Path $LocalDir -Force | Out-Null }
+                        $gcsBase = "gs://cltrainer-optuna-results/$GcsPrefix"
+                        gcloud storage cp "$gcsBase/pipeline_summary.json" "$LocalDir\pipeline_summary.json" 2>$null
+                        $canaryDir = Join-Path $LocalDir "registry\canary_output"
+                        if (-not (Test-Path $canaryDir)) { New-Item -ItemType Directory -Path $canaryDir -Force | Out-Null }
+                        gcloud storage cp -r "$gcsBase/production/*" "$canaryDir\" 2>$null
+                        # Capture serial console (survives VM crash, lost after deletion)
+                        $diagDir = Join-Path $LocalDir "crash_diagnostics"
+                        if (-not (Test-Path $diagDir)) { New-Item -ItemType Directory -Path $diagDir -Force | Out-Null }
+                        $serialOut = gcloud compute instances get-serial-port-output $VmName --zone=$VmZone 2>$null
+                        if ($serialOut) { $serialOut | Out-File -FilePath (Join-Path $diagDir "serial_console.log") -Encoding utf8 }
+                    } -ArgumentList $slot.LocalDir, $slot.GcsPrefix, $slot.VmName, $slot.ActualZone
+
+                    # Wait maximum 2 minutes for salvage - then forcibly stop it
+                    Wait-Job $salvageJob -Timeout 120 | Out-Null
+                    Stop-Job $salvageJob -ErrorAction SilentlyContinue
+                    Remove-Job $salvageJob -Force -ErrorAction SilentlyContinue
+                } catch {
+                    Write-Host "  WARNING: Artifact salvage failed during timeout handling." -ForegroundColor Yellow
+                } finally {
+                    # GUARANTEED EXECUTION: Destroy the VM to free quota and stop billing
+                    Remove-ExperimentVm -VmName $slot.VmName -VmZone $slot.ActualZone
+                }
+
+                Send-BatchTelegram ("[TIMEOUT] *Timeout: $($slot.Label)*`n" +
+                    "Exceeded $($slot.TimeoutMins)min limit`nVM deleted. Salvage attempted.")
+                $slot.Status       = "TIMEOUT"
+                $slot.FailureReason = "Exceeded timeout ($($slot.TimeoutMins)min)"
+                $batchState.failed++
+                
+                Write-Host ""
+                Write-Host "  [FATAL] A VM timed out ($($slot.Label)). Fail-Fast triggered!" -ForegroundColor Red
                 foreach ($active in $activeSlots) {
                     if ($active.VmName -ne $slot.VmName) {
                         Write-Host "  [CLEANUP] Stopping other active VM: $($active.VmName)" -ForegroundColor Yellow
@@ -782,40 +678,118 @@ while (-not $allDone) {
                 }
                 $batchState["completed_at"] = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
                 Save-Progress $batchState
-                throw "Batch aborted due to critical failure in experiment: $($slot.Label). Reason: $($slot.FailureReason)"
+                throw "Batch aborted due to timeout in experiment: $($slot.Label)"
             }
-            $slot.ExitCode = $exitCode
-            $completed    += $slot
 
-            Write-Host "  Batch progress: $($batchState.completed) done, $($batchState.failed) failed, $($queue.Count) queued" -ForegroundColor Cyan
-        } else {
-            # Still running - print a heartbeat
-            $elStr = "{0:N0}" -f $elapsed
-            Write-Host "[$(Get-Date -F 'HH:mm:ss')] $($slot.Label) - running ${elStr}m (job state: $($job.State))" -ForegroundColor Gray
+            if ($job.State -in @("Completed", "Failed", "Stopped")) {
+                $jobOutput  = Receive-Job $job -ErrorAction SilentlyContinue
+                # Read exit code from temp file written by the monitor
+                $exitCode = 1
+                if ($slot.ExitCodeFile -and (Test-Path $slot.ExitCodeFile)) {
+                    $raw = (Get-Content $slot.ExitCodeFile -Raw).Trim()
+                    if ($raw -match '^\d+$') { $exitCode = [int]$raw }
+                    Remove-Item $slot.ExitCodeFile -Force -ErrorAction SilentlyContinue
+                }
+                Remove-Job $job -Force -ErrorAction SilentlyContinue
+
+                Write-Host ""
+                Write-Host "  Monitor finished for: $($slot.Label) (exit: $exitCode)" -ForegroundColor $(if ($exitCode -eq 0) { "Green" } else { "Yellow" })
+
+                # --- ARTIFACT VERIFICATION GATE ---
+                $localDir  = $slot.LocalDir
+                $gcsBase   = "gs://cltrainer-optuna-results/$($slot.GcsPrefix)"
+                $artOk     = Test-ArtifactsDownloaded -LocalDir $localDir -GcsBase $gcsBase -MaxRetries 3
+
+                if (-not $artOk) {
+                    Send-BatchTelegram ("[WARNING] *Artifact Download Failed: $($slot.Label)*`n" +
+                        "pipeline_summary.json or logs not found locally after 3 retries.`n" +
+                        "VM will be deleted to free quota.")
+                }
+                $slot.ArtifactOk = $artOk
+
+                # --- CRASH DIAGNOSTICS (before deletion, only on failure) ---
+                if ($exitCode -ne 0 -or -not $artOk) {
+                    Save-CrashDiagnostics -VmName $slot.VmName -VmZone $slot.ActualZone `
+                        -GcsPrefix $slot.GcsPrefix -LocalDir $slot.LocalDir
+                }
+
+                # --- DELETE VM (quota freed here) ---
+                Remove-ExperimentVm -VmName $slot.VmName -VmZone $slot.ActualZone
+
+                # --- Update status ---
+                if ($exitCode -eq 0 -and $artOk) {
+                    $slot.Status  = "COMPLETED"
+                    $batchState.completed++
+                } else {
+                    $slot.Status       = "FAILED"
+                    if (-not $artOk) {
+                        $slot.FailureReason = "Artifact download failed"
+                    } elseif ($exitCode -eq 2) {
+                        $slot.FailureReason = "No log found (VM died before output)"
+                    } else {
+                        $slot.FailureReason = "E2E pipeline incomplete (exit $exitCode)"
+                    }
+                    $batchState.failed++
+                    $slot.ExitCode = $exitCode
+
+                    Write-Host ""
+                    Write-Host "  [FATAL] A VM failed ($($slot.Label)). Fail-Fast triggered!" -ForegroundColor Red
+                    foreach ($active in $activeSlots) {
+                        if ($active.VmName -ne $slot.VmName) {
+                            Write-Host "  [CLEANUP] Stopping other active VM: $($active.VmName)" -ForegroundColor Yellow
+                            Stop-Job $active.Job -ErrorAction SilentlyContinue
+                            Remove-ExperimentVm -VmName $active.VmName -VmZone $active.ActualZone
+                        }
+                    }
+                    $batchState["completed_at"] = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                    Save-Progress $batchState
+                    throw "Batch aborted due to critical failure in experiment: $($slot.Label). Reason: $($slot.FailureReason)"
+                }
+                $slot.ExitCode = $exitCode
+                $completed    += $slot
+
+                Write-Host "  Batch progress: $($batchState.completed) done, $($batchState.failed) failed, $($queue.Count) queued" -ForegroundColor Cyan
+            } else {
+                # Still running - print a heartbeat
+                $elStr = "{0:N0}" -f $elapsed
+                Write-Host "[$(Get-Date -F 'HH:mm:ss')] $($slot.Label) - running ${elStr}m (job state: $($job.State))" -ForegroundColor Gray
+            }
+        }
+
+        # Remove completed slots and add to state
+        foreach ($done in $completed) {
+            $activeSlots.Remove($done)
+            $batchState.experiments += @{
+                index            = $done.Index
+                label            = $done.Label
+                vm_name          = $done.VmName
+                gcs_prefix       = $done.GcsPrefix
+                local_dir        = $done.LocalDir
+                status           = $done.Status
+                exit_code        = $done.ExitCode
+                artifact_verified = $done.ArtifactOk
+                failure_reason   = $done.FailureReason
+                wall_time_min    = if ($done.StartTime) { [math]::Round(((Get-Date) - $done.StartTime).TotalMinutes, 1) } else { 0 }
+            }
+            Save-Progress $batchState
+        }
+
+        # Check termination condition
+        $allDone = ($queue.Count -eq 0 -and $activeSlots.Count -eq 0)
+        if (-not $allDone) { Start-Sleep -Seconds 30 }
+    }
+} finally {
+    # Teardown any remaining active VMs to prevent leaks
+    if ($activeSlots.Count -gt 0) {
+        Write-Host ""
+        Write-Host "============================================================" -ForegroundColor Yellow
+        Write-Host " TEARDOWN: Cleaning up active VMs on exit..." -ForegroundColor Yellow
+        Write-Host "============================================================" -ForegroundColor Yellow
+        foreach ($slot in $activeSlots) {
+            Write-Host "  Teardown VM: $($slot.VmName) in zone $($slot.ActualZone) ..." -ForegroundColor Yellow
+            gcloud compute instances delete $slot.VmName --zone=$slot.ActualZone --quiet 2>$null
         }
     }
-
-    # Remove completed slots and add to state
-    foreach ($done in $completed) {
-        $activeSlots.Remove($done)
-        $batchState.experiments += @{
-            index            = $done.Index
-            label            = $done.Label
-            vm_name          = $done.VmName
-            gcs_prefix       = $done.GcsPrefix
-            local_dir        = $done.LocalDir
-            status           = $done.Status
-            exit_code        = $done.ExitCode
-            artifact_verified = $done.ArtifactOk
-            failure_reason   = $done.FailureReason
-            wall_time_min    = if ($done.StartTime) { [math]::Round(((Get-Date) - $done.StartTime).TotalMinutes, 1) } else { 0 }
-        }
-        Save-Progress $batchState
-    }
-
-    # Check termination condition
-    $allDone = ($queue.Count -eq 0 -and $activeSlots.Count -eq 0)
-    if (-not $allDone) { Start-Sleep -Seconds 30 }
 }
 
 # ============================================================
@@ -870,11 +844,11 @@ if ($batchState.completed -gt 0) {
     $optWorkerCount = 0
     Write-Host "  Optimizer sizing: $($batchState.completed) experiments × 8 (2 metrics × 2 sides × 2 objectives) = $optTaskCount tasks → $optMachineType (workers=auto)" -ForegroundColor Cyan
 
-    foreach ($oz in $optZoneList) {
-        # Read exec_data / slippage from defaults for optimizer
-        $optExecData  = if ($defaults.exec_data) { $defaults.exec_data } else { "" }
-        $optSlippage  = if ($defaults.slippage_per_side) { [double]$defaults.slippage_per_side } else { 0 }
+    $manifestRaw = Get-Content $ManifestPath -Raw | ConvertFrom-Json
+    $optExecData = if ($manifestRaw.baseline.execution_workflow.execution_data_path) { $manifestRaw.baseline.execution_workflow.execution_data_path } else { "" }
+    $optSlippage = if ($manifestRaw.baseline.execution_workflow.slippage_multiplier) { [double]$manifestRaw.baseline.execution_workflow.slippage_multiplier } else { 0 }
 
+    foreach ($oz in $optZoneList) {
         $optArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\gcp\gcp_deploy_optimizer.ps1",
             "-BatchId", $BatchId,
             "-NTrials", $postOptTrials,
@@ -955,8 +929,6 @@ if ($batchState.completed -gt 0) {
             gcloud compute instances delete $optVmName --zone=$optActualZone --quiet 2>$null
 
             # --- Download Ensemble Results from Cloud ---
-            # Ensemble optimization now completes on the VM (step 4c).
-            # Download all artifacts: MDs, JSONs, and predictions.
             $topPairsPath = Join-Path $localBatch "top_pairs.json"
             if (Test-Path $topPairsPath) {
                 Write-Host ""
@@ -994,7 +966,7 @@ if ($batchState.completed -gt 0) {
 }
 
 # --- Generate Wall Clock Summary ---
-$sweepMachine = if ($defaults.machine_type) { $defaults.machine_type } else { "unknown" }
+$sweepMachine = $machineType
 $ScriptEndTracker = Get-Date
 $TotalScriptDurationMin = [math]::Round(($ScriptEndTracker - $ScriptStartTracker).TotalMinutes, 1)
 

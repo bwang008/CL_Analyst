@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Dict, Optional, Literal, Union
+from typing import List, Dict, Optional, Literal, Union, Any
 
 class SingleBarrierTarget(BaseModel):
     type: Literal["triple_barrier"]
@@ -81,3 +81,40 @@ class MasterConfig(BaseModel):
         except ValueError as e:
             raise ValueError(str(e))
         return v
+
+class InfrastructureConfig(BaseModel):
+    max_concurrent_vms: int = Field(0, description="Max concurrent VM count limit (0 means uncapped)")
+    max_concurrent_vcpus: int = Field(..., description="Max concurrent vCPU count limit")
+    vcpus_per_vm: int = Field(..., description="vCPU requirement per VM instance")
+    machine_type: str = Field("c2-standard-16", description="GCP machine type")
+    provisioning_model: Literal["STANDARD", "SPOT"] = Field("STANDARD", description="GCP VM provisioning strategy")
+    timeout_minutes: int = Field(120, description="Max execution duration in minutes")
+
+    @field_validator("max_concurrent_vcpus", "vcpus_per_vm", "timeout_minutes")
+    @classmethod
+    def validate_positive_ints(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("Must be strictly positive.")
+        return v
+
+    @field_validator("max_concurrent_vms")
+    @classmethod
+    def validate_non_negative_vms(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("Must be non-negative (0 means uncapped).")
+        return v
+
+class ExperimentConfig(BaseModel):
+    label: str
+    gcs_prefix: str
+    overrides: Dict[str, Any] = Field(default_factory=dict)
+
+class BatchSweepConfig(BaseModel):
+    comment: Optional[str] = Field(None, alias="_comment")
+    infrastructure: InfrastructureConfig
+    baseline: MasterConfig
+    experiments: List[ExperimentConfig]
+
+    model_config = {
+        "populate_by_name": True
+    }

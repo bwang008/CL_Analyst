@@ -2,44 +2,16 @@
 .SYNOPSIS
     Provisions a sweep VM, uploads code + downloads data from GCS, and launches the sweep pipeline.
 .DESCRIPTION
-    Unified deployment for batch sweep experiments:
-    - Provisions an n2-highcpu-48 VM (STANDARD by default)
-    - Uploads all code files needed for Optuna search + E2E pipeline
-    - Downloads dataset from GCS to the VM
-    - Launches vm_sweep_run.sh in a detached tmux session with search params
-    - Auto-shutdown after completion (unless -NoShutdown)
-.EXAMPLE
-    .\gcp_deploy_sweep.ps1
-    .\gcp_deploy_sweep.ps1 -ProvisioningModel STANDARD
-    .\gcp_deploy_sweep.ps1 -NoShutdown
+    Unified deployment for batch sweep experiments.
 #>
 
 param (
     [Parameter(Mandatory=$true)][string]$VmName,
     [Parameter(Mandatory=$true)][string]$MasterConfig,
-    [string]$AgentId = "default_agent",
     [string]$Zone = "us-east4-a",
-    [string]$MachineType = "c3-highcpu-44",
-    [int]$DiskSizeGB = 100,
-    [switch]$NoShutdown,
-    [string]$JobName = "",
-    [int]$Trials = 200,
-    [switch]$SkipProvision,
-    [switch]$UseBuckets,
-    [int]$MaxDepthMin = 3,
-    [int]$MaxDepthMax = 10,
-    [int]$NumLeavesMin = 15,
-    [int]$NumLeavesMax = 100,
-    [int]$MaxNEstimators = 2000,
-    [int]$EarlyStopping = 25,
-    [int]$MaxFolds = 5,
-    [double]$LearningRateMin = 0.005,
-    [double]$LearningRateMax = 0.02,
-    [int]$MinChildSamplesMin = 150,
-    [int]$MinChildSamplesMax = 400,
-    [double]$FeatureFractionMin = 0.3,
-    [double]$FeatureFractionMax = 1.0,
-    [string]$ProvisioningModel = "SPOT"
+    [string]$MachineType = "c2-standard-16",
+    [string]$ProvisioningModel = "STANDARD",
+    [string]$JobName = ""
 )
 
 # Add gcloud to PATH if not already there
@@ -54,6 +26,21 @@ $ProjectDir = Split-Path -Parent $ScriptDir
 $GcpUser = $env:USERNAME
 $RemoteHome = "/home/${GcpUser}"
 $RemoteProject = "${RemoteHome}/project"
+
+# Internal/default variables
+$DiskSizeGB = 100
+$SkipProvision = $false
+$NoShutdown = $false
+$Project = gcloud config get-value project --quiet
+
+# Parse the $MasterConfig JSON directly
+$cfg = Get-Content $MasterConfig -Raw | ConvertFrom-Json
+$symbol = $cfg.symbol
+$datasetVersion = $cfg.data_workflow.dataset_version
+$datasetName = "${symbol}_${datasetVersion}.parquet"
+$GcsDataPath = "gs://cltrainer-data/processed/$datasetName"
+$StrategyConfig = Split-Path -Leaf $cfg.execution_workflow.strategy_config_path
+
 $DataFileName = Split-Path -Leaf $GcsDataPath
 
 Write-Host ""
@@ -66,7 +53,6 @@ Write-Host "  Pricing:       $ProvisioningModel"
 Write-Host "  Data (GCS):    $GcsDataPath"
 Write-Host "  Strategy:      $StrategyConfig"
 Write-Host "  Auto-Shutdown: $(-not $NoShutdown)"
-Write-Host "  Buckets:       $($UseBuckets.IsPresent)"
 Write-Host "=====================================================" -ForegroundColor Magenta
 
 # --- [1/6] Provision VM (or reuse existing) ---
@@ -148,7 +134,7 @@ if (-not $SkipProvision) {
 # --- [2/6] Create directory structure ---
 Write-Host "`n[2/6] Creating directory structure..."
 gcloud compute ssh $VmName --zone=$Zone --quiet `
-    --command="mkdir -p $RemoteProject/agent $RemoteProject/src/live_execution/strategies $RemoteProject/src/features $RemoteProject/gcp $RemoteProject/configs/strategies $RemoteProject/models/optuna_studies $RemoteProject/reports $RemoteHome/data" 2>$null
+    --command="mkdir -p $RemoteProject/agent $RemoteProject/src/live_execution/strategies $RemoteProject/src/features $RemoteProject/gcp $RemoteProject/configs/strategies $RemoteProject/configs/sweeps $RemoteProject/models/optuna_studies $RemoteProject/reports $RemoteHome/data" 2>$null
 
 # --- [3/6] Upload code ---
 Write-Host "`n[3/6] Uploading code..."
@@ -173,7 +159,8 @@ $codeFiles = @(
     @{ Local = "src\features\__init__.py";       Remote = "src/features/" },
     @{ Local = "src\features\feature_buckets.py"; Remote = "src/features/" },
     @{ Local = "gcp\vm_sweep_run.sh";           Remote = "gcp/" },
-    @{ Local = "gcp\vm_e2e_pipeline.py";         Remote = "gcp/" }
+    @{ Local = "gcp\vm_e2e_pipeline.py";         Remote = "gcp/" },
+    @{ Local = "gcp\orchestrator.py";            Remote = "gcp/" }
 )
 
 # Upload .env for Telegram (if exists)
@@ -197,6 +184,18 @@ foreach ($file in $codeFiles) {
         Write-Host "  WARNING: Missing $($file.Local)" -ForegroundColor Yellow
     }
 }
+
+# Upload resolved master config JSON to the VM
+$remoteConfigDir = "$RemoteProject/configs/sweeps"
+$remoteConfigPath = "${remoteConfigDir}/$(Split-Path -Leaf $MasterConfig)"
+try {
+    gcloud compute scp $MasterConfig "${VmName}:${remoteConfigPath}" --zone=$Zone --quiet 2>$null
+} catch {
+    Write-Host "  Retrying scp for $(Split-Path -Leaf $MasterConfig)..." -ForegroundColor Yellow
+    Start-Sleep -Seconds 2
+    try { gcloud compute scp $MasterConfig "${VmName}:${remoteConfigPath}" --zone=$Zone --quiet 2>$null } catch { Write-Host "  Failed to copy MasterConfig" -ForegroundColor Red }
+}
+Write-Host "  Uploaded MasterConfig: $(Split-Path -Leaf $MasterConfig)"
 
 # Upload strategy config
 $configPath = Join-Path $ProjectDir "configs\strategies\$StrategyConfig"
@@ -230,32 +229,7 @@ Write-Host "  Data ready on VM!" -ForegroundColor Green
 # --- [5/6] Launch sweep run ---
 Write-Host "`n[5/6] Launching sweep pipeline in tmux..."
 
-$shutdownFlag = if ($NoShutdown) { "" } else { "--shutdown" }
-$bucketFlag = if ($UseBuckets) { " --use-buckets" } else { "" }
-
-# The dataset is now retrieved dynamically from the master config, so we only pass the config path
-# We also pass all the Optuna search bounds
-$runCmd = "cd $RemoteProject && source venv/bin/activate && tmux new-session -d -s sweep `"bash gcp/vm_sweep_run.sh --master-config=configs/sweeps/$MasterConfig $shutdownFlag $bucketFlag --agent-id=$AgentId --job-name=$JobName --n-trials=$Trials --max-depth-min=$MaxDepthMin --max-depth-max=$MaxDepthMax --num-leaves-min=$NumLeavesMin --num-leaves-max=$NumLeavesMax --max-n-estimators=$MaxNEstimators --early-stopping=$EarlyStopping --max-folds=$MaxFolds --learning-rate-min=$LearningRateMin --learning-rate-max=$LearningRateMax --min-child-samples-min=$MinChildSamplesMin --min-child-samples-max=$MinChildSamplesMax --feature-fraction-min=$FeatureFractionMin --feature-fraction-max=$FeatureFractionMax > sweep_tmux.log 2>&1`""
-    $cleanName = $datasetName -replace '^cl-[0-9]+[mh]_bk_', ''
-    $jobName = "sweep_$cleanName"
-}
-# Build search space flags (only pass if non-zero / manifest-provided)
-$searchFlags = ""
-if ($NTrials -gt 0)            { $searchFlags += " --n-trials=$NTrials" }
-if ($MaxDepthMin -gt 0)        { $searchFlags += " --max-depth-min=$MaxDepthMin" }
-if ($MaxDepthMax -gt 0)        { $searchFlags += " --max-depth-max=$MaxDepthMax" }
-if ($NumLeavesMin -gt 0)       { $searchFlags += " --num-leaves-min=$NumLeavesMin" }
-if ($NumLeavesMax -gt 0)       { $searchFlags += " --num-leaves-max=$NumLeavesMax" }
-if ($MaxNEstimators -gt 0)     { $searchFlags += " --max-n-estimators=$MaxNEstimators" }
-if ($EarlyStoppingRounds -gt 0){ $searchFlags += " --early-stopping=$EarlyStoppingRounds" }
-if ($MaxFolds -gt 0)           { $searchFlags += " --max-folds=$MaxFolds" }
-if ($LearningRateMin -gt 0)    { $searchFlags += " --learning-rate-min=$LearningRateMin" }
-if ($LearningRateMax -gt 0)    { $searchFlags += " --learning-rate-max=$LearningRateMax" }
-if ($MinChildSamplesMin -gt 0) { $searchFlags += " --min-child-samples-min=$MinChildSamplesMin" }
-if ($MinChildSamplesMax -gt 0) { $searchFlags += " --min-child-samples-max=$MinChildSamplesMax" }
-if ($FeatureFractionMin -gt 0) { $searchFlags += " --feature-fraction-min=$FeatureFractionMin" }
-if ($FeatureFractionMax -gt 0) { $searchFlags += " --feature-fraction-max=$FeatureFractionMax" }
-$launchCmd = "tmux kill-session -t sweep 2>/dev/null; tmux new-session -d -s sweep 'bash $RemoteProject/gcp/vm_sweep_run.sh $shutdownFlag --dataset=$datasetName --strategy=$StrategyConfig --metrics=$Metrics --job-name=$jobName$targetFlags$bucketFlag$execDataFlag$slippageFlag$searchFlags'"
+$launchCmd = "tmux kill-session -t sweep 2>/dev/null; tmux new-session -d -s sweep 'bash $RemoteProject/gcp/vm_sweep_run.sh --master-config=configs/sweeps/$(Split-Path -Leaf $MasterConfig) --gcs-data-bucket=gs://cltrainer-data/processed'"
 
 # Execute and capture both streams with explicit exit code handling
 $launchOutput = gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd 2>&1
@@ -290,7 +264,7 @@ Write-Host "=====================================================" -ForegroundCo
 Write-Host ""
 Write-Host "  VM:           $VmName"
 Write-Host "  Expected:     ~hours"
-$gcsOut = "gs://cltrainer-optuna-results/$jobName/"
+$gcsOut = "gs://cltrainer-optuna-results/$JobName/"
 Write-Host "  GCS output:   $gcsOut"
 Write-Host ""
 Write-Host "Useful commands:" -ForegroundColor Cyan
