@@ -2885,11 +2885,11 @@ class LiveTrader:
                 pending_cl_entry_qty, effective_position,
             )
 
+        # Log human-friendly PnL + bracket summary when holding a position
         tp_price_live = None
         sl_price_live = None
-
-        # Log human-friendly PnL + bracket summary when holding a position
         if current_position != 0:
+            # Find TP/SL bracket child orders
             # Find TP/SL bracket child orders
             try:
                 for evt in list(self._open_orders.values()):

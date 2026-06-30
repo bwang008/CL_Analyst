@@ -1,7 +1,14 @@
+"""
+TDD-TESTER AUTHORIZATION
+Target Implementation File: src/live_execution/live_trader.py
+Target Class/Function: LiveTrader._on_new_bar
+Status: FINALIZED
+Strict-Lock: TRUE (Implementation agents may NOT modify this file)
+"""
 import logging
 import pandas as pd
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from src.live_execution.live_trader import LiveTrader
 from src.live_execution.interfaces.execution_interface import StandardExecutionEvent
@@ -44,7 +51,8 @@ def test_check_entry_order_ttl_type_mismatch():
     assert trader._pending_entry_order_id is None
 
 
-def test_pnl_log_format(caplog):
+@patch('src.live_execution.live_trader.build_live_features')
+def test_pnl_log_format(mock_build_live_features, caplog):
     """
     Test that the LiveTrader logs the requested TP/SL format:
     TIMESTAMP [INFO] Symbol: CL | Position: X | Price: Y | TP: Z | SL: W
@@ -52,6 +60,7 @@ def test_pnl_log_format(caplog):
     trader = LiveTrader.__new__(LiveTrader)
     trader.exec_client = MagicMock()
     trader.exec_client.get_account_summary.return_value = {"cl_unrealized_pnl": 0.0, "cl_avg_cost": 70000.0}
+    trader.exec_client.get_position.return_value = 1
     trader.strategy = MagicMock()
     trader.strategy.evaluate.return_value = MagicMock(action="HOLD", buy_prob=0.0, sell_prob=0.0)
     trader.telemetry = MagicMock()
@@ -88,8 +97,13 @@ def test_pnl_log_format(caplog):
     trader._rollover_in_progress = False
     trader._check_time_barrier = MagicMock(return_value=False)
     trader._pending_entry_order_id = None
+    trader._needs_macro = False
+    trader.feature_names = ["Open", "High", "Low", "Close", "Volume"]
+    trader._lean_features = False
+    trader._front_month_str = "202607"
     
     features = pd.DataFrame([{"Open": 70.0, "High": 70.0, "Low": 70.0, "Close": 70.0, "Volume": 100}])
+    mock_build_live_features.return_value = features
     
     with caplog.at_level(logging.INFO):
         trader._on_new_bar(
@@ -121,10 +135,10 @@ def test_out_of_band_exit_routing(caplog):
     trader._open_orders = {}
     trader._last_decision_context_by_order_id = {}
     trader._processed_exit_order_ids = set()
-    trader._tp_order_ids = [999]
-    trader._sl_order_id = 888
+    trader._pending_entry_order_id = None
+    trader._front_month_str = "202607"
     
-    # Mock telemetry and exec client
+    # Track the system generated bracket IDs
     trader.telemetry = MagicMock()
     trader.telemetry.close_position = MagicMock()
     
@@ -173,3 +187,66 @@ def test_out_of_band_exit_routing(caplog):
     
     # Check that it did NOT attempt to place bracket children
     trader._place_bracket_children_on_fill.assert_not_called()
+
+
+@patch('src.live_execution.live_trader.build_live_features')
+def test_unbound_local_error_on_zero_position(mock_build_live_features, caplog):
+    """
+    Test to reproduce the UnboundLocalError when _on_new_bar is called with current_position=0.
+    """
+    trader = LiveTrader.__new__(LiveTrader)
+    trader._execution_symbol = "CL"
+    trader._virtual_ledger = {"5m": 0, "1h": 0}
+    trader._last_virtual_ledger_log = ""
+    
+    trader.strategy = MagicMock()
+    # Ensure it returns a HOLD signal so it doesn't try to place orders
+    trader.strategy.evaluate.return_value = MagicMock(
+        action="HOLD", buy_prob=0.0, sell_prob=0.0, probability=0.0, confidence_pct=0.0, signal_label="Hold", skip_reason="None"
+    )
+    
+    trader.telemetry = MagicMock()
+    trader.exec_client = MagicMock()
+    trader.exec_client.get_position.return_value = 0
+    trader.exec_client.get_account_summary.return_value = {"cl_unrealized_pnl": 0.0, "cl_avg_cost": 0.0}
+    
+    trader._open_orders = {}
+    trader._tp_order_ids = []
+    trader._sl_order_id = None
+    trader._tracked_tp_price = None
+    trader._tracked_sl_price = None
+    
+    trader._data_mute = False
+    trader._max_position_size = 1
+    trader._position_bars_held = 0
+    trader._front_month_last_close = 70.0
+    trader._atr_period_long = 14
+    trader._atr_period_short = 14
+    trader._atr_period = 14
+    trader._rollover_in_progress = False
+    trader._check_time_barrier = MagicMock(return_value=False)
+    trader._check_trailing_stop = MagicMock()
+    trader._data_mute_since = 0
+    trader._emergency_halt = False
+    trader._rollover_in_progress = False
+    trader._pending_entry_order_id = None
+    trader._needs_macro = False
+    trader.feature_names = []
+    trader.data_manager_1h = MagicMock()
+    trader._needs_macro = False
+    trader.feature_names = ["Open", "High", "Low", "Close", "Volume"]
+    trader._lean_features = False
+    trader._front_month_str = "202607"
+    
+    # Create mock dataframe for rolling_df with enough rows for ATR calculation (length=14)
+    features = pd.DataFrame([{"Open": 70.0, "High": 70.0, "Low": 70.0, "Close": 70.0, "Volume": 100}] * 15)
+    mock_build_live_features.return_value = features
+
+    
+    # Execute the method which should raise UnboundLocalError
+    with caplog.at_level(logging.INFO):
+        trader._on_new_bar(
+            bar_time=pd.Timestamp("2026-06-30 02:00:20", tz="UTC"),
+            rolling_df=features,
+            stream="5m"
+        )
