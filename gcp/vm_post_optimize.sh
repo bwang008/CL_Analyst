@@ -242,8 +242,7 @@ for exp in experiments:
     
     # Create local directory matching batch_progress layout
     local_dir = os.path.join(project_dir, 'reports', prefix)
-    canary_dir = os.path.join(local_dir, 'registry', 'canary_output')
-    os.makedirs(canary_dir, exist_ok=True)
+    os.makedirs(os.path.join(local_dir, 'registry'), exist_ok=True)
     
     # Download production artifacts zip
     gcs_zip = f'{bucket}/{prefix}/production/'
@@ -251,21 +250,28 @@ for exp in experiments:
     subprocess.run(['gsutil', '-m', 'cp', '-r', f'{gcs_zip}*.zip', local_dir], 
                     capture_output=True)
     
-    # Unzip into registry/canary_output
+    # Unzip into registry/
     import glob
     for zf in glob.glob(os.path.join(local_dir, '*.zip')):
         subprocess.run(['unzip', '-o', '-q', zf, '-d', os.path.join(local_dir, 'registry')],
                         capture_output=True)
         print(f'    Unpacked: {os.path.basename(zf)}')
     
+    # Detect artifact layout: v2 uses production_output/, legacy uses canary_output/
+    prod_dir = os.path.join(local_dir, 'registry', 'production_output')
+    canary_dir = os.path.join(local_dir, 'registry', 'canary_output')
+    if os.path.isdir(prod_dir) and not os.path.isdir(canary_dir):
+        print(f'    Layout: v2 (production_output/)')
+    elif os.path.isdir(canary_dir):
+        print(f'    Layout: legacy (canary_output/)')
+    else:
+        # Fallback: create canary_output for legacy compatibility
+        os.makedirs(canary_dir, exist_ok=True)
+        print(f'    Layout: unknown (created canary_output/)')
+    
     # Also download pipeline_summary.json
     subprocess.run(['gsutil', 'cp', f'{bucket}/{prefix}/pipeline_summary.json', 
                      os.path.join(local_dir, 'pipeline_summary.json')], capture_output=True)
-    # Copy to canary_output too for compatibility
-    summary_src = os.path.join(local_dir, 'pipeline_summary.json')
-    if os.path.exists(summary_src):
-        import shutil
-        shutil.copy2(summary_src, canary_dir)
     
     # Update local_dir in batch_progress to Linux path
     exp['local_dir'] = local_dir
@@ -277,10 +283,10 @@ print(f'  Updated batch_progress.json with {len(experiments)} experiments (Linux
 " 2>&1 | tee -a "$LOG"
 
 # Verify artifacts
-ARTIFACT_COUNT=$(find reports/ -name "*.csv" -path "*/canary_output/*" | wc -l)
+ARTIFACT_COUNT=$(find reports/ -name "*.csv" \( -path "*/canary_output/*" -o -path "*/production_output/*" \) | wc -l)
 echo "  Found $ARTIFACT_COUNT prediction CSVs" | tee -a "$LOG"
 
-CONFIG_COUNT=$(find reports/ -name "*.json" -path "*/canary_output/*" -not -name "pipeline_*" | wc -l)
+CONFIG_COUNT=$(find reports/ -name "*.json" \( -path "*/canary_output/*" -o -path "*/production_output/*" \) -not -name "pipeline_*" | wc -l)
 echo "  Found $CONFIG_COUNT ensemble configs" | tee -a "$LOG"
 
 if [ "$ARTIFACT_COUNT" -eq 0 ]; then
@@ -448,9 +454,9 @@ done
 [ -f "$BATCH_DIR/optimization_results.json" ] && gsutil cp "$BATCH_DIR/optimization_results.json" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
 
 # Upload all optimized config JSONs (legacy per-experiment configs)
-find reports/ -name "*_opt.json" -path "*/canary_output/*" -exec gsutil cp {} "$BUCKET/$GCS_OPT_PREFIX/configs/" \; 2>&1 | tee -a "$LOG" || true
-find reports/ -name "*_opt_long.json" -path "*/canary_output/*" -exec gsutil cp {} "$BUCKET/$GCS_OPT_PREFIX/configs/" \; 2>&1 | tee -a "$LOG" || true
-find reports/ -name "*_opt_short.json" -path "*/canary_output/*" -exec gsutil cp {} "$BUCKET/$GCS_OPT_PREFIX/configs/" \; 2>&1 | tee -a "$LOG" || true
+find reports/ -name "*_opt.json" \( -path "*/canary_output/*" -o -path "*/production_output/*" \) -exec gsutil cp {} "$BUCKET/$GCS_OPT_PREFIX/configs/" \; 2>&1 | tee -a "$LOG" || true
+find reports/ -name "*_opt_long.json" \( -path "*/canary_output/*" -o -path "*/production_output/*" \) -exec gsutil cp {} "$BUCKET/$GCS_OPT_PREFIX/configs/" \; 2>&1 | tee -a "$LOG" || true
+find reports/ -name "*_opt_short.json" \( -path "*/canary_output/*" -o -path "*/production_output/*" \) -exec gsutil cp {} "$BUCKET/$GCS_OPT_PREFIX/configs/" \; 2>&1 | tee -a "$LOG" || true
 
 # Upload generated batch configs (correctly-formatted with all top-level keys)
 if [ -d "$BATCH_DIR/configs" ]; then

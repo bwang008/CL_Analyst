@@ -922,14 +922,10 @@ class LiveTrader:
         still_pending = False
         try:
             for evt in list(self._open_orders.values()):
-                
-                
-                
-                
                 if evt.symbol != "CL":
                     continue
                 order_id = evt.order_id
-                if order_id == self._pending_entry_order_id:
+                if str(order_id) == str(self._pending_entry_order_id):
                     status_str = evt.status
                     if status_str in (
                         "Submitted", "PreSubmitted", "PendingSubmit",
@@ -2893,11 +2889,11 @@ class LiveTrader:
                     oid = evt.order_id
                     # Extract raw ib_insync order to read limit/stop prices
                     raw_order = getattr(getattr(evt, "raw_event", None), "order", None)
-                    if oid is not None and str(oid) in map(str, self._tp_order_ids):
+                    if oid is not None and str(oid) in map(str, getattr(self, '_tp_order_ids', [])):
                         lmt = getattr(raw_order, "lmtPrice", 0.0) or 0.0 if raw_order else 0.0
                         if lmt > 0:
                             tp_price_live = lmt
-                    elif oid is not None and str(oid) == str(self._sl_order_id):
+                    elif oid is not None and str(oid) == str(getattr(self, '_sl_order_id', None)):
                         aux = getattr(raw_order, "auxPrice", 0.0) or 0.0 if raw_order else 0.0
                         if aux > 0:
                             sl_price_live = aux
@@ -2983,8 +2979,9 @@ class LiveTrader:
             )
 
         # Update Thread-Safe Virtual Ledger (Dual Stream Netting)
-        if signal.action == "ENTER":
-            self._virtual_ledger[stream] = signal.direction * signal.lots
+        if signal.action in ("BUY", "SELL", "ENTER", "SHORT"):
+            direction = 1 if signal.action in ("BUY", "ENTER") else -1
+            self._virtual_ledger[stream] = direction * signal.lots
         elif signal.action == "EXIT":
             # Dead path: strategies no longer produce EXIT signals (bracket-only exits).
             # Kept as a safety net to zero the ledger if an EXIT somehow arrives.
@@ -2997,6 +2994,12 @@ class LiveTrader:
         )
         log.info(ledger_log)
         self._last_virtual_ledger_log = f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} [INFO] {ledger_log}"
+        
+        # Output specifically requested formatted position information
+        tp_str = f"{tp_price_live:.2f}" if tp_price_live else "N/A"
+        sl_str = f"{sl_price_live:.2f}" if sl_price_live else "N/A"
+        price_str = f"{current_price:.2f}" if current_price else "N/A"
+        log.info(f"Symbol: {self._execution_symbol} | Position: {current_position} | Price: {price_str} | TP: {tp_str} | SL: {sl_str}")
 
         # Shadow-replay logging: capture exact state for parity validation
         try:
@@ -3935,6 +3938,26 @@ class LiveTrader:
                 if hasattr(self, '_processed_exit_order_ids'):
                     self._processed_exit_order_ids.add(order_id)
                 exit_reason = "TP_HIT" if is_tp_fill else "SL_HIT"
+                
+                # Software OCA: cancel the other resting protective order(s)
+                if is_tp_fill:
+                    # Cancel the SL
+                    if getattr(self, '_sl_order_id', None):
+                        try:
+                            self.exec_client.cancel_order(str(self._sl_order_id))
+                            log.info(f"[OCA] Cancelled SL order {self._sl_order_id} after TP hit")
+                        except Exception as e:
+                            log.warning(f"[OCA] Failed to cancel SL order {self._sl_order_id}: {e}")
+                elif is_sl_fill:
+                    # Cancel all TPs
+                    for tp_id in getattr(self, '_tp_order_ids', []):
+                        if str(tp_id) != str(order_id):
+                            try:
+                                self.exec_client.cancel_order(str(tp_id))
+                                log.info(f"[OCA] Cancelled TP order {tp_id} after SL hit")
+                            except Exception as e:
+                                log.warning(f"[OCA] Failed to cancel TP order {tp_id}: {e}")
+                                
                 try:
                     self._telegram.send(
                         f"[CLOSED] *POSITION CLOSED* ({_tg_escape(exit_reason)})\n"

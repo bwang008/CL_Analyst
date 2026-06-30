@@ -121,7 +121,7 @@ def _unique_model_name(model_path: str) -> str:
     
     # Walk backwards from the model dir to find the experiment directory
     # (skip 'registry', 'canary_output', 'reports' and similar generic names)
-    skip_dirs = {"registry", "canary_output", "reports", "batch_runs", ".", ""}
+    skip_dirs = {"registry", "canary_output", "production_output", "reports", "batch_runs", ".", ""}
     experiment_dir = ""
     for part in reversed(parts[:-1]):
         if part.lower() not in skip_dirs:
@@ -176,7 +176,28 @@ def find_ohlcv_path(manifest_path: str) -> str:
     local_path = manifest.get("defaults", {}).get("local_data_path")
     if local_path and os.path.exists(local_path):
         return local_path
-        
+
+    # V2 manifest: baseline.data_workflow.dataset_version
+    baseline = manifest.get("baseline")
+    if baseline:
+        sym = (baseline.get("symbol") or "").strip()
+        dw = baseline.get("data_workflow") or {}
+        dv = (dw.get("dataset_version") or "").strip()
+        if dv:
+            # Mirror vm_post_optimize.sh logic: avoid redundant symbol prefix
+            if dv.upper().startswith(sym.upper()):
+                dataset_name = f"{dv}.parquet"
+            else:
+                dataset_name = f"{sym}_{dv}.parquet"
+            v2_candidates = [
+                os.path.join("data", "processed", dataset_name),
+                os.path.join("data", "processed", f"cl-1h_bk_{dv}.parquet"),
+            ]
+            for c in v2_candidates:
+                if os.path.exists(c):
+                    return c
+
+    # Legacy: defaults.gcs_data_path
     gcs_path = manifest.get("defaults", {}).get("gcs_data_path", "")
     # Extract filename from GCS path: gs://bucket/data/cl-1h_bk_HourSet_08.parquet
     basename = os.path.basename(gcs_path)
@@ -192,7 +213,7 @@ def find_ohlcv_path(manifest_path: str) -> str:
     for c in candidates:
         if os.path.exists(c):
             return c
-    raise FileNotFoundError(f"Cannot find local OHLCV for {gcs_path}. Tried: {candidates}")
+    raise FileNotFoundError(f"Cannot find local OHLCV for manifest {manifest_path}. Tried v2 and legacy paths.")
 
 
 def merge_predictions(long_path: str, short_path: str) -> pd.DataFrame:
@@ -976,6 +997,14 @@ def main():
             if local_dir and os.path.isdir(local_dir) and local_dir not in search_dirs:
                 search_dirs.append(local_dir)
         
+        # Build gcs_prefix -> local_dir mapping for v2 key expansion
+        prefix_to_local = {}
+        for exp in progress.get("experiments", []):
+            gcs_prefix = exp.get("gcs_prefix", "")
+            local_dir = exp.get("local_dir", "")
+            if gcs_prefix and local_dir:
+                prefix_to_local[os.path.normpath(local_dir)] = gcs_prefix
+
         for search_dir in search_dirs:
             for root, dirs, files in os.walk(search_dir):
                 for file in files:
@@ -987,7 +1016,24 @@ def main():
                     # Also support flat CSV naming: oos_predictions_<prefix>.csv
                     elif file.startswith("oos_predictions_") and file.endswith(".csv"):
                         stem = file.replace(".csv", "")
-                        pred_map[stem] = os.path.join(root, file)
+                        full_path = os.path.join(root, file)
+                        pred_map[stem] = full_path
+                        
+                        # V2 expansion: for files in production_output/, also register
+                        # under the experiment-prefixed key that unified_pair_optimizer expects.
+                        # e.g. "oos_predictions_sweep_long_logloss" -> 
+                        #      "oos_predictions_<gcs_prefix>_long_logloss"
+                        if "production_output" in root.replace("\\", "/"):
+                            # Find which experiment this belongs to
+                            norm_root = os.path.normpath(root)
+                            for local_path, gcs_prefix in prefix_to_local.items():
+                                if norm_root.startswith(local_path):
+                                    # Strip "oos_predictions_sweep_" and rebuild with gcs_prefix
+                                    if stem.startswith("oos_predictions_sweep_"):
+                                        suffix = stem[len("oos_predictions_sweep_"):]
+                                        expanded_key = f"oos_predictions_{gcs_prefix}_{suffix}"
+                                        pred_map[expanded_key] = full_path
+                                    break
         
         print(f"  Discovered {len(pred_map)} prediction paths across {len(search_dirs)} directories")
                     
@@ -1042,21 +1088,32 @@ def main():
             if not local_dir or not os.path.exists(local_dir):
                 local_dir = os.path.join(batch_dir, exp.get("gcs_prefix", ""))
             canary_dir = os.path.join(local_dir, "registry", "canary_output")
+            prod_dir = os.path.join(local_dir, "registry", "production_output")
+            # V2 fallback: production_output/ has the same role as canary_output/
+            # Check canary_dir has actual prediction CSVs (not just pipeline_summary.json)
+            canary_has_csvs = os.path.isdir(canary_dir) and any(
+                f.endswith(".csv") for f in os.listdir(canary_dir) if f.startswith("oos_predictions")
+            )
+            if not canary_has_csvs and os.path.isdir(prod_dir):
+                canary_dir = prod_dir
 
             prefix = exp.get("gcs_prefix", "")
             for metric in ["logloss", "average_precision"]:
-                # Try new naming convention (with gcs_prefix), fall back to legacy
+                # Try new naming convention (with gcs_prefix), fall back to legacy, then v2
                 long_pred_new = os.path.join(canary_dir, f"oos_predictions_{prefix}_long_{metric}.csv")
                 long_pred_old = os.path.join(canary_dir, f"oos_predictions_long_{metric}.csv")
-                long_pred = long_pred_new if os.path.exists(long_pred_new) else long_pred_old
+                long_pred_v2  = os.path.join(canary_dir, f"oos_predictions_sweep_long_{metric}.csv")
+                long_pred = next((p for p in [long_pred_new, long_pred_old, long_pred_v2] if os.path.exists(p)), long_pred_v2)
 
                 short_pred_new = os.path.join(canary_dir, f"oos_predictions_{prefix}_short_{metric}.csv")
                 short_pred_old = os.path.join(canary_dir, f"oos_predictions_short_{metric}.csv")
-                short_pred = short_pred_new if os.path.exists(short_pred_new) else short_pred_old
+                short_pred_v2  = os.path.join(canary_dir, f"oos_predictions_sweep_short_{metric}.csv")
+                short_pred = next((p for p in [short_pred_new, short_pred_old, short_pred_v2] if os.path.exists(p)), short_pred_v2)
 
                 ens_config_new = os.path.join(canary_dir, f"{prefix}_{metric}.json")
                 ens_config_old = os.path.join(canary_dir, f"ensemble_config_{metric}.json")
-                ens_config = ens_config_new if os.path.exists(ens_config_new) else ens_config_old
+                ens_config_v2  = os.path.join(canary_dir, f"sweep_{metric}.json")
+                ens_config = next((p for p in [ens_config_new, ens_config_old, ens_config_v2] if os.path.exists(p)), ens_config_v2)
 
                 if not os.path.exists(ens_config):
                     print(f"  Skipping {label}/{metric}: no ensemble config")

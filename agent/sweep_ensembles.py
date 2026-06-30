@@ -51,8 +51,9 @@ def _unique_model_name(model_path: str) -> str:
     basename = parts[-1]  # e.g. "E2E_HourSet_10_long_logloss"
     
     # Walk backwards from the model dir to find the experiment directory
-    # (skip 'registry', 'canary_output', 'reports' and similar generic names)
-    skip_dirs = {"registry", "canary_output", "reports", "batch_runs", ".", ""}
+    # (skip 'registry', 'canary_output', 'production_output', 'reports' and similar
+    # generic names).  Must match batch_post_optimizer.py._unique_model_name() exactly.
+    skip_dirs = {"registry", "canary_output", "production_output", "reports", "batch_runs", ".", ""}
     experiment_dir = ""
     for part in reversed(parts[:-1]):
         if part.lower() not in skip_dirs:

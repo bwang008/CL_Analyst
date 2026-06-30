@@ -30,6 +30,18 @@ def parse_experiment_key(key, direction):
     experiment_id = rest[idx+1:]
     return sweep_prefix, experiment_id, metric
 
+def _layout_subdir(sweep: str) -> str:
+    """Return the artifact-layout subdir for a sweep.
+
+    v2 (E2E) pipelines emit artifacts under ``registry/production_output/``;
+    legacy canary runs used ``registry/canary_output/``.  Prefer the v2 layout
+    when present, falling back to the legacy name for backward compatibility.
+    """
+    prod = os.path.join("reports", sweep, "registry", "production_output")
+    if os.path.isdir(prod):
+        return "production_output"
+    return "canary_output"
+
 def build_config(opt_result, objective, ensemble_idx, batch_dir, date_str, dataset_tag, base_config):
     # opt_result key example: "sweep...|sweep..."
     keys = list(opt_result.keys())
@@ -192,28 +204,31 @@ def main():
                 cfg["models"] = {"long": {}, "short": {}}
 
             # Merged predictions
+            # Resolve artifact layout per sweep: v2 emits production_output/, legacy canary_output/
+            long_dir = _layout_subdir(long_sweep)
+            short_dir = _layout_subdir(short_sweep)
             long_oos_key = f"oos_predictions_{long_sweep}_long_{long_metric}"
             short_oos_key = f"oos_predictions_{short_sweep}_short_{short_metric}"
-            merged_csv_path = os.path.join("reports", long_sweep, "registry", "canary_output", f"_merged_ens_{long_oos_key}_vs_{short_oos_key}.csv")
-            
+            merged_csv_path = os.path.join("reports", long_sweep, "registry", long_dir, f"_merged_ens_{long_oos_key}_vs_{short_oos_key}.csv")
+
             use_merged = os.path.isfile(merged_csv_path)
             predictions_dst = os.path.join(predictions_dir, predictions_name)
-            
+
             if use_merged:
                 shutil.copy2(merged_csv_path, predictions_dst)
                 pred_path_workspace = os.path.join(args.batch_dir, "predictions", predictions_name).replace("\\", "/")
                 pred_path_long = pred_path_workspace
                 pred_path_short = pred_path_workspace
             else:
-                pred_path_long = os.path.join("reports", long_sweep, "registry", "canary_output", f"{long_oos_key}.csv").replace("\\", "/")
-                pred_path_short = os.path.join("reports", short_sweep, "registry", "canary_output", f"{short_oos_key}.csv").replace("\\", "/")
+                pred_path_long = os.path.join("reports", long_sweep, "registry", long_dir, f"{long_oos_key}.csv").replace("\\", "/")
+                pred_path_short = os.path.join("reports", short_sweep, "registry", short_dir, f"{short_oos_key}.csv").replace("\\", "/")
 
             cfg["models"]["long"]["experiment_id"] = f"{long_exp}_long_{long_metric}"
-            cfg["models"]["long"]["model_path"] = f"reports/{long_sweep}/registry/canary_output/registry/{long_exp}_long_{long_metric}/final_model.pkl"
+            cfg["models"]["long"]["model_path"] = f"reports/{long_sweep}/registry/{long_dir}/registry/{long_exp}_long_{long_metric}/final_model.pkl"
             cfg["models"]["long"]["predictions_path"] = pred_path_long
-            
+
             cfg["models"]["short"]["experiment_id"] = f"{short_exp}_short_{short_metric}"
-            cfg["models"]["short"]["model_path"] = f"reports/{short_sweep}/registry/canary_output/registry/{short_exp}_short_{short_metric}/final_model.pkl"
+            cfg["models"]["short"]["model_path"] = f"reports/{short_sweep}/registry/{short_dir}/registry/{short_exp}_short_{short_metric}/final_model.pkl"
             cfg["models"]["short"]["predictions_path"] = pred_path_short
 
             if not regression_triggered:
