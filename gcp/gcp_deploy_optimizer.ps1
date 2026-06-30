@@ -20,7 +20,9 @@ param(
     [string]$Project = "cltrainer",
     [string]$ProvisioningModel = "STANDARD",
     [int]$NTrials = 500,
-    [int]$HoldoutMonths = 4,
+    # DEPRECATED / IGNORED: holdout is read authoritatively from the manifest
+    # (post_optimizer_holdout_months) by vm_post_optimize.sh. Passing this has no effect.
+    [int]$HoldoutMonths = 0,
     [int]$Workers = 0,
     [switch]$NoShutdown,
     [switch]$NoMonitor,
@@ -259,6 +261,28 @@ try {
     gcloud compute ssh $VmName --zone=$Zone --command="find $RemoteProject -name '*.sh' -exec sed -i 's/\r$//' {} + && chmod +x $RemoteProject/gcp/*.sh" --quiet 2>$null
 } catch {}
 Write-Host "  Line endings fixed." -ForegroundColor Green
+
+# --- [4b/7] Verify uploaded code integrity ---
+# Guards against stale-disk reuse (fixed VM name) + silently-swallowed scp errors:
+# scp runs with 2>$null and "Code uploaded!" prints unconditionally, so a failed
+# overwrite on a reused boot disk would run OLD code. Hash a sentinel file on the VM
+# and compare to local; abort BEFORE launch on mismatch.
+Write-Host "`n[4b/7] Verifying uploaded code matches local..."
+$localSweep  = Join-Path $ProjectDir "agent\sweep_ensembles.py"
+$remoteSweep = "$RemoteProject/agent/sweep_ensembles.py"
+$localHash   = (Get-FileHash -Algorithm SHA256 -Path $localSweep).Hash.ToLower()
+$remoteHash  = gcloud compute ssh $VmName --zone=$Zone --quiet `
+    --command="sha256sum '$remoteSweep' 2>/dev/null | awk '{print `$1}'" 2>$null
+if ($remoteHash) { $remoteHash = $remoteHash.ToString().Trim().ToLower() }
+if ($remoteHash -ne $localHash) {
+    Write-Host "  FATAL: sweep_ensembles.py on VM does NOT match local copy!" -ForegroundColor Red
+    Write-Host "    local : $localHash"  -ForegroundColor Red
+    Write-Host "    remote: $remoteHash" -ForegroundColor Red
+    Write-Host "  Aborting BEFORE launch to prevent running stale code." -ForegroundColor Red
+    Send-TelegramAlert "[ABORT] Code integrity check failed`nBatch: $BatchId`nVM: $VmName`nsweep_ensembles.py hash mismatch - stale code on disk. Delete the VM and re-run on a clean slate."
+    exit 4
+}
+Write-Host "  Code integrity verified (sweep_ensembles.py SHA256 matches)." -ForegroundColor Green
 
 # --- [5/7] Launch optimizer ---
 Write-Host "`n[5/7] Launching post-optimizer in tmux..."

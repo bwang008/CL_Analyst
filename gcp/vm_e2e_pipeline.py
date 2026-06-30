@@ -1106,11 +1106,15 @@ def main():
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"Dataset not found at derived path: {data_path}")
 
-    # Resolve Slippage
+    # Resolve Slippage.
+    # ABSOLUTE price-units per side, taken directly from the manifest (single source of
+    # truth) — identical semantics to the post-optimizer stage. For CL, 0.01 == 1 tick.
+    # (Historically this was base_ticks * slippage_multiplier, which disagreed with the
+    # post-opt stage's raw-absolute use of the same field and caused the -$2.5M PnL bug.)
     from src.core.instrument_master import get_instrument
     instrument = get_instrument(master_config.symbol)
-    base_slippage_points = instrument.slippage_ticks * instrument.tick_size
-    resolved_slippage = base_slippage_points * master_config.execution_workflow.slippage_multiplier
+    one_tick = instrument.slippage_ticks * instrument.tick_size
+    resolved_slippage = master_config.execution_workflow.slippage_per_side
 
     targets_arg = master_config.training_workflow.target_columns
 
@@ -1121,7 +1125,7 @@ def main():
     print(f"  Data Path:  {data_path}")
     print(f"  Strategy:   {master_config.execution_workflow.strategy_config_path}")
     print(f"  Targets:    {targets_arg}")
-    print(f"  Slippage:   {resolved_slippage} points (ticks: {instrument.slippage_ticks}, mult: {master_config.execution_workflow.slippage_multiplier})")
+    print(f"  Slippage:   {resolved_slippage} points/side (absolute, from manifest slippage_per_side; 1 tick = {one_tick})")
     print(f"============================================================")
 
     if args.dry_run:

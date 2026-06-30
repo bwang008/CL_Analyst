@@ -1,3 +1,8 @@
+---
+name: generate-data
+description: Generate a rich feature dataset (Parquet) from raw exchange data by processing it through the pipeline
+---
+
 # /generate-data — Feature Generation Pipeline
 
 Generate a rich feature dataset (Parquet) from raw exchange data by processing it through the AlphaFactory, MacroFeatureEngine, and Target Generators using a Pydantic `DataMap` JSON config.

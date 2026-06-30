@@ -78,7 +78,8 @@
       }
     },
     "execution_workflow": {
-      "slippage_multiplier": 0.01,
+      "slippage_per_side": 0.01,
+      "opt_mode": "ensemble",
       "execution_data_path": null,
       "strategy_config_path": "configs/strategies/hourly_ensemble_010.json"
     }

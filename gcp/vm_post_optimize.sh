@@ -96,7 +96,9 @@ cd "$PROJECT_DIR"
 # Defaults
 BATCH_ID=""
 N_TRIALS=500
-HOLDOUT_MONTHS=4
+# HOLDOUT_MONTHS is NOT defaulted here — it is read authoritatively from the manifest
+# (post_optimizer_holdout_months) below. The manifest is the single source of truth.
+HOLDOUT_MONTHS=""
 WORKERS=0
 SHUTDOWN=false
 OBJECTIVE="both"
@@ -110,7 +112,9 @@ for arg in "$@"; do
     case "$arg" in
         --batch-id=*) BATCH_ID="${arg#*=}" ;;
         --n-trials=*) N_TRIALS="${arg#*=}" ;;
-        --holdout-months=*) HOLDOUT_MONTHS="${arg#*=}" ;;
+        # --holdout-months is intentionally IGNORED if passed: the manifest's
+        # post_optimizer_holdout_months is authoritative (set after manifest parse below).
+        --holdout-months=*) : ;;
         --workers=*) WORKERS="${arg#*=}" ;;
         --objective=*) OBJECTIVE="${arg#*=}" ;;
         --sweep-mode=*) SWEEP_MODE="${arg#*=}" ;;
@@ -133,7 +137,7 @@ echo " POST-OPTIMIZER VM RUN" | tee -a "$LOG"
 echo "============================================================" | tee -a "$LOG"
 echo "  Batch ID:      $BATCH_ID" | tee -a "$LOG"
 echo "  N Trials:      $N_TRIALS" | tee -a "$LOG"
-echo "  Holdout:       $HOLDOUT_MONTHS months" | tee -a "$LOG"
+echo "  Holdout:       (read from manifest below)" | tee -a "$LOG"
 echo "  Workers:       $WORKERS" | tee -a "$LOG"
 echo "  Objective:     $OBJECTIVE" | tee -a "$LOG"
 echo "  Sweep Mode:    $SWEEP_MODE" | tee -a "$LOG"
@@ -150,11 +154,18 @@ mkdir -p "$BATCH_DIR"
 gsutil cp "$BUCKET/$GCS_OPT_PREFIX/batch_progress.json" "$BATCH_DIR/batch_progress.json" 2>&1 | tee -a "$LOG" || { echo "  FATAL: batch_progress.json download failed!" | tee -a "$LOG"; exit 1; }
 gsutil cp "$BUCKET/$GCS_OPT_PREFIX/manifest.json" "$BATCH_DIR/manifest.json" 2>&1 | tee -a "$LOG" || { echo "  FATAL: manifest.json download failed!" | tee -a "$LOG"; exit 1; }
 
-# Extract OHLCV GCS path + strategy/exec/slippage from manifest.
+# Extract OHLCV path + strategy/exec/slippage/holdout from manifest.
+# The MANIFEST IS THE SINGLE SOURCE OF TRUTH: every operational parameter is REQUIRED
+# here and parsing FAILS LOUDLY if any is missing — no silent default may stand in.
 # Supports v2 manifest (baseline.* structure) and legacy (defaults.* structure).
-_PARSED=$(python3 - "$BATCH_DIR/manifest.json" <<'PYEOF'
+_PARSED=$(python3 - "$BATCH_DIR/manifest.json" <<'PYEOF' 2>&1
 import json, os, sys
 m = json.load(open(sys.argv[1]))
+
+def fail(msg):
+    sys.stderr.write("MANIFEST ERROR: " + msg + "\n")
+    sys.exit(1)
+
 b = m.get("baseline")
 if b:  # v2 manifest format
     sym = (b.get("symbol") or "").strip()
@@ -165,33 +176,64 @@ if b:  # v2 manifest format
     else:
         dataset_name = f"{sym}_{dv}.parquet"
     ohlcv = f"gs://cltrainer-optuna-results/data/{dataset_name}"
-    ew = b.get("execution_workflow", {}) or {}
-    strat = os.path.basename(ew.get("strategy_config_path") or "hourly_ensemble_010.json")
+    ew = b.get("execution_workflow") or {}
+    strat_path = ew.get("strategy_config_path")
+    if not strat_path:
+        fail("baseline.execution_workflow.strategy_config_path is required (no default).")
+    strat = os.path.basename(strat_path)
     exec_data = ew.get("execution_data_path") or ""
-    slip = ew.get("slippage_multiplier", 0)
+    if ew.get("slippage_per_side") is None:
+        fail("baseline.execution_workflow.slippage_per_side is required (no default).")
+    slip = ew["slippage_per_side"]
+    opt = (b.get("training_workflow") or {}).get("optuna") or {}
+    if opt.get("post_optimizer_holdout_months") is None:
+        fail("baseline.training_workflow.optuna.post_optimizer_holdout_months is required (no default).")
+    holdout = opt["post_optimizer_holdout_months"]
 else:  # legacy manifest format
-    d = m.get("defaults", {}) or {}
-    ohlcv = d.get("gcs_data_path", "") or ""
-    strat = d.get("strategy_config", "hourly_ensemble_010.json")
-    exec_data = d.get("exec_data", "") or ""
-    slip = d.get("slippage_per_side", "0")
+    d = m.get("defaults") or {}
+    ohlcv = d.get("gcs_data_path") or ""
+    strat = d.get("strategy_config") or ""
+    if not strat:
+        fail("defaults.strategy_config is required (no default).")
+    exec_data = d.get("exec_data") or ""
+    if d.get("slippage_per_side") is None:
+        fail("defaults.slippage_per_side is required (no default).")
+    slip = d["slippage_per_side"]
+    if d.get("post_optimizer_holdout_months") is None:
+        fail("defaults.post_optimizer_holdout_months is required (no default).")
+    holdout = d["post_optimizer_holdout_months"]
+
+if not ohlcv:
+    fail("could not resolve OHLCV gcs data path from manifest.")
+if float(slip) > 0.5:
+    fail(f"slippage_per_side={slip} is implausibly large (>$0.50/side). This is the -$2.5M bug class; aborting.")
+
 print(ohlcv)
 print(strat)
 print(exec_data)
-print(slip if slip is not None else 0)
+print(slip)
+print(holdout)
 PYEOF
 )
+if [ $? -ne 0 ]; then
+    echo "  FATAL: manifest parsing failed — a required parameter is missing or invalid." | tee -a "$LOG"
+    echo "$_PARSED" | tee -a "$LOG"
+    exit 1
+fi
 mapfile -t _MF <<< "$_PARSED"
 OHLCV_GCS="${_MF[0]}"
 STRATEGY_CONFIG="${_MF[1]}"
 EXEC_DATA_GCS="${_MF[2]}"
 SLIPPAGE_PER_SIDE="${_MF[3]}"
+HOLDOUT_MONTHS="${_MF[4]}"   # authoritative: from manifest post_optimizer_holdout_months
 OHLCV_BASENAME=$(basename "$OHLCV_GCS")
 echo "  OHLCV GCS path: $OHLCV_GCS" | tee -a "$LOG"
 echo "  Strategy config: $STRATEGY_CONFIG" | tee -a "$LOG"
+echo "  Slippage/side:  $SLIPPAGE_PER_SIDE  (absolute price units, from manifest)" | tee -a "$LOG"
+echo "  Holdout:        $HOLDOUT_MONTHS months (from manifest)" | tee -a "$LOG"
 
-if [ -z "$OHLCV_GCS" ]; then
-    echo "  ERROR: No gcs_data_path found in manifest!" | tee -a "$LOG"
+if [ -z "$HOLDOUT_MONTHS" ]; then
+    echo "  FATAL: HOLDOUT_MONTHS empty after manifest parse — refusing to run." | tee -a "$LOG"
     exit 1
 fi
 
@@ -348,6 +390,21 @@ if [ "$OPT_MODE" = "ensemble" ]; then
         --no-filter \
         $OPT_ARGS \
         2>&1 | tee -a "$LOG"
+
+    # Generate ensemble backtest artifacts (markdown verification reports).
+    # Mirrors the individual-mode branch; inputs (optimization_results_ensembles_*.json,
+    # manifest.json, registry/{production_output|canary_output}/) are all produced above.
+    echo "" | tee -a "$LOG"
+    echo "  Generating ensemble backtest artifacts..." | tee -a "$LOG"
+    ENS_ART_ARGS="--batch-dir $BATCH_DIR --data data/processed/$OHLCV_BASENAME"
+    if [ -n "$EXEC_DATA_PATH" ]; then
+        ENS_ART_ARGS="$ENS_ART_ARGS --exec-data $EXEC_DATA_PATH"
+    fi
+    if (( $(echo "$SLIPPAGE_PER_SIDE > 0" | bc -l) )); then
+        ENS_ART_ARGS="$ENS_ART_ARGS --slippage-per-side $SLIPPAGE_PER_SIDE"
+    fi
+    python agent/generate_ensemble_artifacts.py $ENS_ART_ARGS 2>&1 | tee -a "$LOG"
+    echo "  Ensemble backtest artifacts complete." | tee -a "$LOG"
 else
     # --- [3b/5] SKIPPED (individual mode) ---
     echo "" | tee -a "$LOG"

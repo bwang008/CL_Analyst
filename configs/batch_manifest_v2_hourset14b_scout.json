@@ -33,7 +33,7 @@
       "gcs_base_dir": "gs://cltrainer-optuna-results/scout"
     },
     "execution_workflow": {
-      "slippage_multiplier": 0.01,
+      "slippage_per_side": 0.01,
       "strategy_config_path": "configs/strategies/hourly_ensemble_010.json"
     }
   },

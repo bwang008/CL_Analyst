@@ -1,5 +1,5 @@
 {
-  "_comment": "HourSet_14B CANARY PARITY - reproduces batch_20260626_0521_CANARY_V1 through the v2 pipeline. 2-way split (holdout_cutoff_date null) = full OOS; slippage_multiplier 1.0 = 0.01 absolute to match old run.",
+  "_comment": "HourSet_14B CANARY PARITY - reproduces batch_20260626_0521_CANARY_V1 through the v2 pipeline. 2-way split (holdout_cutoff_date null) = full OOS. NOTE: slippage_per_side is passed through to backtest_engine as ABSOLUTE price-units slippage_per_side (no tick-size conversion in vm_post_optimize.sh), so 0.01 = $0.01/side = matches old run. 1.0 here previously caused $2k/trade slippage and -$2.5M PnL.",
   "infrastructure": {
     "max_concurrent_vms": 12,
     "max_concurrent_vcpus": 288,
@@ -55,7 +55,8 @@
       }
     },
     "execution_workflow": {
-      "slippage_multiplier": 1.0,
+      "slippage_per_side": 0.01,
+      "opt_mode": "ensemble",
       "execution_data_path": null,
       "strategy_config_path": "configs/strategies/hourly_ensemble_010.json"
     }

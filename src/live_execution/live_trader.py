@@ -901,6 +901,8 @@ class LiveTrader:
         # Clear TP/SL order tracking
         self._tp_order_ids = []
         self._sl_order_id = None
+        self._tracked_tp_price = None
+        self._tracked_sl_price = None
         self._active_trade_id: Optional[str] = None
 
     def _check_entry_order_ttl(self, bar_time: pd.Timestamp) -> None:
@@ -922,7 +924,7 @@ class LiveTrader:
         still_pending = False
         try:
             for evt in list(self._open_orders.values()):
-                if evt.symbol != "CL":
+                if evt.symbol != self._execution_symbol:
                     continue
                 order_id = evt.order_id
                 if str(order_id) == str(self._pending_entry_order_id):
@@ -1079,10 +1081,10 @@ class LiveTrader:
                 )
                 return
             for evt in list(self._open_orders.values()):
-                if evt.symbol != "CL":
+                if evt.symbol != self._execution_symbol:
                     continue
                 order_id = evt.order_id
-                if order_id != self._sl_order_id:
+                if str(order_id) != str(self._sl_order_id):
                     continue
                 # Extract raw ib_insync order to read/modify auxPrice
                 raw_order = getattr(getattr(evt, "raw_event", None), "order", None)
@@ -1095,6 +1097,7 @@ class LiveTrader:
                     order_id, old_sl, new_sl,
                 )
                 self._trailing_activated = True
+                self._tracked_sl_price = new_sl  # Update local cache
                 # Persist new SL price to ledger
                 if self._active_trade_id is not None:
                     try:
@@ -1176,7 +1179,7 @@ class LiveTrader:
                         event_id=event_id,
                         event_type="POSITION_CLOSED_OOB",
                         event_timestamp_utc=event_ts,
-                        symbol="CL",
+                        symbol=self._execution_symbol,
                         status="CLOSED",
                         **self._base_tradebook_fields(),
                     )
@@ -1414,6 +1417,8 @@ class LiveTrader:
             )
             for evt in open_trades:
                 oid = evt.order_id
+                if oid is not None:
+                    self._open_orders[oid] = evt
                 if oid is not None and str(oid) == str(tp_order_id):
                     tp_found = True
                 elif oid is not None and str(oid) == str(sl_order_id):
@@ -1425,9 +1430,10 @@ class LiveTrader:
             )
 
         if tp_found and sl_found:
-            # Both orders exist — just restore the IDs
             self._tp_order_ids = [tp_order_id]
             self._sl_order_id = sl_order_id
+            self._tracked_tp_price = tp_price
+            self._tracked_sl_price = sl_price
             log.info(
                 "[RECOVERY] TP/SL verified on IBKR: "
                 "TP orderId=%s (%.2f)  SL orderId=%s (%.2f)",
@@ -1675,6 +1681,8 @@ class LiveTrader:
                     "(standalone orders, software OCA active)",
                     self._tp_order_ids, self._sl_order_id,
                 )
+                self._tracked_tp_price = tp_price[0][1] if isinstance(tp_price, list) else tp_price
+                self._tracked_sl_price = sl_price
                 # Persist TP/SL order IDs and prices to ledger
                 if self._active_trade_id is not None:
                     try:
@@ -2829,7 +2837,7 @@ class LiveTrader:
                 
                 
                 
-                if evt.symbol != "CL":
+                if evt.symbol != self._execution_symbol:
                     continue
                 order_status = evt.status
                 oid = evt.order_id
@@ -2884,7 +2892,7 @@ class LiveTrader:
             sl_price_live = None
             try:
                 for evt in list(self._open_orders.values()):
-                    if evt.symbol != "CL":
+                    if evt.symbol != self._execution_symbol:
                         continue
                     oid = evt.order_id
                     # Extract raw ib_insync order to read limit/stop prices
@@ -2899,6 +2907,12 @@ class LiveTrader:
                             sl_price_live = aux
             except Exception:
                 log.warning("Bracket order scan failed", exc_info=True)
+                
+            # Fallback to locally cached prices if open order lookup failed
+            if tp_price_live is None and getattr(self, '_tracked_tp_price', None) is not None:
+                tp_price_live = self._tracked_tp_price
+            if sl_price_live is None and getattr(self, '_tracked_sl_price', None) is not None:
+                sl_price_live = self._tracked_sl_price
 
             tp_str = f"TP={tp_price_live:.2f}" if tp_price_live else "TP=N/A"
             sl_str = f"SL={sl_price_live:.2f}" if sl_price_live else "SL=N/A"
@@ -2906,7 +2920,7 @@ class LiveTrader:
 
             try:
                 # Use cached portfolio (sync) via the execution client adapter.
-                acct_summary = self.exec_client.get_account_summary(symbol="CL")
+                acct_summary = self.exec_client.get_account_summary(symbol=self._execution_symbol)
                 unrealized_pnl = float(acct_summary.get("cl_unrealized_pnl", 0.0))
                 avg_cost = float(acct_summary.get("cl_avg_cost", 0.0))
                 # IBKR averageCost = price * multiplier (1000 for CL)
@@ -3195,7 +3209,7 @@ class LiveTrader:
             # Store per-trade overrides from tier matching (None = use global)
             self._trade_trailing_atr_mult = signal.trailing_atr_mult
             self._trade_max_hold_bars = signal.max_hold_bars
-            local_sym = self._front_month_local_symbol if self._front_month_local_symbol else "CL"
+            local_sym = self._front_month_local_symbol if self._front_month_local_symbol else self._execution_symbol
             log.info(
                 "[TRADE] ENTRY: %s %d %s @ %s  "
                 "TP=%.2f  SL=%.2f  (prob=%.2f, orderId=%d)  "

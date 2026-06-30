@@ -74,7 +74,8 @@ def generate_manifest(args):
             optuna=optuna
         ),
         execution_workflow=ExecutionWorkflowConfig(
-            slippage_multiplier=0.01,
+            slippage_per_side=0.01,
+            opt_mode="ensemble",
             strategy_config_path="configs/strategies/hourly_ensemble_010.json"
         )
     )

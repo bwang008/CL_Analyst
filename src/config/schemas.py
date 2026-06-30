@@ -1,5 +1,6 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import List, Dict, Optional, Literal, Union, Any
+import pandas as pd
 
 class SingleBarrierTarget(BaseModel):
     type: Literal["triple_barrier"]
@@ -76,7 +77,16 @@ class OptunaConfig(BaseModel):
     feature_fraction_min: float = 0.3
     feature_fraction_max: float = 1.0
     post_optimizer_trials: int = 3
-    post_optimizer_holdout_months: int = 6
+    # Holdout for the post-optimizer (months reserved from Optuna). REQUIRED — the
+    # manifest is the single source of truth; no silent default may stand in.
+    post_optimizer_holdout_months: int
+
+    @field_validator("post_optimizer_holdout_months")
+    @classmethod
+    def validate_holdout_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("post_optimizer_holdout_months must be strictly positive — the holdout must be respected.")
+        return v
 
 class TrainingWorkflowConfig(BaseModel):
     train_cutoff_date: str
@@ -85,10 +95,62 @@ class TrainingWorkflowConfig(BaseModel):
     gcs_base_dir: str
     optuna: OptunaConfig = Field(default_factory=OptunaConfig)
 
+    @field_validator("train_cutoff_date")
+    @classmethod
+    def validate_train_cutoff_defined(cls, v: str) -> str:
+        # Sanity check: the training end date must be explicitly defined and parseable.
+        # A null/empty cutoff would let training consume the entire dataset and leak
+        # into the holdout — forbidden.
+        if v is None or str(v).strip() == "":
+            raise ValueError("train_cutoff_date (training end date) must be defined — it cannot be null/empty.")
+        try:
+            pd.Timestamp(v)
+        except Exception as e:
+            raise ValueError(f"train_cutoff_date is not a valid date: {v!r} ({e})")
+        return v
+
+    @model_validator(mode="after")
+    def validate_no_holdout_leak(self) -> "TrainingWorkflowConfig":
+        # The training period must not leak into the holdout: train_cutoff_date must be
+        # strictly before the holdout boundary. In 2-way mode (holdout_cutoff_date is
+        # null) the vault = everything >= train_cutoff, which is held out by construction.
+        if self.holdout_cutoff_date is not None and str(self.holdout_cutoff_date).strip() != "":
+            try:
+                train_ts = pd.Timestamp(self.train_cutoff_date)
+                holdout_ts = pd.Timestamp(self.holdout_cutoff_date)
+            except Exception as e:
+                raise ValueError(f"Invalid cutoff date(s): {e}")
+            if train_ts >= holdout_ts:
+                raise ValueError(
+                    f"train_cutoff_date ({train_ts.date()}) must be strictly before "
+                    f"holdout_cutoff_date ({holdout_ts.date()}) — training cannot leak into the holdout period."
+                )
+        return self
+
 class ExecutionWorkflowConfig(BaseModel):
-    slippage_multiplier: float = 1.0
+    # Absolute slippage applied per side in price units by backtest_engine (price +/-
+    # slippage_per_side). NOT a tick multiplier. REQUIRED — no default, so a missing
+    # value fails loudly instead of silently substituting a dangerous number.
+    slippage_per_side: float
     execution_data_path: Optional[str] = None
     strategy_config_path: str
+    # Post-optimization mode. REQUIRED — the manifest is the single source of truth so
+    # behavior is consistent and never depends on a CLI flag passed on the fly.
+    #   "ensemble"   = joint long+short ensemble optimization
+    #   "individual" = per-side Long/Short optimization
+    opt_mode: Literal["individual", "ensemble"]
+
+    @field_validator("slippage_per_side")
+    @classmethod
+    def validate_slippage_sane(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("slippage_per_side must be non-negative.")
+        if v > 0.5:
+            raise ValueError(
+                f"slippage_per_side={v} is implausibly large for price-unit slippage "
+                f"(>$0.50/side). This is the class of error that caused the -$2.5M PnL bug."
+            )
+        return v
 
 class MasterConfig(BaseModel):
     symbol: str

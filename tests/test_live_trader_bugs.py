@@ -21,6 +21,7 @@ def test_check_entry_order_ttl_type_mismatch():
     
     # Set the pending bar time to the past
     trader._pending_entry_bar_time = pd.Timestamp("2026-06-30 00:00:00", tz="UTC")
+    trader._execution_symbol = "CL"
     current_time = pd.Timestamp("2026-06-30 00:05:00", tz="UTC")
     
     # Simulate IBKR sending a string order_id in open_orders
@@ -39,7 +40,7 @@ def test_check_entry_order_ttl_type_mismatch():
     
     trader._check_entry_order_ttl(current_time)
     
-    trader.exec_client.cancel_order.assert_called_once()
+    trader.exec_client.cancel_open_orders.assert_called_once_with(symbol="CL")
     assert trader._pending_entry_order_id is None
 
 
@@ -77,7 +78,15 @@ def test_pnl_log_format(caplog):
     trader._last_virtual_ledger_log = ""
     trader._position_side = 1
     trader._execution_symbol = "CL"
+    trader._emergency_halt = False
     trader._check_trailing_stop = MagicMock()
+    trader._front_month_last_close = 70.0
+    trader._atr_period_long = 14
+    trader._atr_period_short = 14
+    trader._atr_period = 14
+    trader._rollover_in_progress = False
+    trader._check_time_barrier = MagicMock(return_value=False)
+    trader._pending_entry_order_id = None
     
     features = pd.DataFrame([{"Open": 70.0, "High": 70.0, "Low": 70.0, "Close": 70.0, "Volume": 100}])
     

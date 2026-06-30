@@ -157,7 +157,11 @@ gcloud compute ssh $VmName --zone=$Zone --quiet `
 # --- [3/6] Upload code ---
 Write-Host "`n[3/6] Uploading code..."
 
-$zipFile = Join-Path $ProjectDir "deploy.zip"
+# Unique per-VM archive name: concurrent sweep deploys (Start-Job) previously raced a
+# single shared deploy.zip, clobbering each other so some VMs got an empty/corrupt zip
+# and the sweep tmux session died instantly (STARTUP_TIMEOUT). Never share the filename.
+$zipName = "deploy_$VmName.zip"
+$zipFile = Join-Path $ProjectDir $zipName
 if (Test-Path $zipFile) { Remove-Item $zipFile -Force }
 
 $itemsToZip = @("src", "agent", "gcp", "requirements.txt", ".env")
@@ -170,37 +174,56 @@ foreach ($item in $itemsToZip) {
 
 if ($existingItems.Count -gt 0) {
     Write-Host "  Zipping codebase (excluding pycache and datasets)..."
-    $tarArgs = @("-a", "-c", "-f", "deploy.zip", "--exclude=__pycache__", "--exclude=*.parquet", "--exclude=*.csv") + $existingItems
+    # -C + absolute -f: CWD-independent and unique, so parallel deploys can't collide.
+    $tarArgs = @("-a", "-c", "-C", $ProjectDir, "-f", $zipFile, "--exclude=__pycache__", "--exclude=*.parquet", "--exclude=*.csv") + $existingItems
     & "tar.exe" $tarArgs
-    
-    Write-Host "  Uploading deploy.zip to VM..."
-    try {
-        gcloud compute scp "$zipFile" "${VmName}:${RemoteProject}/deploy.zip" --zone=$Zone --quiet 2>$null
-    } catch {
-        Write-Host "  Retrying scp for deploy.zip..." -ForegroundColor Yellow
-        Start-Sleep -Seconds 2
-        try { gcloud compute scp "$zipFile" "${VmName}:${RemoteProject}/deploy.zip" --zone=$Zone --quiet 2>$null } catch { Write-Host "  Failed to copy deploy.zip" -ForegroundColor Red }
+
+    # Upload + unzip + VERIFY with retries. A silent scp failure used to leave ~/project
+    # empty and the deploy marched on to launch tmux on missing code. Never do that again:
+    # re-create the dir tree, re-upload, and confirm gcp/vm_sweep_run.sh actually exists.
+    $codeLanded = $false
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        Write-Host "  Uploading code to VM (attempt $attempt/3)..."
+        gcloud compute ssh $VmName --zone=$Zone --command="mkdir -p $RemoteProject $RemoteHome/data" --quiet 2>$null
+        gcloud compute scp "$zipFile" "${VmName}:${RemoteProject}/$zipName" --zone=$Zone --quiet 2>$null
+        gcloud compute ssh $VmName --zone=$Zone --command="cd $RemoteProject && unzip -q -o $zipName && rm -f $zipName" --quiet 2>$null
+        $verify = gcloud compute ssh $VmName --zone=$Zone --command="test -f $RemoteProject/gcp/vm_sweep_run.sh && echo CODE_OK" --quiet 2>$null
+        if ($verify -match "CODE_OK") { $codeLanded = $true; break }
+        Write-Host "  Code not present on VM after attempt $attempt; retrying..." -ForegroundColor Yellow
+        Start-Sleep -Seconds 3
     }
-    
-    Write-Host "  Unzipping codebase on VM..."
-    gcloud compute ssh $VmName --zone=$Zone --command="cd $RemoteProject && unzip -q -o deploy.zip && rm deploy.zip" --quiet 2>$null
-    
     Remove-Item $zipFile -ErrorAction SilentlyContinue
+
+    if (-not $codeLanded) {
+        Write-Host "  FATAL: code failed to land on VM (gcp/vm_sweep_run.sh missing after 3 attempts)." -ForegroundColor Red
+        Write-Host "  Aborting deploy to avoid launching the sweep on an empty VM." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "  Code verified on VM (gcp/vm_sweep_run.sh present)." -ForegroundColor Green
 } else {
-    Write-Host "  WARNING: No code directories found to upload." -ForegroundColor Yellow
+    Write-Host "  FATAL: No code directories found to upload locally." -ForegroundColor Red
+    exit 1
 }
 
-# Upload resolved master config JSON to the VM
+# Upload resolved master config JSON to the VM (essential -- the sweep can't run without it).
+# Verify it lands; a silent failure here is as fatal as missing code.
 $remoteConfigDir = "$RemoteProject/configs/sweeps"
-$remoteConfigPath = "${remoteConfigDir}/$(Split-Path -Leaf $MasterConfig)"
-try {
+$masterLeaf = Split-Path -Leaf $MasterConfig
+$remoteConfigPath = "${remoteConfigDir}/$masterLeaf"
+$cfgLanded = $false
+for ($attempt = 1; $attempt -le 3; $attempt++) {
+    gcloud compute ssh $VmName --zone=$Zone --command="mkdir -p $remoteConfigDir" --quiet 2>$null
     gcloud compute scp $MasterConfig "${VmName}:${remoteConfigPath}" --zone=$Zone --quiet 2>$null
-} catch {
-    Write-Host "  Retrying scp for $(Split-Path -Leaf $MasterConfig)..." -ForegroundColor Yellow
-    Start-Sleep -Seconds 2
-    try { gcloud compute scp $MasterConfig "${VmName}:${remoteConfigPath}" --zone=$Zone --quiet 2>$null } catch { Write-Host "  Failed to copy MasterConfig" -ForegroundColor Red }
+    $verifyCfg = gcloud compute ssh $VmName --zone=$Zone --command="test -f $remoteConfigPath && echo CFG_OK" --quiet 2>$null
+    if ($verifyCfg -match "CFG_OK") { $cfgLanded = $true; break }
+    Write-Host "  MasterConfig not present on VM after attempt $attempt; retrying..." -ForegroundColor Yellow
+    Start-Sleep -Seconds 3
 }
-Write-Host "  Uploaded MasterConfig: $(Split-Path -Leaf $MasterConfig)"
+if (-not $cfgLanded) {
+    Write-Host "  FATAL: MasterConfig ($masterLeaf) failed to land on VM after 3 attempts. Aborting deploy." -ForegroundColor Red
+    exit 1
+}
+Write-Host "  Uploaded + verified MasterConfig: $masterLeaf" -ForegroundColor Green
 
 # Upload strategy config
 $configPath = Join-Path $ProjectDir "configs\strategies\$StrategyConfig"

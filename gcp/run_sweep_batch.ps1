@@ -35,7 +35,7 @@ param(
     [switch]$DisableTelegram,
     [int]$MaxConcurrentVcpus    = 0,   # 0 = read from manifest defaults
     [string]$SweepMode          = "backtest",  # 'frictionless' for Workflow C, 'backtest' for legacy
-    [string]$OptMode            = "individual"  # 'individual' for per-side Long/Short optimization, 'ensemble' for joint
+    [string]$OptMode            = "individual"  # DEPRECATED/IGNORED: opt_mode is read authoritatively from the manifest (baseline.execution_workflow.opt_mode). This CLI value is overridden.
 )
 
 $ErrorActionPreference = "Continue"
@@ -362,8 +362,15 @@ $orchestratorData = $pythonOut | ConvertFrom-Json
 $limits = $orchestratorData.infrastructure_limits
 $optuna = $orchestratorData.optuna_config
 $experiments = $orchestratorData.experiments
-$postOptTrials  = if ($optuna -and $optuna.post_optimizer_trials) { $optuna.post_optimizer_trials } else { 3 }
-$postOptHoldout = if ($optuna -and $optuna.post_optimizer_holdout_months) { $optuna.post_optimizer_holdout_months } else { 6 }
+# Manifest is the single source of truth — schema marks these REQUIRED, so the Python
+# orchestrator (validated above) guarantees them. No fallback default may stand in:
+# a missing value must already have failed validation, not silently become 3/6.
+$postOptTrials  = $optuna.post_optimizer_trials
+$postOptHoldout = $optuna.post_optimizer_holdout_months
+if ($null -eq $postOptHoldout) {
+    Write-Host "FATAL: post_optimizer_holdout_months missing from validated manifest." -ForegroundColor Red
+    exit 1
+}
 
 # Apply MaxConcurrentVcpus override or read from manifest infrastructure
 $maxVcpus    = if ($MaxConcurrentVcpus -gt 0) { $MaxConcurrentVcpus } `
@@ -400,6 +407,71 @@ Write-Host ""
 # DryRun: validate and exit
 if ($DryRun) {
     Write-Host "=== DRY RUN - No VMs will be created ===" -ForegroundColor Cyan
+
+    # --- Manifest sanity checks (fail the dry run if violated) ---
+    # The pydantic schema already enforces these during orchestrator validation above;
+    # these are an explicit, human-readable gate in the dry-run process per the
+    # "manifest is the single source of truth, holdout must be respected" requirement.
+    Write-Host ""
+    Write-Host "  Manifest sanity checks:" -ForegroundColor Cyan
+    $mf = Get-Content $manifestFull -Raw | ConvertFrom-Json
+    $tw = $mf.baseline.training_workflow
+    if ($null -eq $tw) {
+        Write-Host "    FAIL: baseline.training_workflow missing." -ForegroundColor Red; exit 1
+    }
+    $trainCut   = $tw.train_cutoff_date
+    $holdoutCut = $tw.holdout_cutoff_date
+    $postHold   = $tw.optuna.post_optimizer_holdout_months
+    $slip       = $mf.baseline.execution_workflow.slippage_per_side
+
+    # 1. Training end date must be DEFINED (cannot be null/empty -> would consume whole dataset).
+    if ([string]::IsNullOrWhiteSpace([string]$trainCut)) {
+        Write-Host "    FAIL: train_cutoff_date (training end date) is not defined." -ForegroundColor Red; exit 1
+    }
+    $trainTs = $null
+    try { $trainTs = [datetime]::Parse([string]$trainCut) } catch {
+        Write-Host "    FAIL: train_cutoff_date '$trainCut' is not a valid date." -ForegroundColor Red; exit 1
+    }
+    Write-Host "    [OK] train_cutoff_date defined: $trainCut" -ForegroundColor Green
+
+    # 2. Training must NOT leak into the holdout: train_cutoff < holdout_cutoff (when 3-way).
+    if (-not [string]::IsNullOrWhiteSpace([string]$holdoutCut)) {
+        $holdoutTs = $null
+        try { $holdoutTs = [datetime]::Parse([string]$holdoutCut) } catch {
+            Write-Host "    FAIL: holdout_cutoff_date '$holdoutCut' is not a valid date." -ForegroundColor Red; exit 1
+        }
+        if ($trainTs -ge $holdoutTs) {
+            Write-Host "    FAIL: train_cutoff_date ($trainCut) must be strictly BEFORE holdout_cutoff_date ($holdoutCut) -- training leaks into the holdout." -ForegroundColor Red
+            exit 1
+        }
+        Write-Host "    [OK] no leak: train_cutoff_date < holdout_cutoff_date ($holdoutCut) [3-way]" -ForegroundColor Green
+    } else {
+        Write-Host "    [OK] holdout_cutoff_date null -> 2-way: vault (>= train_cutoff) is held out by construction" -ForegroundColor Green
+    }
+
+    # 3. post_optimizer_holdout_months defined and positive.
+    if ($null -eq $postHold -or [int]$postHold -le 0) {
+        Write-Host "    FAIL: post_optimizer_holdout_months must be defined and > 0 (got '$postHold')." -ForegroundColor Red; exit 1
+    }
+    Write-Host "    [OK] post_optimizer_holdout_months = $postHold" -ForegroundColor Green
+
+    # 4. slippage_per_side defined and sane (guards the -$2.5M class of bug).
+    if ($null -eq $slip) {
+        Write-Host "    FAIL: execution_workflow.slippage_per_side is not defined." -ForegroundColor Red; exit 1
+    }
+    if ([double]$slip -lt 0 -or [double]$slip -gt 0.5) {
+        Write-Host "    FAIL: slippage_per_side=$slip out of sane range [0, 0.5] price units." -ForegroundColor Red; exit 1
+    }
+    Write-Host "    [OK] slippage_per_side = $slip (absolute price units)" -ForegroundColor Green
+
+    # 5. opt_mode defined and valid (manifest is the source of truth, not a CLI flag).
+    $optModeManifest = $mf.baseline.execution_workflow.opt_mode
+    if (@("individual","ensemble") -notcontains [string]$optModeManifest) {
+        Write-Host "    FAIL: opt_mode must be 'individual' or 'ensemble' (got '$optModeManifest')." -ForegroundColor Red; exit 1
+    }
+    Write-Host "    [OK] opt_mode = $optModeManifest (from manifest)" -ForegroundColor Green
+    Write-Host ""
+
     $idx = 0
     foreach ($exp in $experiments) {
         $idx++
@@ -915,7 +987,14 @@ if ($batchState.completed -gt 0) {
 
     $manifestRaw = Get-Content $ManifestPath -Raw | ConvertFrom-Json
     $optExecData = if ($manifestRaw.baseline.execution_workflow.execution_data_path) { $manifestRaw.baseline.execution_workflow.execution_data_path } else { "" }
-    $optSlippage = if ($manifestRaw.baseline.execution_workflow.slippage_multiplier) { [double]$manifestRaw.baseline.execution_workflow.slippage_multiplier } else { 0 }
+    $optSlippage = if ($null -ne $manifestRaw.baseline.execution_workflow.slippage_per_side) { [double]$manifestRaw.baseline.execution_workflow.slippage_per_side } else { 0 }
+    # opt_mode is AUTHORITATIVE from the manifest (single source of truth) — never the CLI flag.
+    $OptMode = $manifestRaw.baseline.execution_workflow.opt_mode
+    if ([string]::IsNullOrWhiteSpace([string]$OptMode)) {
+        Write-Host "FATAL: baseline.execution_workflow.opt_mode missing from manifest." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "  OptMode (from manifest): $OptMode" -ForegroundColor Cyan
 
     foreach ($oz in $optZoneList) {
         $optArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\gcp\gcp_deploy_optimizer.ps1",
