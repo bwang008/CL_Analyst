@@ -1263,7 +1263,7 @@ class LiveTrader:
         # as a known exit rather than triggering PHANTOM FILL BLOCKED.
         _exit_oid = getattr(getattr(trade, "order", None), "orderId", None)
         if _exit_oid is not None:
-            self._processed_exit_order_ids.add(_exit_oid)
+            self._processed_exit_order_ids.add(str(_exit_oid))
         self._reset_position_state()
         return True
 
@@ -1591,10 +1591,10 @@ class LiveTrader:
         from the fill price + stored ATR offsets so the SL/TP are always
         correctly positioned relative to the real entry.
         """
-        ctx = self._last_decision_context_by_order_id.get(order_id)
-        if ctx is None:
+        # Require decision context
+        if order_id not in self._last_decision_context_by_order_id:
             log.warning(
-                "BRACKET CHILDREN: no decision context for orderId=%d "
+                "BRACKET CHILDREN: no decision context for orderId=%s "
                 "— cannot place TP/SL children",
                 order_id,
             )
@@ -2885,11 +2885,12 @@ class LiveTrader:
                 pending_cl_entry_qty, effective_position,
             )
 
+        tp_price_live = None
+        sl_price_live = None
+
         # Log human-friendly PnL + bracket summary when holding a position
         if current_position != 0:
             # Find TP/SL bracket child orders
-            tp_price_live = None
-            sl_price_live = None
             try:
                 for evt in list(self._open_orders.values()):
                     if evt.symbol != self._execution_symbol:
@@ -3828,11 +3829,14 @@ class LiveTrader:
             current_price = 0.0
             if self.rolling_df_5m is not None and len(self.rolling_df_5m) > 0:
                 current_price = float(self.rolling_df_5m["Close"].iloc[-1])
-            self.exec_client.close_position(
+            trade = self.exec_client.close_position(
                 symbol=self._execution_symbol,
                 exit_mode="market",
                 current_price=current_price,
             )
+            close_order_id = getattr(getattr(trade, "order", None), "orderId", None)
+            if close_order_id is not None:
+                self._processed_exit_order_ids.add(str(close_order_id))
             log.critical(
                 "[KILL SWITCH] Market close order submitted for %d contracts",
                 ibkr_pos,
@@ -3950,7 +3954,7 @@ class LiveTrader:
             
             if is_tp_fill or is_sl_fill:
                 if hasattr(self, '_processed_exit_order_ids'):
-                    self._processed_exit_order_ids.add(order_id)
+                    self._processed_exit_order_ids.add(str(order_id))
                 exit_reason = "TP_HIT" if is_tp_fill else "SL_HIT"
                 
                 # Software OCA: cancel the other resting protective order(s)

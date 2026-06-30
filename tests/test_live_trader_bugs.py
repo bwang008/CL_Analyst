@@ -55,6 +55,7 @@ def test_pnl_log_format(caplog):
     trader.strategy = MagicMock()
     trader.strategy.evaluate.return_value = MagicMock(action="HOLD", buy_prob=0.0, sell_prob=0.0)
     trader.telemetry = MagicMock()
+    trader.data_manager_1h = MagicMock()  # Mock this to prevent AttributeError
     
     trader._open_orders = {}
     trader._tp_order_ids = [999]
@@ -101,3 +102,74 @@ def test_pnl_log_format(caplog):
     
     found = any("Symbol: CL | Position:" in msg for msg in log_messages)
     assert found, "Did not find the requested TP/SL log format."
+
+
+def test_out_of_band_exit_routing(caplog):
+    """
+    Test that an automated time-barrier exit is correctly tracked as a close order
+    and does not trigger the 'ENTRY FILLED' logic or the %d format crash.
+    """
+    trader = LiveTrader.__new__(LiveTrader)
+    trader._execution_symbol = "CL"
+    trader._position_entry_bar_time = pd.Timestamp("2026-06-30 00:00:00", tz="UTC")
+    trader._position_bars_held = 25
+    trader._max_hold_bars = 25
+    trader._trade_max_hold_bars = None
+    trader._exit_mode = "MARKETABLE_LIMIT"
+    trader._active_trade_id = "trade_123"
+    trader._pending_close_order_ids = set()
+    trader._open_orders = {}
+    trader._last_decision_context_by_order_id = {}
+    trader._processed_exit_order_ids = set()
+    trader._tp_order_ids = [999]
+    trader._sl_order_id = 888
+    
+    # Mock telemetry and exec client
+    trader.telemetry = MagicMock()
+    trader.telemetry.close_position = MagicMock()
+    
+    trader.exec_client = MagicMock()
+    trader.exec_client.cancel_open_orders.return_value = 2
+    
+    mock_trade = MagicMock()
+    mock_trade.order.orderId = 10
+    trader.exec_client.close_position.return_value = mock_trade
+    
+    # 1. Trigger the time barrier
+    result = trader._check_time_barrier(
+        bar_time=pd.Timestamp("2026-06-30 02:00:00", tz="UTC"),
+        current_price=70.50,
+        atr_value=0.5
+    )
+    assert result is True  # _check_time_barrier returns True if it exited
+    assert "10" in trader._processed_exit_order_ids
+    
+    # 2. Trigger the _on_standard_execution_event callback for the fill of order 10
+    evt = StandardExecutionEvent(
+        order_id="10",
+        symbol="CL",
+        status="Filled",
+        filled_qty=1,
+        remaining_qty=0,
+        avg_price=70.50,
+        raw_event=MagicMock()
+    )
+    evt.raw_event.order.action = "SELL"
+    
+    trader._utc_iso_now = MagicMock(return_value="2026-06-30T02:00:10Z")
+    trader._build_event_id = MagicMock(return_value="evt_123")
+    trader._reset_position_state = MagicMock()
+    trader._place_bracket_children_on_fill = MagicMock()
+    
+    with caplog.at_level(logging.INFO):
+        trader._on_standard_execution_event(evt)
+        
+    log_messages = [rec.message for rec in caplog.records]
+    
+    # Check that it did NOT log "ENTRY FILLED"
+    entry_fill_logs = [msg for msg in log_messages if "ENTRY FILLED" in msg]
+    assert len(entry_fill_logs) == 0, "It mistakenly logged an ENTRY FILLED for a close order!"
+    
+    
+    # Check that it did NOT attempt to place bracket children
+    trader._place_bracket_children_on_fill.assert_not_called()
