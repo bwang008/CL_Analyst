@@ -1536,7 +1536,7 @@ def format_report(
         }
         best_month = max(month_pnl, key=month_pnl.get)  # type: ignore[arg-type]
         worst_month = min(month_pnl, key=month_pnl.get)  # type: ignore[arg-type]
-        best_wr = sum(1 for t in monthly[best_month] if t.net_pnl_dollars > 0) / len(monthly[best_month])
+        best_wr = sum(1 for t in monthly[best_month] if t.net_pnl_dollars > 0) / max(len(monthly[best_month]), 1)
         worst_wr = sum(1 for t in monthly[worst_month] if t.net_pnl_dollars > 0) / max(len(monthly[worst_month]), 1)
 
         lines.append(

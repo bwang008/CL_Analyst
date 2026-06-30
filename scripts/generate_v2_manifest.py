@@ -75,7 +75,7 @@ def generate_manifest(args):
         ),
         execution_workflow=ExecutionWorkflowConfig(
             slippage_per_side=0.01,
-            opt_mode="ensemble",
+            opt_mode="individual",
             strategy_config_path="configs/strategies/hourly_ensemble_010.json"
         )
     )

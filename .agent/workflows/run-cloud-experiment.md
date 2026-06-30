@@ -17,36 +17,37 @@ description: How to run an Optuna hyperparameter search on GCP using the canary 
 ## Batch Sweep Run (Recommended — Fully Automated)
 
 The batch orchestrator manages N experiments end-to-end: deploy → monitor → collect → post-optimize.
-Three tiers are available, each with its own manifest:
+Use the **v2 manifests** (`configs/batch_manifest_v2_*.json`, `baseline`/`overrides` schema validated
+by `BatchSweepConfig`). The legacy `defaults`/`target_long` format is deprecated.
 
-| Tier | Manifest | Experiments | LGBM Trials | Post-Opt Trials | Use Case |
+| Tier | Example Manifest (v2) | Experiments | Sweep n_trials | Post-Opt Trials | Use Case |
 | ---------- | --------------------------------------------- | ----------- | ----------- | --------------- | ------------------------------------------- |
-| **Canary** | `sweep_batch_hourset08_canary.json` | 2 | 50 | 20 | Pipeline validation (~20-30 min) |
-| **Scout** | `sweep_batch_hourset08_scout.json` | 8 | 200 | 500 | Moderate exploration, ballpark performance |
-| **Production** | `sweep_batch_hourset08_production.json` | 8 | 500 | 1500 | Deep optimization, final model selection |
+| **Canary** | `batch_manifest_v2_hourset14a_canary.json` | 2 | 3 | 3 | Pipeline validation / parity (~20-30 min) |
+| **Scout** | `batch_manifest_v2_hourset14a_scout.json` | 4 | 200 | 200 | Moderate exploration, ballpark performance |
+| **Production** | (generate via `scripts/generate_v2_manifest.py`) | 8 | 500 | 1500 | Deep optimization, final model selection |
+
+### opt_mode — the post-optimizer chain (manifest is the source of truth)
+
+`baseline.execution_workflow.opt_mode` selects how the optimizer VM runs. It is **required** and read
+authoritatively from the manifest (never a CLI flag). Two values:
+
+| `opt_mode` | Passes | Selection | Top-N | Produces | Use |
+| ---------- | ------ | --------- | ----- | -------- | --- |
+| **`individual`** | 2 (individual → ensemble) | `unified_pair_optimizer.py` | **Top 4** (`top_pairs.json`) | per-side `batch_summary_optimized_<obj>.md` **and** `batch_summary_optimized_ensembles_<obj>.md` + working `<obj>_ensemble_backtests.md` | **Default. Reproduces CANARY_V1.** Pass 1 optimizes each side, top individuals are paired, pass 2 re-optimizes the pairs as ensembles — all in one VM call. |
+| **`ensemble`** | 1 (brute-force) | `select_top_ensembles.py` | Top 8 (`top_8_ensembles.json`) | `batch_ensemble_pre_opt.md` + ensemble reports only (no per-side reports) | Alternative brute-force sweep of all long/short combos. Diverges from CANARY_V1; skips individual optimization. |
 
 ### 1. Verify no VMs are running (avoid quota conflicts):
 ```powershell
 gcloud compute instances list
 ```
 
-### 2. Dry run to validate manifest (replace manifest path for your tier):
+### 2. Dry run to validate manifest:
+The dry run runs `BatchSweepConfig` schema validation **and** the manifest sanity gate
+(train_cutoff defined, no holdout leak, post_optimizer_holdout_months > 0,
+slippage_per_side ∈ [0, 0.5], opt_mode valid). Any failure aborts before a single VM is created.
 ```powershell
-# Canary (fast pipeline test):
 powershell -ExecutionPolicy Bypass -File .\gcp\run_sweep_batch.ps1 `
-    -ManifestPath "configs\sweep_batch_hourset08_canary.json" `
-    -Zone "us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f" `
-    -DryRun
-
-# Scout (moderate exploration):
-powershell -ExecutionPolicy Bypass -File .\gcp\run_sweep_batch.ps1 `
-    -ManifestPath "configs\sweep_batch_hourset08_scout.json" `
-    -Zone "us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f" `
-    -DryRun
-
-# Production (deep optimization):
-powershell -ExecutionPolicy Bypass -File .\gcp\run_sweep_batch.ps1 `
-    -ManifestPath "configs\sweep_batch_hourset08_production.json" `
+    -ManifestPath "configs\batch_manifest_v2_hourset14a_canary.json" `
     -Zone "us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f" `
     -DryRun
 ```
@@ -54,7 +55,7 @@ powershell -ExecutionPolicy Bypass -File .\gcp\run_sweep_batch.ps1 `
 ### 3. Launch the batch (replace manifest for your tier):
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\gcp\run_sweep_batch.ps1 `
-    -ManifestPath "configs\sweep_batch_hourset08_scout.json" `
+    -ManifestPath "configs\batch_manifest_v2_hourset14a_canary.json" `
     -Zone "us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f"
 ```
 
@@ -65,54 +66,82 @@ powershell -ExecutionPolicy Bypass -File .\gcp\run_sweep_batch.ps1 `
    - Runs artifact verification gate before VM deletion
    - Captures crash diagnostics on failure
    - Generates consolidated batch summary
-   - Deploys a post-optimizer VM, waits for completion, downloads results
-   - Sweeps 256 ensemble pairs and automatically selects Top 8
-   - Runs local ensemble optimization with exec-data and slippage
+   - Deploys a post-optimizer VM (reads `opt_mode` from the manifest), waits for completion, downloads results
+   - **opt_mode=individual (default):** pass 1 per-side optimization → `unified_pair_optimizer.py` selects
+     **Top 4** (`top_pairs.json`) → pass 2 ensemble optimization on those pairs
+   - **opt_mode=ensemble:** brute-force sweep of all combos → `select_top_ensembles.py` Top 8 (`top_8_ensembles.json`)
    - Generates ensemble backtest verification reports (`sharpe_ensemble_backtests.md`, `sortino_ensemble_backtests.md`)
-   - Produces final `batch_ensemble_pre_opt.md`, `batch_summary_optimized.md`, and `wall_clock_summary.md`
+   - Produces `batch_summary_optimized_<obj>.md`, `batch_summary_optimized_ensembles_<obj>.md`, and `wall_clock_summary.md`
 
-### 5. Review results:
+### 5. Review results (opt_mode=individual / parity layout):
 ```
 reports/batch_runs/batch_<timestamp>/
-├── batch_progress.json              ← live progress tracker
-├── batch_summary.md                 ← unoptimized results
-├── batch_ensemble_pre_opt.md        ← baseline sweep of 256 ensembles
-├── top_8_ensembles.json             ← dynamically selected top ensembles
-├── batch_summary_optimized.md       ← MAIN DELIVERABLE
-├── sharpe_ensemble_backtests.md     ← full backtest dumps for sharpe ensembles
-├── sortino_ensemble_backtests.md    ← full backtest dumps for sortino ensembles
-├── wall_clock_summary.md            ← auto-generated timing report
-├── optimization_results.json        ← raw optimization data
-├── configs/                         ← backtest-ready config JSONs per ensemble
-├── predictions/                     ← merged prediction CSVs per ensemble
-└── manifest.json                    ← frozen config
+├── batch_progress.json                        ← live progress tracker
+├── batch_summary.md                           ← unoptimized results
+├── batch_summary_optimized_{sharpe,sortino}.md          ← per-side individual optimization (MAIN)
+├── optimization_results_{sharpe,sortino}.json           ← raw individual optimization data
+├── top_pairs.json                             ← Top 4 ensemble pairs (unified_pair_optimizer)
+├── batch_summary_optimized_ensembles_{sharpe,sortino}.md ← Top-4 ensemble optimization
+├── optimization_results_ensembles_{sharpe,sortino}.json
+├── {sharpe,sortino}_ensemble_backtests.md     ← full backtest dumps per ensemble
+├── wall_clock_summary.md                      ← auto-generated timing report
+├── configs/                                   ← backtest-ready config JSONs per ensemble
+├── predictions/                               ← merged prediction CSVs per ensemble
+└── manifest.json                              ← frozen config
+```
+(opt_mode=ensemble instead emits `batch_ensemble_pre_opt.md` + `top_8_ensembles.json`.)
+
+### 6. Validate parity against a reference run:
+After a canary/parity run, confirm it structurally matches the golden reference
+(`batch_20260626_0521_CANARY_V1`) and introduced no new crashes:
+```powershell
+conda activate trader
+python scripts/compare_parity.py --run reports\batch_runs\batch_<timestamp>
+# exit 0 = PARITY PASS; checks artifact set, Top-4, no FileNotFound/new tracebacks, slippage 0.01, sane PnL
+```
 ```
 
-### Manifest Format
+### Manifest Format (v2 — `BatchSweepConfig`)
+The manifest is the **single source of truth**: every operational parameter is required and validated;
+there are no silent code-side defaults. Generate a fresh one with `scripts/generate_v2_manifest.py`.
 ```json
 {
-  "defaults": {
+  "infrastructure": {
     "machine_type": "c2-standard-16",
     "provisioning_model": "STANDARD",
-    "gcs_data_path": "gs://cltrainer-optuna-results/data/<dataset>.parquet",
-    "strategy_config": "hourly_ensemble_008.json",
-    "metrics": "logloss,average_precision",
     "timeout_minutes": 240,
     "max_concurrent_vcpus": 288,
     "vcpus_per_vm": 16,
-    "post_optimizer_trials": 200,
-    "post_optimizer_holdout_months": 6
+    "max_concurrent_vms": 12
+  },
+  "baseline": {
+    "symbol": "CL",
+    "data_workflow": { "dataset_version": "HourSet_14A", "resolution": "1h", "features": {}, "targets": {} },
+    "training_workflow": {
+      "train_cutoff_date": "2022-01-01",
+      "holdout_cutoff_date": "2026-01-01",
+      "target_columns": [],
+      "gcs_base_dir": "gs://cltrainer-optuna-results/canary",
+      "optuna": { "n_trials": 3, "post_optimizer_trials": 3, "post_optimizer_holdout_months": 6, "...": "..." }
+    },
+    "execution_workflow": {
+      "slippage_per_side": 0.01,
+      "opt_mode": "individual",
+      "strategy_config_path": "configs/strategies/hourly_ensemble_010.json"
+    }
   },
   "experiments": [
     {
-      "label": "HS08 3x1 12H",
-      "target_long": "TARGET_TRIPLE_3x1_12H_LONG",
-      "target_short": "TARGET_TRIPLE_3x1_12H_SHORT",
-      "gcs_prefix": "sweep_hs08_3x1_12h"
+      "label": "HS14A 2x1 6H",
+      "gcs_prefix": "sweep_hs14a_2x1_6h_canary",
+      "overrides": { "training_workflow": { "target_columns": ["TARGET_TRIPLE_2x1_6H_LONG", "TARGET_TRIPLE_2x1_6H_SHORT"] } }
     }
   ]
 }
 ```
+> **slippage_per_side is ABSOLUTE price units** (passed straight to the backtest engine, no tick-size
+> conversion). `0.01` = $0.01/side. A value like `1.0` means ~$2,000/trade and produces the −$2.5M-PnL
+> blowup class — the dry-run gate rejects anything > 0.5.
 
 ---
 
