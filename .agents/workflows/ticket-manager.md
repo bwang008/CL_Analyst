@@ -26,16 +26,16 @@ When spawning your subagents, you **MUST** explicitly instruct them to read thei
 
 ## Step 2: The Fast Track (Token Saver)
 When the `Ticket-Auditor` replies with a fix:
-1. Check the Auditor's severity classification.
-2. **If the bug is LOW severity** (e.g., an isolated, single-line patch, typo, or trivial KeyError): Skip the Impact-Reviewer entirely.
-3. Immediately generate the `Ticket_Resolution_Blueprint.md` (see format below), update the dashboard, notify the user, and terminate.
+1. Check the Auditor's severity classification and the root cause.
+2. **If the bug is a recent regression** (i.e., introduced by a recent git change/commit), you **MUST NOT** fast track it, regardless of severity. Always proceed to Step 3 for 3rd-party confirmation.
+3. **If the bug is LOW severity** AND is **not** a recent regression: Skip the Impact-Reviewer entirely. Immediately generate the `Ticket_Resolution_Blueprint.md` (see format below), update the dashboard, notify the user, and terminate.
 4. **If the bug is NOT low severity**: Proceed to Step 3.
 
 ## Step 3: Initialize Review (Gatekeeper)
 1. Use `invoke_subagent` to spawn the Reviewer agent.
    - **TypeName**: `"self"`
    - **Role**: `"Ticket-Impact-Reviewer"`
-   - **Prompt**: Pass the Auditor's proposed fix and justification, and explicitly instruct it: *"You are the Ticket-Impact-Reviewer. First, use your `view_file` tool to read the `.agents/workflows/ticket-impact-reviewer.md` file. Follow those instructions strictly to review this proposal, and `send_message` back to me with your approval, rejection, or request for human authorization."*
+   - **Prompt**: Pass the Auditor's proposed fix and justification. **CRITICAL:** Do NOT share the Auditor's severity classification or mention anything about fast tracking. The Reviewer must form an unbiased opinion. Explicitly instruct it: *"You are the Ticket-Impact-Reviewer. First, use your `view_file` tool to read the `.agents/workflows/ticket-impact-reviewer.md` file. Follow those instructions strictly to review this proposal, and `send_message` back to me with your approval, rejection, or request for human authorization."*
 2. Update your dashboard status.
 3. Stop calling tools and wait for the Reviewer to reply.
 
