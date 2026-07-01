@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Optional, Any
 
 import logging
-logging.getLogger("src.live_execution.execution_guard").setLevel(logging.ERROR)
+
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module=".*execution_models")
@@ -1937,5 +1937,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    logging.getLogger("src.live_execution.execution_guard").setLevel(logging.ERROR)
     main()
-

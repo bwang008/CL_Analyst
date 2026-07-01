@@ -34,7 +34,7 @@ from agent.backtest_engine import BacktestEngine, load_ohlcv, load_ohlcv_dual, l
 from agent.strategy_optimizer import run_optimization, extract_metrics, send_telegram, suppress_telegram
 
 import logging
-logging.getLogger("src.live_execution.execution_guard").setLevel(logging.ERROR)
+
 
 
 import re as _re
@@ -792,8 +792,14 @@ def _finalize_objective_results(
 
     # Save raw results JSON
     results_json_path = os.path.join(batch_dir, f"optimization_results_{prefix}{objective_metric}.json")
+    # Serialize in a DETERMINISTIC key order. all_results is populated in
+    # as_completed() (worker-finish) order, which is non-deterministic run-to-run.
+    # Downstream (generate_ensemble_artifacts) now orders E-slots from
+    # top_pairs.json, but sorting here makes the JSON itself reproducible and
+    # prevents insertion-order from leaking into any other consumer.
     serializable = {}
-    for k, v in all_results.items():
+    for k in sorted(all_results.keys()):
+        v = all_results[k]
         sv = {"status": v["status"]}
         if v.get("metrics"):
             sv["metrics"] = v["metrics"]
@@ -1238,5 +1244,5 @@ def main():
 
 
 if __name__ == "__main__":
+    logging.getLogger("src.live_execution.execution_guard").setLevel(logging.ERROR)
     main()
-

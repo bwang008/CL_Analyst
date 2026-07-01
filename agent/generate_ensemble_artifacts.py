@@ -70,6 +70,84 @@ def _resolve_side_pred(sweep: str, layout_dir: str, side: str, metric: str, pref
     return candidates[0].replace("\\", "/")
 
 
+_METRIC_RANK = {"logloss": 0, "average_precision": 1}
+
+
+def _ensemble_sort_key(item):
+    """Deterministic TOTAL ordering for ensemble pairs (fallback only).
+
+    The previous sort key was built from the sweep prefix alone and dropped the
+    metric. When every pair comes from a single sweep (canary), all keys tie and
+    Python's stable sort falls back to opt_data insertion order — the
+    ProcessPoolExecutor as_completed() order, which is non-deterministic. This
+    key adds a fixed (long_metric, short_metric) tie-break — logloss < AP — so it
+    never ties and matches the canonical top_pairs ordering.
+    """
+    pair_key, _ = item
+    keys = pair_key.split("|")
+    long_key = keys[0]
+    short_key = keys[1] if len(keys) > 1 else ""
+    long_sweep, _, long_metric = parse_experiment_key(long_key, "long")
+    short_sweep, _, short_metric = parse_experiment_key(short_key, "short")
+    exp_col = f"{long_sweep} / {short_sweep}" if long_sweep and short_sweep else (long_sweep or short_sweep or "-")
+    natural = [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', exp_col)]
+    return (natural,
+            _METRIC_RANK.get(long_metric, 99),
+            _METRIC_RANK.get(short_metric, 99),
+            long_metric, short_metric)
+
+
+def _canonical_pair_order(opt_data, batch_dir):
+    """Return (pair_key, pair_val) items in the canonical top_pairs.json order.
+
+    E-slot labels (E01..E04) are assigned by enumeration position, so the order
+    MUST match top_pairs.json — the single source of truth for which pair is
+    ensemble N. Driving the order off ``sorted(opt_data.items(), ...)`` let the
+    non-deterministic as_completed() insertion order leak into the E labels
+    whenever the sort key tied (single-sweep canary), mislabeling the emitted
+    predictions/configs/backtests run-to-run.
+
+    Falls back to the deterministic, metric-aware ``_ensemble_sort_key`` when
+    top_pairs.json is missing/unreadable. Any opt_data pair not declared in
+    top_pairs.json is appended (never dropped) in deterministic order; any
+    declared pair missing from opt_data is reported loudly.
+    """
+    tp_path = os.path.join(batch_dir, "top_pairs.json")
+    top_pairs = None
+    if os.path.isfile(tp_path):
+        try:
+            with open(tp_path, "r", encoding="utf-8-sig") as f:
+                top_pairs = json.load(f)
+        except Exception as e:
+            print(f"  [WARN] top_pairs.json unreadable ({e}); using deterministic sort fallback for E-order")
+            top_pairs = None
+
+    if not top_pairs:
+        if not os.path.isfile(tp_path):
+            print("  [WARN] top_pairs.json missing; using deterministic sort fallback for E-order")
+        return sorted(opt_data.items(), key=_ensemble_sort_key)
+
+    ordered = []
+    used = set()
+    missing = []
+    for p in top_pairs:
+        pk = f"{p.get('target_long', '')}|{p.get('target_short', '')}"
+        if pk in opt_data:
+            ordered.append((pk, opt_data[pk]))
+            used.add(pk)
+        else:
+            missing.append(pk)
+    leftover = sorted(
+        ((k, v) for k, v in opt_data.items() if k not in used),
+        key=_ensemble_sort_key,
+    )
+    if missing:
+        print(f"  [WARN] {len(missing)} top_pairs.json pair(s) not found in opt_data (cannot emit): {missing}")
+    if leftover:
+        print(f"  [WARN] {len(leftover)} opt_data pair(s) not declared in top_pairs.json; appending in deterministic order after declared pairs")
+    return ordered + leftover
+
+
 def build_config(opt_result, objective, ensemble_idx, batch_dir, date_str, dataset_tag, base_config):
     # opt_result key example: "sweep...|sweep..."
     keys = list(opt_result.keys())
@@ -171,19 +249,9 @@ def main():
         markdown_lines.append("")
         markdown_lines.append("---")
         markdown_lines.append("")
-        def get_ensemble_sort_key(item):
-            pair_key, _ = item
-            keys = pair_key.split("|")
-            long_key = keys[0]
-            short_key = keys[1] if len(keys) > 1 else ""
-            
-            long_sweep, _, _ = parse_experiment_key(long_key, "long")
-            short_sweep, _, _ = parse_experiment_key(short_key, "short")
-            
-            exp_col = f"{long_sweep} / {short_sweep}" if long_sweep and short_sweep else (long_sweep or short_sweep or "-")
-            return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', exp_col)]
-
-        sorted_opt_data = sorted(opt_data.items(), key=get_ensemble_sort_key)
+        # E-slot order MUST follow top_pairs.json (the canonical selection), not
+        # the non-deterministic opt_data insertion order. See _canonical_pair_order.
+        sorted_opt_data = _canonical_pair_order(opt_data, batch_dir)
 
         # Derive e2e_dataset_tag the exact same way vm_e2e_pipeline.py does
         data_basename = os.path.splitext(os.path.basename(args.data))[0]

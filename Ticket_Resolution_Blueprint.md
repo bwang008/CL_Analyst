@@ -1,10 +1,12 @@
 # Ticket Resolution Blueprint
 
 ## Bug Summary
-The `NameError: name 'ctx' is not defined` in `_place_bracket_children_on_fill` was caused by an accidental removal of the `ctx` variable assignment (`ctx = self._last_decision_context_by_order_id[order_id]`) in a previous commit, leading to a failure when trying to access `ctx.get("tp_offset")`.
+The 4 execution guard tests failed during the full suite run (`task-97`) due to a global logger mutation leaking during test collection. The `agent/strategy_optimizer.py` and `agent/batch_post_optimizer.py` modules contained a global `setLevel(logging.ERROR)` call on the `src.live_execution.execution_guard` logger. When `pytest` collected the tests, these modules were imported, which permanently silenced the logger across the entire test session. Consequently, tests in `test_execution_guard.py` that asserted expected `WARNING` logs failed.
 
 ## Target Files
-- `src/live_execution/live_trader.py`
+- `agent/strategy_optimizer.py`
+- `agent/batch_post_optimizer.py`
 
 ## Required Changes
-In `src/live_execution/live_trader.py`, locate the `_place_bracket_children_on_fill` method. Right after the block that checks if `order_id` is not in `self._last_decision_context_by_order_id`, and before `tp_offset = ctx.get("tp_offset")`, restore the missing assignment: `ctx = self._last_decision_context_by_order_id[order_id]`.
+1. Remove the global `logging.getLogger("src.live_execution.execution_guard").setLevel(logging.ERROR)` calls from both files.
+2. Relocate these calls inside the respective `if __name__ == "__main__":` blocks of both files. This ensures the logger is only suppressed when the scripts are executed directly, preventing test state pollution.
