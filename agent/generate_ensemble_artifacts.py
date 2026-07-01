@@ -42,6 +42,34 @@ def _layout_subdir(sweep: str) -> str:
         return "production_output"
     return "canary_output"
 
+def _resolve_side_pred(sweep: str, layout_dir: str, side: str, metric: str, prefixed_key: str) -> str:
+    """Resolve the on-disk per-side prediction CSV for a sweep, path-agnostically.
+
+    Fix G: individual-mode sweeps emit a GENERIC filename
+    ``oos_predictions_sweep_{side}_{metric}.csv`` (identical across every sweep).
+    The unique ``oos_predictions_{sweep}_{side}_{metric}`` name is only a pred_map
+    KEY, so it may not exist as a file. We look ONLY inside this sweep's own
+    ``reports/<sweep>/registry/<layout>/`` directory, so we can never source a
+    prediction file that belongs to a different sweep — regardless of OS/path style.
+
+    Preference order (first existing wins):
+      1. reports/<sweep>/registry/<layout>/<prefixed_key>.csv   (if materialized)
+      2. reports/<sweep>/registry/<layout>/oos_predictions_sweep_{side}_{metric}.csv
+      3. reports/<sweep>/registry/<layout>/oos_predictions_{side}_{metric}.csv (legacy)
+    Falls back to the prefixed name (for the error/verification message) if none exist.
+    """
+    base = os.path.join("reports", sweep, "registry", layout_dir)
+    candidates = [
+        os.path.join(base, f"{prefixed_key}.csv"),
+        os.path.join(base, f"oos_predictions_sweep_{side}_{metric}.csv"),
+        os.path.join(base, f"oos_predictions_{side}_{metric}.csv"),
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c.replace("\\", "/")
+    return candidates[0].replace("\\", "/")
+
+
 def build_config(opt_result, objective, ensemble_idx, batch_dir, date_str, dataset_tag, base_config):
     # opt_result key example: "sweep...|sweep..."
     keys = list(opt_result.keys())
@@ -220,8 +248,14 @@ def main():
                 pred_path_long = pred_path_workspace
                 pred_path_short = pred_path_workspace
             else:
-                pred_path_long = os.path.join("reports", long_sweep, "registry", long_dir, f"{long_oos_key}.csv").replace("\\", "/")
-                pred_path_short = os.path.join("reports", short_sweep, "registry", short_dir, f"{short_oos_key}.csv").replace("\\", "/")
+                # Fix G alignment: sweeps write GENERIC per-side filenames
+                # (oos_predictions_sweep_{side}_{metric}.csv) into <sweep>/registry/<layout>/.
+                # The unique <prefix>-keyed name only exists as a pred_map KEY, not on disk.
+                # Resolve to the real file: prefer the prefixed name if it was materialized,
+                # else fall back to the generic per-side name INSIDE THE SWEEP'S OWN dir
+                # (path-agnostic — scoped to reports/<sweep>/, so no cross-sweep mis-source).
+                pred_path_long = _resolve_side_pred(long_sweep, long_dir, "long", long_metric, long_oos_key)
+                pred_path_short = _resolve_side_pred(short_sweep, short_dir, "short", short_metric, short_oos_key)
 
             cfg["models"]["long"]["experiment_id"] = f"{long_exp}_long_{long_metric}"
             cfg["models"]["long"]["model_path"] = f"reports/{long_sweep}/registry/{long_dir}/registry/{long_exp}_long_{long_metric}/final_model.pkl"

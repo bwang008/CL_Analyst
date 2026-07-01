@@ -147,8 +147,6 @@ def _write_worker_status(trials_done: int, total_trials: int, status: str = "run
 _EXPERIMENT_LOG_PATH = os.path.join(PROJECT_ROOT, "agent", "experiment_log.json")
 
 
-import filelock
-
 def load_experiment_log():
     """Load the experiment log, or create a fresh one."""
     if os.path.exists(_EXPERIMENT_LOG_PATH):
@@ -168,6 +166,7 @@ def generate_experiment_id(log_data):
 
 def _append_to_log(record):
     """Append an experiment record to the log file."""
+    import filelock  # lazy import: not required for the search itself
     lock_path = _EXPERIMENT_LOG_PATH + ".lock"
     os.makedirs(os.path.dirname(_EXPERIMENT_LOG_PATH), exist_ok=True)
     with filelock.FileLock(lock_path):
@@ -427,6 +426,7 @@ def make_objective(
     learning_rate_range: tuple[float, float] = (0.005, 0.02),
     min_child_samples_range: tuple[int, int] = (150, 400),
     feature_fraction_range: tuple[float, float] = (0.3, 1.0),
+    random_seed: int = 42,
 ):
     """Create the Optuna objective closure.
 
@@ -468,6 +468,17 @@ def make_objective(
             "boosting_type": boosting_type,
             "verbose": -1,
             "num_threads": num_threads,
+            # --- Reproducibility: route all LGBM RNG through the shared seed ---
+            # NOTE: full bit-for-bit determinism ALSO requires a fixed thread
+            # count. deterministic=True + force_col_wise=True remove most sources
+            # of nondeterminism, but residual multi-thread nondeterminism risk
+            # remains if num_threads varies between runs. We intentionally do NOT
+            # hard-pin threads here (num_threads stays configurable via CLI).
+            "seed": random_seed,
+            "bagging_seed": random_seed,
+            "feature_fraction_seed": random_seed,
+            "deterministic": True,
+            "force_col_wise": True,
             "num_leaves": trial.suggest_int("num_leaves", num_leaves_range[0], num_leaves_range[1]),
             "min_child_samples": trial.suggest_int("min_child_samples", min_child_samples_range[0], min_child_samples_range[1]),
             "learning_rate": trial.suggest_float("learning_rate", learning_rate_range[0], learning_rate_range[1], log=True),
@@ -685,6 +696,7 @@ def run_search(
     min_child_samples_range: tuple[int, int] = (150, 400),
     feature_fraction_range: tuple[float, float] = (0.3, 1.0),
     exec_ohlcv_path: str | None = None,
+    random_seed: int = 42,
 ):
     """Run the Walk-Forward Optuna search (Phase 1: Brain Optimization).
 
@@ -702,6 +714,9 @@ def run_search(
         db_dir: Directory for SQLite study persistence.
     """
     start_time = time.perf_counter()
+
+    # Reproducibility: seed the process-level numpy RNG at this entrypoint.
+    np.random.seed(random_seed)
 
     # Validate sharpe mode requires strategy config
     if ml_metric == "sharpe" and not strategy_config_path:
@@ -847,6 +862,7 @@ def run_search(
         storage=storage,
         direction="maximize",
         load_if_exists=True,
+        sampler=optuna.samplers.TPESampler(seed=random_seed),
     )
 
     objective = make_objective(
@@ -871,6 +887,7 @@ def run_search(
         learning_rate_range=learning_rate_range,
         min_child_samples_range=min_child_samples_range,
         feature_fraction_range=feature_fraction_range,
+        random_seed=random_seed,
     )
 
     # Progress callback
@@ -1137,6 +1154,11 @@ def main():
         "--exec-data", default=None,
         help="Optional: path to raw unadjusted execution data for wallet/fills",
     )
+    parser.add_argument(
+        "--random-seed", type=int, default=42,
+        help="Shared random seed for reproducibility (TPE sampler, LGBM RNG, "
+             "numpy). Default: 42.",
+    )
     args = parser.parse_args()
 
     import json
@@ -1213,6 +1235,7 @@ def main():
         min_child_samples_range=(opt.min_child_samples_min, opt.min_child_samples_max),
         feature_fraction_range=(opt.feature_fraction_min, opt.feature_fraction_max),
         exec_ohlcv_path=args.exec_data,
+        random_seed=args.random_seed,
     )
 
 

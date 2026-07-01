@@ -185,10 +185,16 @@ if b:  # v2 manifest format
     if ew.get("slippage_per_side") is None:
         fail("baseline.execution_workflow.slippage_per_side is required (no default).")
     slip = ew["slippage_per_side"]
-    opt = (b.get("training_workflow") or {}).get("optuna") or {}
+    tw = b.get("training_workflow") or {}
+    opt = tw.get("optuna") or {}
     if opt.get("post_optimizer_holdout_months") is None:
         fail("baseline.training_workflow.optuna.post_optimizer_holdout_months is required (no default).")
     holdout = opt["post_optimizer_holdout_months"]
+    # Global RNG seed — REQUIRED (no default). Threaded to strategy_optimizer via
+    # batch_post_optimizer.py so the post-optimization stage is reproducible.
+    if tw.get("random_seed") is None:
+        fail("baseline.training_workflow.random_seed is required (no default).")
+    seed = tw["random_seed"]
 else:  # legacy manifest format
     d = m.get("defaults") or {}
     ohlcv = d.get("gcs_data_path") or ""
@@ -202,6 +208,9 @@ else:  # legacy manifest format
     if d.get("post_optimizer_holdout_months") is None:
         fail("defaults.post_optimizer_holdout_months is required (no default).")
     holdout = d["post_optimizer_holdout_months"]
+    if d.get("random_seed") is None:
+        fail("defaults.random_seed is required (no default).")
+    seed = d["random_seed"]
 
 if not ohlcv:
     fail("could not resolve OHLCV gcs data path from manifest.")
@@ -213,6 +222,7 @@ print(strat)
 print(exec_data)
 print(slip)
 print(holdout)
+print(seed)
 PYEOF
 )
 if [ $? -ne 0 ]; then
@@ -226,14 +236,21 @@ STRATEGY_CONFIG="${_MF[1]}"
 EXEC_DATA_GCS="${_MF[2]}"
 SLIPPAGE_PER_SIDE="${_MF[3]}"
 HOLDOUT_MONTHS="${_MF[4]}"   # authoritative: from manifest post_optimizer_holdout_months
+RANDOM_SEED="${_MF[5]}"      # authoritative: from manifest training_workflow.random_seed
 OHLCV_BASENAME=$(basename "$OHLCV_GCS")
 echo "  OHLCV GCS path: $OHLCV_GCS" | tee -a "$LOG"
 echo "  Strategy config: $STRATEGY_CONFIG" | tee -a "$LOG"
 echo "  Slippage/side:  $SLIPPAGE_PER_SIDE  (absolute price units, from manifest)" | tee -a "$LOG"
 echo "  Holdout:        $HOLDOUT_MONTHS months (from manifest)" | tee -a "$LOG"
+echo "  Random seed:    $RANDOM_SEED (from manifest)" | tee -a "$LOG"
 
 if [ -z "$HOLDOUT_MONTHS" ]; then
     echo "  FATAL: HOLDOUT_MONTHS empty after manifest parse — refusing to run." | tee -a "$LOG"
+    exit 1
+fi
+
+if [ -z "$RANDOM_SEED" ]; then
+    echo "  FATAL: RANDOM_SEED empty after manifest parse — refusing to run (reproducibility required)." | tee -a "$LOG"
     exit 1
 fi
 
@@ -272,6 +289,8 @@ fi
 if (( $(echo "$SLIPPAGE_PER_SIDE > 0" | bc -l) )); then
     OPT_ARGS="$OPT_ARGS --slippage-per-side $SLIPPAGE_PER_SIDE"
 fi
+# Seed threaded into batch_post_optimizer.py -> strategy_optimizer (Task 1 consumer).
+OPT_ARGS="$OPT_ARGS --random-seed $RANDOM_SEED"
 
 # --- [3/5] Download all experiment artifacts from GCS ---
 echo "" | tee -a "$LOG"
@@ -462,6 +481,7 @@ else
         if (( $(echo "$SLIPPAGE_PER_SIDE > 0" | bc -l) )); then
             EXEC_ENS_ARGS="$EXEC_ENS_ARGS --slippage-per-side $SLIPPAGE_PER_SIDE"
         fi
+        EXEC_ENS_ARGS="$EXEC_ENS_ARGS --random-seed $RANDOM_SEED"
 
         python agent/batch_post_optimizer.py \
             --batch-dir "$BATCH_DIR" \

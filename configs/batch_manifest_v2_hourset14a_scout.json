@@ -34,6 +34,7 @@
       "holdout_cutoff_date": null,
       "target_columns": [],
       "gcs_base_dir": "gs://cltrainer-optuna-results/scout",
+      "random_seed": 42,
       "optuna": {
         "n_trials": 200,
         "metrics": ["logloss", "average_precision"],

@@ -115,6 +115,11 @@ def main():
     processes = []
     targets = master_config.training_workflow.target_columns
     metrics = master_config.training_workflow.optuna.metrics
+    # Global RNG seed (REQUIRED in the manifest — schema crashes if missing). Threaded to
+    # every stochastic stage so sweeps are reproducible. Passed with the EXACT flag name
+    # --random-seed that the Task 2 consumers (optuna_lgbm_search_v2.py, vm_e2e_pipeline.py)
+    # expect.
+    random_seed = master_config.training_workflow.random_seed
     # One worker per (target, metric). Cap LightGBM threads so all concurrent
     # workers together stay within the VM's core budget (avoid oversubscription).
     total_workers = max(1, len(targets) * len(metrics))
@@ -136,7 +141,8 @@ def main():
                 "--study-name", study_name,
                 "--db-dir", args.db_dir,
                 "--num-threads", str(threads_per_worker),
-                "--worker-id", str(worker_id)
+                "--worker-id", str(worker_id),
+                "--random-seed", str(random_seed)
             ] + unknown_args
 
             print(f"Launching W{worker_id} for {target} [{metric}] (threads={threads_per_worker})...")
@@ -171,6 +177,7 @@ def main():
         "--db-dir", args.db_dir,
         "--opt-trials", str(post_opt_trials),
         "--study-prefix", "sweep",
+        "--random-seed", str(random_seed),
         "--metrics", *metrics,
     ]
     if args.gcs_prefix:

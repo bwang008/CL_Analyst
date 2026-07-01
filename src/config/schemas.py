@@ -93,7 +93,23 @@ class TrainingWorkflowConfig(BaseModel):
     holdout_cutoff_date: Optional[str] = None
     target_columns: List[str]
     gcs_base_dir: str
+    # Global RNG seed threaded to every stochastic stage (Optuna sampler, LightGBM,
+    # numpy). REQUIRED — the manifest is the single source of truth. A missing seed
+    # previously left each stage self-seeding non-deterministically, making sweeps
+    # irreproducible. Crash instead of silently defaulting to None.
+    random_seed: int
     optuna: OptunaConfig = Field(default_factory=OptunaConfig)
+
+    @field_validator("random_seed")
+    @classmethod
+    def validate_random_seed_present(cls, v: int) -> int:
+        if v is None:
+            raise ValueError(
+                "random_seed must be defined — it cannot be null/missing. Reproducibility "
+                "requires a single explicit seed threaded to Optuna/LightGBM/numpy; a missing "
+                "value silently made sweeps non-deterministic."
+            )
+        return v
 
     @field_validator("train_cutoff_date")
     @classmethod

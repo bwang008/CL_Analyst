@@ -716,6 +716,27 @@ def _derive_trailing_params(params: dict) -> dict:
     return out
 
 
+def _reapply_strategy_level_params(best_cfg: dict, trial_params: dict) -> dict:
+    """Re-apply strategy-level (non-per-side) trial params onto ``best_cfg``.
+
+    The reconstruction blocks split ``best_trial.params`` into per-side dicts
+    using a ``_long`` / ``_short`` suffix filter. Any strategy-level param that
+    carries neither suffix — notably ``conflict_resolution`` — is silently
+    dropped by that filter, so the re-backtest of ``best_cfg`` diverged from the
+    trial's own score (best_obj_score != consistency_score).
+
+    This mirrors exactly what the Optuna objective does when it builds its cfg
+    (``cfg["conflict_resolution"] = conflict_mode``): any key without a side
+    suffix is written straight onto the top-level config.
+
+    Mutates ``best_cfg`` in place and returns it for chaining.
+    """
+    for k, v in trial_params.items():
+        if not (k.endswith("_long") or k.endswith("_short")):
+            best_cfg[k] = v
+    return best_cfg
+
+
 def _extract_warm_start_params(
     base_cfg: dict,
     is_tiered: bool,
@@ -1049,6 +1070,7 @@ def run_optimization(
     optimize_side: str | None = None,
     exec_ohlcv_path: str | None = None,
     slippage_per_side: float | None = None,
+    random_seed: int = 42,
 ) -> tuple[dict, BacktestResult]:
     """Run strategy parameter optimization.
 
@@ -1064,6 +1086,9 @@ def run_optimization(
         are stored in ``best_config["optuna_info"]["holdout_metrics"]``.
     """
     start_time = time.perf_counter()
+
+    # Seed numpy for reproducibility (Optuna sampler seeded separately below).
+    np.random.seed(random_seed)
 
     from src.live_execution.config_loader import load_strategy_config
     base_cfg = load_strategy_config(config_path)
@@ -1185,6 +1210,7 @@ def run_optimization(
         direction="maximize",
         study_name=f"strategy_opt_{model_name}_{objective_metric}",
         storage=f"sqlite:///{db_path}",
+        sampler=optuna.samplers.TPESampler(seed=random_seed),
     )
 
     # ── Warm-start: inject baseline as trial #0 ───────────────────────
@@ -1292,6 +1318,9 @@ def run_optimization(
         short_params = _derive_trailing_params(short_params)
         strategy.apply_trial_params(best_cfg, long_params, side="long")
         strategy.apply_trial_params(best_cfg, short_params, side="short")
+        # Re-apply strategy-level params (e.g. conflict_resolution) dropped by
+        # the _long/_short suffix filter above, matching the objective's cfg.
+        _reapply_strategy_level_params(best_cfg, dict(best_trial.params))
     else:
         params = _derive_trailing_params(dict(best_trial.params))
         strategy.apply_trial_params(best_cfg, params)
@@ -1432,6 +1461,7 @@ def run_hybrid_optimization(
     exec_ohlcv_path: str | None = None,
     slippage_per_side: float | None = None,
     vbt_top_n: int = 20,
+    random_seed: int = 42,
 ) -> tuple[dict, BacktestResult]:
     """Two-Stage Hybrid optimizer: vectorbt pre-screen → Optuna warm-start.
 
@@ -1461,6 +1491,9 @@ def run_hybrid_optimization(
         Tuple of (best_config, best_result) — same format as run_optimization().
     """
     start_time = time.perf_counter()
+
+    # Seed numpy for reproducibility (Optuna sampler seeded separately below).
+    np.random.seed(random_seed)
 
     from src.live_execution.config_loader import load_strategy_config
     base_cfg = load_strategy_config(config_path)
@@ -1598,6 +1631,7 @@ def run_hybrid_optimization(
         direction="maximize",
         study_name=f"hybrid_opt_{model_name}_{objective_metric}",
         storage=f"sqlite:///{db_path}",
+        sampler=optuna.samplers.TPESampler(seed=random_seed),
     )
 
     # ── Warm-start: inject baseline as first trial ────────────────────
@@ -1709,6 +1743,9 @@ def run_hybrid_optimization(
         short_params = _derive_trailing_params(short_params)
         strategy.apply_trial_params(best_cfg, long_params, side="long")
         strategy.apply_trial_params(best_cfg, short_params, side="short")
+        # Re-apply strategy-level params (e.g. conflict_resolution) dropped by
+        # the _long/_short suffix filter above, matching the objective's cfg.
+        _reapply_strategy_level_params(best_cfg, dict(best_trial.params))
     else:
         params = _derive_trailing_params(dict(best_trial.params))
         strategy.apply_trial_params(best_cfg, params)
@@ -1876,6 +1913,11 @@ def main() -> None:
         "--side", choices=["long", "short", "both"], default="both",
         help="Which side to optimize: long, short, or both (default: both)"
     )
+    parser.add_argument(
+        "--random-seed", type=int, default=42,
+        help="Seed for the Optuna TPE sampler and numpy RNG (default: 42). "
+             "Same seed => identical study best_trial.params."
+    )
     args = parser.parse_args()
 
     _side = None if args.side == "both" else args.side
@@ -1890,6 +1932,7 @@ def main() -> None:
         objective_metric=args.objective,
         optimize_side=_side,
         exec_ohlcv_path=args.exec_data,
+        random_seed=args.random_seed,
     )
 
 

@@ -127,6 +127,7 @@ def train_final_model(
     params: dict,
     balance_mode: str = "downsample",
     output_path: str = "final_model.pkl",
+    random_seed: int = 42,
 ) -> lgb.Booster:
     """Train a final LightGBM model on the full train split and save .pkl."""
 
@@ -141,7 +142,7 @@ def train_final_model(
 
     # Apply class balancing
     if balance_mode == "downsample":
-        X, y = util.downsample_majority(X, y, random_state=42)
+        X, y = util.downsample_majority(X, y, random_state=random_seed)
         print(f"  After downsample: {len(X):,} rows")
 
     # Split for early stopping (last 10%)
@@ -156,6 +157,16 @@ def train_final_model(
     lgb_params["num_threads"] = 8
     lgb_params["metric"] = "None"
     lgb_params["objective"] = focal_obj
+    # --- Reproducibility: route all LGBM RNG through the shared seed ---
+    # NOTE: full bit-for-bit determinism ALSO requires a fixed thread count.
+    # deterministic=True + force_col_wise=True remove most nondeterminism, but a
+    # residual multi-thread nondeterminism risk remains if num_threads changes
+    # between runs (here num_threads is pinned to 8, so runs are reproducible).
+    lgb_params["seed"] = random_seed
+    lgb_params["bagging_seed"] = random_seed
+    lgb_params["feature_fraction_seed"] = random_seed
+    lgb_params["deterministic"] = True
+    lgb_params["force_col_wise"] = True
 
     train_data = lgb.Dataset(X_tr, label=y_tr)
     val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
@@ -422,10 +433,14 @@ def run_pipeline(
     opt_trials: int = 100,
     exec_data_path: str | None = None,
     slippage_per_side: float | None = None,
+    random_seed: int = 42,
 ):
     """Run the full E2E pipeline."""
 
     start_time = time.perf_counter()
+
+    # Reproducibility: seed the process-level numpy RNG at this entrypoint.
+    np.random.seed(random_seed)
 
     if metrics is None:
         metrics = ["logloss", "average_precision"]
@@ -580,6 +595,7 @@ def run_pipeline(
                 params=params,
                 balance_mode="downsample",
                 output_path=model_path,
+                random_seed=random_seed,
             )
 
             fmt_prefix = study_prefix if study_prefix else "baseline"
@@ -1069,6 +1085,11 @@ def main():
     parser.add_argument(
         "--dry-run", action="store_true", help="Parse config, resolve paths, and exit successfully without running pipeline",
     )
+    parser.add_argument(
+        "--random-seed", type=int, default=42,
+        help="Shared random seed for reproducibility (downsampling, LGBM RNG, "
+             "numpy). Default: 42.",
+    )
 
     args = parser.parse_args()
     
@@ -1149,6 +1170,7 @@ def main():
         opt_trials=args.opt_trials,
         exec_data_path=master_config.execution_workflow.execution_data_path,
         slippage_per_side=resolved_slippage,
+        random_seed=args.random_seed,
     )
 
 

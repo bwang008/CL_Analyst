@@ -168,6 +168,71 @@ def _label_from_pred_path(pred_path: str, gcs_to_label: dict) -> str:
     return ""
 
 
+def _owning_prefix(path: str, gcs_prefixes: list[str]) -> str:
+    """Return the gcs_prefix that owns ``path``, matched by whole path SEGMENT.
+
+    Fix G: OS-independent. Splits ``path`` on BOTH separators and compares whole
+    segments, so it can never be fooled by a Linux-vs-Windows path stored in
+    batch_progress.json, nor mis-source a file whose prefix is a substring of an
+    unrelated segment. ``gcs_prefixes`` MUST be sorted longest-first so a longer,
+    more specific prefix wins over a shorter one that is also a segment.
+    """
+    segments = set(_re.split(r"[\\/]+", path))
+    for pfx in gcs_prefixes:
+        if pfx in segments:
+            return pfx
+    return ""
+
+
+def build_pred_map(search_dirs: list[str], gcs_prefixes: list[str]) -> dict:
+    """Discover prediction CSVs across ``search_dirs`` into a collision-free pred_map.
+
+    Fix G (reproducibility, OFF-VM safe): individual-mode sweeps emit GENERIC
+    filenames ``oos_predictions_sweep_{side}_{metric}.csv`` — identical across every
+    sweep. Keying them by that stem collides (the last-walked sweep overwrites all
+    others -> mis-sourced predictions). We instead resolve each file's owning
+    experiment by matching its gcs_prefix as a path SEGMENT (path-agnostic; no
+    OS-specific ``startswith`` against the Linux ``local_dir`` in the progress JSON)
+    and register it under the UNIQUE key ``oos_predictions_{prefix}_{side}_{metric}``.
+    """
+    # Longest-first so a specific prefix wins over a shorter substring segment.
+    gcs_prefixes = sorted({p for p in gcs_prefixes if p}, key=len, reverse=True)
+    pred_map: dict = {}
+    for search_dir in search_dirs:
+        for root, _dirs, files in os.walk(search_dir):
+            for file in files:
+                if file == "oos_predictions.csv":
+                    # Key matches sweep_ensembles.py._unique_model_name()
+                    key = _unique_model_name(root)
+                    pred_map[key] = os.path.join(root, file)
+                elif file.startswith("oos_predictions_") and file.endswith(".csv"):
+                    stem = file.replace(".csv", "")
+                    full_path = os.path.join(root, file)
+
+                    owning_prefix = _owning_prefix(full_path, gcs_prefixes)
+                    if owning_prefix and stem.startswith("oos_predictions_sweep_"):
+                        suffix = stem[len("oos_predictions_sweep_"):]
+                        expanded_key = f"oos_predictions_{owning_prefix}_{suffix}"
+                        if expanded_key in pred_map and pred_map[expanded_key] != full_path:
+                            raise RuntimeError(
+                                f"Prediction collision: '{expanded_key}' already maps to "
+                                f"{pred_map[expanded_key]!r}, cannot also map to {full_path!r}. "
+                                "Two sweeps resolved to the same unique key — aborting to "
+                                "avoid a mis-sourced prediction."
+                            )
+                        pred_map[expanded_key] = full_path
+
+                    # Never let a generic 'oos_predictions_sweep_*' stem clobber
+                    # another sweep's file: register the generic key only when it is
+                    # itself unique, and only as a first-writer legacy fallback.
+                    is_generic_sweep = stem.startswith("oos_predictions_sweep_")
+                    if not is_generic_sweep:
+                        pred_map[stem] = full_path
+                    elif stem not in pred_map:
+                        pred_map[stem] = full_path
+    return pred_map
+
+
 def find_ohlcv_path(manifest_path: str) -> str:
     """Resolve the local OHLCV parquet from the batch manifest."""
     with open(manifest_path) as f:
@@ -246,6 +311,7 @@ def run_single_optimization(
     optimize_side: str | None = None,
     exec_ohlcv_path: str | None = None,
     slippage_per_side: float | None = None,
+    random_seed: int | None = None,
 ) -> dict:
     """Run strategy_optimizer on a single config and return results."""
     # Suppress per-worker Telegram notifications — the batch orchestrator
@@ -272,6 +338,7 @@ def run_single_optimization(
             optimize_side=optimize_side,
             exec_ohlcv_path=exec_ohlcv_path,
             slippage_per_side=slippage_per_side,
+            random_seed=random_seed,
         )
         best_metrics = extract_metrics(best_result)
         return {
@@ -816,6 +883,7 @@ def _run_all_objectives_concurrent(
                     optimize_side=side,
                     exec_ohlcv_path=args.exec_data,
                     slippage_per_side=args.slippage_per_side,
+                    random_seed=args.random_seed,
                 )
                 futures[future] = (task_key, merged_path, label, metric, side, obj_metric)
 
@@ -849,6 +917,7 @@ def _run_all_objectives_concurrent(
                 optimize_side=side,
                 exec_ohlcv_path=args.exec_data,
                 slippage_per_side=args.slippage_per_side,
+                random_seed=args.random_seed,
             )
             results_by_objective[obj_metric][task_key] = result
             _completed_count += 1
@@ -890,6 +959,12 @@ def main():
     parser.add_argument("--min-trades", type=int, default=10, help="Min trades for valid trial")
     parser.add_argument("--exec-data", default=None, help="Optional: path to raw unadjusted execution data")
     parser.add_argument("--slippage-per-side", type=float, default=None, help="Slippage to apply per side in points")
+    parser.add_argument(
+        "--random-seed", type=int, required=True,
+        help="Global RNG seed threaded to strategy_optimizer (Optuna sampler/LightGBM/numpy). "
+             "REQUIRED — the manifest is the single source of truth; a missing seed makes "
+             "post-optimization non-reproducible."
+    )
     parser.add_argument(
         "--holdout-months", type=int, default=4,
         help="Reserve last N months of predictions as unseen holdout (default: 4)"
@@ -985,56 +1060,20 @@ def main():
         # Build gcs_prefix -> experiment label mapping from batch_progress.json
         gcs_to_label = _build_gcs_prefix_to_label(progress)
             
-        # Map model directory names to their oos_predictions.csv paths
-        # sweep_ensembles.py uses directory names like "registry_E2E_HourSet_10_long_logloss"
-        # and the predictions are at <dir>/oos_predictions.csv
-        pred_map = {}
-        
-        # Build list of directories to search: batch_dir + all experiment local_dirs
+        # Map model directory names to their prediction CSV paths.
+        # Build list of directories to search: batch_dir + all experiment local_dirs.
         search_dirs = [batch_dir]
         for exp in progress.get("experiments", []):
             local_dir = exp.get("local_dir", "")
             if local_dir and os.path.isdir(local_dir) and local_dir not in search_dirs:
                 search_dirs.append(local_dir)
-        
-        # Build gcs_prefix -> local_dir mapping for v2 key expansion
-        prefix_to_local = {}
-        for exp in progress.get("experiments", []):
-            gcs_prefix = exp.get("gcs_prefix", "")
-            local_dir = exp.get("local_dir", "")
-            if gcs_prefix and local_dir:
-                prefix_to_local[os.path.normpath(local_dir)] = gcs_prefix
 
-        for search_dir in search_dirs:
-            for root, dirs, files in os.walk(search_dir):
-                for file in files:
-                    if file == "oos_predictions.csv":
-                        # Key matches sweep_ensembles.py._unique_model_name()
-                        # e.g. "sweep_hs10_3x1_6h_20260609_0026_E2E_HourSet_10_long_logloss"
-                        key = _unique_model_name(root)
-                        pred_map[key] = os.path.join(root, file)
-                    # Also support flat CSV naming: oos_predictions_<prefix>.csv
-                    elif file.startswith("oos_predictions_") and file.endswith(".csv"):
-                        stem = file.replace(".csv", "")
-                        full_path = os.path.join(root, file)
-                        pred_map[stem] = full_path
-                        
-                        # V2 expansion: for files in production_output/, also register
-                        # under the experiment-prefixed key that unified_pair_optimizer expects.
-                        # e.g. "oos_predictions_sweep_long_logloss" -> 
-                        #      "oos_predictions_<gcs_prefix>_long_logloss"
-                        if "production_output" in root.replace("\\", "/"):
-                            # Find which experiment this belongs to
-                            norm_root = os.path.normpath(root)
-                            for local_path, gcs_prefix in prefix_to_local.items():
-                                if norm_root.startswith(local_path):
-                                    # Strip "oos_predictions_sweep_" and rebuild with gcs_prefix
-                                    if stem.startswith("oos_predictions_sweep_"):
-                                        suffix = stem[len("oos_predictions_sweep_"):]
-                                        expanded_key = f"oos_predictions_{gcs_prefix}_{suffix}"
-                                        pred_map[expanded_key] = full_path
-                                    break
-        
+        # All experiment gcs_prefixes — the OS-agnostic identity of each sweep, used by
+        # build_pred_map() for collision-free, path-agnostic re-keying (Fix G).
+        gcs_prefixes = [exp.get("gcs_prefix", "") for exp in progress.get("experiments", [])]
+
+        pred_map = build_pred_map(search_dirs, gcs_prefixes)
+
         print(f"  Discovered {len(pred_map)} prediction paths across {len(search_dirs)} directories")
                     
         for i, pair in enumerate(top_pairs):

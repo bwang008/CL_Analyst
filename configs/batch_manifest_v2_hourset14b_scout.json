@@ -34,6 +34,7 @@
       "holdout_cutoff_date": null,
       "target_columns": [],
       "gcs_base_dir": "gs://cltrainer-optuna-results/scout",
+      "random_seed": 42,
       "optuna": {
         "_comment_lgbm_ranges": "Restored to legacy scout batch_20260626_0017_HS14B_SCOUT_FIX (wide LGBM box) to A/B the model-search-space gap. Was narrow: depth_max 6 / leaves_max 31 / est 500 / lr 0.005-0.02 / folds 3 / es 15 / min_child 150-400 / n_trials 200.",
         "n_trials": 100,
