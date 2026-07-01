@@ -225,6 +225,14 @@ def _trade_floor_weight(trade_count: int, trade_floor: float,
     return raw / at_floor
 
 
+def _apply_trade_floor_penalty(raw_score: float, trade_count: int, trade_floor: float) -> float:
+    """Apply the trade-floor penalty multiplier to a raw objective score."""
+    if raw_score > 0:
+        weight = _trade_floor_weight(trade_count, trade_floor)
+        return raw_score * weight
+    return raw_score
+
+
 # ---------------------------------------------------------------------------
 # Metrics helpers
 # ---------------------------------------------------------------------------
@@ -798,6 +806,7 @@ def _extract_warm_start_params(
 def _compute_objective_score(
     result: BacktestResult,
     objective_metric: str,
+    trade_floor: float,
 ) -> float:
     """Compute the same Sharpe/Sortino score used by the Optuna objective.
 
@@ -814,7 +823,7 @@ def _compute_objective_score(
     trades_df["exit_dt"] = pd.to_datetime(trades_df["exit_dt"])
     trades_df = trades_df.set_index("exit_dt").sort_index()
 
-    monthly_pnls = trades_df["pnl"].resample("ME").sum().dropna()
+    monthly_pnls = trades_df["pnl"].resample("M").sum().dropna()
     monthly_pnl_vals = monthly_pnls.values
 
     if len(monthly_pnl_vals) == 0:
@@ -825,13 +834,14 @@ def _compute_objective_score(
         downside_dev = float(np.sqrt(np.mean(downside_sq)))
         if downside_dev < 1e-9:
             if len(monthly_pnl_vals) > 0 and float(np.mean(monthly_pnl_vals)) > 0:
-                return OBJECTIVE_SCORE_CAP   # Holy grail: only winning months
+                raw_score = OBJECTIVE_SCORE_CAP   # Holy grail: only winning months
             else:
                 return -9999.0  # Degenerate: 0 trades or perfectly flat
-        score = float(
-            (np.mean(monthly_pnl_vals) / downside_dev) * np.sqrt(12)
-        )
-        return min(score, OBJECTIVE_SCORE_CAP)
+        else:
+            score = float(
+                (np.mean(monthly_pnl_vals) / downside_dev) * np.sqrt(12)
+            )
+            raw_score = min(score, OBJECTIVE_SCORE_CAP)
     else:
         std_pnl = float(np.std(monthly_pnl_vals))
         if std_pnl < 1e-9:
@@ -839,7 +849,9 @@ def _compute_objective_score(
         score = float(
             (np.mean(monthly_pnl_vals) / std_pnl) * np.sqrt(12)
         )
-        return min(score, OBJECTIVE_SCORE_CAP)
+        raw_score = min(score, OBJECTIVE_SCORE_CAP)
+        
+    return _apply_trade_floor_penalty(raw_score, result.trade_count, trade_floor)
 
 
 # ---------------------------------------------------------------------------
@@ -967,7 +979,7 @@ def make_objective(
         trades_df["exit_dt"] = pd.to_datetime(trades_df["exit_dt"])
         trades_df = trades_df.set_index("exit_dt").sort_index()
 
-        monthly_pnls = trades_df["pnl"].resample("ME").sum().dropna()
+        monthly_pnls = trades_df["pnl"].resample("M").sum().dropna()
         monthly_pnl_vals = monthly_pnls.values
 
         if len(monthly_pnl_vals) == 0:
@@ -1000,11 +1012,7 @@ def make_objective(
         # --- Trade Floor Penalty ---
         # Negative score returned as-is (multiplying by weight < 1 would
         # *improve* a negative score — the opposite of the intended effect).
-        if annualized_score > 0:
-            weight = _trade_floor_weight(result.trade_count, _trade_floor)
-            final_score = annualized_score * weight
-        else:
-            final_score = annualized_score
+        final_score = _apply_trade_floor_penalty(annualized_score, result.trade_count, _trade_floor)
 
         # Track top configs (penalized score so ranking matches Optuna)
         if tracker is not None:
@@ -1193,7 +1201,11 @@ def run_optimization(
         print("  [WARN] NO WARM-START: Optimizer will cold-start from random sampling!")
 
     # Compute baseline objective score for regression guard
-    baseline_obj_score = _compute_objective_score(baseline_result, objective_metric)
+    _floor_rate = TRADES_PER_YEAR_FLOOR_SINGLE if optimize_side else TRADES_PER_YEAR_FLOOR
+    _backtest_years = (predictions_df.index.max() - predictions_df.index.min()).days / 365.25
+    _trade_floor = max(1.0, _floor_rate * _backtest_years)
+    
+    baseline_obj_score = _compute_objective_score(baseline_result, objective_metric, _trade_floor)
     print(f"  Baseline {objective_metric}: {baseline_obj_score:.4f}")
 
     score_label = objective_metric.capitalize()
@@ -1302,7 +1314,7 @@ def run_optimization(
           f"DD=${baseline_metrics['max_drawdown']:,.2f}")
 
     # ── Regression guard ──────────────────────────────────────────────
-    best_obj_score = _compute_objective_score(best_result, objective_metric)
+    best_obj_score = _compute_objective_score(best_result, objective_metric, _trade_floor)
     _regression_triggered = False
     if best_obj_score <= baseline_obj_score:
         _regression_triggered = True
@@ -1611,7 +1623,11 @@ def run_hybrid_optimization(
         print(f"  Enqueued {len(stage1_configs)} Stage 1 warm-start trials")
 
     # Compute baseline objective score for regression guard
-    baseline_obj_score = _compute_objective_score(baseline_result, objective_metric)
+    _floor_rate = TRADES_PER_YEAR_FLOOR_SINGLE if optimize_side else TRADES_PER_YEAR_FLOOR
+    _backtest_years = (predictions_df.index.max() - predictions_df.index.min()).days / 365.25
+    _trade_floor = max(1.0, _floor_rate * _backtest_years)
+
+    baseline_obj_score = _compute_objective_score(baseline_result, objective_metric, _trade_floor)
     print(f"  Baseline {objective_metric}: {baseline_obj_score:.4f}")
 
     def trial_callback(study_: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
@@ -1715,7 +1731,7 @@ def run_hybrid_optimization(
           f"DD=${baseline_metrics['max_drawdown']:,.2f}")
 
     # ── Regression guard ──────────────────────────────────────────────
-    best_obj_score = _compute_objective_score(best_result, objective_metric)
+    best_obj_score = _compute_objective_score(best_result, objective_metric, _trade_floor)
     _regression_triggered = False
     if best_obj_score <= baseline_obj_score:
         _regression_triggered = True
