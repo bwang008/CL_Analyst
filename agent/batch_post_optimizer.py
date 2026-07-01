@@ -75,6 +75,25 @@ def shorten_model_name(name: str) -> str:
     return "_".join(parts) if parts else name
 
 
+def format_best_trial(opt_info: dict) -> str:
+    """Best-trial display that reflects the regression guard.
+
+    When ``regression_guard_triggered`` is True the optimizer discarded the
+    study's best trial and reverted to the baseline config, so the Optimized
+    columns (Opt Thr, TP/SL, etc.) are intentionally blank and pre==opt. In that
+    case printing the study's best trial number (e.g. ``#2/3``) is misleading —
+    it reads as though a non-baseline trial was selected. Report the revert
+    explicitly instead so the empty Opt columns are self-explanatory.
+    """
+    trial_num = opt_info.get('trial_number', '-')
+    n_t = opt_info.get('n_trials', '?')
+    if opt_info.get('regression_guard_triggered'):
+        return "baseline (guard)"
+    if trial_num == '-':
+        return "-"
+    return f"#{trial_num}/{n_t}"
+
+
 def shorten_model_side(name: str) -> str:
     """Extract just the metric + direction from a model name for ensemble display.
     
@@ -461,8 +480,6 @@ def generate_optimized_report(
                     ho_trades = f"{ho_t}/{ho_l}/{ho_s}"
                 else:
                     ho_trades = "-"
-                trial_num = opt_info.get('trial_number', '-')
-                n_t = opt_info.get('n_trials', '?')
                 baseline = opt_info.get("baseline_metrics", {})
 
                 # Baseline metrics
@@ -492,7 +509,7 @@ def generate_optimized_report(
                 lines.append(
                     f"| {idx} | {experiment_col} | {long_model} | {short_model} | {base_trades} | {opt_trades} | {ho_trades} | "
                     f"{base_pf} | {opt_pf} | {base_pnl} | {opt_pnl} | {ho_pnl} | {opt_thr} | "
-                    f"#{trial_num}/{n_t} |"
+                    f"{format_best_trial(opt_info)} |"
                 )
             elif opt.get("status") == "FAILED":
                 lines.append(
@@ -567,9 +584,7 @@ def generate_optimized_report(
                         opt_consec = params.get("consecutive_signal_threshold", "-")
                         ho_metrics = opt_info.get("holdout_metrics", {})
                         ho_pnl = f"${ho_metrics['total_pnl']:,.0f}" if ho_metrics else "-"
-                        trial_num = opt_info.get('trial_number', '-')
-                        n_t = opt_info.get('n_trials', '?')
-                        best_trial_str = f"#{trial_num}/{n_t}" if trial_num != '-' else "-"
+                        best_trial_str = format_best_trial(opt_info)
                         lines.append(
                             f"| {label} | {base_trades} | {opt_trades} | "
                             f"{base_pf:.2f} | {opt_pf:.2f} | "
@@ -714,8 +729,7 @@ def generate_optimized_report(
                 bv = base_cfg.get("long", {}).get(param_key, base_cfg.get(param_key, '-')) if base_cfg else '-'
                 lines.append(f"| {display_name} | {bv} | {params.get(param_key, '-')} |")
 
-        trial_num = opt_info.get('trial_number', '-')
-        lines.append(f"| Best Trial | - | #{trial_num}/{opt_info.get('n_trials', '-')} |")
+        lines.append(f"| Best Trial | - | {format_best_trial(opt_info)} |")
         lines.append(f"| Wall Time | - | {opt_info.get('wall_time_seconds', '-')}s |")
         lines.append("")
 

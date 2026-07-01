@@ -1600,6 +1600,7 @@ class LiveTrader:
             )
             return
 
+        ctx = self._last_decision_context_by_order_id[order_id]
         tp_offset = ctx.get("tp_offset")
         sl_offset = ctx.get("sl_offset")
         entry_action = ctx.get("entry_action")

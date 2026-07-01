@@ -250,3 +250,51 @@ def test_unbound_local_error_on_zero_position(mock_build_live_features, caplog):
             rolling_df=features,
             stream="5m"
         )
+
+
+def test_place_bracket_children_on_fill():
+    """
+    Test that _place_bracket_children_on_fill correctly calculates child prices
+    and places child orders without raising NameError for 'ctx'.
+    """
+    trader = LiveTrader.__new__(LiveTrader)
+    trader._execution_symbol = "CL"
+    trader.exec_client = MagicMock()
+    
+    # Mock child trades returned by place_child_orders
+    tp_trade = MagicMock()
+    tp_trade.order.orderId = 124
+    sl_trade = MagicMock()
+    sl_trade.order.orderId = 125
+    trader.exec_client.place_child_orders.return_value = [tp_trade, sl_trade]
+    
+    order_id = 123
+    trader._last_decision_context_by_order_id = {
+        order_id: {
+            "tp_offset": 0.5,
+            "sl_offset": 0.5,
+            "entry_action": "BUY",
+            "lots": 1,
+            "tiered_tp_offsets": []
+        }
+    }
+    
+    # This should not raise an error, and should place orders at fill_price + 0.5 and fill_price - 0.5
+    trader._place_bracket_children_on_fill(
+        order_id=order_id,
+        fill_price=70.0,
+        action_str="BUY",
+        qty=1.0,
+        contract=MagicMock()
+    )
+    
+    trader.exec_client.place_child_orders.assert_called_once_with(
+        symbol="CL",
+        parent_order_id=order_id,
+        action="SELL",
+        quantity=1,
+        tp_price=70.5,
+        sl_price=69.5
+    )
+    assert trader._tp_order_ids == [124]
+    assert trader._sl_order_id == 125
