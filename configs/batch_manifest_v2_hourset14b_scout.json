@@ -31,7 +31,7 @@
     },
     "training_workflow": {
       "train_cutoff_date": "2022-01-01",
-      "holdout_cutoff_date": "2026-01-01",
+      "holdout_cutoff_date": null,
       "target_columns": [],
       "gcs_base_dir": "gs://cltrainer-optuna-results/scout",
       "optuna": {
@@ -57,7 +57,7 @@
     "execution_workflow": {
       "slippage_per_side": 0.01,
       "opt_mode": "individual",
-      "execution_data_path": null,
+      "execution_data_path": "gs://cltrainer-optuna-results/data/CL_raw.parquet",
       "strategy_config_path": "configs/strategies/hourly_ensemble_010.json"
     }
   },

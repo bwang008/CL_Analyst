@@ -68,7 +68,7 @@ def generate_manifest(args):
         ),
         training_workflow=TrainingWorkflowConfig(
             train_cutoff_date="2022-01-01",
-            holdout_cutoff_date="2026-01-01",
+            holdout_cutoff_date=None,  # 2-way split (full OOS as vault); 3-way is opt-in and dry-run-guarded against collapse
             target_columns=[], # To be overridden per experiment
             gcs_base_dir="gs://cltrainer-optuna-results/canary",
             optuna=optuna
@@ -76,6 +76,10 @@ def generate_manifest(args):
         execution_workflow=ExecutionWorkflowConfig(
             slippage_per_side=0.01,
             opt_mode="individual",
+            # Raw UNADJUSTED price series used for execution/PnL (ratio-adjusted data trains/signals,
+            # raw data executes). Omitting this silently reverts PnL to adjusted prices — see the
+            # exec_data regression. Must always be set.
+            execution_data_path=args.exec_data_path,
             strategy_config_path="configs/strategies/hourly_ensemble_010.json"
         )
     )
@@ -130,6 +134,9 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=str, required=True, help="Output JSON path")
     parser.add_argument("--dataset-version", type=str, default="HourSet_14A")
     parser.add_argument("--symbols", type=str, nargs="+", default=["CL"])
+    parser.add_argument("--exec-data-path", type=str,
+                        default="gs://cltrainer-optuna-results/data/CL_raw.parquet",
+                        help="GCS path to the raw UNADJUSTED price series used for execution/PnL")
     
     # Optuna Args
     parser.add_argument("--n-trials", type=int, default=200)

@@ -1,0 +1,2 @@
+[2026-06-30 15:24:23 UTC] | TDD-TESTER | Created failing test test_unbound_local_error_on_zero_position in tests/test_live_trader_bugs.py to reproduce UnboundLocalError when tp_price_live is accessed with current_position=0.
+[2026-06-30T15:26:58.850324+00:00] | TDD-CODER | Initialized tp_price_live and sl_price_live unconditionally to None before the current_position != 0 check to prevent UnboundLocalError.\n

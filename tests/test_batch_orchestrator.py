@@ -81,9 +81,15 @@ def test_batch_sweep_config_validation():
             "training_workflow": {
                 "train_cutoff_date": "2022-01-01",
                 "target_columns": ["TARGET_TRIPLE_3x1_6H_LONG"],
-                "gcs_base_dir": "gs://test"
+                "gcs_base_dir": "gs://test",
+                "optuna": {
+                    "post_optimizer_holdout_months": 6
+                }
             },
             "execution_workflow": {
+                "slippage_per_side": 0.01,
+                "opt_mode": "individual",
+                "execution_data_path": "gs://cltrainer-optuna-results/data/CL_raw.parquet",
                 "strategy_config_path": "configs/strategies/hourly_ensemble_008_2.json"
             }
         },

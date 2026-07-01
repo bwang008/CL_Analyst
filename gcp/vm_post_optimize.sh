@@ -254,6 +254,17 @@ elif [ -n "$EXEC_DATA_GCS" ]; then
     EXEC_DATA_PATH="$EXEC_DATA_GCS"
 fi
 
+# Fail-fast guard: the strategy trains/signals on ratio-adjusted data but MUST execute + track
+# PnL on the raw UNADJUSTED series (execution_data_path). With no exec data, the optimizer and the
+# ensemble backtest silently fall back to DIFFERENT adjusted sources -> summary != backtest report,
+# and all PnL is computed on adjusted prices. This class of silent error burned batch_20260630_1037.
+if [ -z "$EXEC_DATA_PATH" ]; then
+    echo "  FATAL: execution_data_path is empty. This pipeline executes PnL on raw unadjusted data;" | tee -a "$LOG"
+    echo "         running without it produces wrong AND internally-inconsistent PnL. Set" | tee -a "$LOG"
+    echo "         baseline.execution_workflow.execution_data_path in the manifest and re-run." | tee -a "$LOG"
+    exit 1
+fi
+
 OPT_ARGS=""
 if [ -n "$EXEC_DATA_PATH" ]; then
     OPT_ARGS="--exec-data $EXEC_DATA_PATH"

@@ -13,7 +13,7 @@
     after the batch to generate a consolidated comparison report.
 .PARAMETER ManifestPath
     Path to the JSON manifest defining the experiments to run.
-    Default: configs\canary_batch_manifest.json
+    Default: configs\batch_manifest_v2_hourset14b_canary.json
 .PARAMETER DryRun
     Validate manifest and print what would be deployed, but do NOT create VMs.
     Also sends a Telegram test message to verify credentials.
@@ -29,7 +29,7 @@
 #>
 
 param(
-    [string]$ManifestPath        = "configs\sweep_batch_manifest.json",
+    [string]$ManifestPath        = "configs\batch_manifest_v2_hourset14b_canary.json",
     [string]$Zone                = "us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f,us-east1-b,us-east1-c,us-east1-d,us-east4-a,us-east4-b,us-east4-c",
     [switch]$DryRun,
     [switch]$DisableTelegram,
@@ -470,6 +470,18 @@ if ($DryRun) {
         Write-Host "    FAIL: opt_mode must be 'individual' or 'ensemble' (got '$optModeManifest')." -ForegroundColor Red; exit 1
     }
     Write-Host "    [OK] opt_mode = $optModeManifest (from manifest)" -ForegroundColor Green
+
+    # 6. Data-aware holdout/OOS collapse guard. Loads the dataset's real date range and
+    #    fails if the post-opt holdout carve (post_optimizer_holdout_months) swallows the
+    #    entire backtest window (3-way vault or 2-way OOS) -> "pre" = 0 trades. This is the
+    #    HS14A 0/0/0 collapse class. Prefers python3 (needs pyarrow); skips gracefully if absent.
+    $preflightPy = if (Get-Command python3 -ErrorAction SilentlyContinue) { "python3" } else { "python" }
+    $pfOut = & $preflightPy scripts/preflight_holdout_check.py --manifest $manifestFull 2>&1
+    $pfExit = $LASTEXITCODE
+    $pfOut | ForEach-Object { Write-Host $_ }
+    if ($pfExit -eq 2) {
+        Write-Host "    FAIL: OOS/holdout window collapse -- aborting dry run." -ForegroundColor Red; exit 1
+    }
     Write-Host ""
 
     $idx = 0

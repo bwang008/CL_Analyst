@@ -13,7 +13,7 @@
     after the batch to generate a consolidated comparison report.
 .PARAMETER ManifestPath
     Path to the JSON manifest defining the experiments to run.
-    Default: configs\canary_batch_manifest.json
+    Default: configs\batch_manifest_v2_hourset14b_canary.json
 .PARAMETER DryRun
     Validate manifest and print what would be deployed, but do NOT create VMs.
     Also sends a Telegram test message to verify credentials.
@@ -29,7 +29,7 @@
 #>
 
 param(
-    [string]$ManifestPath        = "configs\canary_batch_manifest.json",
+    [string]$ManifestPath        = "configs\batch_manifest_v2_hourset14b_canary.json",
     [string]$Zone                = "us-central1-a",
     [switch]$DryRun,
     [switch]$DisableTelegram,

@@ -132,13 +132,28 @@ class ExecutionWorkflowConfig(BaseModel):
     # slippage_per_side). NOT a tick multiplier. REQUIRED — no default, so a missing
     # value fails loudly instead of silently substituting a dangerous number.
     slippage_per_side: float
-    execution_data_path: Optional[str] = None
+    # Raw UNADJUSTED price series used for execution/PnL. The strategy trains/signals on
+    # ratio-adjusted data but MUST execute on raw prices (with rollover gaps). REQUIRED — no
+    # default: a missing value previously defaulted to null, silently reverting PnL to adjusted
+    # prices AND desyncing the optimizer from the ensemble backtest. Crash instead.
+    execution_data_path: str
     strategy_config_path: str
     # Post-optimization mode. REQUIRED — the manifest is the single source of truth so
     # behavior is consistent and never depends on a CLI flag passed on the fly.
     #   "ensemble"   = joint long+short ensemble optimization
     #   "individual" = per-side Long/Short optimization
     opt_mode: Literal["individual", "ensemble"]
+
+    @field_validator("execution_data_path")
+    @classmethod
+    def validate_exec_data_present(cls, v: str) -> str:
+        if v is None or str(v).strip() == "":
+            raise ValueError(
+                "execution_data_path must be defined — it cannot be null/empty. PnL is executed "
+                "on the raw unadjusted series; omitting it silently reverts to adjusted prices and "
+                "desyncs the optimizer from the ensemble backtest."
+            )
+        return v
 
     @field_validator("slippage_per_side")
     @classmethod

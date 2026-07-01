@@ -194,6 +194,13 @@ import math
 TRADES_PER_YEAR_FLOOR = 100  # Minimum ~8 trades/month combined (long+short)
 TRADES_PER_YEAR_FLOOR_SINGLE = 50  # Minimum ~4 trades/month for single-side optimization
 
+# Ceiling on the annualized Sharpe/Sortino optimization OBJECTIVE (not the displayed
+# metric). Low-trade configs have a tiny downside_dev -> exploding ratio; this cap stops
+# that becoming an unbounded reward. Lowering it makes the trade-floor penalty more
+# dominant: a low-trade config's penalized score (cap * floor_weight) must exceed a real
+# high-trade config's score to win — at cap=5 it usually no longer can. (Was 10.0.)
+OBJECTIVE_SCORE_CAP = 5.0
+
 
 def _trade_floor_weight(trade_count: int, trade_floor: float,
                         steepness: float = 6.0) -> float:
@@ -607,7 +614,7 @@ def run_vbt_prescreener(
                             downside_sq = np.minimum(0, ret_vals) ** 2
                             downside_dev = float(np.sqrt(np.mean(downside_sq)))
                             if downside_dev < 1e-12:
-                                score = 10.0 if mean_r > 0 else 0.0
+                                score = OBJECTIVE_SCORE_CAP if mean_r > 0 else 0.0
                             else:
                                 score = float(mean_r / downside_dev * np.sqrt(bars_per_year))
                         else:  # sharpe
@@ -818,13 +825,13 @@ def _compute_objective_score(
         downside_dev = float(np.sqrt(np.mean(downside_sq)))
         if downside_dev < 1e-9:
             if len(monthly_pnl_vals) > 0 and float(np.mean(monthly_pnl_vals)) > 0:
-                return 10.0   # Holy grail: only winning months
+                return OBJECTIVE_SCORE_CAP   # Holy grail: only winning months
             else:
                 return -9999.0  # Degenerate: 0 trades or perfectly flat
         score = float(
             (np.mean(monthly_pnl_vals) / downside_dev) * np.sqrt(12)
         )
-        return min(score, 10.0)
+        return min(score, OBJECTIVE_SCORE_CAP)
     else:
         std_pnl = float(np.std(monthly_pnl_vals))
         if std_pnl < 1e-9:
@@ -832,7 +839,7 @@ def _compute_objective_score(
         score = float(
             (np.mean(monthly_pnl_vals) / std_pnl) * np.sqrt(12)
         )
-        return min(score, 10.0)
+        return min(score, OBJECTIVE_SCORE_CAP)
 
 
 # ---------------------------------------------------------------------------
@@ -972,14 +979,14 @@ def make_objective(
             downside_dev = float(np.sqrt(np.mean(downside_sq)))
             if downside_dev < 1e-9:
                 if len(monthly_pnl_vals) > 0 and float(np.mean(monthly_pnl_vals)) > 0:
-                    annualized_score = 10.0   # Holy grail: only winning months
+                    annualized_score = OBJECTIVE_SCORE_CAP   # Holy grail: only winning months
                 else:
                     annualized_score = -9999.0  # Degenerate
             else:
                 annualized_score = float(
                     (np.mean(monthly_pnl_vals) / downside_dev) * np.sqrt(12)
                 )
-                annualized_score = min(annualized_score, 10.0)
+                annualized_score = min(annualized_score, OBJECTIVE_SCORE_CAP)
         else:
             # --- Annualized Monthly Sharpe ---
             std_pnl = float(np.std(monthly_pnl_vals))
@@ -988,7 +995,7 @@ def make_objective(
             annualized_score = float(
                 (np.mean(monthly_pnl_vals) / std_pnl) * np.sqrt(12)
             )
-            annualized_score = min(annualized_score, 10.0)
+            annualized_score = min(annualized_score, OBJECTIVE_SCORE_CAP)
 
         # --- Trade Floor Penalty ---
         # Negative score returned as-is (multiplying by weight < 1 would
