@@ -32,6 +32,7 @@ os.chdir(PROJECT_ROOT)
 import pandas as pd
 from agent.backtest_engine import BacktestEngine, load_ohlcv, load_ohlcv_dual, load_predictions
 from agent.strategy_optimizer import run_optimization, extract_metrics, send_telegram, suppress_telegram
+from agent.generate_ensemble_artifacts import _canonical_pair_order
 
 import logging
 
@@ -435,15 +436,7 @@ def generate_optimized_report(
         lines.append("")
         lines.append("| # | Experiment | Long Model | Short Model | Trades (pre) T/L/S | Trades (opt) T/L/S | Trades (ho) T/L/S | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (holdout) | Opt Thr | Best Trial |")
         lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
-        def get_ensemble_sort_key(item):
-            key, opt = item
-            labels_info = exp_labels.get(key, {})
-            long_exp = labels_info.get("long_label", "")
-            short_exp = labels_info.get("short_label", "")
-            exp_col = f"{long_exp} / {short_exp}" if long_exp and short_exp else (long_exp or short_exp or "-")
-            return [int(text) if text.isdigit() else text.lower() for text in _re.split(r'(\d+)', exp_col)]
-            
-        sorted_ensembles = sorted(all_results.items(), key=get_ensemble_sort_key)
+        sorted_ensembles = _canonical_pair_order(all_results, batch_dir)
         for idx, (key, opt) in enumerate(sorted_ensembles, 1):
             # Derive experiment + model display names
             parts = key.split('|')

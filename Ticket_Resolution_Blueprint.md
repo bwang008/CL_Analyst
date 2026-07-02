@@ -1,12 +1,14 @@
 # Ticket Resolution Blueprint
 
 ## Bug Summary
-The 4 execution guard tests failed during the full suite run (`task-97`) due to a global logger mutation leaking during test collection. The `agent/strategy_optimizer.py` and `agent/batch_post_optimizer.py` modules contained a global `setLevel(logging.ERROR)` call on the `src.live_execution.execution_guard` logger. When `pytest` collected the tests, these modules were imported, which permanently silenced the logger across the entire test session. Consequently, tests in `test_execution_guard.py` that asserted expected `WARNING` logs failed.
+The `batch_summary_optimized_ensembles_sharpe.md` summary table lists ensembles in a different order than the `sharpe_ensemble_backtests.md` report, causing holdout PnL values to appear mismatched to the user. The root cause is a non-deterministic sorting bug in `agent/batch_post_optimizer.py`. While the backtest generation correctly relies on `top_pairs.json` to assign a canonical numbering (`E01`, `E02`, etc.), the summary report generator uses a natural sort of experiment labels. Because multiple pairs can share the exact same label (e.g., when the only difference is the objective, like AP vs LL), Python's stable sort falls back to the original dictionary insertion order of `all_results`. Since `all_results` is populated asynchronously via `as_completed()`, the tiebreaker is highly non-deterministic.
 
 ## Target Files
-- `agent/strategy_optimizer.py`
 - `agent/batch_post_optimizer.py`
 
 ## Required Changes
-1. Remove the global `logging.getLogger("src.live_execution.execution_guard").setLevel(logging.ERROR)` calls from both files.
-2. Relocate these calls inside the respective `if __name__ == "__main__":` blocks of both files. This ensures the logger is only suppressed when the scripts are executed directly, preventing test state pollution.
+Update the `get_ensemble_sort_key` function within `generate_optimized_report()` (or the global scope, wherever it is defined) so that it respects the canonical `top_pairs.json` order, mimicking the deterministic logic found in `generate_ensemble_artifacts.py`.
+
+1. **Load Canonical Order:** At the beginning of `generate_optimized_report()`, attempt to load the `top_pairs.json` file from the `batch_dir`. Map each `pair_key` to its canonical index (e.g., `1` for the first pair).
+2. **Update Sort Key Logic:** Modify `get_ensemble_sort_key(item)` to use this loaded canonical `index` as the primary sort key for ensembles.
+3. **Deterministic Fallbacks:** Maintain the natural label sorting and add a metric-aware tie-breaker as secondary fallbacks to ensure determinism for unranked pairs or if `top_pairs.json` is not present.

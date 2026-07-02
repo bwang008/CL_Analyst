@@ -6,6 +6,7 @@ import subprocess
 import shutil
 import re
 from datetime import datetime
+from pathlib import Path
 
 def parse_experiment_key(key, direction):
     """
@@ -146,6 +147,72 @@ def _canonical_pair_order(opt_data, batch_dir):
     if leftover:
         print(f"  [WARN] {len(leftover)} opt_data pair(s) not declared in top_pairs.json; appending in deterministic order after declared pairs")
     return ordered + leftover
+
+
+def resolve_exec_data_path(manifest, cli_exec_data):
+    """Resolve the execution data path using a fallback chain.
+
+    Priority order:
+      1. cli_exec_data (if non-empty)
+      2. manifest['defaults']['local_exec_data'] (if non-empty)
+      3. manifest['baseline']['execution_workflow']['execution_data_path']
+         - If GCS URI (gs://...): extract filename, build local path via
+           get_data_root() / 'processed' / filename, validate existence.
+         - If local path: return directly.
+      4. Empty string (nothing found)
+    """
+    # 1. CLI takes precedence
+    if cli_exec_data:
+        return cli_exec_data
+
+    # 2. Check defaults.local_exec_data
+    local_exec = manifest.get("defaults", {}).get("local_exec_data", "")
+    if local_exec:
+        return local_exec
+
+    # 3. Check baseline.execution_workflow.execution_data_path
+    exec_path = (
+        manifest.get("baseline", {})
+        .get("execution_workflow", {})
+        .get("execution_data_path", "")
+    )
+    if exec_path:
+        if exec_path.startswith("gs://"):
+            # Extract filename from GCS URI and build local path
+            filename = exec_path.split("/")[-1]
+            try:
+                from src.data_paths import get_data_root
+                local_path = str(get_data_root() / "processed" / filename)
+            except Exception:
+                # Fallback when CL_DATA_ROOT is not configured
+                local_path = str(Path("data") / "processed" / filename)
+            if not os.path.exists(local_path):
+                raise FileNotFoundError(
+                    f"Resolved local exec_data path {local_path} does not exist. "
+                    f"Please download the dataset first."
+                )
+            return local_path
+        else:
+            return exec_path
+
+    # 4. Nothing found
+    return ""
+
+
+def validate_exec_data(manifest, cli_exec_data, symbol):
+    """Validate that an exec_data path can be resolved; raise FATAL if not.
+
+    Calls resolve_exec_data_path() and raises ValueError with a clear
+    diagnostic message when no path is available.
+    """
+    resolved = resolve_exec_data_path(manifest, cli_exec_data)
+    if not resolved:
+        raise ValueError(
+            f"FATAL: No exec_data path resolved for symbol {symbol}. "
+            f"Ensure manifest contains 'baseline.execution_workflow.execution_data_path' "
+            f"or equivalent."
+        )
+    return resolved
 
 
 def build_config(opt_result, objective, ensemble_idx, batch_dir, date_str, dataset_tag, base_config):

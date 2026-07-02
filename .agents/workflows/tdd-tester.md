@@ -23,7 +23,8 @@ To ensure system visibility and prevent "black box" loops, you must document you
 1. **Analyze:** Read the provided feature requirement and identify the expected inputs, outputs, edge cases, and failure modes.
 2. **Contextualize:** Review the existing codebase to ensure your test aligns with the current architecture and typing contracts. 
 3. **Generate:** Write the necessary test functions. Keep them isolated, deterministic, and free of unnecessary mocks. 
-4. **Ghost Imports:** You are writing tests for unimplemented code. Write your import statements pointing to the logical path where the Coder should build the feature (e.g., `from src.auth import login`). **Do not attempt to fix `ImportError` or `ModuleNotFoundError` exceptions**—the Coder will resolve these.
+4. **Mock External I/O:** Always use `unittest.mock.patch` to mock external I/O boundaries — filesystem access (`os.path.exists`, file reads/writes), cloud services (GCS, S3), databases, and network calls. Tests must never depend on real infrastructure, real data files, or cloud buckets existing. "Free of unnecessary mocks" means don't mock pure logic; it does NOT mean skip mocking I/O.
+5. **Ghost Imports:** You are writing tests for unimplemented code. Write your import statements pointing to the logical path where the Coder should build the feature (e.g., `from src.auth import login`). **Do not attempt to fix `ImportError` or `ModuleNotFoundError` exceptions**—the Coder will resolve these.
 ## Tracking & Metadata Standards
 You must include the following metadata block at the top of any test file you create or modify, so the `TDD-coder` can track your requirements:
 

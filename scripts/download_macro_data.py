@@ -28,6 +28,7 @@ import logging
 import os
 import sys
 import zipfile
+from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
 
@@ -284,33 +285,202 @@ def _normalize_cot_columns(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def _parse_cot_date(df: pd.DataFrame) -> pd.Series:
+    """Parse the CFTC report date column, tolerant of the naming/format
+    variants seen across report families and years.
+
+    ISO ``Report_Date_as_YYYY-MM-DD`` (modern files) is preferred; older
+    files expose ``As_of_Date_In_Form_YYYYMMDD`` (8-digit) or
+    ``As_of_Date_In_Form_YYMMDD`` (6-digit).
+    """
+    for c in ["Report_Date_as_YYYY-MM-DD", "Report Date as YYYY-MM-DD"]:
+        if c in df.columns:
+            # No explicit format: pandas auto-detects ISO reliably. (Avoid
+            # format="mixed", which is unsupported on pandas 1.5.x and coerces
+            # every value to NaT there.)
+            return pd.to_datetime(df[c], errors="coerce")
+    for c in ["As_of_Date_In_Form_YYYYMMDD", "As of Date in Form YYYYMMDD"]:
+        if c in df.columns:
+            return pd.to_datetime(df[c].astype(str).str.zfill(8), format="%Y%m%d", errors="coerce")
+    for c in ["As_of_Date_In_Form_YYMMDD", "As of Date in Form YYMMDD"]:
+        if c in df.columns:
+            return pd.to_datetime(df[c].astype(str).str.zfill(6), format="%y%m%d", errors="coerce")
+    log.warning("  Could not find a recognizable COT date column")
+    return pd.Series([pd.NaT] * len(df))
+
+
+def _normalize_tff_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize CFTC *Traders in Financial Futures* (TFF) columns onto the
+    canonical commodity-role schema used by the rest of the pipeline.
+
+    Approved category mapping (see COT scope review):
+        MM   (speculative funds)      <- Leveraged Funds
+        Prod (real-money institutional) <- Asset Manager / Institutional
+        Spec (dealer / intermediary)  <- Dealer / Intermediary
+
+    This intentionally reuses the MM/Prod/Spec column names so financial
+    symbols (ES, NQ) produce the *same* COT_* feature names as commodities.
+    """
+    col_map: dict[str, list[str]] = {
+        "OI": ["Open_Interest_All", "Open Interest (All)"],
+        # MM <- Leveraged Funds
+        "MM_Long": ["Lev_Money_Positions_Long_All",
+                    "Leveraged Funds Positions Long (All)"],
+        "MM_Short": ["Lev_Money_Positions_Short_All",
+                     "Leveraged Funds Positions Short (All)"],
+        # Prod <- Asset Manager / Institutional
+        "Prod_Long": ["Asset_Mgr_Positions_Long_All",
+                      "Asset Manager Positions Long (All)"],
+        "Prod_Short": ["Asset_Mgr_Positions_Short_All",
+                       "Asset Manager Positions Short (All)"],
+        # Spec <- Dealer / Intermediary
+        "Spec_Long": ["Dealer_Positions_Long_All",
+                      "Dealer Positions Long (All)"],
+        "Spec_Short": ["Dealer_Positions_Short_All",
+                       "Dealer Positions Short (All)"],
+    }
+
+    result = pd.DataFrame()
+    available_cols = set(df.columns)
+    for target, candidates in col_map.items():
+        for c in candidates:
+            if c in available_cols:
+                result[target] = df[c].values
+                break
+        else:
+            log.warning("  [TFF] Could not find column for '%s' (tried: %s)",
+                        target, candidates)
+
+    result["Date"] = _parse_cot_date(df).values
+    return result
+
+
+# ---------------------------------------------------------------------------
+# COT report adapters — one CFTC report family per adapter, all emitting the
+# canonical schema: Date, OI, MM_Long/Short, Prod_Long/Short, Spec_Long/Short.
+# ---------------------------------------------------------------------------
+
+class CotReportAdapter(ABC):
+    """Selects the CFTC report source files and normalizes them to the
+    canonical trader-role schema consumed by ``MacroFeatureEngine``."""
+
+    #: URL of a combined multi-year historical file, or ``None`` if the
+    #: report family has no such file (fetch per-year from ``start_year``).
+    combined_url: str | None = None
+    #: Earliest year of per-year files to attempt.
+    start_year: int = 2006
+
+    @abstractmethod
+    def year_url(self, year: int) -> str:
+        """URL of the per-year zip for ``year``."""
+
+    @abstractmethod
+    def normalize(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Map raw report columns to the canonical schema."""
+
+
+class DisaggregatedAdapter(CotReportAdapter):
+    """Physical-commodity futures (CFTC *Disaggregated* report).
+
+    Roles: Money Manager (MM), Producer/Merchant (Prod), Swap Dealer (Spec).
+    Used for CL, NG, HG, GC, PA.
+    """
+
+    combined_url = f"{CFTC_BASE_URL}/fut_disagg_txt_hist_2006_2016.zip"
+    start_year = 2006
+
+    def year_url(self, year: int) -> str:
+        return f"{CFTC_BASE_URL}/fut_disagg_txt_{year}.zip"
+
+    def normalize(self, df: pd.DataFrame) -> pd.DataFrame:
+        return _normalize_cot_columns(df)
+
+
+class TffAdapter(CotReportAdapter):
+    """Financial futures (CFTC *Traders in Financial Futures* report).
+
+    Roles are remapped onto the canonical MM/Prod/Spec names per the approved
+    mapping in ``_normalize_tff_columns``. Used for equity-index symbols
+    (ES, NQ). TFF history begins in 2010 (no pre-2010 combined file).
+    """
+
+    combined_url = None
+    start_year = 2010
+
+    def year_url(self, year: int) -> str:
+        return f"{CFTC_BASE_URL}/fut_fin_txt_{year}.zip"
+
+    def normalize(self, df: pd.DataFrame) -> pd.DataFrame:
+        return _normalize_tff_columns(df)
+
+
+COT_REPORT_ADAPTERS: dict[str, type[CotReportAdapter]] = {
+    "disaggregated": DisaggregatedAdapter,
+    "tff": TffAdapter,
+}
+
+# Which CFTC report family each symbol is reported under. An unmapped symbol
+# must raise (no silent default) so new instruments are classified explicitly.
+COT_REPORT_BY_SYMBOL: dict[str, str] = {
+    "CL": "disaggregated",
+    "NG": "disaggregated",
+    "HG": "disaggregated",
+    "GC": "disaggregated",
+    "PA": "disaggregated",
+    "ES": "tff",
+    "NQ": "tff",
+}
+
+
+def get_cot_adapter(instrument) -> CotReportAdapter:
+    """Return the COT report adapter for ``instrument``.
+
+    Raises ``ValueError`` if the symbol has no registered report type — we do
+    not guess, because commodity vs. financial reports have incompatible
+    trader categories.
+    """
+    symbol = str(instrument.symbol).upper()
+    report_type = COT_REPORT_BY_SYMBOL.get(symbol)
+    if report_type is None:
+        raise ValueError(
+            f"No CFTC COT report type registered for symbol '{symbol}'. "
+            f"Add it to COT_REPORT_BY_SYMBOL as one of "
+            f"{sorted(COT_REPORT_ADAPTERS)}."
+        )
+    return COT_REPORT_ADAPTERS[report_type]()
+
+
 def download_cot_data(instrument) -> pd.DataFrame:
-    """Download CFTC COT disaggregated futures data for CL."""
+    """Download CFTC COT data for ``instrument`` via its report adapter.
+
+    Commodity symbols use the Disaggregated report; financial symbols use the
+    TFF report. Both are normalized to the same canonical schema.
+    """
+    adapter = get_cot_adapter(instrument)
     all_frames: list[pd.DataFrame] = []
 
-    # Strategy: try the combined historical file first, then individual years
-    log.info("Downloading CFTC COT data for %s...", instrument.name)
+    # Strategy: try the combined historical file first (if any), then years.
+    log.info("Downloading CFTC COT data for %s (report=%s)...",
+             instrument.name, type(adapter).__name__)
 
-    # Try the big historical combined file (2006-2016)
-    df_hist = _download_cot_zip(CFTC_COMBINED_URL)
-    if df_hist is not None and len(df_hist) > 0:
-        cl_hist = _filter_cot(df_hist, instrument)
-        if len(cl_hist) > 0:
-            normalized = _normalize_cot_columns(cl_hist)
-            all_frames.append(normalized)
-            log.info("  -> Historical combined: %d rows", len(cl_hist))
+    if adapter.combined_url:
+        df_hist = _download_cot_zip(adapter.combined_url)
+        if df_hist is not None and len(df_hist) > 0:
+            hist = _filter_cot(df_hist, instrument)
+            if len(hist) > 0:
+                all_frames.append(adapter.normalize(hist))
+                log.info("  -> Historical combined: %d rows", len(hist))
 
-    # Download individual year files (2017 onwards, or all if combined failed)
-    start_year = 2017 if all_frames else 2006
+    # Download individual year files (2017 onwards if combined succeeded,
+    # else from the adapter's earliest available year).
+    start_year = 2017 if all_frames else adapter.start_year
     for year in range(start_year, datetime.now().year + 1):
-        url = f"{CFTC_BASE_URL}/fut_disagg_txt_{year}.zip"
-        df_year = _download_cot_zip(url)
+        df_year = _download_cot_zip(adapter.year_url(year))
         if df_year is not None and len(df_year) > 0:
-            cl_year = _filter_cot(df_year, instrument)
-            if len(cl_year) > 0:
-                normalized = _normalize_cot_columns(cl_year)
-                all_frames.append(normalized)
-                log.info("  -> %d: %d rows", year, len(cl_year))
+            yr = _filter_cot(df_year, instrument)
+            if len(yr) > 0:
+                all_frames.append(adapter.normalize(yr))
+                log.info("  -> %d: %d rows", year, len(yr))
 
     if not all_frames:
         log.error("No COT data downloaded")
