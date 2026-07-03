@@ -3958,24 +3958,14 @@ class LiveTrader:
                     self._processed_exit_order_ids.add(str(order_id))
                 exit_reason = "TP_HIT" if is_tp_fill else "SL_HIT"
                 
-                # Software OCA: cancel the other resting protective order(s)
-                if is_tp_fill:
-                    # Cancel the SL
-                    if getattr(self, '_sl_order_id', None):
-                        try:
-                            self.exec_client.cancel_order(str(self._sl_order_id))
-                            log.info(f"[OCA] Cancelled SL order {self._sl_order_id} after TP hit")
-                        except Exception as e:
-                            log.warning(f"[OCA] Failed to cancel SL order {self._sl_order_id}: {e}")
-                elif is_sl_fill:
-                    # Cancel all TPs
-                    for tp_id in getattr(self, '_tp_order_ids', []):
-                        if str(tp_id) != str(order_id):
-                            try:
-                                self.exec_client.cancel_order(str(tp_id))
-                                log.info(f"[OCA] Cancelled TP order {tp_id} after SL hit")
-                            except Exception as e:
-                                log.warning(f"[OCA] Failed to cancel TP order {tp_id}: {e}")
+                # Software OCA: cancel the remaining resting protective order(s).
+                # cancel_open_orders is a bulk, symbol-scoped cancel; at exit time
+                # exactly one bracket is live, so this clears only the sibling leg(s).
+                try:
+                    cancelled = self.exec_client.cancel_open_orders(symbol=self._execution_symbol)
+                    log.info(f"[OCA] cancelled {cancelled} resting protective order(s) after {exit_reason}")
+                except Exception as e:
+                    log.warning(f"[OCA] Failed to cancel resting protective orders after {exit_reason}: {e}")
                                 
                 try:
                     self._telegram.send(

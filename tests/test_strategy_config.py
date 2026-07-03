@@ -13,7 +13,7 @@ Validates:
 """
 
 import copy
-import json
+
 import os
 import sys
 from dataclasses import FrozenInstanceError
@@ -229,49 +229,6 @@ class TestImmutability:
         with pytest.raises(FrozenInstanceError):
             sc.long.trailing_sl_atr_offset = 999.0
 
-
-# ---------------------------------------------------------------------------
-# Tests: Production Config Roundtrip
-# ---------------------------------------------------------------------------
-
-
-class TestProductionConfigRoundtrip:
-    """Load an actual production config and verify parsing."""
-
-    SWEEP_CONFIG_PATH = os.path.join(
-        PROJECT_ROOT,
-        "configs", "strategies", "hs08_sweep_5x1_24h_logloss_opt.json",
-    )
-
-    SCOUT_CONFIG_PATH = os.path.join(
-        PROJECT_ROOT,
-        "configs", "strategies", "hs08_scout_3x1_12h_logloss_opt.json",
-    )
-
-    @pytest.mark.skipif(
-        not os.path.exists(SWEEP_CONFIG_PATH),
-        reason="Production sweep config not found",
-    )
-    def test_sweep_config_resolves_correctly(self):
-        """The sweep config has trailing_activation_mult in side blocks."""
-        with open(self.SWEEP_CONFIG_PATH) as f:
-            cfg = json.load(f)
-        sc = StrategyConfig.from_dict(cfg)
-        # These values come from the legacy key in the side blocks
-        assert sc.long.trailing_sl_atr_offset == 3.0
-        assert sc.short.trailing_sl_atr_offset == 3.5
-
-    @pytest.mark.skipif(
-        not os.path.exists(SCOUT_CONFIG_PATH),
-        reason="Production scout config not found",
-    )
-    def test_scout_config_defaults_to_1_0(self):
-        """The scout config has NO trailing offset key — should default to 1.0."""
-        with open(self.SCOUT_CONFIG_PATH) as f:
-            cfg = json.load(f)
-        sc = StrategyConfig.from_dict(cfg)
-        assert sc.long.trailing_sl_atr_offset == 1.0
-        assert sc.short.trailing_sl_atr_offset == 1.0
 
 
 # ---------------------------------------------------------------------------

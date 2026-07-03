@@ -448,6 +448,7 @@ class MacroFeatureEngine:
             # This ensures .pct_change correctly compares LIVE against yesterday's close.
             df.loc[live_time] = new_row
             log.debug("Injected live overrides: %s", live_overrides)
+            df = df.sort_index()
 
         features = pd.DataFrame(index=df.index)
 

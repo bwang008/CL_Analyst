@@ -298,3 +298,120 @@ def test_place_bracket_children_on_fill():
     )
     assert trader._tp_order_ids == [124]
     assert trader._sl_order_id == 125
+
+
+def _make_oca_trader():
+    """
+    Build an isolated LiveTrader instance wired for exercising the OCA
+    (One-Cancels-All) block inside _on_standard_execution_event.
+
+    All external I/O boundaries (execution client, telemetry, telegram,
+    event-id/time helpers, position-state reset, bracket placement) are
+    mocked so only the OCA cancel-contract logic is under test.
+    """
+    trader = LiveTrader.__new__(LiveTrader)
+    trader._execution_symbol = "CL"
+    trader._front_month_str = "202607"
+    trader._active_trade_id = "trade_abc"
+    trader._position_bars_held = 5
+    trader._position_side = 1
+    trader._open_orders = {}
+    trader._processed_exit_order_ids = set()
+    trader._processed_entry_order_ids = set()
+    trader._last_decision_context_by_order_id = {}
+
+    # Bracket protective legs: ints (matches production contract)
+    trader._tp_order_ids = [999]
+    trader._sl_order_id = 888
+
+    # Execution client — MagicMock auto-creates BOTH cancel_open_orders and
+    # cancel_order attributes, so the buggy code (cancel_order) raises no error.
+    # The RED signal is therefore that cancel_open_orders is NOT called.
+    trader.exec_client = MagicMock()
+    trader.exec_client.cancel_open_orders.return_value = 1
+
+    # Mock every other side-effecting collaborator to isolate OCA logic.
+    trader.telemetry = MagicMock()
+    trader._telegram = MagicMock()
+    trader._utc_iso_now = MagicMock(return_value="2026-06-30T02:00:10Z")
+    trader._build_event_id = MagicMock(return_value="evt_oca")
+    trader._reset_position_state = MagicMock()
+    trader._place_bracket_children_on_fill = MagicMock()
+    return trader
+
+
+def _make_fill_event(order_id_str):
+    """A Filled StandardExecutionEvent for the given (string) order id."""
+    raw_order = MagicMock()
+    raw_order.action = "SELL"
+    raw_order.permId = None
+    raw_order.parentId = None
+    raw_order.account = None
+    return StandardExecutionEvent(
+        order_id=order_id_str,
+        symbol="CL",
+        status="Filled",
+        filled_qty=1,
+        remaining_qty=0,
+        avg_price=70.50,
+        raw_event=MagicMock(order=raw_order),
+    )
+
+
+def test_oca_tp_fill_uses_bulk_symbol_scoped_cancel(caplog):
+    """
+    RED-before-fix: When a TAKE-PROFIT leg fills, the OCA block must cancel the
+    resting sibling protective order via the ONLY existing cancel contract:
+    exec_client.cancel_open_orders(symbol=...) -> int.
+
+    The current buggy implementation calls the nonexistent
+    exec_client.cancel_order(str(self._sl_order_id)) instead, so
+    cancel_open_orders is never invoked. This assertion is therefore RED
+    against current code and GREEN after the Coder collapses the two
+    per-order branches into one bulk symbol-scoped cancel.
+    """
+    trader = _make_oca_trader()
+
+    # order_id "999" is in _tp_order_ids -> TP fill
+    evt = _make_fill_event("999")
+
+    with caplog.at_level(logging.INFO):
+        trader._on_standard_execution_event(evt)
+
+    # The required contract: single bulk, symbol-scoped cancel.
+    trader.exec_client.cancel_open_orders.assert_called_once_with(symbol="CL")
+
+    # Must NOT use the nonexistent per-order cancel API.
+    assert not trader.exec_client.cancel_order.called, (
+        "OCA must not call the nonexistent cancel_order(order_id) API; "
+        "it must use cancel_open_orders(symbol=...)."
+    )
+
+    # Sanity: the OCA exit path still ran to completion.
+    trader._reset_position_state.assert_called_once_with(reason="TP_HIT")
+    assert "999" in trader._processed_exit_order_ids
+
+
+def test_oca_sl_fill_uses_bulk_symbol_scoped_cancel(caplog):
+    """
+    RED-before-fix: When a STOP-LOSS leg fills, the OCA block must cancel the
+    resting sibling TP order(s) via exec_client.cancel_open_orders(symbol=...)
+    and must NOT call the nonexistent cancel_order(order_id) API.
+    """
+    trader = _make_oca_trader()
+
+    # order_id "888" matches _sl_order_id -> SL fill
+    evt = _make_fill_event("888")
+
+    with caplog.at_level(logging.INFO):
+        trader._on_standard_execution_event(evt)
+
+    trader.exec_client.cancel_open_orders.assert_called_once_with(symbol="CL")
+
+    assert not trader.exec_client.cancel_order.called, (
+        "OCA must not call the nonexistent cancel_order(order_id) API; "
+        "it must use cancel_open_orders(symbol=...)."
+    )
+
+    trader._reset_position_state.assert_called_once_with(reason="SL_HIT")
+    assert "888" in trader._processed_exit_order_ids

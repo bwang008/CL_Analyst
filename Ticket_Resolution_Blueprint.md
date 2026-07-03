@@ -1,14 +1,21 @@
 # Ticket Resolution Blueprint
 
 ## Bug Summary
-The `batch_summary_optimized_ensembles_sharpe.md` summary table lists ensembles in a different order than the `sharpe_ensemble_backtests.md` report, causing holdout PnL values to appear mismatched to the user. The root cause is a non-deterministic sorting bug in `agent/batch_post_optimizer.py`. While the backtest generation correctly relies on `top_pairs.json` to assign a canonical numbering (`E01`, `E02`, etc.), the summary report generator uses a natural sort of experiment labels. Because multiple pairs can share the exact same label (e.g., when the only difference is the objective, like AP vs LL), Python's stable sort falls back to the original dictionary insertion order of `all_results`. Since `all_results` is populated asynchronously via `as_completed()`, the tiebreaker is highly non-deterministic.
+The trailing stop logic in the live execution environment fails to trigger on intrabar price movements. The root cause is a scheduling mismatch: the `_check_trailing_stop()` method is currently invoked inside `_on_new_bar()`. Because the strategy operates on a `1h` resolution, `_on_new_bar()` is only called once per hour when the 1H bar closes. 
+
+Compounding the issue, `_check_trailing_stop()` explicitly reads from `self.rolling_df_5m.iloc[-1]`. When evaluated at the end of the hour, it only checks the extremes of the very last 5-minute bar (e.g., 18:55) and completely ignores the highest/lowest points reached during the first 55 minutes of the hour. As a result, price spikes that hit the trailing trigger threshold (such as the 68.80 high) are entirely missed by the tracking state.
 
 ## Target Files
-- `agent/batch_post_optimizer.py`
+- `c:\Users\bwang\Documents\GitHub\CL_Analyst_Development\src\live_execution\live_trader.py`
 
 ## Required Changes
-Update the `get_ensemble_sort_key` function within `generate_optimized_report()` (or the global scope, wherever it is defined) so that it respects the canonical `top_pairs.json` order, mimicking the deterministic logic found in `generate_ensemble_artifacts.py`.
-
-1. **Load Canonical Order:** At the beginning of `generate_optimized_report()`, attempt to load the `top_pairs.json` file from the `batch_dir`. Map each `pair_key` to its canonical index (e.g., `1` for the first pair).
-2. **Update Sort Key Logic:** Modify `get_ensemble_sort_key(item)` to use this loaded canonical `index` as the primary sort key for ensembles.
-3. **Deterministic Fallbacks:** Maintain the natural label sorting and add a metric-aware tie-breaker as secondary fallbacks to ensure determinism for unranked pairs or if `top_pairs.json` is not present.
+1. **Remove Trailing Stop from Inference Cycle**: Locate `self._check_trailing_stop()` inside the `_on_new_bar()` method (around line 2952) and remove it. Trailing stops should not be bound to the strategy's inference timeframe.
+2. **Inject into 5-Minute Callback**: Locate the `_on_bar_update_5m()` method (around line 2616). Add a call to `self._check_trailing_stop()` inside a `with self._ledger_lock:` block so that it executes unconditionally on every newly closed 5-minute bar, regardless of the overarching strategy resolution.
+   - Example implementation in `_on_bar_update_5m`:
+     ```python
+     with self._ledger_lock:
+         self._check_trailing_stop()
+         if self._bar_size == "5m":
+             self._on_new_bar(bar_time, self.rolling_df_5m, "5m")
+     ```
+3. **Verify State Updates**: This change will allow `_highest_high` and `_lowest_low` to be updated sequentially with every 5-minute bar's extremes, ensuring intra-hour price spikes correctly trigger the `modify_order` call to IBKR.
