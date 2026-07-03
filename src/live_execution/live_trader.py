@@ -2613,6 +2613,9 @@ class LiveTrader:
             close=new_row["Close"].iloc[0], volume=new_row["Volume"].iloc[0],
         )
 
+        with self._ledger_lock:
+            self._check_trailing_stop()
+
         if self._bar_size == "5m":
             with self._ledger_lock:
                 self._on_new_bar(bar_time, self.rolling_df_5m, "5m")
@@ -2948,8 +2951,6 @@ class LiveTrader:
                 )
                 log.warning("Portfolio lookup failed", exc_info=True)
 
-            # Check trailing stop condition on every bar while in position
-            self._check_trailing_stop()
 
         # 3. Delegate decision to strategy (always — needed for INFERENCE display)
         t0 = time.perf_counter()
