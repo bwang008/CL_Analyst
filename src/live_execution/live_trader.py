@@ -946,7 +946,7 @@ class LiveTrader:
 
         # Cancel the stale entry + bracket children
         log.info(
-            "ENTRY TTL: cancelling unfilled entry order %d "
+            "ENTRY TTL: cancelling unfilled entry order %s "
             "(placed at %s, now %s — 1 bar TTL expired)",
             self._pending_entry_order_id,
             self._pending_entry_bar_time,
@@ -1093,7 +1093,7 @@ class LiveTrader:
                     raw_order.auxPrice = new_sl
                 if hasattr(self.exec_client, "modify_order"): self.exec_client.modify_order(evt.order_id, evt)
                 log.info(
-                    "TRAILING STOP: modified SL order %d: %.2f → %.2f",
+                    "TRAILING STOP: modified SL order %s: %.2f → %.2f",
                     order_id, old_sl, new_sl,
                 )
                 self._trailing_activated = True
@@ -1130,7 +1130,7 @@ class LiveTrader:
                     log.debug("Failed to snapshot TRAILING_ACTIVATED state", exc_info=True)
                 return
             log.warning(
-                "TRAILING STOP: triggered but SL order %d not found in "
+                "TRAILING STOP: triggered but SL order %s not found in "
                 "open trades (may have already filled or been cancelled)",
                 self._sl_order_id,
             )
