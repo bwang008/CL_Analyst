@@ -1,0 +1,2 @@
+<!-- Migrated 2026-07-03 from shared .agents/collab/ticket_audit_log.md (per-ticket log convention). -->
+[2026-07-02T22:27:04-07:00] | trailing-stop-log-type-error_07022026_2225 | TICKET-AUDITOR | Investigated TypeError at line 1096 in _check_trailing_stop(); confirmed %d format on string order_id; found 2 additional sibling instances at lines 949 and 1133; proposed single-line format-specifier fix (%d → %s) at all three sites — severity LOW.

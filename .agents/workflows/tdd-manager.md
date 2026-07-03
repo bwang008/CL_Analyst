@@ -53,7 +53,7 @@ If the feedback loop between the test runner and the coder exceeds 3 iterations,
 On the 4th failure, do not send raw tracebacks. Instead, send a summarized, compressed message of the recurring failure pattern, explicitly direct the Coder to review a specific block of logic, and clear the previous execution history from your payload.
 
 ## 📊 THE DASHBOARD (MANDATORY)
-You must provide human visibility into this workflow. At the end of every state change (e.g., waiting on Tester, testing failed, waiting on Coder, feature complete), you must append your current status to `.agents/collab/tdd_status.md`.
+You must provide human visibility into this workflow. At the end of every state change (e.g., waiting on Tester, testing failed, waiting on Coder, feature complete), you must append your current status to `.agents/collab/tickets/<TICKET_ID>/tdd_status.md`.
 * Format: `[TIMESTAMP] | <TICKET_ID> | PHASE: [Red | Green | Refactor] | STATUS: <What you are currently doing or waiting for>`
 * Example: `[2026-06-30T10:00:00Z] | oca-cancel-order_07022026_1842 | PHASE: Red | STATUS: Waiting on TDD-Tester to output failing tests.`
 * Example: `[2026-06-30T10:05:00Z] | oca-cancel-order_07022026_1842 | PHASE: Red | STATUS: Tests failed as expected. Spawning TDD-Coder with tracebacks.`

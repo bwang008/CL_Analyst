@@ -727,54 +727,6 @@ def main():
     # counters never activate — causing immediate re-entry after SL exits.
     trader._strategy = trader.strategy
 
-    # PARITY FIX 2: Cooldown counter timing alignment.
-    #
-    # In the backtest (_run_single_strategy), the counter is:
-    #   1. Incremented at START of each bar loop (line 1200)
-    #   2. Reset to 0 in _close_trade() (mid-bar)
-    #   3. Strategy sees counter=0 on exit bar, counter=1 on next bar
-    #
-    # In the livetest, ConfigurableStrategy.evaluate() does:
-    #   1. Check counter (line 424: if counter <= cooldown → zero buy_prob)
-    #   2. Increment counter (line 436: counter += 1)
-    #   3. Pass incremented counter in EngineState to TieredStrategy
-    #
-    # Net effect: on the exit bar, TieredStrategy sees counter=1 (not 0).
-    # This causes the livetest to release cooldown 1 bar earlier than backtest.
-    #
-    # Fix: Set initial counter so that TieredStrategy sees the correct value:
-    #
-    # For SL/TP exits (signal evaluation runs on exit bar):
-    #   Set to -1: after ConfigurableStrategy's check(-1<=0→zero) + increment,
-    #   TieredStrategy sees counter=0 on exit bar (matching backtest).
-    #
-    # For TIME_BARRIER exits (signal evaluation SKIPPED on exit bar):
-    #   _check_time_barrier() returns True → _on_new_bar() returns immediately.
-    #   Signal evaluation is NOT called on the exit bar. Set counter=0 so the
-    #   NEXT bar starts at counter=0 (matching backtest where strategy IS called
-    #   on the exit bar with counter=0).
-    #
-    # Also neutralize the exit reason so ConfigurableStrategy always uses
-    # tp_cooldown=0, delegating ALL cooldown enforcement to TieredStrategy
-    # (which mirrors the backtest's single cooldown_bars check).
-    orig_on_exit = trader.strategy.on_exit
-
-    def _parity_on_exit(side: int, exit_reason: object, bars_held: int) -> None:
-        orig_on_exit(side, exit_reason, bars_held)
-        # TIME_BARRIER exits call _reset_position_state() with reason="CLOSED"
-        # and skip signal evaluation. SL/TP exits use reason="SL_HIT"/"TP_HIT"
-        # and signal evaluation runs on the exit bar.
-        is_time_barrier = str(exit_reason) == "CLOSED"
-        counter_val = 0 if is_time_barrier else -1
-        if side == 1:
-            trader.strategy._last_exit_bars_ago_long = counter_val
-            trader.strategy._last_exit_reason_long = "PARITY_NEUTRAL"
-        elif side == -1:
-            trader.strategy._last_exit_bars_ago_short = counter_val
-            trader.strategy._last_exit_reason_short = "PARITY_NEUTRAL"
-
-    trader.strategy.on_exit = _parity_on_exit
-
     # 6. Disable Telegram unless explicitly opted in (prevents flooding
     #    real channels with hundreds of simulated trade notifications).
     if not args.telegram:

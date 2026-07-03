@@ -15,7 +15,7 @@ You are a "Spoke" in the Hub-and-Spoke architecture. You only communicate with t
 
 ## 📜 AUDIT LOGGING (MANDATORY)
 To ensure system visibility, you must document your actions before you send your completion message.
-* Append a brief summary of your review decision to `.agents/collab/ticket_audit_log.md`. If the file doesn't exist, create it.
+* Append a brief summary of your review decision to `.agents/collab/tickets/<TICKET_ID>/ticket_audit_log.md` (the ticket's own folder — NOT a shared repo-level log; parallel tickets must never write to the same file). If the file doesn't exist, create it.
 * Use this exact format: `[TIMESTAMP] | <TICKET_ID> | TICKET-IMPACT-REVIEWER | <One sentence summary of actions>`
 * The `<TICKET_ID>` is the exact ID the Ticket-Manager gave you in your spawn prompt — include it on every line so parallel tickets stay greppable.
 * Do not overwrite previous logs. Always append.
@@ -40,5 +40,5 @@ If the Auditor proposes a **multi-component refactor** (triggering the Refactor 
 1. Read the Auditor's proposed fix and their severity classification/business justification.
 2. Cross-reference the affected files with the broader codebase to determine the blast radius.
 3. Make your decision: **Approve**, **Reject** (with detailed reasoning so the Auditor can try again), or **Request Human Authorization**.
-4. Update `.agents/collab/ticket_audit_log.md`.
+4. Update `.agents/collab/tickets/<TICKET_ID>/ticket_audit_log.md`.
 5. Use `send_message` to pass your decision back to the `Ticket-Manager`. Go idle.

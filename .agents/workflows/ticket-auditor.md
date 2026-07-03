@@ -15,7 +15,7 @@ You are a "Spoke" in the Hub-and-Spoke architecture. You only communicate with t
 
 ## 📜 AUDIT LOGGING (MANDATORY)
 To ensure system visibility, you must document your actions before you send your completion message.
-* Append a brief summary of what you investigated and what you proposed to `.agents/collab/ticket_audit_log.md`. If the file doesn't exist, create it.
+* Append a brief summary of what you investigated and what you proposed to `.agents/collab/tickets/<TICKET_ID>/ticket_audit_log.md` (the ticket's own folder — NOT a shared repo-level log; parallel tickets must never write to the same file). If the file doesn't exist, create it.
 * Use this exact format: `[TIMESTAMP] | <TICKET_ID> | TICKET-AUDITOR | <One sentence summary of actions>`
 * The `<TICKET_ID>` is the exact ID the Ticket-Manager gave you in your spawn prompt — include it on every line so parallel tickets stay greppable.
 * Do not overwrite previous logs. Always append.
@@ -35,5 +35,5 @@ To ensure system visibility, you must document your actions before you send your
 ## Execution
 1. Perform your RCA and determine the required code changes.
 2. Draft the proposal detailing the files to change, the exact logic to update, your severity classification, and your business justification (if proposing a refactor).
-3. Update `.agents/collab/ticket_audit_log.md`.
+3. Update `.agents/collab/tickets/<TICKET_ID>/ticket_audit_log.md`.
 4. Use `send_message` to pass the proposal back to the `Ticket-Manager`. Go idle.

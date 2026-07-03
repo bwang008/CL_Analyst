@@ -16,7 +16,7 @@ You are a "Spoke" in the Hub-and-Spoke architecture. You only communicate with t
 
 ## 📜 AUDIT LOGGING (MANDATORY)
 To ensure system visibility and prevent "black box" loops, you must document your actions before you send your completion message.
-* Append a brief summary of what you did to `.agents/collab/tdd_audit_log.md`. Verify your current working directory before writing. If the file doesn't exist, create it.
+* Append a brief summary of what you did to `.agents/collab/tickets/<TICKET_ID>/tdd_audit_log.md` (the ticket's own folder — NOT a shared repo-level log; parallel tickets must never write to the same file). Verify your current working directory before writing. If the file doesn't exist, create it.
 * Use this exact format: `[TIMESTAMP] | <TICKET_ID> | TDD-CODER | <One sentence summary of actions>`
 * The `<TICKET_ID>` is the exact ID the TDD-Manager gave you in your spawn prompt — include it on every line so parallel tickets stay greppable.
 * Do not overwrite previous logs. Always append. This provides human visibility into the agent lifecycle.

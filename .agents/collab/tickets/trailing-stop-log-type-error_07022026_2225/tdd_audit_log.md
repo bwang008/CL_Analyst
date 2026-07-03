@@ -1,0 +1,2 @@
+<!-- Migrated 2026-07-03 from shared .agents/collab/tdd_audit_log.md (per-ticket log convention). -->
+[2026-07-02T22:33:35-07:00] | trailing-stop-log-type-error_07022026_2225 | TDD-TESTER | Created tests/test_trailing_stop_log_format.py with 3 RED tests covering all three %d→%s bug sites (test_trailing_stop_modify_log_accepts_string_order_id, test_trailing_stop_not_found_log_accepts_string_order_id, test_entry_ttl_cancel_log_accepts_string_order_id); all 3 confirmed FAILING with TypeError: %d format: a real number is required, not str.

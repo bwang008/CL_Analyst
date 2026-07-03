@@ -58,9 +58,10 @@ When the `Ticket-Auditor` replies with a fix:
    - Terminate.
 
 ## 📄 BLUEPRINT FORMAT
-The blueprint at `.agents/collab/tickets/<TICKET_ID>/blueprint.md` must clearly state the problem and the approved implementation steps so the `TDD-Manager` can execute it. Include the Ticket ID in the title line.
+The blueprint at `.agents/collab/tickets/<TICKET_ID>/blueprint.md` must clearly state the problem and the approved implementation steps so the `TDD-Manager` can execute it. Include the Ticket ID in the title line, and explicitly specify the `Ticket Directory` so all agents are aligned on the workspace.
 ```markdown
 # Ticket Resolution Blueprint — <TICKET_ID>
+**Ticket Directory:** `.agents/collab/tickets/<TICKET_ID>/`
 
 ## Bug Summary
 [Brief description of the bug and root cause]
@@ -74,6 +75,6 @@ The blueprint at `.agents/collab/tickets/<TICKET_ID>/blueprint.md` must clearly 
 ```
 
 ## 📊 THE DASHBOARD (MANDATORY)
-You must provide human visibility into this workflow. At the end of every state change, append your current status to `.agents/collab/ticket_status.md`.
+You must provide human visibility into this workflow. At the end of every state change, append your current status to `.agents/collab/tickets/<TICKET_ID>/ticket_status.md`.
 * Format: `[TIMESTAMP] | <TICKET_ID> | TICKET-MANAGER | STATUS: <What you are currently doing or waiting for>`
 * The `<TICKET_ID>` field is mandatory on every line so a single ticket's history stays greppable when multiple tickets run in parallel.

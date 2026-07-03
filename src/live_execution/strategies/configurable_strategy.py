@@ -415,6 +415,17 @@ class ConfigurableStrategy(Strategy):
                     sell_prob=sell_prob,
                 )
 
+        # Update cooldown counters BEFORE the gate (backtest start-of-bar
+        # convention: increment at the top of the bar loop, reset to 0 in
+        # _close_trade — the gate reads the post-increment value).
+        if current_position == 0:
+            self._last_exit_bars_ago_long += 1
+            self._last_exit_bars_ago_short += 1
+        elif current_position > 0:
+            self._last_exit_bars_ago_short += 1
+        elif current_position < 0:
+            self._last_exit_bars_ago_long += 1
+
         # Advanced cooldown guard to match BacktestEngine
         if current_position == 0:
             long_cfg = self.config.get("long", {})
@@ -431,22 +442,16 @@ class ConfigurableStrategy(Strategy):
             if self._last_exit_bars_ago_short <= short_cooldown:
                 sell_prob = 0.0
 
-        # Update cooldown counters
-        if current_position == 0:
-            self._last_exit_bars_ago_long += 1
-            self._last_exit_bars_ago_short += 1
-        elif current_position > 0:
-            self._last_exit_bars_ago_short += 1
-        elif current_position < 0:
-            self._last_exit_bars_ago_long += 1
-
         state = EngineState(
             position=1 if current_position != 0 else 0,
             side=side,
             bars_held=0,  # Live trader tracks its own state, so we just provide FSM equivalents
             open_positions=1 if current_position != 0 else 0,
-            last_exit_bars_ago_long=self._last_exit_bars_ago_long,
-            last_exit_bars_ago_short=self._last_exit_bars_ago_short,
+            # Neutralizing sentinel: cooldown is enforced ONLY by the gate
+            # above; the execution strategy's re-gate (bars_ago <= cooldown)
+            # must never fire, so feed a value above any configured cooldown.
+            last_exit_bars_ago_long=9999,
+            last_exit_bars_ago_short=9999,
         )
 
         orders = self._exec_strategy.on_bar(

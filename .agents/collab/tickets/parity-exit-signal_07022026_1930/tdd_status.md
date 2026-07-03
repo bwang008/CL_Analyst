@@ -1,0 +1,5 @@
+<!-- Migrated 2026-07-03 from shared .agents/collab/tdd_status.md (per-ticket log convention). -->
+[2026-07-03T05:24:49Z] | parity-exit-signal_07022026_1930 | PHASE: Red | STATUS: Spawning TDD-Tester to write failing parity tests (Phenomenon A cooldown authority + B(a) SL/TP fill basis).
+[2026-07-03T05:36:00Z] | parity-exit-signal_07022026_1930 | PHASE: Red | STATUS: Red validated — full suite 14 failed / 726 passed; 11 failures are this ticket's new tests, 3 belonged to parallel ticket trailing-stop-log-type-error_07022026_2225 (since gone Green). Paused for shared-log corruption triage + per-ticket log migration.
+[2026-07-03T06:15:06Z] | parity-exit-signal_07022026_1930 | PHASE: Red | STATUS: Red confirmed (11 new tests fail, 726 pass, parallel-ticket failures resolved). Spawning TDD-Coder with tracebacks.
+[2026-07-03T06:25:15Z] | parity-exit-signal_07022026_1930 | PHASE: Green | STATUS: Full suite 740 passed / 0 failed. tdd_result.md written. Feature complete; 336-bar replay validation recommended as follow-up.

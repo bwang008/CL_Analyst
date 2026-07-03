@@ -656,14 +656,17 @@ class BacktestEngine:
         entry_order_side = "Buy" if signal_side == 1 else "Sell"
         self._entry_fill = self._apply_slippage(self._entry_price, entry_order_side)
 
+        # Static SL/TP mimic IBKR reality (live_trader.py bracket placement):
+        # derived from the slippage-adjusted entry FILL and single-rounded to
+        # the CL 0.01 penny grid — round(fill +/- mult*atr, 2).
         if signal_side == 1:
-            self._tp_price = self._entry_price + tp_mult * atr
-            self._sl_price = self._entry_price - sl_mult * atr
+            self._tp_price = round(self._entry_fill + tp_mult * atr, 2)
+            self._sl_price = round(self._entry_fill - sl_mult * atr, 2)
             self._highest_high = bar.exec_High
             self._lowest_low = bar.exec_Low
         else:
-            self._tp_price = self._entry_price - tp_mult * atr
-            self._sl_price = self._entry_price + sl_mult * atr
+            self._tp_price = round(self._entry_fill - tp_mult * atr, 2)
+            self._sl_price = round(self._entry_fill + sl_mult * atr, 2)
             self._highest_high = bar.exec_High
             self._lowest_low = bar.exec_Low
 
@@ -779,12 +782,14 @@ class BacktestEngine:
             if order.trailing_atr_mult is not None:
                 pos_trailing_atr_mult = order.trailing_atr_mult
 
+        # Static SL/TP mimic IBKR reality: fill-basis + penny-grid rounding
+        # (same derivation as _on_flat).
         if signal_side == 1:
-            tp_price = entry_price + tp_mult * atr
-            sl_price = entry_price - sl_mult * atr
+            tp_price = round(entry_fill + tp_mult * atr, 2)
+            sl_price = round(entry_fill - sl_mult * atr, 2)
         else:
-            tp_price = entry_price - tp_mult * atr
-            sl_price = entry_price + sl_mult * atr
+            tp_price = round(entry_fill - tp_mult * atr, 2)
+            sl_price = round(entry_fill + sl_mult * atr, 2)
 
         pos = _OpenPosition(
             entry_dt=dt,

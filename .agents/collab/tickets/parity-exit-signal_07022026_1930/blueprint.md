@@ -108,7 +108,8 @@ and is out of scope.
 
 ## Audit Trail
 - Auditor RCA + revised RCA, Impact-Reviewer blast-radius reviews (both rounds), and human
-  authorizations are logged in `.agents/collab/ticket_audit_log.md` and
-  `.agents/collab/ticket_status.md`, all stamped `parity-exit-signal_07022026_1930`.
+  authorizations are logged in `.agents/collab/tickets/parity-exit-signal_07022026_1930/ticket_audit_log.md`
+  (migrated 2026-07-03 from the former shared `.agents/collab/ticket_audit_log.md`), all stamped
+  `parity-exit-signal_07022026_1930`.
 - Human decision: authorize A (Option B, live-side cooldown) + B(a) (backtest SL/TP → IBKR basis,
   accepting ≤1-tick historical PnL drift). Defer B(b) and C.
