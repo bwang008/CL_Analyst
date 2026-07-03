@@ -129,6 +129,18 @@ class TestDisaggregatedAdapterRegression:
         assert row["Prod_Long"] == 90000 and row["Prod_Short"] == 150000
         assert row["Spec_Long"] == 60000 and row["Spec_Short"] == 40000
 
+    def test_disagg_date_parsed(self):
+        """Disaggregated date must parse to the correct Timestamp, not NaT."""
+        out = _normalize_cot_columns(_disagg_fixture())
+        assert pd.Timestamp(out.iloc[0]["Date"]) == pd.Timestamp("2026-06-23")
+
+    def test_disagg_date_not_nat(self):
+        """No NaT values should survive date parsing in the disaggregated path."""
+        out = _normalize_cot_columns(_disagg_fixture())
+        assert out["Date"].notna().all(), (
+            f"Found {out['Date'].isna().sum()} NaT value(s) in Date column"
+        )
+
     def test_disagg_urls_are_commodity(self):
         a = DisaggregatedAdapter()
         assert "fut_disagg_txt" in a.year_url(2015)

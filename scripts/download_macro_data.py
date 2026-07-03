@@ -280,7 +280,7 @@ def _normalize_cot_columns(df: pd.DataFrame) -> pd.DataFrame:
                     break
 
     if "Date" in result.columns:
-        result["Date"] = pd.to_datetime(result["Date"], format="mixed", errors="coerce")
+        result["Date"] = _parse_cot_date(df).values
 
     return result
 
