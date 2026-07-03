@@ -8,6 +8,14 @@ Run this workflow before deploying a new strategy config to live trading,
 after modifying execution logic in `backtest_engine.py` or `live_trader.py`,
 or as a periodic health check.
 
+> **Scope note:** this workflow is the *offline* layer (config / feature / ATR /
+> execution unit tests + shadow-log prediction parity). It does **not** reconcile
+> the two engines at the trade-ledger level, so it can report green while the
+> BacktestEngine and LiveTrader still disagree on cooldown/exit behavior. For
+> trade-by-trade ledger reconciliation (a Parity-Mode livetest replay compared
+> against the BacktestEngine ledger), run `/validate-ledger-parity` after this
+> one is green.
+
 ## Usage
 
 Trigger this workflow by asking the agent to run the `/validate-parity` workflow.
