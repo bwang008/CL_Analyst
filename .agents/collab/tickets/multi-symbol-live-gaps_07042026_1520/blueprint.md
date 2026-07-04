@@ -128,3 +128,20 @@ Files: `agent/generate_ensemble_artifacts.py:272-278,324-327,354-401`, `agent/ba
 
 **T7 — ES ops runway (parallel with T2-T6).**
 Build ES 1h seed parquet, download ES macro/COT CSVs, sync batch predictions, IBKR CME data subscription check, then a dry-run canary: `python -m src.live_execution.cli --config configs/strategies/ES01B_Sharpe_E03_07042026.json --dry-run` must reach the event loop with ES bars flowing and zero CL contract requests in the IB request log.
+
+**T8 — Workflow doc remediation (process fix; prevents regeneration of the same defects).**
+The agent workflows that guided the ES standup produced the broken artifacts and must be
+corrected so future symbol standups don't recreate them. Primary target:
+`.agents/workflows/build-symbol-pipeline.md` — Phase 5/6 currently treat the CL-derived
+baseline strategy (`execution_symbol:"CL"`, ~line 90) as a soft follow-up; it must become a
+HARD GATE: generated strategy configs must be validated post-canary (execution_symbol ==
+manifest baseline.symbol; every model_path exists on disk; predictions_path synced) before
+the workflow reports success. Sweep ALL of `.agents/workflows/` (and `.agent/workflows/` +
+`docs/prompts/` legacy copies) for the same assumptions: run-cloud-batch.md,
+post-optimize.md, generate-data.md, grab-data.md, run-live.md, run-cloud-experiment.md.
+Add a "generated-artifact validation" checklist step wherever configs/manifests are emitted.
+Depends on T1 (validation rules) + T6 (generator emits correct values to validate against);
+doc-only, no code.
+*Testability:* doc review — each workflow that generates configs/manifests contains an
+explicit validation gate; a fixture walk-through of build-symbol-pipeline.md on the ES
+example would have caught execution_symbol=CL and the E2E_ES_* path mismatch.
