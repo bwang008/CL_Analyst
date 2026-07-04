@@ -237,6 +237,35 @@ class TestOnExitResetValue:
         assert probs[0] == 0.0 and probs[1] == 0.0, f"calls 1-2 must be blocked; got {probs}"
         assert probs[2] > 0.0, f"call 3 (reads 2 > 1) must release; got {probs}"
 
+    def test_per_side_cooldown_bars_participates_in_the_gate(self):
+        """The backtest enforces BOTH the flavored tp/sl cooldown (engine gate)
+        AND the flavor-independent per-side `cooldown_bars` (TieredEnsemble
+        re-gate reading REAL counters). Live's re-gate is sentinel-neutralized,
+        so evaluate()'s gate must enforce the UNION: after a TP exit with
+        tp_cooldown_bars=0 but long.cooldown_bars=2, re-entry releases only
+        when the counter exceeds 2 (exit bar reads 0; released on the 4th
+        call reading 3)."""
+        cfg = {
+            "nickname": "union",
+            "sl_cooldown_bars": 7,
+            "tp_cooldown_bars": 0,
+            "long": {"cooldown_bars": 2},
+            "short": {"cooldown_bars": 2},
+        }
+        strat = _make_strategy(cfg)
+        strat.on_exit(1, "TP_HIT", 5)  # TP exit -> flavored cooldown is 0
+
+        probs = [strat.evaluate(pd.DataFrame(), 70.0, 0.5, 0).buy_prob for _ in range(4)]
+
+        assert probs[0] == 0.0, f"exit bar (reads 0) must be blocked; got {probs}"
+        assert probs[1] == 0.0, (
+            f"exit+1 (reads 1 <= cooldown_bars 2) must be blocked — the "
+            f"backtest's TieredEnsemble re-gate blocks it with the real "
+            f"counter; got {probs}"
+        )
+        assert probs[2] == 0.0, f"exit+2 (reads 2 <= 2) must be blocked; got {probs}"
+        assert probs[3] > 0.0, f"exit+3 (reads 3 > 2) must release; got {probs}"
+
 
 # ---------------------------------------------------------------------------
 # F(3) — live evaluates the exit bar after a time-barrier exit

@@ -311,13 +311,15 @@ class TestSingleCooldownAuthorityEndToEnd:
             f"or later); got actions={actions}"
         )
 
-    def test_downstream_regate_cannot_block_a_released_side(self):
-        """evaluate()'s gate says GO after the exit bar (sl_cooldown_bars=0)
-        while the nested per-side cooldown_bars=5 would block via the
-        EngineState re-gate. With the sentinel in place the SECOND evaluate()
-        (exit bar + 1, counter reads 1 > 0) must emit SELL — the exit bar
-        itself is always blocked (reads 0), and a HOLD on call 2 proves
-        cooldown is still enforced twice (real counter 1 <= 5 downstream).
+    def test_cooldown_bars_enforced_once_with_backtest_release_bar(self):
+        """sl_cooldown_bars=0 but per-side cooldown_bars=5: the backtest
+        enforces cooldown_bars via the TieredEnsemble re-gate reading REAL
+        counters, so evaluate()'s sole-authority gate must enforce the UNION
+        (updated under ticket bb-f-exit-bar-semantics_07032026_2045). Against
+        the REAL TieredEnsembleStrategy (sentinel keeps its re-gate inert),
+        SELL must be emitted on exactly the 7th evaluate counting from the
+        exit bar (reads 6 > 5) — not earlier (union gate) and not later
+        (which would prove double enforcement via the un-neutralized re-gate).
         """
         exec_strat = TieredEnsembleStrategy(CFG_REGATE_ONLY_DOWNSTREAM)
         strat = _make_strategy(
@@ -328,16 +330,16 @@ class TestSingleCooldownAuthorityEndToEnd:
         )
         strat.on_exit(-1, "SL_HIT", 3)
 
-        sig_exit_bar = _evaluate(strat)
-        assert sig_exit_bar.action == "HOLD", (
-            "the exit bar itself must be blocked (reads 0 <= cooldown 0)"
+        actions = [_evaluate(strat).action for _ in range(7)]
+
+        assert actions[:6] == ["HOLD"] * 6, (
+            f"SHORT must stay gated for the exit bar + 5 cooldown_bars "
+            f"(reads 0..5, each <= 5); got {actions}"
         )
-        sig = _evaluate(strat)
-        assert sig.action == "SELL", (
-            f"With evaluate() the sole cooldown authority (cooldown 0, counter "
-            f"reads 1 > 0) the first bar AFTER the exit bar must enter SHORT; "
-            f"got action={sig.action!r} skip_reason={sig.skip_reason!r} — the "
-            f"TieredEnsembleStrategy re-gate must be neutralized"
+        assert actions[6] == "SELL", (
+            f"SHORT must release on the 7th evaluate (reads 6 > 5), matching "
+            f"the backtest's cooldown_bars re-gate timeline exactly once; "
+            f"got {actions}"
         )
 
 
