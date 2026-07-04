@@ -119,28 +119,28 @@ this list:
 |----|-----------|--------|
 | **A** | Trade-count 18 vs 17 + one-bar-early short / missing follow-on long in the 2026-05-28→29 window | **RESOLVED 2026-07-03** — cooldown double-enforcement fixed (ticket `parity-exit-signal_07022026_1930`, commit `f4f0732`) |
 | **B(a)** | Static SL/TP price-basis skew (raw unrounded vs fill+penny-rounded) | **RESOLVED 2026-07-03** — backtest SL/TP now `round(entry_fill ± mult*atr, 2)`; brackets match live to the cent |
-| **B(b)** | Same-bar exit precedence inversion (BT checks TIME_BARRIER first; live matching engine fills TP/SL first) — e.g. 2026-05-26 BT `TIME_BARRIER` vs LT `TP_HIT` | **Known open — backlogged** by human decision |
+| **B(b)** | Same-bar exit precedence inversion (BT checked TIME_BARRIER first; live matching engine fills TP/SL first) | **RESOLVED 2026-07-04** — ticket `bb-f-exit-bar-semantics_07032026_2045`, commit `6d6a421` (backtest evaluates TP/SL before the barrier in both `_on_in_position` and `_check_position`; human-authorized historical-metrics shift) |
 | **C** | Sub-tick trailed-SL residuals | **Known open** — unmeasurable in a 1h harness (see Pitfalls #3); re-measure in a 5m harness |
 | **D** | Live exit-reason vocabulary gap: time-barrier/OOB exits reset with `"CLOSED"` → tp_cooldown instead of sl_cooldown | **RESOLVED 2026-07-03 evening** — ticket `exit-fill-routing-cooldown_07032026_0930`, commit `fc89b11` (TIME_BARRIER/CLOSED_OOB reasons; CLOSED-family now SL-flavored) |
 | **E** | Fill misrouting: orphaned protective fills processed as ENTRY (brackets around an exit); exits salvaged by OOB; bracket children placed TWICE per entry | **RESOLVED 2026-07-03 evening** — same ticket/commit (`_entry_order_ids` registry + UNRECOGNIZED FILL guard; harness duplicate placement removed). Post-fix log: 0 UNRECOGNIZED, 0 OOB, [OCA] firing, 18/18 single child sets |
-| **F** | Exit-bar evaluation semantics (refined 2026-07-03): (1) `on_exit` resets the counter to 0 so the exit-bar evaluate reads 1 vs BT's 0 → same-bar re-entry after TP when tp_cooldown=0; (2) the harness flushes deferred fill callbacks AFTER the bar's evaluation, so the exit-bar evaluate sees a flat sim position with stale counters; (3) live skips evaluation on TIME_BARRIER exit bars while BT evaluates them → one-bar shifts in consecutive-signal gating | **Known open — needs its own ticket**; fix directions in `tickets/exit-fill-routing-cooldown_07032026_0930/tdd_result.md` |
+| **F** | Exit-bar evaluation semantics: on_exit reset value, harness callback flush ordering, TIME_BARRIER exit-bar evaluation skip, and the per-side `cooldown_bars` union in evaluate()'s gate | **RESOLVED 2026-07-04** — ticket `bb-f-exit-bar-semantics_07032026_2045`, commits `6d6a421` + `c3a3cff` (reset -1 → exit bar reads 0; pre-evaluation exit-fill flush; exit bars always evaluated; gate = max(flavored, cooldown_bars)) |
 
-### Reference baseline — run of 2026-07-03 evening, post D/E fix (`fc89b11`), TRAILING DISABLED symmetrically (`trailing_atr_mult=10000` patched into the parity config; livetest ledger is trailing-invariant in the 1h harness)
+### Reference baseline — run of 2026-07-04, post B(b)+F fix, TRAILING DISABLED via `setup --disable-trailing` (livetest ledger is trailing-invariant in the 1h harness)
 
 ```
-trades: backtest=15  livetest=17  matched=14  (bt_only=1, lt_only=3)
-exact-cent matches: 13/14
-side match: True (14/14)  |  entry_fill delta: $0.0000
-violations: 1 (the B(b) trade, $1500)
-unmatched: 05-26 13:00 lt (B(b) cascade × F), 05-28 07:00 lt + 05-28 08:00 bt
-           (same trade shifted one bar — F), 06-10 11:00 lt (F)
+trades: backtest=15  livetest=15  matched=15   (bt_only=0, lt_only=0)
+exact-cent matches: 15/15   exit mapping: 15/15   side match: 15/15
+max per-trade PnL delta: $0.00
+total PnL: backtest=$1,695.01  livetest=$1,695.01  delta=$0.00
+PARITY: PASS   (exit code 0)
 ```
+
+**This workflow is now a true PASS/FAIL regression gate** for the trailing-disabled
+configuration: any non-PASS result on this window is a NEW regression.
 
 With the ORIGINAL (trailing-on) config the run FAILs on ~9 backtest `TRAILING_BE` trades —
-expected, per Pitfall #3; disable trailing symmetrically to use this workflow until the
-5m-harness ticket lands.
-
-When B(b) and F are resolved, update this baseline to the new PASS state.
+expected, per Pitfall #3; use `setup --disable-trailing` until the 5m-harness ticket lands.
+Only **C** (trailing-dependent sub-tick residuals) remains open, owned by that ticket.
 
 ---
 
