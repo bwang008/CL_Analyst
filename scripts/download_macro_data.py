@@ -429,6 +429,9 @@ COT_REPORT_BY_SYMBOL: dict[str, str] = {
     "PA": "disaggregated",
     "ES": "tff",
     "NQ": "tff",
+    "ZC": "disaggregated",
+    "ZS": "disaggregated",
+    "SI": "disaggregated",
 }
 
 

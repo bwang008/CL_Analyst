@@ -62,6 +62,9 @@ SYMBOL_MAP: dict[str, str] = {
     "NG": "NG.v.0",   # Natural Gas
     "ES": "ES.v.0",   # E-mini S&P 500
     "NQ": "NQ.v.0",   # E-mini Nasdaq 100
+    "ZC": "ZC.v.0",   # Corn (CBOT)
+    "ZS": "ZS.v.0",   # Soybeans (CBOT)
+    "SI": "SI.v.0",   # Silver (COMEX)
 }
 
 DEFAULT_DATASET = "GLBX.MDP3"

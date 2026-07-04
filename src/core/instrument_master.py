@@ -67,6 +67,36 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         tick_value=5.00,
         cftc_code="209742",
         volatility_index="VIXCLS"
+    ),
+    "ZC": Instrument(
+        symbol="ZC",
+        name="Corn",
+        # Corn: 5,000 bu; 1/4-cent tick = $12.50. tick_size assumes the
+        # Databento GLBX cents-per-bushel quote (~450.25); verified in the
+        # Phase-1 sanity check against the converted series magnitude.
+        tick_size=0.25,
+        tick_value=12.50,
+        cftc_code="002602",       # CORN - CHICAGO BOARD OF TRADE (Disaggregated)
+        volatility_index="VIXCLS" # No FRED grain vol index; VIX proxy per HG/PA precedent
+    ),
+    "ZS": Instrument(
+        symbol="ZS",
+        name="Soybeans",
+        # Soybeans: 5,000 bu; 1/4-cent tick = $12.50. Databento GLBX quotes
+        # cents/bushel (~1000+), so quarter-cent tick = 0.25 price units.
+        tick_size=0.25,
+        tick_value=12.50,
+        cftc_code="005602",       # SOYBEANS - CHICAGO BOARD OF TRADE (Disaggregated)
+        volatility_index="VIXCLS" # No FRED grain vol index; VIX proxy per HG/PA precedent
+    ),
+    "SI": Instrument(
+        symbol="SI",
+        name="Silver",
+        # Silver: 5,000 troy oz; $0.005/oz tick = $25.00.
+        tick_size=0.005,
+        tick_value=25.00,
+        cftc_code="084691",       # SILVER - COMMODITY EXCHANGE (Disaggregated)
+        volatility_index="VIXCLS" # Cboe VXSLV discontinued, no FRED silver vol; VIX proxy
     )
 }
 

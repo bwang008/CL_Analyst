@@ -1,0 +1,116 @@
+{
+  "_comment": "ZC (Corn) HourSet_01A CANARY - mirrors batch_manifest_v2_hourset14a_canary.json (CL template). CANARY TIER: smoke test (n_trials=3, post_optimizer_trials=3, timeout=240m, 2 experiments). Baseline strategy hourly_ensemble_010.json is CL-derived (execution_symbol=CL) - follow-up: ZC-tuned baseline.",
+  "infrastructure": {
+    "max_concurrent_vms": 12,
+    "max_concurrent_vcpus": 288,
+    "vcpus_per_vm": 16,
+    "machine_type": "c2-standard-16",
+    "provisioning_model": "STANDARD",
+    "timeout_minutes": 240
+  },
+  "baseline": {
+    "symbol": "ZC",
+    "data_workflow": {
+      "dataset_version": "HourSet_01A",
+      "resolution": "1h",
+      "output_dir": "data/processed",
+      "output_filename": null,
+      "features": {
+        "windows": [
+          24,
+          72,
+          168
+        ],
+        "macro_windows": {
+          "1W": 168
+        },
+        "include_momentum": true,
+        "include_macro": true,
+        "include_extended": true,
+        "include_dma": true,
+        "include_ichimoku": true,
+        "include_term_structure": true,
+        "drop_features": [],
+        "keep_features": []
+      },
+      "targets": {
+        "raw_horizon": 120,
+        "atr_period": 14,
+        "definitions": [
+          {
+            "type": "triple_barrier",
+            "tp_multiplier": 2.0,
+            "sl_multiplier": 1.0,
+            "horizon": 6
+          },
+          {
+            "type": "triple_barrier",
+            "tp_multiplier": 3.0,
+            "sl_multiplier": 1.0,
+            "horizon": 6
+          }
+        ]
+      }
+    },
+    "training_workflow": {
+      "train_cutoff_date": "2022-01-01",
+      "holdout_cutoff_date": null,
+      "target_columns": [],
+      "gcs_base_dir": "gs://cltrainer-optuna-results/canary",
+      "random_seed": 42,
+      "optuna": {
+        "n_trials": 3,
+        "metrics": ["logloss", "average_precision"],
+        "max_depth_min": 3,
+        "max_depth_max": 6,
+        "num_leaves_min": 15,
+        "num_leaves_max": 31,
+        "max_n_estimators": 500,
+        "early_stopping_rounds": 15,
+        "max_folds": 3,
+        "learning_rate_min": 0.005,
+        "learning_rate_max": 0.02,
+        "min_child_samples_min": 150,
+        "min_child_samples_max": 400,
+        "feature_fraction_min": 0.4,
+        "feature_fraction_max": 0.8,
+        "post_optimizer_trials": 3,
+        "post_optimizer_holdout_months": 6
+      }
+    },
+    "execution_workflow": {
+      "slippage_per_side": 0.01,
+      "opt_mode": "individual",
+      "execution_data_path": "gs://cltrainer-optuna-results/data/ZC_raw.parquet",
+      "strategy_config_path": "configs/strategies/hourly_ensemble_010.json"
+    }
+  },
+  "experiments": [
+    {
+      "label": "ZC HS01A 2x1 6H",
+      "gcs_prefix": "sweep_zc_hs01a_2x1_6h_canary",
+      "overrides": {
+        "symbol": "ZC",
+        "training_workflow": {
+          "target_columns": [
+            "TARGET_TRIPLE_2x1_6H_LONG",
+            "TARGET_TRIPLE_2x1_6H_SHORT"
+          ]
+        }
+      }
+    },
+    {
+      "label": "ZC HS01A 3x1 6H",
+      "gcs_prefix": "sweep_zc_hs01a_3x1_6h_canary",
+      "overrides": {
+        "symbol": "ZC",
+        "training_workflow": {
+          "target_columns": [
+            "TARGET_TRIPLE_3x1_6H_LONG",
+            "TARGET_TRIPLE_3x1_6H_SHORT"
+          ]
+        }
+      }
+    }
+  ]
+}
