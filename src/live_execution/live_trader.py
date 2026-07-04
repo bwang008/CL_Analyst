@@ -2672,6 +2672,12 @@ class LiveTrader:
 
         self.data_manager_1h.append_bar(new_row)
 
+        # Check trailing stop on every 1h bar — bar-size agnostic.
+        # In production, 5m bars already check via _on_bar_update_5m().
+        # This ensures 1h-only paths (livetest, future bar sizes) also check.
+        with self._ledger_lock:
+            self._check_trailing_stop()
+
         if self._bar_size == "1h":
             with self._ledger_lock:
                 self._on_new_bar(bar_time, self.rolling_df_1h, "1h")

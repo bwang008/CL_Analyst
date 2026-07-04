@@ -1,0 +1,1 @@
+[2026-07-04T02:48:07-07:00] | telegram-spam-tests_07042026_0247 | TICKET-AUDITOR | Investigated the strategy_optimizer telegram spam issue and discovered that test_objective_seed_offset.py calls run_optimization without mocking send_telegram, proposing a patch to add the mock.
