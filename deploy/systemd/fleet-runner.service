@@ -1,0 +1,49 @@
+[Unit]
+Description=CL Analyst Fleet Runner (multi-strategy supervisor)
+Documentation=https://github.com/bwang/CL_Analyst_Development
+After=ibc-gateway.service
+Requires=ibc-gateway.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/cl-trader.env
+
+# Pre-flight: wait for IB Gateway API port to be listening.
+# Times out after 120s to avoid infinite spin if gateway never starts.
+ExecStartPre=/usr/bin/timeout 120 /bin/bash -c \
+    'while ! nc -z 127.0.0.1 4002; do sleep 2; echo "Waiting for IB Gateway API on port 4002..."; done'
+
+# Run the fleet runner using the absolute Conda python path.
+# The runner launches/monitors one src.live_execution.cli child per enabled
+# manifest instance. Division of labor: systemd restarts the RUNNER; the
+# runner restarts crashed CHILDREN (children must NOT also be systemd units).
+ExecStart=/home/bwang008/miniconda3/envs/trader/bin/python -m src.live_execution.fleet_runner \
+    --manifest configs/fleet/fleet_manifest.json
+
+WorkingDirectory=/home/bwang008/projects/CL_Analyst
+
+# Self-healing: restart on ANY failure (crash, OOM, etc.)
+Restart=always
+RestartSec=60
+StartLimitIntervalSec=3600
+StartLimitBurst=10
+
+# Graceful shutdown: the runner must SIGTERM every child and wait for their
+# IBKR disconnect + warm-start cache saves before systemd SIGKILLs. Larger
+# than live-trader.service's 30s because N children shut down sequentially.
+TimeoutStopSec=90
+
+# Run as local user (not root)
+User=bwang008
+Group=bwang008
+
+# Logging to journald (children also log to per-cid files in reports/)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fleet-runner
+
+# OOM protection: kill this service last (prefer to kill other things)
+OOMScoreAdjust=-500
+
+[Install]
+WantedBy=multi-user.target

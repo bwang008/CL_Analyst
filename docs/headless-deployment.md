@@ -210,6 +210,38 @@ sudo systemctl stop ibc-gateway
 
 ---
 
+## Multi-Strategy Deployment (Fleet Runner)
+
+`deploy/systemd/fleet-runner.service` is the **multi-strategy replacement for
+`live-trader.service`**. Instead of one hardcoded `--config`, it runs
+`python -m src.live_execution.fleet_runner --manifest configs/fleet/fleet_manifest.json`,
+which validates the fleet (explicit `live_config.client_id` per config, ids
+unique and spaced >= 2 apart, <= 16 enabled instances per gateway), then
+launches one live-CLI child per enabled instance with a staggered start
+(`stagger_seconds`) and restarts crashed children with capped backoff.
+systemd restarts the runner; the runner restarts the children — the children
+are not systemd units. Full details: `deploy/systemd/README.md`.
+
+### Migration runbook (WSL)
+
+1. `git pull origin development` in `~/projects/CL_Analyst` (brings the fleet
+   runner plus pending live-trader fixes).
+2. `pip install -r requirements.txt` in the trader env if dependencies changed.
+3. Install the unit:
+   `sudo cp deploy/systemd/fleet-runner.service /etc/systemd/system/ && sudo systemctl daemon-reload`.
+4. Disable the old single-strategy unit first (duplicate traders collide on
+   IBKR client IDs): `sudo systemctl disable --now live-trader.service`
+   (leave disabled, or `sudo rm /etc/systemd/system/live-trader.service` +
+   `daemon-reload`).
+5. Enable on boot and start:
+   `sudo systemctl enable ibc-gateway.service fleet-runner.service && sudo systemctl start ibc-gateway.service fleet-runner.service`.
+6. **Smoke test first**: run with a 1-instance manifest (HS14B) with
+   `"extra_args": ["--dry-run"]`, verify clean startup in
+   `journalctl -u fleet-runner -f`, then add a second instance and verify the
+   staggered launch, then flip dry-run off.
+
+---
+
 ## Architecture
 
 ```
