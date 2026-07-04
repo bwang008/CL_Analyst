@@ -3,6 +3,10 @@
 This directory contains systemd unit files for running the CL_Analyst
 live trader and IBC (IB Gateway Controller) on a headless Linux VPS.
 
+> **Multi-strategy deployments:** `fleet-runner.service` supersedes
+> `live-trader.service`. See [Fleet Runner (Multi-Strategy)](#fleet-runner-multi-strategy)
+> below for install and migration steps.
+
 ## Architecture
 
 ```
@@ -108,6 +112,70 @@ wsl bash -c "journalctl -u live-trader --since '2 min ago' --no-pager"
 > alongside the systemd service.  This creates duplicate processes
 > competing for the same IBKR client ID, causing connection failures.
 > Always let systemd manage the lifecycle.
+
+## Fleet Runner (Multi-Strategy)
+
+`fleet-runner.service` runs `python -m src.live_execution.fleet_runner`, which
+launches and supervises **one live-CLI child process per enabled instance** in
+`configs/fleet/fleet_manifest.json`. It replaces the single-strategy
+`live-trader.service` (which hardcodes one `--config`).
+
+### Division of labor
+
+| Layer | Restarts what | Mechanism |
+|-------|---------------|-----------|
+| systemd (`Restart=always`) | the fleet **runner** itself | `RestartSec=60` |
+| fleet runner (`poll_once`) | crashed **children** | capped exponential backoff (`--max-restarts`, default 5) |
+
+Children must **NOT** also be systemd units — the runner owns their lifecycle.
+The runner validates before launching anything: explicit
+`live_config.client_id` per config, client_ids unique and spaced >= 2 apart
+(each instance consumes `cid` for data and `cid+1` for execution), and at most
+16 enabled instances per gateway (2 x N <= 32 connections). Launches are
+staggered by `stagger_seconds` (60 in the shipped manifest) to respect IBKR
+historical-data pacing during warm-start backfill.
+
+### Install / migration (replacing live-trader.service)
+
+```bash
+# 0. IMPORTANT: disable the old single-strategy unit FIRST — duplicate trader
+#    processes collide on IBKR client IDs.
+sudo systemctl disable --now live-trader.service
+
+# 1. Install the new unit
+sudo cp deploy/systemd/fleet-runner.service /etc/systemd/system/
+sudo systemctl daemon-reload
+
+# 2. Enable on boot (gateway + runner) and start
+sudo systemctl enable ibc-gateway.service fleet-runner.service
+sudo systemctl start ibc-gateway.service
+sudo systemctl start fleet-runner.service   # pre-flight waits for port 4002
+
+# 3. Watch it
+journalctl -u fleet-runner -f
+```
+
+`TimeoutStopSec=90` (vs 30s on the old unit): on stop, the runner SIGTERMs
+every child and waits for their IBKR disconnect + warm-start cache saves
+before systemd would SIGKILL.
+
+### Code deployment with the fleet runner
+
+The no-sudo redeploy flow still works, but the **pkill target becomes
+`fleet_runner`** (killing the runner SIGTERMs all children; systemd then
+restarts the runner, which relaunches the fleet with staggered starts):
+
+```bash
+wsl bash -c "cd /home/bwang008/projects/CL_Analyst && git pull origin development"
+wsl bash -c "pkill -f 'fleet_runner'"
+# wait ~60s (RestartSec), then:
+wsl bash -c "systemctl status fleet-runner.service"
+wsl bash -c "journalctl -u fleet-runner --since '2 min ago' --no-pager"
+```
+
+Do NOT `pkill -f live_trader`-style-kill an individual child expecting a code
+reload — the runner will restart it (that counts against the child's restart
+cap) but other children keep running old code. Kill the runner instead.
 
 ## Daily Smoke Test Cron
 

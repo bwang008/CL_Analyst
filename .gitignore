@@ -37,6 +37,8 @@ reports/
 !configs/*.json
 !configs/strategies/**
 configs/strategies/candidates/**
+# Fleet manifests (multi-strategy runner definitions)
+!configs/fleet/*.json
 
 # ----- Disaster recovery: track prediction & artifact files -----
 # Prediction CSVs used by backtest configs (typically < 3 MB each)

@@ -1,0 +1,12 @@
+{
+  "instances": [
+    {
+      "config": "configs/strategies/HS14B_Sharpe_E01_06262026.json",
+      "enabled": true,
+      "extra_args": []
+    }
+  ],
+  "stagger_seconds": 60,
+  "data_port": 4002,
+  "exec_port": 4002
+}
