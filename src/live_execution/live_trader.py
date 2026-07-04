@@ -2830,13 +2830,17 @@ class LiveTrader:
         # For new entries, the side-specific value is used.
         atr_value = _compute_bracket_atr(self._atr_period)
 
-        # Enforce 24-hour time barrier on any open position (engine safety rail)
-        if self._check_time_barrier(
+        # Enforce 24-hour time barrier on any open position (engine safety
+        # rail). On a barrier exit do NOT return early: the exit bar must
+        # still be evaluated — the backtest evaluates every bar including
+        # exit bars, and consecutive-signal/opposite-side-entry parity
+        # depends on it (B(b)+F ticket, human-authorized 2026-07-03). The
+        # exited side is gated by its own cooldown (exit-bar counter reads 0).
+        self._check_time_barrier(
             bar_time=bar_time,
             current_price=current_price,
             atr_value=atr_value,
-        ):
-            return
+        )
 
         # 2. Position guard: check both filled position AND pending orders
         #    to prevent duplicate entries when Adaptive Algo is still working

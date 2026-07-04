@@ -574,12 +574,20 @@ class ConfigurableStrategy(Strategy):
         )
 
     def on_exit(self, side: int, exit_reason: object, bars_held: int) -> None:
-        """Forward position closure to the underlying execution strategy."""
+        """Forward position closure to the underlying execution strategy.
+
+        Counter reset is -1 (not 0): the exit-bar evaluate() ALWAYS runs
+        (fills arrive before the bar-close evaluation; time-barrier exits no
+        longer skip evaluation) and its pre-gate increment yields 0 — the
+        exact value the backtest gate reads on the exit bar. Release then
+        happens at exit+N+1 reading N+1, matching the backtest for every
+        cooldown including 0 (B(b)+F ticket, human-authorized 2026-07-03).
+        """
         if side == 1:
-            self._last_exit_bars_ago_long = 0
+            self._last_exit_bars_ago_long = -1
             self._last_exit_reason_long = str(exit_reason)
         elif side == -1:
-            self._last_exit_bars_ago_short = 0
+            self._last_exit_bars_ago_short = -1
             self._last_exit_reason_short = str(exit_reason)
             
         if hasattr(self._exec_strategy, 'on_exit'):
