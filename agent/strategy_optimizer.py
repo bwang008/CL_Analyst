@@ -67,6 +67,12 @@ try:
 except ImportError:
     _VBT_AVAILABLE = False
 
+# ---------------------------------------------------------------------------
+# Per-objective seed offsets — ensures different objectives explore different
+# parameter spaces even when the base random_seed is identical.
+# ---------------------------------------------------------------------------
+_OBJECTIVE_SEED_OFFSETS = {"sharpe": 0, "sortino": 1}
+
 
 # ---------------------------------------------------------------------------
 # Best result tracking — O(1) memory replacement for unbounded results_cache
@@ -1088,7 +1094,8 @@ def run_optimization(
     start_time = time.perf_counter()
 
     # Seed numpy for reproducibility (Optuna sampler seeded separately below).
-    np.random.seed(random_seed)
+    effective_seed = random_seed + _OBJECTIVE_SEED_OFFSETS.get(objective_metric, 0)
+    np.random.seed(effective_seed)
 
     from src.live_execution.config_loader import load_strategy_config
     base_cfg = load_strategy_config(config_path)
@@ -1210,7 +1217,7 @@ def run_optimization(
         direction="maximize",
         study_name=f"strategy_opt_{model_name}_{objective_metric}",
         storage=f"sqlite:///{db_path}",
-        sampler=optuna.samplers.TPESampler(seed=random_seed),
+        sampler=optuna.samplers.TPESampler(seed=effective_seed),
     )
 
     # ── Warm-start: inject baseline as trial #0 ───────────────────────
