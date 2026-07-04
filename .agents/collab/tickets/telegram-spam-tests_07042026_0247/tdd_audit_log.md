@@ -1,0 +1,1 @@
+[2026-07-04T02:55:00-07:00] | telegram-spam-tests_07042026_0247 | TDD-TESTER | Added a patch for send_telegram to the patches list in _run_optimization_capturing_seeds inside tests/test_objective_seed_offset.py to prevent Telegram notifications from firing during tests.

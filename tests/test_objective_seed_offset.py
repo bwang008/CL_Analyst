@@ -2,10 +2,10 @@
 TDD-TESTER AUTHORIZATION
 Target Implementation File: agent/strategy_optimizer.py
 Target Class/Function: run_optimization
-Status: FINALIZED
+Status: DRAFT
 Strict-Lock: TRUE (Implementation agents may NOT modify this file)
 
-Ticket: ensemble-objective-report-parity_07032026_2055
+Ticket: telegram-spam-tests_07042026_0247
 
 Tests for per-objective seed offset in run_optimization().
 
@@ -190,6 +190,8 @@ def _run_optimization_capturing_seeds(objective_metric: str, random_seed: int = 
         patch("pathlib.Path.unlink"),
         # Warm-start param extraction
         patch.object(mod, "_extract_warm_start_params", return_value=None),
+        # Prevent Telegram spam on cold-start
+        patch.object(mod, "send_telegram", return_value=None),
     ]
 
     for p in patches:
