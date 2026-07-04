@@ -359,6 +359,14 @@ def run_simulation(
             volume=volume,
         )
 
+        # 2b. Deliver EXIT-fill callbacks BEFORE the bar's evaluation so
+        #     on_exit/cooldown state is current when the exit bar is
+        #     evaluated — production delivers fills in real time ahead of
+        #     the bar-close evaluation (F(2), human-authorized 2026-07-03).
+        #     The post-fire flush below still handles same-bar ENTRY fills
+        #     placed during the evaluation itself.
+        sim_exec.flush_deferred_callbacks()
+
         # 3. Push bar into LiveTrader's subscription callback
         #    LiveTrader._on_bar_update_Xm reads bars[-2] (completed bar)
         #    and bars[-1] (new incomplete bar).  We push a completed bar

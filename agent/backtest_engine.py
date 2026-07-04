@@ -677,9 +677,14 @@ class BacktestEngine:
         """IN_POSITION state: manage an active trade (pessimistic).
 
         Checks:
-        1. Time-barrier exit
-        2. Evaluate both TP and SL — if BOTH breach, SL wins
+        1. Evaluate both TP and SL — if BOTH breach, SL wins
+        2. Time-barrier exit (only if no TP/SL fill this bar)
         3. Trailing stop upgrade to breakeven
+
+        Precedence mirrors IBKR reality (B(b), human-authorized 2026-07-03):
+        resting TP/SL orders fill INTRABAR; the live time-barrier check runs
+        at bar close only if still in position — so on the barrier bar a
+        TP/SL breach wins over TIME_BARRIER.
         """
         self._bars_held += 1
 
@@ -687,12 +692,7 @@ class BacktestEngine:
         self._highest_high = max(self._highest_high, bar_high)
         self._lowest_low = min(self._lowest_low, bar_low)
 
-        # 1. Time-barrier exit
-        if self._bars_held > self._trade_max_horizon:
-            self._close_trade(dt, bar_open, ExitReason.TIME_BARRIER)
-            return
-
-        # 2. Evaluate BOTH TP and SL — pessimistic: SL wins on same-bar
+        # 1. Evaluate BOTH TP and SL FIRST — pessimistic: SL wins on same-bar
         if self._side == 1:
             tp_hit = bar_high >= self._tp_price
             sl_hit = bar_low <= self._sl_price
@@ -722,6 +722,11 @@ class BacktestEngine:
                 bar_open, self._tp_price, self._side, is_tp=True
             )
             self._close_trade(dt, exit_price, ExitReason.TP)
+            return
+
+        # 2. Time-barrier exit (no TP/SL fill this bar; exit at bar open)
+        if self._bars_held > self._trade_max_horizon:
+            self._close_trade(dt, bar_open, ExitReason.TIME_BARRIER)
             return
 
         # 3. Trailing stop upgrade: move SL after +N×ATR in favor
@@ -833,42 +838,43 @@ class BacktestEngine:
         exit_price: Optional[float] = None
         exit_reason: Optional[ExitReason] = None
 
-        # 1. Time barrier (use per-position override if set)
-        effective_horizon = pos.pos_max_horizon if pos.pos_max_horizon is not None else self.max_horizon
-        if pos.bars_held > effective_horizon:
-            exit_price = bar_open
-            exit_reason = ExitReason.TIME_BARRIER
+        # 1. Evaluate BOTH TP and SL FIRST — pessimistic: SL wins on conflict.
+        #    Intrabar fills beat the bar-close time barrier (B(b), 2026-07-03).
+        if pos.side == 1:
+            tp_hit = bar_high >= pos.tp_price
+            sl_hit = bar_low <= pos.sl_price
+        else:
+            tp_hit = bar_low <= pos.tp_price
+            sl_hit = bar_high >= pos.sl_price
 
-        # 2. Evaluate BOTH TP and SL — pessimistic: SL wins on conflict
+        if tp_hit and sl_hit:
+            exit_price = self._gap_fill_price(
+                bar_open, pos.sl_price, pos.side, is_tp=False
+            )
+            exit_reason = (
+                ExitReason.TRAILING_BE if pos.trailing_activated
+                else ExitReason.SL
+            )
+        elif sl_hit:
+            exit_price = self._gap_fill_price(
+                bar_open, pos.sl_price, pos.side, is_tp=False
+            )
+            exit_reason = (
+                ExitReason.TRAILING_BE if pos.trailing_activated
+                else ExitReason.SL
+            )
+        elif tp_hit:
+            exit_price = self._gap_fill_price(
+                bar_open, pos.tp_price, pos.side, is_tp=True
+            )
+            exit_reason = ExitReason.TP
+
+        # 2. Time barrier (only if no TP/SL fill; per-position override if set)
         if exit_reason is None:
-            if pos.side == 1:
-                tp_hit = bar_high >= pos.tp_price
-                sl_hit = bar_low <= pos.sl_price
-            else:
-                tp_hit = bar_low <= pos.tp_price
-                sl_hit = bar_high >= pos.sl_price
-
-            if tp_hit and sl_hit:
-                exit_price = self._gap_fill_price(
-                    bar_open, pos.sl_price, pos.side, is_tp=False
-                )
-                exit_reason = (
-                    ExitReason.TRAILING_BE if pos.trailing_activated
-                    else ExitReason.SL
-                )
-            elif sl_hit:
-                exit_price = self._gap_fill_price(
-                    bar_open, pos.sl_price, pos.side, is_tp=False
-                )
-                exit_reason = (
-                    ExitReason.TRAILING_BE if pos.trailing_activated
-                    else ExitReason.SL
-                )
-            elif tp_hit:
-                exit_price = self._gap_fill_price(
-                    bar_open, pos.tp_price, pos.side, is_tp=True
-                )
-                exit_reason = ExitReason.TP
+            effective_horizon = pos.pos_max_horizon if pos.pos_max_horizon is not None else self.max_horizon
+            if pos.bars_held > effective_horizon:
+                exit_price = bar_open
+                exit_reason = ExitReason.TIME_BARRIER
 
         # 3. Trailing stop upgrade (use per-position overrides if set)
         eff_trailing = pos.pos_trailing_atr_mult if pos.pos_trailing_atr_mult is not None else self.trailing_atr_mult

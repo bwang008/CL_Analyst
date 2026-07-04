@@ -436,6 +436,11 @@ class ConfigurableStrategy(Strategy):
             # TIME_BARRIER exits with sl_cooldown, and an OOB close is an exit
             # whose true reason was lost — the longer cooldown is the safe match.
             long_cooldown = sl_cd_l if self._last_exit_reason_long in ("SL_HIT", "TIME_BARRIER", "REVERSE", "CLOSED", "CLOSED_OOB") else tp_cd_l
+            # UNION with the flavor-independent per-side cooldown_bars: the
+            # backtest enforces it via the TieredEnsembleStrategy re-gate
+            # reading REAL EngineState counters; live's re-gate is sentinel-
+            # neutralized, so the sole-authority gate here must cover it.
+            long_cooldown = max(long_cooldown, int(long_cfg.get("cooldown_bars", 0)))
             if self._last_exit_bars_ago_long <= long_cooldown:
                 buy_prob = 0.0
 
@@ -443,6 +448,7 @@ class ConfigurableStrategy(Strategy):
             tp_cd_s = short_cfg.get("tp_cooldown_bars", self.config.get("tp_cooldown_bars", 0))
             sl_cd_s = short_cfg.get("sl_cooldown_bars", self.config.get("sl_cooldown_bars", 3))
             short_cooldown = sl_cd_s if self._last_exit_reason_short in ("SL_HIT", "TIME_BARRIER", "REVERSE", "CLOSED", "CLOSED_OOB") else tp_cd_s
+            short_cooldown = max(short_cooldown, int(short_cfg.get("cooldown_bars", 0)))
             if self._last_exit_bars_ago_short <= short_cooldown:
                 sell_prob = 0.0
 
@@ -574,12 +580,20 @@ class ConfigurableStrategy(Strategy):
         )
 
     def on_exit(self, side: int, exit_reason: object, bars_held: int) -> None:
-        """Forward position closure to the underlying execution strategy."""
+        """Forward position closure to the underlying execution strategy.
+
+        Counter reset is -1 (not 0): the exit-bar evaluate() ALWAYS runs
+        (fills arrive before the bar-close evaluation; time-barrier exits no
+        longer skip evaluation) and its pre-gate increment yields 0 — the
+        exact value the backtest gate reads on the exit bar. Release then
+        happens at exit+N+1 reading N+1, matching the backtest for every
+        cooldown including 0 (B(b)+F ticket, human-authorized 2026-07-03).
+        """
         if side == 1:
-            self._last_exit_bars_ago_long = 0
+            self._last_exit_bars_ago_long = -1
             self._last_exit_reason_long = str(exit_reason)
         elif side == -1:
-            self._last_exit_bars_ago_short = 0
+            self._last_exit_bars_ago_short = -1
             self._last_exit_reason_short = str(exit_reason)
             
         if hasattr(self._exec_strategy, 'on_exit'):

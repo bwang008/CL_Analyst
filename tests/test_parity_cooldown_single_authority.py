@@ -12,11 +12,13 @@ authority, mirroring the backtest convention (agent/backtest_engine.py):
 
 1. The per-side since-exit counter increments at the TOP of the cooldown
    section, BEFORE the prob-zeroing gate (backtest increments at start of
-   bar, backtest_engine.py:1200-1201; reset to 0 in _close_trade). After an
-   exit resets a side's counter to 0, the FIRST subsequent evaluate() call
-   gates that side reading the post-increment value 1; with an effective
-   cooldown of 1 the side is still blocked (1 <= 1) and the SECOND call
-   reads 2 and releases the side.
+   bar, backtest_engine.py:1200-1201; reset to 0 in _close_trade).
+   UPDATED 2026-07-03 under the human-authorized B(b)+F ticket
+   (bb-f-exit-bar-semantics_07032026_2045): on_exit now resets the counter
+   to -1 because the exit-bar evaluate() always runs and must read 0 —
+   exactly what the backtest gate reads on the exit bar. The FIRST
+   evaluate() after on_exit IS the exit bar (reads 0, always blocked);
+   release happens at exit+N+1 reading N+1 for cooldown N.
 2. The EngineState handed to TieredEnsembleStrategy.on_bar must carry the
    neutralizing sentinel last_exit_bars_ago_long == last_exit_bars_ago_short
    == 9999 so the downstream re-gate (execution_models.py:754-760,
@@ -162,45 +164,52 @@ CFG_REGATE_ONLY_DOWNSTREAM = {
 
 
 class TestCounterIncrementsBeforeGate:
-    def test_side_released_on_second_call_after_exit_with_cooldown_1(self):
-        """cooldown=1: 1st call reads post-increment 1 (blocked), 2nd reads 2 (released).
+    def test_side_released_on_third_call_after_exit_with_cooldown_1(self):
+        """cooldown=1 (B(b)+F convention): exit-bar call reads 0 (blocked),
+        +1 reads 1 (blocked, 1 <= 1), +2 reads 2 (RELEASED).
 
-        Backtest convention: counter reset to 0 on exit (_close_trade), then
-        incremented at the START of each bar before the strategy gate reads it.
-        Current (buggy) live code increments AFTER the gate, so the gate reads
-        0 then 1 and only releases on the THIRD call — one bar late.
+        Backtest convention: counter reset on exit, incremented at the START
+        of each bar before the gate reads it — the exit bar itself reads 0.
+        on_exit resets to -1 so the exit-bar evaluate()'s pre-gate increment
+        yields exactly that 0.
         """
         strat = _make_strategy(CFG_CD1)
-        strat.on_exit(1, "SL_HIT", 5)  # LONG exit -> long counter reset to 0
-        assert strat._last_exit_bars_ago_long == 0
+        strat.on_exit(1, "SL_HIT", 5)  # LONG exit -> long counter reset to -1
+        assert strat._last_exit_bars_ago_long == -1
 
-        # Call 1: counter advances 0 -> 1 first, gate reads 1 <= 1 -> blocked
+        # Call 1 (the exit bar): counter advances -1 -> 0, gate reads 0 <= 1 -> blocked
         sig1 = _evaluate(strat)
-        assert strat._last_exit_bars_ago_long == 1
-        assert sig1.buy_prob == 0.0, "1st call after exit must still be gated"
+        assert strat._last_exit_bars_ago_long == 0
+        assert sig1.buy_prob == 0.0, "exit-bar call must be gated (reads 0)"
         assert sig1.sell_prob == pytest.approx(SELL_PROB), (
             "Opposite (short) side must not be gated by a LONG exit"
         )
 
-        # Call 2: counter advances 1 -> 2, gate reads 2 > 1 -> RELEASED
+        # Call 2: reads 1 <= 1 -> still blocked
         sig2 = _evaluate(strat)
+        assert strat._last_exit_bars_ago_long == 1
+        assert sig2.buy_prob == 0.0, "exit+1 must still be gated (reads 1 <= 1)"
+
+        # Call 3: reads 2 > 1 -> RELEASED
+        sig3 = _evaluate(strat)
         assert strat._last_exit_bars_ago_long == 2
-        assert sig2.buy_prob == pytest.approx(BUY_PROB), (
-            "2nd call after exit must be released (gate reads post-increment "
-            "value 2 > cooldown 1) — backtest start-of-bar convention"
+        assert sig3.buy_prob == pytest.approx(BUY_PROB), (
+            "exit+2 must be released (gate reads post-increment value 2 > "
+            "cooldown 1) — backtest exit-bar convention"
         )
 
     def test_short_release_exact_bar_with_sl_cooldown_7(self):
-        """SHORT SL exit, sl_cooldown_bars=7: sell gated on calls 1-7, released on call 8.
+        """SHORT SL exit, sl_cooldown_bars=7 (B(b)+F convention): the exit-bar
+        call plus 7 cooldown bars are gated (reads 0..7), released on call 9.
 
         Deterministic scripted-bar regression for the SHORT->cooldown-release
         boundary: the first bar the gated side's probability survives
-        non-zeroed must be exactly the 8th evaluate() after the exit
-        (counter reads 8 > 7), not one bar earlier or later.
+        non-zeroed must be exactly the 9th evaluate() counting from the exit
+        bar (counter reads 8 > 7), not one bar earlier or later.
         """
         strat = _make_strategy(CFG_SL7)
-        strat.on_exit(-1, "SL_HIT", 4)  # SHORT exit -> short counter 0
-        assert strat._last_exit_bars_ago_short == 0
+        strat.on_exit(-1, "SL_HIT", 4)  # SHORT exit -> short counter -1
+        assert strat._last_exit_bars_ago_short == -1
 
         sell_probs = []
         buy_probs = []
@@ -209,14 +218,14 @@ class TestCounterIncrementsBeforeGate:
             sell_probs.append(sig.sell_prob)
             buy_probs.append(sig.buy_prob)
 
-        # Calls 1..7: blocked (post-increment counter values 1..7, each <= 7)
-        assert sell_probs[:7] == [0.0] * 7, (
-            f"Sell side must be zeroed for exactly 7 bars, got {sell_probs}"
+        # Calls 1..8 (exit bar + 7 cooldown bars): blocked (reads 0..7, each <= 7)
+        assert sell_probs[:8] == [0.0] * 8, (
+            f"Sell side must be zeroed for the exit bar + 7 bars, got {sell_probs}"
         )
-        # Call 8: counter reads 8 > 7 -> released
-        assert sell_probs[7] == pytest.approx(SELL_PROB), (
-            f"Sell side must be released on the 8th call after exit "
-            f"(backtest convention); got sell_probs={sell_probs}"
+        # Call 9: counter reads 8 > 7 -> released
+        assert sell_probs[8] == pytest.approx(SELL_PROB), (
+            f"Sell side must be released on the 9th call counting from the "
+            f"exit bar (backtest convention); got sell_probs={sell_probs}"
         )
         # The LONG side is never gated by a SHORT exit (per-side counters)
         assert all(bp == pytest.approx(BUY_PROB) for bp in buy_probs), (
@@ -292,20 +301,25 @@ class TestSingleCooldownAuthorityEndToEnd:
 
         actions = [_evaluate(strat).action for _ in range(9)]
 
-        assert actions[:7] == ["HOLD"] * 7, (
-            f"SHORT side must stay gated for exactly 7 bars, got {actions}"
+        assert actions[:8] == ["HOLD"] * 8, (
+            f"SHORT side must stay gated for the exit bar + 7 cooldown bars, "
+            f"got {actions}"
         )
-        assert actions[7] == "SELL", (
-            f"SHORT entry must be released on the 8th bar after the exit "
-            f"(backtest convention — not one bar earlier or later); "
-            f"got actions={actions}"
+        assert actions[8] == "SELL", (
+            f"SHORT entry must be released on the 9th evaluate counting from "
+            f"the exit bar (B(b)+F backtest convention — not one bar earlier "
+            f"or later); got actions={actions}"
         )
 
-    def test_downstream_regate_cannot_block_a_released_side(self):
-        """evaluate()'s gate says GO (sl_cooldown_bars=0) while the nested
-        per-side cooldown_bars=5 would block via the EngineState re-gate.
-        With the sentinel in place the very FIRST evaluate() after the exit
-        must emit SELL — a HOLD proves cooldown is still enforced twice.
+    def test_cooldown_bars_enforced_once_with_backtest_release_bar(self):
+        """sl_cooldown_bars=0 but per-side cooldown_bars=5: the backtest
+        enforces cooldown_bars via the TieredEnsemble re-gate reading REAL
+        counters, so evaluate()'s sole-authority gate must enforce the UNION
+        (updated under ticket bb-f-exit-bar-semantics_07032026_2045). Against
+        the REAL TieredEnsembleStrategy (sentinel keeps its re-gate inert),
+        SELL must be emitted on exactly the 7th evaluate counting from the
+        exit bar (reads 6 > 5) — not earlier (union gate) and not later
+        (which would prove double enforcement via the un-neutralized re-gate).
         """
         exec_strat = TieredEnsembleStrategy(CFG_REGATE_ONLY_DOWNSTREAM)
         strat = _make_strategy(
@@ -316,12 +330,16 @@ class TestSingleCooldownAuthorityEndToEnd:
         )
         strat.on_exit(-1, "SL_HIT", 3)
 
-        sig = _evaluate(strat)
-        assert sig.action == "SELL", (
-            f"With evaluate() the sole cooldown authority (cooldown 0, counter "
-            f"reads 1 > 0) the first bar after exit must enter SHORT; got "
-            f"action={sig.action!r} skip_reason={sig.skip_reason!r} — the "
-            f"TieredEnsembleStrategy re-gate must be neutralized"
+        actions = [_evaluate(strat).action for _ in range(7)]
+
+        assert actions[:6] == ["HOLD"] * 6, (
+            f"SHORT must stay gated for the exit bar + 5 cooldown_bars "
+            f"(reads 0..5, each <= 5); got {actions}"
+        )
+        assert actions[6] == "SELL", (
+            f"SHORT must release on the 7th evaluate (reads 6 > 5), matching "
+            f"the backtest's cooldown_bars re-gate timeline exactly once; "
+            f"got {actions}"
         )
 
 
