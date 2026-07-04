@@ -58,6 +58,33 @@ def _bootstrap_repo() -> None:
     os.chdir(REPO)
 
 
+def _disable_trailing(cfg: dict, sentinel: float = 10000.0) -> int:
+    """Set every `trailing_atr_mult` (top-level, per-side, and inside tiers/tiered_exits)
+    to a huge sentinel so the trailing stop never activates.
+
+    The live trailing stop is INERT in the 1h harness (bound to the 5m callback), while
+    the backtest trails at 1h resolution — an unavoidable asymmetry. Disabling trailing
+    symmetrically makes the ledger trailing-invariant so the harness can validate the
+    matching/exit/cooldown engine. See validate-ledger-parity.md (Pitfall #3)."""
+    n = 0
+
+    def walk(o: object) -> None:
+        nonlocal n
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k == "trailing_atr_mult":
+                    o[k] = sentinel
+                    n += 1
+                else:
+                    walk(v)
+        elif isinstance(o, list):
+            for item in o:
+                walk(item)
+
+    walk(cfg)
+    return n
+
+
 def _to_dt_indexed(df: pd.DataFrame) -> pd.DataFrame:
     """Return df indexed by a DatetimeIndex, discovering the datetime column if needed."""
     if isinstance(df.index, pd.DatetimeIndex):
@@ -115,6 +142,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
     cfg["models"]["long"]["predictions_path"] = args.predictions
     cfg["models"]["short"]["model_path"] = args.short_model
     cfg["models"]["short"]["predictions_path"] = args.predictions
+    n_trail = _disable_trailing(cfg) if args.disable_trailing else 0
     cfg_path = out_dir / "parity_config.json"
     with open(cfg_path, "w") as fh:
         json.dump(cfg, fh, indent=2)
@@ -130,8 +158,10 @@ def cmd_setup(args: argparse.Namespace) -> int:
         "commission_per_side": args.commission_per_side,
         "slippage_per_side": args.slippage_per_side,
         "contract_multiplier": args.contract_multiplier,
+        "trailing_disabled": bool(args.disable_trailing),
     }
     (out_dir / "parity_meta.json").write_text(json.dumps(meta, indent=2))
+    print(f"[setup] trailing disabled: {bool(args.disable_trailing)}  ({n_trail} field(s) set to sentinel)")
 
     livetest_out = out_dir / "livetest_ledger.csv"
     print(f"[setup] subset      : {subset_path}  ({len(subset)} bars, "
@@ -253,9 +283,9 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
         print(f"\nUNMATCHED trades (trade-count divergence): bt_only={bt_only} lt_only={lt_only}")
 
     if total_violations == 0:
-        print("\nPARITY: PASS ✅")
+        print("\nPARITY: PASS")
         return 0
-    print(f"\nPARITY: FAIL ❌  ({total_violations} issue(s) — see known-open list in "
+    print(f"\nPARITY: FAIL  ({total_violations} issue(s) -- see known-open list in "
           "validate-ledger-parity.md before flagging as a NEW regression)")
     return 1
 
@@ -273,6 +303,10 @@ def main() -> int:
     s.add_argument("--warmup-bars", type=int, default=2200, help="Warmup bars (default 2200).")
     s.add_argument("--replay-bars", type=int, default=336, help="Replay bars (~2 weeks 1h; default 336).")
     s.add_argument("--pred-end", default=None, help="Replay anchor end (default = predictions coverage end).")
+    s.add_argument("--disable-trailing", action="store_true",
+                   help="Set all trailing_atr_mult to a huge sentinel so trailing never "
+                        "activates. Required for the 1h harness (live trailing is inert "
+                        "there); see validate-ledger-parity.md Pitfall #3.")
     s.add_argument("--commission-per-side", type=float, default=2.5)
     s.add_argument("--slippage-per-side", type=float, default=0.01)
     s.add_argument("--contract-multiplier", type=float, default=1000.0)
