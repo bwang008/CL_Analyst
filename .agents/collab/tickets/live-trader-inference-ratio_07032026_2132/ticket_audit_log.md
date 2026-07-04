@@ -1,0 +1,1 @@
+[2026-07-04T04:34:00Z] | live-trader-inference-ratio_07032026_2132 | TICKET-AUDITOR | Investigated live_trader.py inference cache ratio adjustment and drafted a localized fix to apply self.data_manager_5m.get_ratio_adjusted_df() as the 5m fallback.

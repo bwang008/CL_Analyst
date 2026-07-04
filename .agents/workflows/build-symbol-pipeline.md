@@ -82,11 +82,15 @@ gcloud storage cp C:/CL_Analyst_Data/data/processed/<SYM>_raw.parquet          g
 ```
 Do both variants + the raw. Verify: `gcloud storage ls -l "gs://cltrainer-optuna-results/data/<SYM>_*.parquet"` (sizes match local). VM path derivation prefixes the symbol, so `dataset_version=HourSet_01A` → `<SYM>_HourSet_01A.parquet`.
 
-## Phase 5 — Write canary manifests & dry-run gate
-1. Create `configs/batch_manifest_v2_<sym>_hourset<ver>_canary.json` by mirroring the CL v2 canary template (`configs/batch_manifest_v2_hourset14a_canary.json`, resp. `14b`). Change only: `baseline.symbol` + every `overrides.symbol` → `<SYM>`; `baseline.data_workflow.dataset_version`; `execution_data_path` → `gs://.../<SYM>_raw.parquet`; experiment `label`/`gcs_prefix` to symbol-specific names. **Keep** `random_seed:42`, `opt_mode:"individual"`, `slippage_per_side:0.01`, `holdout_cutoff_date:null`, `n_trials:3`, `post_optimizer_trials:3`, `post_optimizer_holdout_months:6`, and the two target-column pairs. Strategy config `configs/strategies/hourly_ensemble_010.json` is acceptable for a machinery canary but is CL-derived (`execution_symbol:CL`) — flag an ES/NG-tuned baseline as a follow-up.
-2. Dry-run both until green:
+## Phase 5 — Write canary + scout manifests & dry-run gate
+Generate BOTH tiers for each variant (A, B), by mirroring the matching CL template and changing ONLY: `baseline.symbol` + every `overrides.symbol` → `<SYM>`; `baseline.data_workflow.dataset_version`; `execution_data_path` → `gs://.../<SYM>_raw.parquet`; experiment `label`/`gcs_prefix` to symbol-specific names; and the `_comment`. **Preserve every other field of the template verbatim** (never derive one tier from the other — they differ in more than one field).
+
+1. **Canary** — mirror `configs/batch_manifest_v2_hourset14a_canary.json` (resp. `14b`) → `configs/batch_manifest_v2_<sym>_hourset<ver>_canary.json`. Canary tier = smoke test: `n_trials:3`, `post_optimizer_trials:3`, `timeout_minutes:240`, `gcs_base_dir:.../canary`, **2 experiments** (`2x1_6H`, `3x1_6H`).
+2. **Scout** — mirror `configs/batch_manifest_v2_hourset14a_scout.json` (resp. `14b`) → `configs/batch_manifest_v2_<sym>_hourset<ver>_scout.json`. Scout tier = heavier exploration: `n_trials:100`, `post_optimizer_trials:200`, `timeout_minutes:360`, `gcs_base_dir:.../scout`, the **wide LGBM box** (`max_depth_max:8`, `num_leaves_max:64`, `max_n_estimators:1500`, `learning_rate 0.001–0.05`, `max_folds:5`, `early_stopping_rounds:30`, `min_child_samples 100–500`), and **4 experiments** (adds `2x1_3H`, `4x1_36H`). **14B is the source of truth for the optuna box; 14A is kept identical to it.** Verify the parquet actually contains all 4 scout target-column pairs (`2x1_6H`, `3x1_6H`, `2x1_3H`, `4x1_36H` × LONG/SHORT) before writing.
+   - Both tiers keep `random_seed:42`, `opt_mode:"individual"`, `slippage_per_side:0.01`, `holdout_cutoff_date:null`, `post_optimizer_holdout_months:6`. The strategy config `configs/strategies/hourly_ensemble_010.json` is acceptable for machinery validation but is CL-derived (`execution_symbol:CL`) — flag a symbol-tuned baseline as a follow-up.
+3. Dry-run each (canary + scout, both variants — 4 dry-runs) until green:
    ```
-   & .\gcp\run_sweep_batch.ps1 -ManifestPath "configs\batch_manifest_v2_<sym>_hourset<ver>_canary.json" -Zone "us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f" -DryRun
+   & .\gcp\run_sweep_batch.ps1 -ManifestPath "configs\batch_manifest_v2_<sym>_hourset<ver>_{canary|scout}.json" -Zone "us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f" -DryRun
    ```
    All gates must pass: train_cutoff parseable, 2-way holdout, `post_optimizer_holdout_months=6`, `slippage∈[0,0.5]`, `opt_mode` valid, and **OOS window > 6mo (no holdout/OOS collapse)** computed against the real dataset dates. (A PowerShell 5.1 `NativeCommandError` trailer echoing INFO logs is not a failure.)
 
@@ -121,9 +125,10 @@ And the results must be **substantively valid** (not just present): open a summa
 - [ ] `fred_macro_data_<sym>.csv` + `cftc_cot_<sym>.csv` present & valid (correct COT report family).
 - [ ] `<SYM>_raw.parquet` (execution) + `<SYM>_HourSet_01A.parquet` + `01B.parquet` built & verified (targets, COT features, no all-NaN, CL parity).
 - [ ] `configs/master/DataMap_<SYM>_HourSet_01A.json` + `01B.json` (consistent with the built parquets).
-- [ ] `configs/batch_manifest_v2_<sym>_hourset01a_canary.json` + `01b`.
+- [ ] Canary manifests: `configs/batch_manifest_v2_<sym>_hourset01a_canary.json` + `01b`.
+- [ ] Scout manifests: `configs/batch_manifest_v2_<sym>_hourset01a_scout.json` + `01b` (wide LGBM box, 4 experiments).
 - [ ] All 3 parquets uploaded to `gs://cltrainer-optuna-results/data/`.
-- [ ] Both manifests pass `-DryRun` (no OOS collapse).
+- [ ] All 4 manifests (canary + scout, both variants) pass `-DryRun` (no OOS collapse).
 - [ ] Canary run: `reports\batch_runs\batch_<ID>\` fully populated (list above) with real trades/PnL/holdout.
 - [ ] Full test suite green (no regressions); VMs cleaned up; hand-off written; nothing committed.
 
@@ -135,5 +140,6 @@ And the results must be **substantively valid** (not just present): open a summa
 | `scripts/download_macro_data.py` | FRED + COT; `COT_REPORT_BY_SYMBOL`, `CotReportAdapter`/`DisaggregatedAdapter`/`TffAdapter` |
 | `scripts/regenerate_features.py` | Config-driven parquet build (`process_from_config`) |
 | `configs/master/DataMap_CL_HourSet_14A.json` / `14B` | CL DataMap templates to mirror |
-| `configs/batch_manifest_v2_hourset14a_canary.json` / `14b` | CL v2 canary manifest templates to mirror |
+| `configs/batch_manifest_v2_hourset14a_canary.json` / `14b` | CL v2 CANARY manifest templates to mirror (n_trials 3, 2 exps) |
+| `configs/batch_manifest_v2_hourset14a_scout.json` / `14b` | CL v2 SCOUT manifest templates to mirror (wide LGBM box, n_trials 100, 4 exps) |
 | `gcp/run_sweep_batch.ps1` | Dry-run gate + canary/batch launcher |

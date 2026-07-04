@@ -1,0 +1,2 @@
+[2026-07-03T08:35:00Z] | optimizer-objective-report-parity_07032026_0830 | TDD-TESTER | Added guard-gated fallback regression tests (summary + detail + objective-invariance) to tests/test_report_best_trial.py.
+[2026-07-03T08:44:00Z] | optimizer-objective-report-parity_07032026_0830 | TDD-CODER | Guard-gated both all_trial_params fallbacks (summary + Optimized Parameters Detail) on not regression_guard_triggered in agent/batch_post_optimizer.py.

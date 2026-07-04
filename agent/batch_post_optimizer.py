@@ -554,7 +554,11 @@ def generate_optimized_report(
                         base_pnl = baseline.get("total_pnl", 0.0)
 
                         params = opt_info.get("params", {})
-                        if not params and "all_trial_params" in opt_info:
+                        if (
+                            not params
+                            and "all_trial_params" in opt_info
+                            and not opt_info.get("regression_guard_triggered")
+                        ):
                             suffix = f"_{direction_key}"
                             params = {
                                 k.replace(suffix, ""): v
@@ -628,7 +632,12 @@ def generate_optimized_report(
 
         params = opt_info.get("params", {})
         is_ensemble = '|' in key and len(key.split('|')) == 2
-        if not params and "all_trial_params" in opt_info and not is_ensemble:
+        if (
+            not params
+            and "all_trial_params" in opt_info
+            and not is_ensemble
+            and not opt_info.get("regression_guard_triggered")
+        ):
             direction_key = key.split('|')[1] if len(key.split('|')) > 1 else ""
             if direction_key:
                 suffix = f"_{direction_key}"
