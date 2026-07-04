@@ -404,10 +404,13 @@ def run_simulation(
         #    (fires _on_standard_execution_event → telemetry recording)
         sim_exec.flush_deferred_callbacks()
 
-        # 5. After entry fill, explicitly place bracket children (TP/SL)
-        #    _on_standard_execution_event doesn't call _place_bracket_children_on_fill
-        #    automatically — in production, IBKR brackets are placed atomically.
-        #    In simulation, we must trigger it explicitly after the fill callback.
+        # 5. Register the TP/SL children that live_trader placed on the entry
+        #    fill in _open_orders so _check_trailing_stop() can find them to
+        #    modify. Do NOT place children here: _on_standard_execution_event's
+        #    entry branch already calls _place_bracket_children_on_fill on the
+        #    fill callback — a second placement would overwrite
+        #    _tp_order_ids/_sl_order_id and orphan the first child set, whose
+        #    fills then arrive UNRECOGNIZED (misrouted exits, phantom entries).
         last_filled = getattr(trader, "_last_filled_entry_order_id", None)
         if last_filled is not None and last_filled not in _placed_children:
             _placed_children.add(last_filled)
@@ -415,15 +418,6 @@ def run_simulation(
             entry_ctx = sim_exec._active_entry
             if entry_ctx is not None:
                 try:
-                    trader._place_bracket_children_on_fill(
-                        order_id=int(last_filled),
-                        fill_price=entry_ctx["entry_price"],
-                        action_str=entry_ctx["action"],
-                        qty=entry_ctx["quantity"],
-                        contract=SimpleNamespace(symbol=entry_ctx["symbol"]),
-                    )
-                    # Register TP/SL child orders in _open_orders so
-                    # _check_trailing_stop() can find them to modify.
                     for oid in (trader._tp_order_ids or []):
                         trader._open_orders[oid] = StandardExecutionEvent(
                             order_id=oid,
@@ -459,7 +453,7 @@ def run_simulation(
                             ),
                         )
                 except Exception as e:
-                    log.warning("Failed to place bracket children: %s", e)
+                    log.warning("Failed to register bracket children: %s", e)
 
         # Trim bars list to prevent unbounded memory growth
         if len(bars_sub) > 100:

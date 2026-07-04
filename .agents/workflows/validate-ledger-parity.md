@@ -117,11 +117,28 @@ this list:
 
 | ID | Divergence | Status |
 |----|-----------|--------|
-| **A** | Trade-count 18 vs 17 + one-bar-early short / missing follow-on long in the 2026-05-28→29 window | **Known open** — cooldown double-enforcement (see ticket `parity-exit-signal`) |
-| **B** | 2026-06-02 07:00 LONG: backtest `TIME_BARRIER` vs livetest `SL_HIT` (~$420) | **Known open** — static-SL price/precedence (live trailing is inert in the 1h harness — see Pitfalls) |
-| **C** | Sub-tick residuals: 2026-06-01 $14.04 / 06-04 $9.49 / 06-09 $12.52 | **Known open** — trailed-SL 2dp rounding; some are unmeasurable in a 1h harness |
+| **A** | Trade-count 18 vs 17 + one-bar-early short / missing follow-on long in the 2026-05-28→29 window | **RESOLVED 2026-07-03** — cooldown double-enforcement fixed (ticket `parity-exit-signal_07022026_1930`, commit `f4f0732`) |
+| **B(a)** | Static SL/TP price-basis skew (raw unrounded vs fill+penny-rounded) | **RESOLVED 2026-07-03** — backtest SL/TP now `round(entry_fill ± mult*atr, 2)`; brackets match live to the cent |
+| **B(b)** | Same-bar exit precedence inversion (BT checks TIME_BARRIER first; live matching engine fills TP/SL first) — e.g. 2026-05-26 BT `TIME_BARRIER` vs LT `TP_HIT` | **Known open — backlogged** by human decision |
+| **C** | Sub-tick trailed-SL residuals | **Known open** — unmeasurable in a 1h harness (see Pitfalls #3); re-measure in a 5m harness |
+| **D** | Live exit-reason vocabulary gap: `_reset_position_state()` defaults `reason="CLOSED"` (time-barrier / OOB exits), but `ConfigurableStrategy`'s cooldown flavor tuple only knows `SL_HIT/TIME_BARRIER/REVERSE` → those exits get tp_cooldown (0) instead of sl_cooldown | **Known open — NEW 2026-07-03** (exposed once the TieredStrategy re-gate was neutralized) — needs a ticket |
+| **E** | Harness/adapter fill misrouting: protective SL fills hit `_on_standard_execution_event` as `action=UNKNOWN` → processed as ENTRY (brackets placed around an exit); TP fills emit no exit event; exits salvaged by OOB cleanup a step late; bracket children placed TWICE per entry | **Known open — NEW 2026-07-03** (pre-existing, previously masked) — needs a ticket |
+| **F** | Exit-bar off-by-one at cooldown=0: BT blocks re-entry on the exit bar (counter 0 ≤ 0); live's exit-bar evaluate reads 1 → same-bar re-entry after TP | **Known open — NEW 2026-07-03** — needs a ticket (or fold into D) |
 
-When A/B/C are resolved, update this baseline to the new PASS state.
+### Reference baseline — run of 2026-07-03, post parity-exit-signal fix, TRAILING DISABLED symmetrically (`trailing_atr_mult=10000` patched into the parity config; livetest ledger is trailing-invariant in the 1h harness)
+
+```
+trades: backtest=15  livetest=22  matched=15  (bt_only=0, lt_only=7)
+exact-cent matches: 14/15
+side match: True (15/15)  |  entry_fill delta: $0.0000
+violations: 1 (the B(b) trade)  |  lt_only extras all trace to D/E/F
+```
+
+With the ORIGINAL (trailing-on) config the run FAILs on ~9 backtest `TRAILING_BE` trades —
+expected, per Pitfall #3; disable trailing symmetrically to use this workflow until the
+5m-harness ticket lands.
+
+When B(b)/D/E/F are resolved, update this baseline to the new PASS state.
 
 ---
 

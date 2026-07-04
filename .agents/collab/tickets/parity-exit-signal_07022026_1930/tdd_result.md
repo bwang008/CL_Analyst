@@ -18,3 +18,48 @@
 
 ## Audit trail
 Per-ticket logs in this folder: `tdd_status.md`, `tdd_audit_log.md`, `ticket_audit_log.md` (migrated 2026-07-03 from former shared collab logs).
+
+---
+
+## ADDENDUM 2026-07-03 — 336-bar replay validation (follow-up #1) executed
+
+Ran `/validate-ledger-parity` (setup → livetest harness → reconcile) on the replay window.
+
+**Run 1 (original config, trailing on):** FAIL as expected — all 9 violations were backtest
+`TRAILING_BE` exits. Post-`922dea5` the 1h harness cannot trail (5m callback never fires), so
+trailing-dependent trades cannot reconcile here (known limitation, pitfall #3). Not attributable
+to this ticket.
+
+**Run 2 (trailing disabled symmetrically — `trailing_atr_mult=10000` in parity config; livetest
+ledger reused since it is trailing-invariant in this harness):**
+```
+trades: backtest=15  livetest=22  matched=15   (bt_only=0)
+exact-cent matches: 14/15   entry_fill delta: $0.0000   side match 15/15
+```
+**Verdict on this ticket's scope:**
+- **Phenomenon B(a) VERIFIED** — backtest and livetest bracket prices identical to the cent
+  (e.g. 05-28 08:00 LONG: TP 92.87 / SL 88.27 in BOTH ledgers); 14/15 exact-cent matches.
+- **Phenomenon A VERIFIED at entry level** — every backtest trade matched bar-for-bar with
+  $0.0000 entry deltas. (The blueprint's 05-28 13:00 SHORT anchor is unreachable in the 1h
+  harness: it only exists downstream of a backtest TRAILING_BE exit; with trailing symmetric,
+  both engines identically skip it. Unit tests pin the boundary semantics instead.)
+
+**Residual divergences discovered (OUT of this ticket's authorized scope — need new tickets):**
+1. **(R1) Exit-reason vocabulary mismatch** — `LiveTrader._reset_position_state()` defaults to
+   `reason="CLOSED"` (time-barrier and OOB-cleanup exits), but the evaluate() cooldown flavor
+   tuple (`configurable_strategy.py` ~:423) recognizes only `SL_HIT/TIME_BARRIER/REVERSE` →
+   time-barrier exits get tp_cooldown (0) instead of sl_cooldown (7). Previously masked by the
+   TieredEnsembleStrategy re-gate's blanket per-side cooldown, now exposed by the 9999 sentinel.
+2. **(R2) Exit-bar off-by-one at cooldown=0** — backtest blocks re-entry on the exit bar itself
+   (counter 0 ≤ 0); live's exit-bar evaluate reads 1 > 0 → same-bar re-entry after TP exits.
+3. **(R3) Harness/adapter fill misrouting (pre-existing)** — protective SL fills arrive at
+   `_on_standard_execution_event` with `action=UNKNOWN` and are processed as ENTRY fills
+   (spawning bracket children around an exit); TP fills produce no exit event at all; exits are
+   salvaged one step later by OOB cleanup with reason "CLOSED" (feeding R1). Also, bracket
+   children are placed TWICE per entry (two TP/SL sets resting). Not touched by this ticket's
+   diff (`f4f0732` deleted only the monkey-patch); previously masked by the re-gate.
+   → The 1 remaining violation (05-26: BT TIME_BARRIER vs LT TP_HIT, same bar) is the
+   **backlogged B(b)** same-bar precedence inversion. The 7 lt_only extras all trace to R1/R2/R3.
+
+Artifacts: `reports/_ledger_parity/` (backtest_ledger.csv, livetest_ledger.csv,
+parity_config.json = trailing-off, parity_config_with_trailing.json.bak = original).

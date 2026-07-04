@@ -431,14 +431,18 @@ class ConfigurableStrategy(Strategy):
             long_cfg = self.config.get("long", {})
             tp_cd_l = long_cfg.get("tp_cooldown_bars", self.config.get("tp_cooldown_bars", 0))
             sl_cd_l = long_cfg.get("sl_cooldown_bars", self.config.get("sl_cooldown_bars", 3))
-            long_cooldown = sl_cd_l if self._last_exit_reason_long in ("SL_HIT", "TIME_BARRIER", "REVERSE") else tp_cd_l
+            # CLOSED/CLOSED_OOB (LiveTrader's default / out-of-band resets) are
+            # treated conservatively as SL-flavored: the backtest flavors
+            # TIME_BARRIER exits with sl_cooldown, and an OOB close is an exit
+            # whose true reason was lost — the longer cooldown is the safe match.
+            long_cooldown = sl_cd_l if self._last_exit_reason_long in ("SL_HIT", "TIME_BARRIER", "REVERSE", "CLOSED", "CLOSED_OOB") else tp_cd_l
             if self._last_exit_bars_ago_long <= long_cooldown:
                 buy_prob = 0.0
 
             short_cfg = self.config.get("short", {})
             tp_cd_s = short_cfg.get("tp_cooldown_bars", self.config.get("tp_cooldown_bars", 0))
             sl_cd_s = short_cfg.get("sl_cooldown_bars", self.config.get("sl_cooldown_bars", 3))
-            short_cooldown = sl_cd_s if self._last_exit_reason_short in ("SL_HIT", "TIME_BARRIER", "REVERSE") else tp_cd_s
+            short_cooldown = sl_cd_s if self._last_exit_reason_short in ("SL_HIT", "TIME_BARRIER", "REVERSE", "CLOSED", "CLOSED_OOB") else tp_cd_s
             if self._last_exit_bars_ago_short <= short_cooldown:
                 sell_prob = 0.0
 

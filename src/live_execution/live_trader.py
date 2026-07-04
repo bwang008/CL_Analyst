@@ -432,6 +432,11 @@ class LiveTrader:
         # misidentify the same exit order as a new entry fill.
         self._processed_exit_order_ids: set[int] = set()
         self._processed_entry_order_ids: set[int] = set()
+        # Registry of order IDs submitted as ENTRY orders (str form). The fill
+        # handler only books a new trade for IDs in this set — decision context
+        # alone cannot discriminate entries because it is also stored under
+        # child TP/SL order IDs for telemetry traceability.
+        self._entry_order_ids: set = set()
         # Active trade ID for position ledger tracking (OOB close detection)
         self._active_trade_id: Optional[str] = None
         self._run_id = (
@@ -1202,7 +1207,10 @@ class LiveTrader:
                         "OOB CLEANUP: cancel_open_cl_orders failed",
                         exc_info=True,
                     )
-            self._reset_position_state()
+            # CLOSED_OOB: an exit whose true reason was lost. on_exit() only
+            # fires when _position_side != 0, i.e. exactly the OOB case; the
+            # routine flat-bar reset below it never reaches the strategy.
+            self._reset_position_state(reason="CLOSED_OOB")
             return False
 
         if self._position_entry_bar_time is None:
@@ -1264,7 +1272,9 @@ class LiveTrader:
         _exit_oid = getattr(getattr(trade, "order", None), "orderId", None)
         if _exit_oid is not None:
             self._processed_exit_order_ids.add(str(_exit_oid))
-        self._reset_position_state()
+        # Pass the real reason so ConfigurableStrategy applies sl_cooldown_bars
+        # (the backtest flavors TIME_BARRIER exits as SL, backtest_engine).
+        self._reset_position_state(reason="TIME_BARRIER")
         return True
 
     def _recover_inherited_position(self) -> None:
@@ -3267,6 +3277,9 @@ class LiveTrader:
                 "bar_str": bar_str,
             }
             self._last_decision_context_by_order_id[order_id] = decision_ctx
+            # Register as a known ENTRY order so the fill handler routes it to
+            # the entry branch (see UNRECOGNIZED FILL guard).
+            self._entry_order_ids.add(str(order_id))
             # Log tradebook event for parent entry
             event_ts = self._utc_iso_now()
             event_id = self._build_event_id(
@@ -3989,6 +4002,23 @@ class LiveTrader:
                     pass
                 self._reset_position_state(reason=exit_reason)
             else:
+                # Guard: only orders registered at submission may book a NEW
+                # trade. A fill that is neither a tracked TP/SL exit nor a
+                # known entry (e.g. an orphaned protective order, or a replayed
+                # fill after restart) must NOT be treated as an entry — doing
+                # so places bracket children around an exit and corrupts
+                # position tracking. Decision context is no discriminator: it
+                # is also stored under child order IDs for telemetry.
+                _known_entries = getattr(self, "_entry_order_ids", set())
+                if str(order_id) not in _known_entries:
+                    log.error(
+                        "[TRADE] UNRECOGNIZED FILL: orderId=%s  action=%s  "
+                        "fill=%.2f  qty=%d — not a tracked entry or TP/SL "
+                        "order; ignoring (position state unchanged; OOB "
+                        "detection will reconcile)",
+                        order_id, action_str, avg_price, int(qty),
+                    )
+                    return
                 if hasattr(self, '_processed_entry_order_ids'):
                     self._processed_entry_order_ids.add(order_id)
                 self._last_filled_entry_order_id = order_id
