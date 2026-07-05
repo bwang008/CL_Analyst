@@ -1,6 +1,11 @@
 ---
 description: Run a model improvement experiment locally (training + evaluation)
 ---
+
+> [!WARNING]
+> **DEPRECATED — do not edit here.** Maintained copy: `.agents/workflows/run-experiment.md`.
+> This `.agent/workflows/` twin is retained only to preserve inbound links.
+
 // turbo-all
 
 ## Context Loading

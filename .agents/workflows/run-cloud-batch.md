@@ -10,6 +10,13 @@ format is retired.
 > The **manifest is the single source of truth.** Every operational parameter is required and
 > validated; there are no silent code-side defaults. opt_mode, slippage, holdout, and trials all
 > come from the manifest, never from CLI flags.
+>
+> `baseline.symbol` is **REQUIRED** — the config generator hard-raises without it (post-T6) and
+> stamps `execution_symbol` + `models.*.symbol` from it. **Non-CL manifests MUST also carry a
+> `defaults` block** (`defaults.strategy_config` = the symbol's baseline config): the local
+> generator (`agent/generate_ensemble_artifacts.py:303`) ignores `strategy_config_path` and
+> silently falls back to the CL base `hourly_ensemble_010.json` when `defaults` is absent. See
+> [build-symbol-pipeline](build-symbol-pipeline.md) Phase 5 (C2).
 
 ## Tiers
 
@@ -50,11 +57,13 @@ gcloud compute instances list
 
 ## 2. Dry run (schema + sanity gate — no VMs created)
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\gcp\run_sweep_batch.ps1 `
+& .\gcp\run_sweep_batch.ps1 `
     -ManifestPath "configs\batch_manifest_v2_hourset14a_scout.json" `
     -Zone "us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f" `
     -DryRun
 ```
+(Invoke the script directly with `&` — never prefix `powershell -ExecutionPolicy Bypass`, a safety
+classifier blocks it.)
 The dry run aborts before any deploy if any gate fails:
 1. `train_cutoff_date` defined & parseable
 2. no leak: `train_cutoff < holdout_cutoff` (when 3-way)
@@ -65,7 +74,7 @@ The dry run aborts before any deploy if any gate fails:
 
 ## 3. Launch
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\gcp\run_sweep_batch.ps1 `
+& .\gcp\run_sweep_batch.ps1 `
     -ManifestPath "configs\batch_manifest_v2_hourset14a_scout.json" `
     -Zone "us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f"
 ```
@@ -80,6 +89,17 @@ python scripts/compare_parity.py --run reports\batch_runs\batch_<timestamp>
 # exit 0 = PARITY PASS: checks artifact set, Top-4, no FileNotFound/new tracebacks, slippage 0.01, sane PnL
 ```
 
+## 5. Validate generated configs (blocking)
+Run the CONFIG VALIDATION GATE from [build-symbol-pipeline](build-symbol-pipeline.md) Phase 6
+against the downloaded batch dir (from the repo root):
+```powershell
+conda run -n trader python <scratchpad>\validate_batch_configs.py reports\batch_runs\batch_<timestamp>
+```
+Exit 0 required (zero configs found = FAIL). Per config it asserts: resolves via
+`resolve_instrument_context`, `execution_symbol == manifest baseline.symbol`, `models.*.symbol`
+present, and every `model_path`/`predictions_path` exists on disk. The batch is not "done" until
+this gate passes.
+
 ## Output (opt_mode=individual layout)
 ```
 reports/batch_runs/batch_<timestamp>/
@@ -92,7 +112,7 @@ reports/batch_runs/batch_<timestamp>/
 ├── optimization_results_ensembles_{sharpe,sortino}.json
 ├── {sharpe,sortino}_ensemble_backtests.md       ← full backtest dumps per ensemble
 ├── wall_clock_summary.md
-├── configs/                                     ← backtest-ready config JSONs per ensemble
+├── configs/                                     ← config JSONs per ensemble — subject to the config validation gate (step 5) before use
 ├── predictions/                                 ← merged prediction CSVs per ensemble
 └── manifest.json                                ← frozen config
 ```

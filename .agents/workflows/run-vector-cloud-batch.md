@@ -1,5 +1,14 @@
 # Run Vectorized Cloud Batch (Workflow C)
 
+> [!WARNING]
+> **DEPRECATED — retired manifests/schema.** The `configs/sweep_batch_hourset09_*.json` manifests
+> referenced below no longer exist, and their legacy top-level `defaults` manifest schema fails v2
+> validation (`BatchSweepConfig.model_validate` requires `infrastructure` + `baseline` —
+> `gcp/batch_orchestrator.py:65-68`, invoked by `run_sweep_batch.ps1:355`). Use
+> [run-cloud-batch](run-cloud-batch.md) with a v2 manifest instead. Note: the vectorized
+> mechanism itself is NOT removed — `-SweepMode "frictionless"` still exists in
+> `gcp/run_sweep_batch.ps1` (`:37`, `:1019`) and flows through the v2 pipeline.
+
 // turbo-all
 
 > [!IMPORTANT]

@@ -2,6 +2,10 @@
 
 // turbo-all
 
+> [!NOTE]
+> **Legacy v1 single-VM flow.** For batch sweep work use the v2-manifest pipeline in
+> [run-cloud-batch](run-cloud-batch.md) (`/run-cloud-batch`) instead.
+
 ## Prerequisites
 - Google Cloud SDK installed and authenticated (`gcloud auth login`)
 - Project set: `gcloud config set project cltrainer`
@@ -133,5 +137,10 @@ To maintain a clean tracking environment for cloud experiments and live producti
    - These represent the baseline systems used for live trading or official E2E reporting.
    - **Format:** [horizon_or_name]_ensemble_[version].json
    - **Example:** hourly_ensemble_006.json
+   - **Validation gate (blocking):** before a config may enter `configs/strategies/`, it must pass
+     the CONFIG VALIDATION GATE checks from [build-symbol-pipeline](build-symbol-pipeline.md)
+     Phase 6 (single-config variant): `resolve_instrument_context` succeeds, `execution_symbol`
+     matches the intended symbol, `models.*.symbol` present, and every
+     `model_path`/`predictions_path` exists on disk.
 
 Always ensure new configs are moved to the correct directory based on their lifecycle stage.

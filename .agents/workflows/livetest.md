@@ -127,7 +127,15 @@ Compare the trade ledgers side by side:
 
 These are structural differences between BacktestEngine and LiveTrader, not bugs:
 
-1. **Tick-size rounding**: ConfigurableStrategy rounds TP/SL prices with `round(price, 2)` (correct for CL's $0.01 tick size). BacktestEngine does NOT round. This causes exit fills to differ by up to $0.005, resulting in ≤$5.00 PnL delta per trade. The livetest is more correct here.
+1. **Bracket price grids (CL-only equality)**: BacktestEngine rounds bracket prices to the **penny
+   grid** via `round(fill ± mult*atr, 2)` (`agent/backtest_engine.py:659-669, 793-797`), NOT via
+   `round_to_tick`; `ConfigurableStrategy` likewise computes signal TP/SL with `round(x, 2)`
+   (`src/live_execution/strategies/configurable_strategy.py:561-565`). Only the **live
+   order-placement layer** snaps prices to the instrument tick via `round_to_tick` (T3;
+   `live_trader.py:1643-1644, 1792-1820`). For CL's $0.01 tick the penny grid and the tick grid
+   coincide bit-exactly; for non-penny-tick symbols (e.g. ES/ZC, tick 0.25) the backtest penny grid
+   ≠ live tick grid — a **residual non-CL backtest/live bracket-grid divergence of up to ½ tick**.
+   Do NOT claim both engines round to the instrument tick.
 
 2. **Trailing stop evaluation order**: Both systems use N+1 evaluation — the OLD SL is checked against bar N, trailing activation updates the SL, and the new SL only takes effect on bar N+1. Verified by code tracing.
 
@@ -150,7 +158,10 @@ These are structural differences between BacktestEngine and LiveTrader, not bugs
 
 To run a livetest against a different strategy config (e.g., a new HourSet or ensemble):
 
-1. Replace the `--config` path with the new config JSON
-2. Replace the `--data` path with the correct parquet for that config's dataset
-3. Ensure the parquet has enough bars for warmup (≥2,200 for hourly models)
-4. For parity mode: ensure the config's `models.long.predictions_path` and `models.short.predictions_path` point to valid prediction CSVs relative to `--predictions-dir`
+1. The config must first pass the resolver — `resolve_instrument_context`
+   (`src/live_execution/instrument_context.py`) must succeed on it (valid `execution_symbol`,
+   consistent model symbol tags); a config that fails it will not start
+2. Replace the `--config` path with the new config JSON
+3. Replace the `--data` path with the correct parquet for that config's dataset
+4. Ensure the parquet has enough bars for warmup (≥2,200 for hourly models)
+5. For parity mode: ensure the config's `models.long.predictions_path` and `models.short.predictions_path` point to valid prediction CSVs relative to `--predictions-dir`

@@ -15,6 +15,11 @@ or as a periodic health check.
 > trade-by-trade ledger reconciliation (a Parity-Mode livetest replay compared
 > against the BacktestEngine ledger), run `/validate-ledger-parity` after this
 > one is green.
+>
+> The suite is also **CL-fixtured** and does not exercise the session calendar,
+> stale-bar watchdog, front-month roll, or live seed math (the T5 test pins are
+> the only fence there) — a green run says nothing about a non-CL config's
+> correctness.
 
 ## Usage
 

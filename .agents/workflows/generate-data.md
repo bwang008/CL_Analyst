@@ -11,6 +11,7 @@ Generate a rich feature dataset (Parquet) from raw exchange data by processing i
 
 - Raw execution data must exist (usually generated via `/grab-data`).
 - `CL_DATA_ROOT` environment variable should point to your data directory (or use explicit absolute paths).
+- The DataMap `symbol` must be a fully-registered `INSTRUMENT_REGISTRY` entry (see [build-symbol-pipeline](build-symbol-pipeline.md) Phase 0) — `MacroFeatureEngine` now hard-raises on missing per-symbol FRED/COT files and on a missing vol column (T4).
 
 ## The DataMap Config
 

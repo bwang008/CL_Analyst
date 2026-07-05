@@ -222,6 +222,24 @@ launches one live-CLI child per enabled instance with a staggered start
 systemd restarts the runner; the runner restarts the children — the children
 are not systemd units. Full details: `deploy/systemd/README.md`.
 
+### Per-config prerequisites (the runner validates client_ids ONLY)
+
+The fleet runner's manifest validation covers client_id spacing/uniqueness — it
+does **not** validate the configs themselves. Each child runs
+`python -m src.live_execution.cli`, which **fail-fasts at startup** via
+`resolve_instrument_context` (`cli.py:227-229`). Per enabled config:
+
+- **Truthful `execution_symbol`** — a missing/unknown/mismatched symbol makes
+  the child raise before connecting to IBKR.
+- **Per-symbol data artifacts on the host data root** — the 1h seed
+  `{SYM}_raw_1h.parquet` (≥ 4,320 1h bars), `fred_macro_data_<sym>.csv`, and
+  `cftc_cot_<sym>.csv`. A missing seed/macro file raises at startup, so the
+  child **crash-loops under the runner's restart backoff** until the artifact
+  is staged.
+- **`enable_5m_stream: false`** for symbols without a 5m seed (all hourly-only
+  symbols) — the key defaults to `true`, and startup then fails on the missing
+  5m seed.
+
 ### Migration runbook (WSL)
 
 1. `git pull origin development` in `~/projects/CL_Analyst` (brings the fleet
@@ -337,7 +355,10 @@ To replicate this setup on a GCP/AWS Ubuntu VM:
    this for 2FA exemption on dedicated API accounts.
 2. **Firewall**: No inbound ports needed — all connections are outbound to IBKR.
 3. **Data transfer**: Copy seed CSVs, model PKLs, and processed parquets to
-   `/opt/cl-trader/data/` (use `gsutil cp` or `scp`).
+   `/opt/cl-trader/data/` (use `gsutil cp` or `scp`) — **per traded symbol**,
+   this includes the `{SYM}_raw_1h.parquet` live seed and the
+   `fred_macro_data_<sym>.csv` / `cftc_cot_<sym>.csv` macro files (startup
+   hard-raises on each missing artifact).
 4. **First-time login**: Install VNC server (`tightvnc`), SSH tunnel to port
    5901, and complete the GUI login remotely.
 5. **Systemd**: Works natively on cloud VMs (no WSL `wsl.conf` step needed).

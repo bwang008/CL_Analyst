@@ -135,6 +135,23 @@ The runner validates before launching anything: explicit
 staggered by `stagger_seconds` (60 in the shipped manifest) to respect IBKR
 historical-data pacing during warm-start backfill.
 
+### Per-config prerequisites (beyond client_id spacing)
+
+The runner's manifest validation covers client_ids ONLY — the configs
+themselves are validated by each child at startup (`python -m
+src.live_execution.cli` fail-fasts via `resolve_instrument_context`,
+`cli.py:227-229`). Per enabled config:
+
+- **Truthful `execution_symbol`** — missing/unknown/mismatched raises before
+  IBKR connection.
+- **Per-symbol data artifacts on the host data root** — the 1h seed
+  `{SYM}_raw_1h.parquet` (>= 4,320 1h bars), `fred_macro_data_<sym>.csv`, and
+  `cftc_cot_<sym>.csv`. A missing seed/macro file raises at startup and the
+  child crash-loops under the runner's capped restart backoff.
+- **`enable_5m_stream: false`** for symbols without a 5m seed (hourly-only
+  symbols) — the key defaults to `true`, and startup then fails on the
+  missing 5m seed.
+
 ### Install / migration (replacing live-trader.service)
 
 ```bash

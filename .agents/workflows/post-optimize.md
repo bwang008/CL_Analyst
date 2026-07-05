@@ -32,13 +32,15 @@ When running via `run_sweep_batch.ps1`, post-optimization is **fully automated**
 
 For **manual** post-optimization (e.g., re-running on a completed batch):
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\gcp\gcp_deploy_optimizer.ps1 `
+& .\gcp\gcp_deploy_optimizer.ps1 `
     -BatchId batch_XXXXXXXX_XXXX `
     -NTrials 500 `
     -HoldoutMonths 6 `
     -MachineType n2-standard-16 `
     -Workers 16
 ```
+(Invoke the script directly with `&` — never prefix `powershell -ExecutionPolicy Bypass`, a safety
+classifier blocks it.)
 
 The VM will:
 1. Download all experiment artifacts from GCS
@@ -63,12 +65,30 @@ New-Item -ItemType Directory -Force -Path "reports\batch_runs\$batchId\configs"
 gcloud storage cp -r "gs://cltrainer-optuna-results/batch_optimizer/$batchId/batch_configs/*" "reports\batch_runs\$batchId\configs\"
 ```
 
+**Then validate the downloaded configs (blocking):** run the CONFIG VALIDATION GATE from
+[build-symbol-pipeline](build-symbol-pipeline.md) Phase 6 against the batch dir (from the repo root):
+```powershell
+conda run -n trader python <scratchpad>\validate_batch_configs.py reports\batch_runs\$batchId
+```
+Exit 0 required (zero configs found = FAIL): each config must resolve via
+`resolve_instrument_context`, match the manifest's `baseline.symbol`, carry `models.*.symbol`, and
+point at on-disk `model_path`/`predictions_path`.
+
 > [!IMPORTANT]
 > Use `n2-standard-*` machines (not `n2-highcpu-*`). Each parallel worker loads the OHLCV parquet (~2GB), so you need sufficient RAM. `n2-highcpu-48` (48GB) will OOM with 24+ workers.
 
 ---
 
 ## Option B — Local (Slow, ~3-6 hours for 12 targets)
+
+> [!WARNING]
+> **C1 residual — this is the target-pairs path.** Local `batch_post_optimizer.py` in target-pairs
+> mode (`:1045-1134`) deep-copies the raw CL base config and `agent/strategy_optimizer.py` writes
+> the results as `*_opt_*.json` (`:1443-1447`) / `*_hybrid_*.json` (`:1868-1872`) into
+> `configs/strategies/` with **no symbol stamping**. **Never ship these `_opt_`/`_hybrid_`
+> emissions for a non-CL symbol** — quarantine/delete them and regenerate via
+> `agent/generate_ensemble_artifacts.py` (which stamps `execution_symbol` + `models.*.symbol` from
+> `baseline.symbol`). See [build-symbol-pipeline](build-symbol-pipeline.md) Phase 5 (C1).
 
 ```powershell
 python agent/batch_post_optimizer.py `

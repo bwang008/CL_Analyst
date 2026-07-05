@@ -32,6 +32,22 @@ client ID collisions).
 
 ---
 
+## Preflight (startup hard-raises on each of these by design)
+
+Before starting, verify — for the config's symbol `<SYM>`/`<sym>`:
+
+1. **Config resolves** (fail-fast resolver, T1 — catches missing/unknown/mismatched `execution_symbol`):
+   ```bash
+   conda run -n trader python -c "import json; from src.live_execution.instrument_context import resolve_instrument_context; print(resolve_instrument_context(json.load(open('configs/strategies/<config>.json'))))"
+   ```
+2. **1h seed present:** `data/processed/<SYM>_raw_1h.parquet` (per-symbol live seed via
+   `derive_data_paths`; missing seed raises at startup).
+3. **Macro files present:** `fred_macro_data_<sym>.csv` + `cftc_cot_<sym>.csv` (missing file or
+   missing vol column raises).
+4. **Hourly-only symbols** (no 5m seed — all new symbols): the config must set
+   `"live_config": {"enable_5m_stream": false, ...}` — the key defaults to `true` and startup then
+   fails on the missing 5m seed.
+
 ## Starting from Scratch (No systemd service yet)
 
 1. Run diagnostics to verify IBKR connection and telemetry health:
@@ -41,13 +57,16 @@ client ID collisions).
 
 2. Start the live trader in dry-run mode using a production JSON config (default safe mode):
    ```bash
-   conda run -n trader python -m src.live_execution.live_trader --config configs/strategies/hourly_ensemble_002.json --dry-run
+   conda run -n trader python -m src.live_execution.cli --config configs/strategies/hourly_ensemble_002.json --dry-run
    ```
 
 If live mode is explicitly requested, use:
    ```bash
-   conda run -n trader python -m src.live_execution.live_trader
+   conda run -n trader python -m src.live_execution.cli --config configs/strategies/<config>.json
    ```
+
+   (`python -m src.live_execution.cli` is the canonical multi-symbol entry point; the legacy
+   `python -m src.live_execution.live_trader` module entry still exists, but use the CLI.)
 
 3. Monitor the output for connection issues, bar updates, and signal generation.
 

@@ -38,12 +38,28 @@ python agent/generate_model_predictions.py `
 
 ## Step 3: Construct Strategy Configurations
 Create the new `.json` execution config in `configs/strategies/`.
+
+> [!WARNING]
+> **Duplicating a donor config inherits its symbol — this is the ES01B defect verbatim.** The ES
+> standup shipped a config with `execution_symbol: "CL"` inherited from the CL donor. Symbol
+> fields must be stamped explicitly (sub-steps 2-3) and the config must pass the validation
+> checks (sub-step 6) before any backtest or live use.
+
 1. Duplicate the baseline canary config.
-2. Update the `models.long.predictions_path` and `models.short.predictions_path` to point to the `extended_predictions.csv` files you just generated.
-3. Apply the optimized parameters exactly to three places in the config:
+2. Set `execution_symbol` to the target symbol (never leave the donor's value).
+3. Set `models.long.symbol` and `models.short.symbol` to the target symbol.
+4. Update the `models.long.predictions_path` and `models.short.predictions_path` to point to the `extended_predictions.csv` files you just generated.
+5. Apply the optimized parameters exactly to three places in the config:
    - The top-level settings (`tp_atr_mult`, `sl_atr_mult`, `trailing_atr_mult`, `max_hold_bars`, etc.)
    - The `long` and `short` object dictionaries.
    - The `models.long.threshold` and `models.short.threshold` fields.
+6. **Validate the config (blocking, BEFORE Step 4's backtest)** — run the CONFIG VALIDATION GATE
+   checks from [build-symbol-pipeline](build-symbol-pipeline.md) Phase 6 on the single config
+   (single-config variant: stage a copy as `<tmpdir>\configs\<name>.json` next to a minimal
+   `<tmpdir>\manifest.json` stub `{"baseline": {"symbol": "<SYM>"}}`, then run the script on
+   `<tmpdir>` from the repo root). It asserts: `resolve_instrument_context` succeeds,
+   `execution_symbol` matches the target symbol, `models.*.symbol` present, and every
+   `model_path`/`predictions_path` exists on disk.
 
 *Tip: Using a Python script to programmatically load the base JSON, inject the new parameters, and dump the JSON is significantly less error-prone than manual text replacements.*
 

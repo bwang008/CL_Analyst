@@ -2,6 +2,10 @@
 description: How to run an Optuna hyperparameter search on GCP using the canary deploy + monitor wrapper
 ---
 
+> [!WARNING]
+> **DEPRECATED — do not edit here.** Maintained copy: `.agents/workflows/run-cloud-experiment.md`.
+> This `.agent/workflows/` twin is retained only to preserve inbound links.
+
 # Run Cloud Experiment Workflow
 
 // turbo-all

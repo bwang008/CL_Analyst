@@ -7,6 +7,12 @@ It now also validates `warm_start_cache*.parquet` cadence based on filename:
 - `warm_start_cache_1h.parquet` -> 1-hour bars
 - `warm_start_cache_2h.parquet` -> 2-hour bars
 - `warm_start_cache_4h.parquet` -> 4-hour bars
+- `warm_start_cache_{SYM}.parquet` -> 5-minute bars (per-symbol, e.g. `warm_start_cache_ES.parquet`)
+- `warm_start_cache_{SYM}_1h.parquet` -> 1-hour bars (per-symbol)
+
+Per-symbol cache names come from `derive_data_paths()` (`src/live_execution/data_manager.py`);
+the unsuffixed `warm_start_cache[_1h].parquet` names are **CL's legacy exceptions** — every other
+symbol uses the `warm_start_cache_{SYM}[_1h].parquet` pattern.
 
 ## Usage
 Trigger this workflow by asking the agent to run the `/smoketest` workflow.

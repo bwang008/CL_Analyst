@@ -7,6 +7,11 @@ description: Download historical futures data from Databento and IBKR, validate 
 
 Download historical OHLCV futures data from Databento (training source) and IBKR (live execution source), then cross-reference them with a parity check.
 
+> [!IMPORTANT]
+> **Hourly-only ruling (T7, user ruling):** data acquisition in this repo is **HOURLY-ONLY** —
+> never acquire 5m data. New symbols run the live engine in hourly-only mode: their configs set
+> `live_config.enable_5m_stream: false`.
+
 ## Prerequisites
 
 - `DATABENTO_API_KEY` set in `.env`
@@ -24,6 +29,9 @@ Download historical OHLCV futures data from Databento (training source) and IBKR
 | NG | Natural Gas | `NG.v.0` | NYMEX |
 | ES | E-mini S&P 500 | `ES.v.0` | CME |
 | NQ | E-mini Nasdaq 100 | `NQ.v.0` | CME |
+| ZC | Corn | `ZC.v.0` | CBOT |
+| ZS | Soybeans | `ZS.v.0` | CBOT |
+| SI | Silver | `SI.v.0` | COMEX |
 
 ---
 
@@ -134,6 +142,9 @@ python scripts/download_futures_data.py submit --symbols ES NG --full
 Files download to `$CL_DATA_ROOT/data/raw/DataBentoSample/{SYMBOL}/` and ratio-adjusted copies are placed at `$CL_DATA_ROOT/data/raw/{SYMBOL}.csv` for the pipeline.
 
 ## Step 7: Verify Pipeline Compatibility
+
+For a NEW symbol, first complete the full instrument registration and its blocking registry gate —
+see [build-symbol-pipeline](build-symbol-pipeline.md) Phase 0 (all 17 registry fields + GATE 0).
 
 Load the converted data through the pipeline to confirm feature engineering works:
 

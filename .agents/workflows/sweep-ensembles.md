@@ -9,6 +9,9 @@ This workflow executes an automated Cartesian Cross-Backtest across all availabl
 ## Prerequisites
 You must formulate a base `.json` config to define the threshold, TP/SL modifiers, and fractional exits that the swept models will inherit. Ensure `agent/backtest_engine.py` is fully functional.
 
+> [!WARNING]
+> **Every** field of `--base-config` (including `execution_symbol`) propagates into the derived configs — non-CL sweeps need a symbol-correct base.
+
 ## Step 1: Run the Ensemble Sweeper
 Execute the `agent/sweep_ensembles.py` script. The script automatically reads predefined model buckets and iterates over $N \times M$ combinations.
 

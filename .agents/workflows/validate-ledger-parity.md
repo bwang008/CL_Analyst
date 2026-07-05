@@ -24,6 +24,11 @@ Run this **after** `/validate-parity` is green, and whenever `backtest_engine.py
 > **Environment:** every command runs in the `trader` conda env:
 > `conda run -n trader python ...`. (That env pins pandas 1.5.3 — see Pitfalls.)
 
+> **Scope note:** this suite is **CL-fixtured** (HS14B) and does not exercise the
+> session calendar, stale-bar watchdog, front-month roll, or live seed math (the
+> T5 test pins are the only fence there) — a PASS says nothing about a non-CL
+> config's correctness.
+
 ---
 
 ## Steps

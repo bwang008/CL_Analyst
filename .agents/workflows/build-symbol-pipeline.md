@@ -30,10 +30,41 @@ This workflow composes two existing ones — do those steps there, don't re-docu
    conda run -n trader python -m pytest -q --no-header
    ```
    Record the pass/skip count (see [run-tests](run-tests.md)).
-2. Confirm the symbol is fully registered:
+2. Register the instrument **completely** — post-T1/T5 the registry is the single source of truth
+   for the live engine; every field is REQUIRED (dataclass has no defaults except `micro_of`,
+   `slippage_ticks`) and live startup RAISES on gaps:
    - `src/data/databento_data_builder.py` → `SYMBOL_MAP["<SYM>"] = "<SYM>.v.0"`.
-   - `src/core/instrument_master.py` → `INSTRUMENT_REGISTRY["<SYM>"]` with `cftc_code` and `volatility_index` set correctly (e.g. equity index → `VIXCLS`; energy → `OVXCLS`/its own).
+   - `src/core/instrument_master.py` → `INSTRUMENT_REGISTRY["<SYM>"]` with ALL fields:
+     - identity: `symbol`, `name`
+     - pricing: `tick_size`, `tick_value`, `multiplier`, `quote_unit_usd` (0.01 for grains quoted
+       in cents/bu) — **invariant, test-enforced:** `tick_value == tick_size * multiplier * quote_unit_usd`.
+       T3 snaps every live order price to `tick_size` (`round_to_tick`) — a wrong tick = rejected orders.
+     - training: `cftc_code`, `volatility_index` (FRED series: equities → `VIXCLS`; energy → `OVXCLS`;
+       gold → `GVZCLS`; grains/silver/copper → `VIXCLS` proxy, no FRED series exists)
+     - routing: `exchange` (IBKR string: NYMEX / CME / COMEX / CBOT)
+     - rollover: `active_months` (MGL codes — EXCLUDE illiquid serials, e.g. GC=`"GJMQVZ"`),
+       `roll_reference` (`"LTD"`, or `"FND"` for physically delivered), `roll_buffer_days`
+       (CL 6, ES/NQ 8, FND-referenced metals/grains 3), `roll_ratio_tolerance` (CL/MCL pinned
+       `0.01`; all new symbols `0.001`)
+     - session: `session_hours_ct` — **MUST reuse one of the three modeled shapes**:
+       `_GLOBEX_SESSION` (17:00–16:00 CT), `_GRAINS_SESSION` (19:00–07:45 + 08:30–13:20 CT),
+       `_EQUITY_SESSION` (17:00–15:15 + 15:30–16:00 CT). `src/live_execution/session_calendar.py`
+       dispatches on the exact tuple and **RAISES on any other shape** — an instrument with an
+       unmodeled session will not start live. A new session shape is an SDLC code change: STOP,
+       report, test-first.
+     - provisioning: `bars_per_day_5m`, `bars_per_day_1h` (drives the live seed-lookback formula;
+       24h markets 288/24 (CL pins), 23h 276/23, grains 200/16)
+     - live vol: `live_vol_index` (IBKR CBOE index symbol `"VIX"`/`"OVX"`/`"GVZ"` — NOT the FRED name)
+     - micro sibling (if traded): a separate `M<SYM>` entry with `micro_of="<SYM>"`, inheriting
+       the parent's `cftc_code`/`volatility_index` (micros are execution-only).
    - `scripts/download_macro_data.py` → `COT_REPORT_BY_SYMBOL["<SYM>"]` = `disaggregated` (commodities: CL/NG/HG/GC/PA) or `tff` (financials: ES/NQ). **Unmapped raises** — if the symbol is missing, add it. If it needs a COT report family not yet supported, that's an SDLC code change (see Phase 2).
+   - **GATE 0 — registry completeness (blocking):**
+     ```
+     conda run -n trader python -m pytest tests/test_instrument_master_live_fields.py tests/test_instrument_context.py -q
+     ```
+     Both suites green before Phase 1. They enforce field completeness, the tick-value invariant,
+     session-shape membership, and resolver behavior for every registry entry. (A `TypeError` on
+     `Instrument(...)` construction = you omitted a required field — that is the intended failure.)
 
 ## Phase 1 — Data acquisition (real full history)
 Follow [grab-data](grab-data.md). Concretely:
@@ -47,6 +78,14 @@ Follow [grab-data](grab-data.md). Concretely:
 4. **Stage the training input:** copy `<SYM>_ratio.csv` → `C:\CL_Analyst_Data\data\raw\<SYM>.csv` (this is the default input `regenerate_features.py` loads; it is the **ratio-adjusted** series — verified: CL's `raw/CL.csv` ≡ `CL_ratio.csv`).
 5. **Sanity check** the series (temp script): date range covers ≥ several years each side of `train_cutoff` 2022-01-01, monotonic timestamps, no dup rows, valid OHLC (`High≥Low`, etc.), no NaN.
 6. **Build the execution parquet** `<SYM>_raw.parquet` (schema `[DateTime, Open, High, Low, Close, Volume]`, hourly) from `<SYM>_raw.csv` — mirror `CL_raw_1h.parquet`. This is the PnL/execution series the manifest's `execution_data_path` points at.
+7. **Live 1h seed (T7):** stage `data/processed/<SYM>_raw_1h.parquet` — the per-symbol live seed
+   resolved by `derive_data_paths()` (`src/live_execution/data_manager.py`); a missing seed RAISES
+   at live startup. Since `<SYM>_raw.parquet` is already hourly, a copy suffices — but verify it
+   holds ≥ **4,320** hourly bars (`REQUIRED_1H_BARS`) *inside the instrument's lookback window*
+   (`derive_seed_lookback_days(bars_per_day_1h)`: ES 292 calendar days, grains 406) and re-stage
+   near launch time (the window decays ~1 trading day/day).
+   **NO 5m acquisition — Databento in this repo is hourly-only (USER RULING, T7).** New symbols
+   run the live engine in hourly-only mode (`live_config.enable_5m_stream: false`, Phase 6 gate 2).
 
 ## Phase 2 — Macro data (FRED + COT)  ⚠ symbol-type sensitive
 The feature build calls `MacroFeatureEngine.merge_all` which requires **both** `raw/macro/fred_macro_data_<sym>.csv` and `raw/macro/cftc_cot_<sym>.csv`; COT is mandatory (`include_cot=True`, no config knob) and `_load_cot` hard-raises if the file is missing.
@@ -87,7 +126,26 @@ Generate BOTH tiers for each variant (A, B), by mirroring the matching CL templa
 
 1. **Canary** — mirror `configs/batch_manifest_v2_hourset14a_canary.json` (resp. `14b`) → `configs/batch_manifest_v2_<sym>_hourset<ver>_canary.json`. Canary tier = smoke test: `n_trials:3`, `post_optimizer_trials:3`, `timeout_minutes:240`, `gcs_base_dir:.../canary`, **2 experiments** (`2x1_6H`, `3x1_6H`).
 2. **Scout** — mirror `configs/batch_manifest_v2_hourset14a_scout.json` (resp. `14b`) → `configs/batch_manifest_v2_<sym>_hourset<ver>_scout.json`. Scout tier = heavier exploration: `n_trials:100`, `post_optimizer_trials:200`, `timeout_minutes:360`, `gcs_base_dir:.../scout`, the **wide LGBM box** (`max_depth_max:8`, `num_leaves_max:64`, `max_n_estimators:1500`, `learning_rate 0.001–0.05`, `max_folds:5`, `early_stopping_rounds:30`, `min_child_samples 100–500`), and **4 experiments** (adds `2x1_3H`, `4x1_36H`). **14B is the source of truth for the optuna box; 14A is kept identical to it.** Verify the parquet actually contains all 4 scout target-column pairs (`2x1_6H`, `3x1_6H`, `2x1_3H`, `4x1_36H` × LONG/SHORT) before writing.
-   - Both tiers keep `random_seed:42`, `opt_mode:"individual"`, `slippage_per_side:0.01`, `holdout_cutoff_date:null`, `post_optimizer_holdout_months:6`. The strategy config `configs/strategies/hourly_ensemble_010.json` is acceptable for machinery validation but is CL-derived (`execution_symbol:CL`) — flag a symbol-tuned baseline as a follow-up.
+   - Both tiers keep `random_seed:42`, `opt_mode:"individual"`, `slippage_per_side:0.01`, `holdout_cutoff_date:null`, `post_optimizer_holdout_months:6`.
+   - `baseline.execution_workflow.strategy_config_path` may point at the CL base
+     `configs/strategies/hourly_ensemble_010.json` for machinery validation — but every config the
+     batch derives from it MUST pass the Phase 6 CONFIG VALIDATION GATE before any backtest/live use.
+     Two generator residuals are open at HEAD (T6 audit; code fixes deliberately deferred):
+     - **C1 — do NOT ship `_opt_`/`_hybrid_` configs from the target-pairs path for a non-CL symbol.**
+       `agent/batch_post_optimizer.py` (target-pairs mode, `:1045-1134`) hands the raw CL base to
+       `agent/strategy_optimizer.py`, which writes `*_opt_*.json` (`:1443-1447`) and `*_hybrid_*.json`
+       (`:1868-1872`) into `configs/strategies/` with **no symbol stamping**. Until the code fix lands,
+       quarantine/delete any such files a non-CL batch produces and regenerate via
+       `agent/generate_ensemble_artifacts.py` (which stamps `execution_symbol` + `models.*.symbol`
+       from `baseline.symbol` and self-checks with `resolve_instrument_context`).
+     - **C2 — non-CL manifests MUST carry a `defaults` block.** The local generator
+       (`agent/generate_ensemble_artifacts.py:303`; same pattern `batch_post_optimizer.py:1045/:1071`)
+       ignores `strategy_config_path` and reads `defaults.strategy_config`, silently falling back to
+       the CL base when absent — and NO v2 manifest carries `defaults` today. Add
+       `"defaults": {"strategy_config": "<symbol-baseline>.json", "local_data_path": "<local parquet>", "local_exec_data": "<local raw parquet>"}`
+       mirroring the `baseline.execution_workflow` values (`BatchSweepConfig` ignores the extra key —
+       verified, `src/config/schemas.py:229-237`). A CL-parameterized deep-copy is silent misconfiguration even when the symbols are
+       stamped correctly (CL-tuned blocked hours/thresholds/offsets).
 3. Dry-run each (canary + scout, both variants — 4 dry-runs) until green:
    ```
    & .\gcp\run_sweep_batch.ps1 -ManifestPath "configs\batch_manifest_v2_<sym>_hourset<ver>_{canary|scout}.json" -Zone "us-west1-a,us-west1-b,us-west1-c,us-central1-a,us-central1-b,us-central1-c,us-central1-f" -DryRun
@@ -109,6 +167,70 @@ Run it in the background and monitor. This provisions sweep VMs → post-optimiz
 - `configs/` populated with per-experiment `<SYM>...E0N_*.json`
 - `predictions/` populated with per-experiment `<SYM>...E0N_predictions.csv`
 
+**CONFIG VALIDATION GATE (hard — the workflow may not report success without exit 0).**
+For EVERY strategy config in `reports\batch_runs\batch_<ID>\configs\` (and any config promoted to
+`configs/strategies/`), run a scratchpad script (per the hard rules — no multi-line `python -c`):
+
+```python
+# <scratchpad>\validate_batch_configs.py  — usage: python validate_batch_configs.py <batch_dir>
+# Run from the repo root (the sys.path bootstrap below and the repo-relative
+# model/prediction paths inside the configs both depend on it).
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, os.getcwd())
+from src.live_execution.instrument_context import resolve_instrument_context
+
+batch_dir = Path(sys.argv[1])
+manifest = json.loads((batch_dir / "manifest.json").read_text())
+expected = manifest["baseline"]["symbol"].upper()          # KeyError here = manifest bug: fix the manifest
+failures = []
+cfgs = sorted((batch_dir / "configs").glob("*.json"))
+if not cfgs:
+    failures.append(f"NO CONFIGS FOUND in {batch_dir / 'configs'} — generator produced nothing")
+for cfg_path in cfgs:
+    cfg = json.loads(cfg_path.read_text())
+    try:
+        ctx = resolve_instrument_context(cfg)              # raises on missing/unknown symbol + model-tag mismatch
+        if ctx.execution_symbol != expected:
+            raise ValueError(f"execution_symbol {ctx.execution_symbol!r} != manifest baseline.symbol {expected!r}")
+        for side, m in cfg.get("models", {}).items():
+            if not m.get("symbol"):
+                raise ValueError(f"models.{side}.symbol missing (T6 generator stamps it — regenerate, don't hand-patch)")
+            for key in ("model_path", "predictions_path"):
+                p = m.get(key)
+                if not p or not Path(p).exists():
+                    raise ValueError(f"models.{side}.{key} not on disk: {p}")
+    except Exception as e:
+        failures.append(f"{cfg_path.name}: {e}")
+print("\n".join(failures) or "CONFIG GATE: PASS")
+sys.exit(1 if failures else 0)
+```
+```
+conda run -n trader python <scratchpad>\validate_batch_configs.py reports\batch_runs\batch_<ID>
+```
+Exit 0 required. **Zero configs found = FAIL** (a silently-empty `configs/` dir is a generator
+failure, not a pass). **Any failure = the canary FAILED**, regardless of PnL/artifact checks. Checks, per
+config: (a) resolves via `resolve_instrument_context` (execution_symbol present + registered, model
+symbol tags consistent), (b) `execution_symbol == manifest baseline.symbol`, (c) `models.*.symbol`
+present, (d) every `model_path` exists on disk, (e) every `predictions_path` exists on disk.
+
+**Known fixtures (calibrate the gate before trusting it):**
+- The preserved ES standup batch dir `reports\batch_runs\batch_20260704_0701_ES_01B_SCOUT`
+  **correctly FAILS** this gate — its `configs/` still holds the 8 pre-T6 CL-stamped originals,
+  kept deliberately as the negative regression fixture (living proof the gate catches ES01B).
+  Do NOT regenerate that batch dir just to make the gate green.
+- The promoted `configs/strategies/ES01B_Sharpe_E03_07042026.json` **PASSES** (single-config
+  variant: stage a copy as `<tmpdir>\configs\<name>.json` next to a minimal
+  `<tmpdir>\manifest.json` stub `{"baseline": {"symbol": "ES"}}`, then run the script on `<tmpdir>`).
+
+**Gate 2 — hourly-only stamp:** any config destined for live on a symbol with no 5m seed (ALL new
+symbols — hourly-only ruling) MUST set `"live_config": {"enable_5m_stream": false, ...}`; the key
+defaults to `true` and startup then fails on the missing 5m seed. Verify on the promoted config.
+
+**Gate 3 — C1 quarantine:** if the post-optimizer ran in target-pairs mode, list
+`configs/strategies/*_opt_*.json` / `*_hybrid_*.json` created during the run and quarantine them
+(see Phase 5 C1) — they are unstamped CL-base clones.
+
 And the results must be **substantively valid** (not just present): open a summary and confirm real trades and PnL (non-zero `Trades (pre)`/`Trades (opt)`), and a populated **Holdout** column with non-zero trades — i.e. **no period/OOS collapse** (0-trade holdout is the classic failure). Confirm the run exited 0 and any sweep VMs were auto-cleaned.
 
 **If it crashes:** capture the full task output + VM logs, root-cause it, and report the cause and any newly-found gaps to patch (SDLC for code fixes) — do not silently retry.
@@ -116,7 +238,7 @@ And the results must be **substantively valid** (not just present): open a summa
 ## Phase 7 — Regression check & hand-off
 1. Re-run the full suite; confirm no regressions vs the Phase-0 baseline (new tests may raise the pass count, but nothing previously green may fail).
 2. Clean up: delete any leftover VMs (`gcloud compute instances list --project cltrainer`; the persistent `optuna-post-optimizer` may remain RUNNING — confirm with the user before deleting).
-3. Report: Databento cost + actual date range; files created (2 parquets + raw, 2 DataMaps in `configs/master/`, 2 manifests, GCS uploads, any code changes + tests); dry-run results; canary artifact-validation result; the exact non-`-DryRun` launch commands for the real batches; and caveats (CL-derived baseline strategy, symbol-specific vol index, COT coverage start). Nothing committed; no full batch launched.
+3. Report: Databento cost + actual date range; files created (2 parquets + raw, 2 DataMaps in `configs/master/`, 2 manifests, GCS uploads, any code changes + tests); dry-run results; canary artifact-validation result **including the CONFIG VALIDATION GATE output (must be PASS)**; the exact non-`-DryRun` launch commands for the real batches; and caveats (CL-derived baseline strategy, symbol-specific vol index, COT coverage start). Nothing committed; no full batch launched.
 
 ---
 
@@ -130,13 +252,21 @@ And the results must be **substantively valid** (not just present): open a summa
 - [ ] All 3 parquets uploaded to `gs://cltrainer-optuna-results/data/`.
 - [ ] All 4 manifests (canary + scout, both variants) pass `-DryRun` (no OOS collapse).
 - [ ] Canary run: `reports\batch_runs\batch_<ID>\` fully populated (list above) with real trades/PnL/holdout.
+- [ ] `data/processed/<SYM>_raw_1h.parquet` live seed staged (≥4,320 1h bars in-window; no 5m data).
+- [ ] CONFIG VALIDATION GATE exit 0 on `reports\batch_runs\batch_<ID>` (resolver + symbol + paths).
+- [ ] No unquarantined `*_opt_*/*_hybrid_*` CL-base configs in `configs/strategies/`; non-CL manifests carry a `defaults` block.
 - [ ] Full test suite green (no regressions); VMs cleaned up; hand-off written; nothing committed.
 
 ## Key files
 | File | Purpose |
 |------|---------|
 | `src/data/databento_data_builder.py` | Databento download/convert; `SYMBOL_MAP` |
-| `src/core/instrument_master.py` | `INSTRUMENT_REGISTRY` (cftc_code, volatility_index) |
+| `src/core/instrument_master.py` | `INSTRUMENT_REGISTRY` (17 required fields — see Phase 0) |
+| `src/live_execution/instrument_context.py` | `resolve_instrument_context` — config fail-fast validation (T1) |
+| `src/live_execution/session_calendar.py` | the three modeled session shapes; unknown shape raises (T5/T7) |
+| `src/live_execution/data_manager.py` | `derive_data_paths` per-symbol seed/cache/ledger names; `REQUIRED_1H_BARS` (T2/T5) |
+| `src/core/dataset_tag.py` | `derive_dataset_tag` — the ONLY authority for `E2E_*` names (T6) |
+| `agent/generate_ensemble_artifacts.py` | config (re)generation with symbol stamping + self-check (T6) |
 | `scripts/download_macro_data.py` | FRED + COT; `COT_REPORT_BY_SYMBOL`, `CotReportAdapter`/`DisaggregatedAdapter`/`TffAdapter` |
 | `scripts/regenerate_features.py` | Config-driven parquet build (`process_from_config`) |
 | `configs/master/DataMap_CL_HourSet_14A.json` / `14B` | CL DataMap templates to mirror |
