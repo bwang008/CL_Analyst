@@ -385,24 +385,46 @@ class SimulatedExecution(ExecutionClient):
         price after trailing stop activation.  The new price is already
         written into the event's raw_event.order.auxPrice by the caller.
         We just need to update our internal _resting_orders dict.
+
+        Contract (ExecutionClient.modify_order): the sync-detectable
+        malformed-event class raises ValueError exactly like the IBKR
+        adapter (silent no-ops here are what masked the dead production
+        transmit in every parity run); an unknown order id stays a no-op
+        — mirroring live IBKR, where re-placing an already-filled or
+        cancelled order is rejected via the async errorEvent — but is
+        logged at WARNING.
         """
+        if event is None or getattr(event, "raw_event", None) is None:
+            raise ValueError(
+                f"modify_order({order_id}): event.raw_event is required"
+            )
+        raw_order = getattr(event.raw_event, "order", None)
+        if raw_order is None:
+            raise ValueError(
+                f"modify_order({order_id}): raw_event lacks .order"
+            )
+        new_price = getattr(raw_order, "auxPrice", None)
+        if new_price is None:
+            raise ValueError(
+                f"modify_order({order_id}): raw_event.order has no auxPrice "
+                f"— the caller must write the new price before transmitting"
+            )
         oid = int(order_id) if not isinstance(order_id, int) else order_id
         resting = self._resting_orders.get(oid)
         if resting is None:
-            log.debug("modify_order: orderId=%s not found in resting orders", order_id)
+            log.warning(
+                "modify_order: orderId=%s not found in resting orders "
+                "(already filled/cancelled?) — no-op, mirroring live "
+                "venue-async rejection",
+                order_id,
+            )
             return
-        # Read the new price from the event if available
-        if event is not None:
-            raw = getattr(event, "raw_event", None)
-            raw_order = getattr(raw, "order", None) if raw else None
-            new_price = getattr(raw_order, "auxPrice", None) if raw_order else None
-            if new_price is not None:
-                old_price = resting.price
-                resting.price = new_price
-                log.debug(
-                    "SIM MODIFY ORDER: orderId=%d price=%.2f → %.2f",
-                    oid, old_price, new_price,
-                )
+        old_price = resting.price
+        resting.price = new_price
+        log.debug(
+            "SIM MODIFY ORDER: orderId=%d price=%.2f → %.2f",
+            oid, old_price, new_price,
+        )
 
     def cancel_open_orders(self, symbol: str) -> int:
         """Cancel all resting orders for the given symbol."""

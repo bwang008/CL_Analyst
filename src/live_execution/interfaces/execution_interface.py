@@ -60,6 +60,26 @@ class ExecutionClient(ABC):
         pass
 
     @abstractmethod
+    def modify_order(self, order_id, event=None) -> Any:
+        """Synchronously transmit a modification of a resting order to the venue.
+
+        The caller has already written the new price into
+        ``event.raw_event.order`` (e.g. ``auxPrice`` for a STP order) —
+        the new price travels on the event by side effect, not as an
+        argument.
+
+        Implementations MUST synchronously transmit the modification and
+        MUST raise when it cannot be transmitted or validated: malformed
+        event (missing event / raw_event / order / contract / price),
+        order-id mismatch, or disconnected venue. Venue-side rejection of
+        a transmitted modify is reported asynchronously via the error
+        callback, not by this method. An unknown/not-found order id MAY
+        warn and no-op (matches live IBKR async semantics: re-placing an
+        already-filled/cancelled order is rejected via the async
+        errorEvent, not synchronously).
+        """
+
+    @abstractmethod
     def cancel_open_orders(self, symbol: str) -> int:
         pass
 

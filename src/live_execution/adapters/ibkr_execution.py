@@ -149,6 +149,51 @@ class IBKRExecutionClient(ExecutionClient):
             sl_price=sl_price,
         )
 
+    def modify_order(self, order_id, event=None) -> Any:
+        """Transmit a modification of a resting order to IBKR.
+
+        Modify = re-placeOrder the SAME ib_insync Order object (same
+        orderId, unchanged permId) on the same client session — the
+        documented ib_insync modify flow, identical to the pre-refactor
+        trailing transmit. The qualified contract rides in on the Trade
+        (``event.raw_event``), so this method makes NO qualification /
+        reqContractDetails / reqHistoricalData calls and is safe to
+        invoke from ib_insync bar-update callbacks (placeOrder is a
+        plain synchronous message send).
+
+        Raises on every sync-detectable failure per the ExecutionClient
+        contract: ValueError (malformed event, order-id mismatch),
+        ConnectionError (session not connected). Venue-side rejection
+        arrives asynchronously via the error callback.
+        """
+        if event is None or getattr(event, "raw_event", None) is None:
+            raise ValueError(
+                f"modify_order({order_id}): event.raw_event "
+                f"(ib_insync Trade) is required"
+            )
+        trade = event.raw_event
+        order = getattr(trade, "order", None)
+        contract = getattr(trade, "contract", None)
+        if order is None or contract is None:
+            raise ValueError(
+                f"modify_order({order_id}): raw_event lacks .order/.contract"
+            )
+        if str(order.orderId) != str(order_id):
+            raise ValueError(
+                f"modify_order: order_id mismatch — called with {order_id} "
+                f"but raw_event.order.orderId is {order.orderId}"
+            )
+        if not self.is_connected():
+            raise ConnectionError(
+                f"modify_order({order_id}): IBKR session not connected — "
+                f"cannot transmit SL modification"
+            )
+        log.info(
+            "MODIFY ORDER: re-placing orderId=%s auxPrice=%s",
+            order.orderId, getattr(order, "auxPrice", None),
+        )
+        return self.manager.ib.placeOrder(contract, order)
+
     def cancel_open_orders(self, symbol: str) -> int:
         return self.manager.cancel_open_cl_orders(symbol=symbol)
 

@@ -1122,7 +1122,26 @@ class LiveTrader:
                 old_sl = getattr(raw_order, "auxPrice", 0.0) or 0.0 if raw_order else 0.0
                 if raw_order is not None:
                     raw_order.auxPrice = new_sl
-                if hasattr(self.exec_client, "modify_order"): self.exec_client.modify_order(evt.order_id, evt)
+                # TRANSMIT-THEN-COMMIT: transmit FIRST inside a targeted
+                # try/except — the generic handler below must never swallow
+                # a transmit failure after the auxPrice mutation above. On
+                # failure: restore the cached order, log at ERROR, and
+                # commit NOTHING (no latch, no tracked price, no ledger
+                # write, no snapshot) — the trigger is not latched, so the
+                # next bar re-fires and retries naturally.
+                try:
+                    self.exec_client.modify_order(evt.order_id, evt)
+                except Exception:
+                    if raw_order is not None:
+                        raw_order.auxPrice = old_sl  # un-poison the cached Trade
+                    log.exception(
+                        "TRAILING STOP: SL modify transmit FAILED for order "
+                        "%s (SL remains %.2f at broker) — will retry on "
+                        "next bar",
+                        order_id, old_sl,
+                    )
+                    return
+                # --- success only below this line ---
                 log.info(
                     "TRAILING STOP: modified SL order %s: %.2f → %.2f",
                     order_id, old_sl, new_sl,
