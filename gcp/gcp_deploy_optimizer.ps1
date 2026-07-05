@@ -185,7 +185,7 @@ if ($elapsed -ge $maxWait) {
 # --- [3/7] Create directory structure ---
 Write-Host "`n[3/7] Creating directory structure..."
 gcloud compute ssh $VmName --zone=$Zone --quiet `
-    --command="mkdir -p $RemoteProject/agent $RemoteProject/src/live_execution/strategies $RemoteProject/src/features $RemoteProject/gcp $RemoteProject/configs/strategies $RemoteProject/reports/batch_runs $RemoteProject/data/processed" 2>$null
+    --command="mkdir -p $RemoteProject/agent $RemoteProject/src/live_execution/strategies $RemoteProject/src/features $RemoteProject/src/core $RemoteProject/gcp $RemoteProject/configs/strategies $RemoteProject/reports/batch_runs $RemoteProject/data/processed" 2>$null
 
 # --- [4/7] Upload code ---
 Write-Host "`n[4/7] Uploading code..."
@@ -217,6 +217,11 @@ $codeFiles = @(
     @{ Local = "src\live_execution\strategies\buy70_sized_manatee.py"; Remote = "src/live_execution/strategies/" },
     @{ Local = "src\features\__init__.py";       Remote = "src/features/" },
     @{ Local = "src\features\feature_buckets.py"; Remote = "src/features/" },
+    # src/core is imported at module level by generate_ensemble_artifacts (dataset_tag,
+    # instrument_master) which batch_post_optimizer imports — omitting it crashes the
+    # optimizer VM with ModuleNotFoundError before any optimization runs (S1/S2 2026-07-05).
+    @{ Local = "src\core\dataset_tag.py";        Remote = "src/core/" },
+    @{ Local = "src\core\instrument_master.py";  Remote = "src/core/" },
     @{ Local = "gcp\vm_post_optimize.sh";        Remote = "gcp/" }
 )
 
