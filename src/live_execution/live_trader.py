@@ -63,6 +63,7 @@ from src.features.macro_features import MacroFeatureEngine, StaleDataException
 from src.live_execution.strategy import Strategy, TradeSignal
 
 from src.live_execution.strategies.configurable_strategy import ConfigurableStrategy
+from src.live_execution.instrument_context import resolve_instrument_context
 from src.live_execution.data_manager import DataManager
 from src.live_execution.interfaces.data_feed_interface import DataFeedClient
 from src.live_execution.interfaces.execution_interface import ExecutionClient, StandardExecutionEvent
@@ -272,10 +273,11 @@ class LiveTrader:
         self._last_filled_entry_order_id = None
         log.info("Strategy: %s  direction=%s", strategy.name, strategy.direction)
 
-        # Read execution_symbol from strategy config (Brain=CL, Hands=CL or MCL)
-        self._execution_symbol: str = strategy_config.get(
-            "execution_symbol", "CL"
-        ).upper()
+        # Resolve + validate the instrument (raises on missing/unknown/
+        # mismatched symbol — no silent CL default). Stored for T2-T5 to
+        # consume; T1 wires nothing else through it.
+        self._instrument_context = resolve_instrument_context(strategy_config)
+        self._execution_symbol: str = self._instrument_context.execution_symbol
         # Force lean_features to False in live trading because live models
         # generally require the full feature set (MACRO/DIST).
         # This prevents accidental missing feature errors if the config retains

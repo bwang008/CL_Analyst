@@ -18,7 +18,8 @@ class DummyStrategy:
         self.feature_names = feature_names
         self.name = "DummyStrategy"
         self.direction = "LONG"
-        self.config = {}
+        # T1: execution_symbol is now required (no silent CL default)
+        self.config = {"execution_symbol": "CL"}
 
 
 class TestLiveMacroRefresh:

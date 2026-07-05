@@ -2,6 +2,7 @@
     "nickname": "Ensemble2_Opt",
     "description": "Ensemble combining Optuna-best Manatee2 (trial #827) + Koala2 (trial #361)",
     "execution_class": "ConservativeEnsembleStrategy",
+    "execution_symbol": "CL",
     "models": {
         "long": {
             "experiment_id": "EXP-025_S_Ultimate_OOS",

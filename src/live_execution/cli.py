@@ -216,6 +216,19 @@ def main() -> None:
         strategy_cls = _STRATEGY_REGISTRY[strategy_key]
         strategy = strategy_cls(base_quantity=args.quantity)
 
+    # ── Fail-fast instrument resolution (T1) ──────────────────────
+    # Resolve + validate the instrument immediately after config load,
+    # BEFORE any data/exec factory constructs an IBKR client. Any
+    # ValueError propagates and kills the process pre-connect.
+    from src.live_execution.instrument_context import resolve_instrument_context
+
+    ctx = resolve_instrument_context(strategy.config)
+    log.info(
+        "Instrument resolved: execution=%s (%s, tick=%s) brain=%s",
+        ctx.execution_symbol, ctx.execution_instrument.exchange,
+        ctx.execution_instrument.tick_size, ctx.brain_symbol,
+    )
+
     # CLI --client-id takes priority; if not explicitly set (== 1 default),
     # fall back to config's live_config.client_id
     resolved_client_id = args.client_id
