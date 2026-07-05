@@ -980,7 +980,7 @@ $optWorkerCount  = 0
 if ($batchState.completed -gt 0) {
     Write-Host ""
     Write-Host "Deploying cloud optimizer VM..." -ForegroundColor Cyan
-    $optVmName = "optuna-post-optimizer"
+    $optVmName = "opt-post-$($BatchId.Replace('_','-'))"
     $optZoneList = ($Zone -split ',') | ForEach-Object { $_.Trim() }
     $optDeployExit = 1
     $optActualZone = $optZoneList[0]  # fallback default

@@ -655,7 +655,7 @@ if ($batchState.completed -gt 0) {
     # Wait for optimizer VM to finish (self-shutdown)
     Write-Host ""
     Write-Host "Waiting for optimizer VM to complete..." -ForegroundColor Cyan
-    $optVmName = "optuna-post-optimizer"
+    $optVmName = "opt-post-$($BatchId.Replace('_','-'))"
     $optElapsed = 0
     $optZone = "us-east1-b"  # Default zone for optimizer
 

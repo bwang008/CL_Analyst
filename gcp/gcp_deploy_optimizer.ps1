@@ -13,7 +13,7 @@
 param(
     [Parameter(Mandatory=$true)]
     [string]$BatchId,
-    [string]$VmName = "optuna-post-optimizer",
+    [string]$VmName = "opt-post-$($BatchId.Replace('_','-'))",
     [string]$MachineType = "n2-standard-32",
     [string]$Zone = "us-central1-a",
     [int]$DiskSizeGB = 50,
