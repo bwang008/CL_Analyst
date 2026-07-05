@@ -64,7 +64,7 @@ from src.live_execution.strategy import Strategy, TradeSignal
 
 from src.live_execution.strategies.configurable_strategy import ConfigurableStrategy
 from src.live_execution.instrument_context import resolve_instrument_context
-from src.live_execution.data_manager import DataManager
+from src.live_execution.data_manager import DataManager, derive_data_paths
 from src.live_execution.interfaces.data_feed_interface import DataFeedClient
 from src.live_execution.interfaces.execution_interface import ExecutionClient, StandardExecutionEvent
 from src.live_execution.telemetry import TelemetryDB
@@ -92,7 +92,7 @@ from src.live_execution.log_config import (  # noqa: F401
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
-from src.data_paths import get_data_path as _dp_data_path, get_data_root as _dp_data_root
+from src.data_paths import get_data_path as _dp_data_path
 
 _DEFAULT_DB_PATH = str(_dp_data_path("live_telemetry.db"))
 
@@ -135,11 +135,9 @@ _STALE_BAR_THRESHOLD_MINUTES = 15  # Minutes without a bar before forcing reconn
 _RESTART_MAX_ATTEMPTS = 5        # Max full restart attempts
 _RESTART_DELAY = 300.0           # Delay between restart attempts (5 minutes)
 
-# Default paths for DataManager (CL_DATA_ROOT primary, repo-local fallback)
-_DEFAULT_SEED_PATH = str(_dp_data_path("raw/cl-5m_bk.csv"))
-_DEFAULT_CACHE_PATH = str(
-    _dp_data_root() / "processed" / "warm_start_cache.parquet"
-)
+# DataManager default paths are derived per symbol via
+# data_manager.derive_data_paths(ctx.brain_symbol) — T2 removed the
+# module-level CL constants (_DEFAULT_SEED_PATH/_DEFAULT_CACHE_PATH).
 
 # ---------------------------------------------------------------------------
 # Logging (CLOnlyLogFilter, _setup_file_logging moved to log_config.py)
@@ -195,8 +193,8 @@ class LiveTrader:
         exec_client: ExecutionClient,
         strategy: Strategy,
         db_path: str = _DEFAULT_DB_PATH,
-        seed_path: str = _DEFAULT_SEED_PATH,
-        cache_path: str = _DEFAULT_CACHE_PATH,
+        seed_path: Optional[str] = None,
+        cache_path: Optional[str] = None,
         quantity: int = _DEFAULT_QUANTITY,
         dry_run: bool = False,
         entry_mode: str = "adaptive",
@@ -278,6 +276,13 @@ class LiveTrader:
         # consume; T1 wires nothing else through it.
         self._instrument_context = resolve_instrument_context(strategy_config)
         self._execution_symbol: str = self._instrument_context.execution_symbol
+        # T2 (D3): all live data artifacts are keyed by the BRAIN symbol —
+        # the cached/ledgered series IS the brain-stream continuous series,
+        # so an MCL config legitimately shares CL's file set. CL derives
+        # byte-identical legacy names. Explicit seed/cache args win.
+        _paths = derive_data_paths(self._instrument_context.brain_symbol)
+        seed_path = seed_path or str(_paths.seed_5m)
+        cache_path = cache_path or str(_paths.cache_5m)
         # Force lean_features to False in live trading because live models
         # generally require the full feature set (MACRO/DIST).
         # This prevents accidental missing feature errors if the config retains
@@ -328,10 +333,21 @@ class LiveTrader:
         )
         log.info("DATA PATHS: 5m seed=%s  cache=%s", seed_path, cache_path)
 
+        # C2 (T2 impact review): the roll-metadata file is shared per BRAIN
+        # symbol, but DataManager.front_month_id stores the EXECUTION
+        # front-month localSymbol. Concurrent CL + MCL instances sharing
+        # .roll_metadata.json therefore ping-pong last_front_month
+        # (CLxx <-> MCLxx), triggering spurious rollover DETECTION churn on
+        # restart. That is detection noise, NOT misdata: the roll ratio is
+        # computed against the same CL-continuous series (~1.0, within
+        # _ROLL_PRICE_TOLERANCE) so no ledger adjustment or roll-history
+        # append occurs. Normalizing the stored identifier is T5 scope.
         self.data_manager_5m = DataManager(
+            symbol=self._instrument_context.brain_symbol,
             seed_path=seed_path,
             cache_path=cache_path,
-            master_ledger_path=str(_get_data_root() / "processed" / "cl_continuous_master.parquet"),
+            master_ledger_path=str(_paths.ledger_5m),
+            roll_metadata_path=str(_paths.roll_metadata),
             data_client=self.data_client,
             bar_size="5 mins",
             bars_per_day=288,
@@ -340,10 +356,10 @@ class LiveTrader:
         self.data_manager_1h = None
         if self._bar_size in ("1h", "2h", "4h"):
             # 1h models use a dedicated 1h data manager to avoid pacing limits.
-            # Seed from the full historical 1H parquet (cl-1h_bk_HourSet_06.parquet)
+            # Seed from the full historical 1H parquet ({SYM}_raw_1h.parquet)
             # which lives alongside the processed datasets in CL_DATA_ROOT/data/processed/.
             _data_root = _get_data_root()
-            cache_path_1h = str(_data_root / "processed" / "warm_start_cache_1h.parquet")
+            cache_path_1h = str(_paths.cache_1h)
             # Allow strategy config to override the seed path
             _live_cfg = strategy.config.get("live_config", {}) if getattr(strategy, "config", None) else {}
             _seed_override = _live_cfg.get("seed_path_1h")
@@ -354,7 +370,7 @@ class LiveTrader:
                     _seed_p = _data_root / _seed_override
                 seed_path_1h = str(_seed_p)
             else:
-                seed_path_1h = str(_data_root / "processed" / "CL_raw_1h.parquet")
+                seed_path_1h = str(_paths.seed_1h)
             log.info("DATA PATHS: 1h seed=%s  cache=%s", seed_path_1h, cache_path_1h)
 
             # Hard validation: the 1H seed must exist. If it doesn't, the
@@ -364,19 +380,24 @@ class LiveTrader:
             _cache_1h_path = Path(cache_path_1h)
             if not _cache_1h_path.exists() and not _seed_1h_path.exists():
                 raise FileNotFoundError(
-                    f"CRITICAL: Neither 1H cache nor seed file found!\n"
+                    f"CRITICAL: Neither 1H cache nor seed file found for "
+                    f"{self._instrument_context.brain_symbol}!\n"
                     f"  cache: {cache_path_1h}\n"
                     f"  seed:  {seed_path_1h}\n"
                     f"  CL_DATA_ROOT={_CL_DATA_ROOT}\n"
                     f"Ensure CL_DATA_ROOT points to the shared data directory "
-                    f"containing data/processed/CL_HourSet_08.parquet, or copy "
+                    f"containing the 1H seed parquet, or copy "
                     f"the seed file to this environment."
                 )
 
+            # Same roll-metadata file as the 5m manager — preserves the
+            # intra-symbol 5m+1h sharing (see the C2 note above).
             self.data_manager_1h = DataManager(
+                symbol=self._instrument_context.brain_symbol,
                 seed_path=seed_path_1h,
                 cache_path=cache_path_1h,
-                master_ledger_path=str(_data_root / "processed" / "cl_continuous_master_1h.parquet"),
+                master_ledger_path=str(_paths.ledger_1h),
+                roll_metadata_path=str(_paths.roll_metadata),
                 data_client=self.data_client,
                 bar_size="1 hour",
                 bars_per_day=24,
@@ -2038,11 +2059,33 @@ class LiveTrader:
     # Live bar subscription
     # ------------------------------------------------------------------
 
+    @property
+    def _brain_symbol(self) -> str:
+        """Brain-stream symbol (T2).
+
+        Prefers the resolved InstrumentContext (always set by __init__).
+        Falls back to the SAME structural derivation the resolver uses
+        (micro -> parent contract, outright -> itself) for test stubs
+        built via object.__new__ that set only _execution_symbol (e.g.
+        tests/test_cooldown.py). This is structural derivation, NOT a
+        silent CL default — unknown symbols raise via get_instrument.
+        """
+        ctx = getattr(self, "_instrument_context", None)
+        if ctx is not None:
+            return ctx.brain_symbol
+        from src.core.instrument_master import get_instrument
+        return get_instrument(self._execution_symbol).micro_of or self._execution_symbol
+
     def _subscribe(self) -> None:
-        """Subscribe to live bars (Brain streams)."""
+        """Subscribe to live bars (Brain streams).
+
+        T2 (constraint 3): Brain streams subscribe the BRAIN symbol's
+        continuous contract (an MCL config's brain is CL); the Hands
+        stream (_subscribe_front_month) stays on the execution symbol.
+        """
         log.info("Subscribing to live 5-min bars (Stream A)...")
         self._live_bars_5m = self.data_client.subscribe_live_bars(
-            symbol=self._execution_symbol,
+            symbol=self._brain_symbol,
             continuous=True,
             bar_size="5 mins",
             duration_str="60 S",
@@ -2053,7 +2096,7 @@ class LiveTrader:
         if self._bar_size in ("1h", "2h", "4h"):
             log.info("Subscribing to live 1-hour bars (Stream B)...")
             self._live_bars_1h = self.data_client.subscribe_live_bars(
-                symbol=self._execution_symbol,
+                symbol=self._brain_symbol,
                 continuous=True,
                 bar_size="1 hour",
                 duration_str="2 D",
@@ -2312,9 +2355,11 @@ class LiveTrader:
                     pass
             
             # 2. Re-subscribe using async API
+            # T2 (constraint 3): Brain streams = brain symbol continuous;
+            # the Hands (front-month) stream below stays execution symbol.
             log.info("Subscribing to live 5-min bars (Stream A)...")
             self._live_bars_5m = await self.data_client.subscribe_live_bars_async(
-                symbol=self._execution_symbol,
+                symbol=self._brain_symbol,
                 continuous=True,
                 bar_size="5 mins",
                 duration_str="60 S",
@@ -2325,7 +2370,7 @@ class LiveTrader:
             if self._bar_size == "1h":
                 log.info("Subscribing to live 1-hour bars (Stream B)...")
                 self._live_bars_1h = await self.data_client.subscribe_live_bars_async(
-                    symbol=self._execution_symbol,
+                    symbol=self._brain_symbol,
                     continuous=True,
                     bar_size="1 hour",
                     duration_str="2 D",
@@ -2369,9 +2414,11 @@ class LiveTrader:
 
         This prevents phantom price spikes in rolling indicators when
         bars are missed due to connectivity loss, hibernation, etc.
-        """
-        from src.live_execution.ibkr_client import build_cl_contract, ib_bars_to_dataframe
 
+        The fetch below carries NO symbol kwarg — the symbol is bound at
+        adapter construction (T2, D1), which keeps this call compatible
+        with the untouched SimulatedDataFeed.
+        """
         now = pd.Timestamp.now()
         warmup_count = 0
 

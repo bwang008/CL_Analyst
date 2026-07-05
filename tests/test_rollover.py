@@ -3,7 +3,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
@@ -43,9 +43,11 @@ def seed_csv(tmp_dir):
 def dm(tmp_dir, seed_csv):
     """Create a DataManager with temp paths and no IBKR."""
     return DataManager(
+        symbol="CL",
         seed_path=seed_csv,
         cache_path=str(tmp_dir / "cache.parquet"),
         master_ledger_path=str(tmp_dir / "master.parquet"),
+        roll_metadata_path=str(tmp_dir / "roll_metadata_fixture.json"),
         data_client=None,
         front_month_id="CLJ6",
     )
@@ -59,36 +61,28 @@ class TestRollMetadata:
     def test_save_and_load(self, dm, tmp_dir):
         """Saving metadata creates file; loading returns same data."""
         meta_file = tmp_dir / ".roll_metadata.json"
-        with patch(
-            "src.live_execution.data_manager._ROLL_METADATA_PATH",
-            str(meta_file),
-        ):
-            dm._save_roll_metadata()
-            assert meta_file.exists()
+        # T2: roll metadata is a per-instance attribute (was a module global)
+        dm.roll_metadata_path = str(meta_file)
+        dm._save_roll_metadata()
+        assert meta_file.exists()
 
-            meta = dm._load_roll_metadata()
-            assert meta["last_front_month"] == "CLJ6"
-            assert "updated_at" in meta
+        meta = dm._load_roll_metadata()
+        assert meta["last_front_month"] == "CLJ6"
+        assert "updated_at" in meta
 
     def test_load_missing_file(self, dm, tmp_dir):
         """Loading when no metadata file exists returns empty dict."""
-        with patch(
-            "src.live_execution.data_manager._ROLL_METADATA_PATH",
-            str(tmp_dir / "nonexistent.json"),
-        ):
-            meta = dm._load_roll_metadata()
-            assert meta == {}
+        dm.roll_metadata_path = str(tmp_dir / "nonexistent.json")
+        meta = dm._load_roll_metadata()
+        assert meta == {}
 
     def test_load_corrupt_file(self, dm, tmp_dir):
         """Loading a corrupt JSON file returns empty dict gracefully."""
         bad_file = tmp_dir / "corrupt.json"
         bad_file.write_text("NOT JSON", encoding="utf-8")
-        with patch(
-            "src.live_execution.data_manager._ROLL_METADATA_PATH",
-            str(bad_file),
-        ):
-            meta = dm._load_roll_metadata()
-            assert meta == {}
+        dm.roll_metadata_path = str(bad_file)
+        meta = dm._load_roll_metadata()
+        assert meta == {}
 
 
 # ---------------------------------------------------------------------------
@@ -98,11 +92,8 @@ class TestRollMetadata:
 class TestRolloverDetection:
     def test_first_run_no_rollover(self, dm, tmp_dir):
         """First run (no metadata file) should not be detected as rollover."""
-        with patch(
-            "src.live_execution.data_manager._ROLL_METADATA_PATH",
-            str(tmp_dir / "nonexistent.json"),
-        ):
-            assert dm._detect_rollover() is False
+        dm.roll_metadata_path = str(tmp_dir / "nonexistent.json")
+        assert dm._detect_rollover() is False
 
     def test_same_contract_no_rollover(self, dm, tmp_dir):
         """Same front-month as last run = no rollover."""
@@ -111,11 +102,8 @@ class TestRolloverDetection:
             json.dumps({"last_front_month": "CLJ6"}),
             encoding="utf-8",
         )
-        with patch(
-            "src.live_execution.data_manager._ROLL_METADATA_PATH",
-            str(meta_file),
-        ):
-            assert dm._detect_rollover() is False
+        dm.roll_metadata_path = str(meta_file)
+        assert dm._detect_rollover() is False
 
     def test_different_contract_triggers_rollover(self, dm, tmp_dir):
         """Different front-month since last run = rollover detected."""
@@ -124,11 +112,8 @@ class TestRolloverDetection:
             json.dumps({"last_front_month": "CLH6"}),
             encoding="utf-8",
         )
-        with patch(
-            "src.live_execution.data_manager._ROLL_METADATA_PATH",
-            str(meta_file),
-        ):
-            assert dm._detect_rollover() is True
+        dm.roll_metadata_path = str(meta_file)
+        assert dm._detect_rollover() is True
 
 
 # ---------------------------------------------------------------------------
@@ -283,44 +268,40 @@ class TestRollMetadataHistory:
     def test_roll_history_accumulated(self, dm, tmp_dir):
         """Roll history entries accumulate across multiple rolls."""
         meta_file = tmp_dir / ".roll_metadata.json"
-        with patch(
-            "src.live_execution.data_manager._ROLL_METADATA_PATH",
-            str(meta_file),
-        ):
-            # First roll
-            dm.front_month_id = "CLK6"
-            dm._roll_detected = True
-            dm._roll_ratios.append(1.5)
-            dm._save_roll_metadata()
+        dm.roll_metadata_path = str(meta_file)
 
-            meta = dm._load_roll_metadata()
-            assert len(meta["roll_history"]) == 1
-            assert meta["roll_history"][0]["ratio"] == 1.50
-            assert meta["cumulative_ratio"] == 1.50
+        # First roll
+        dm.front_month_id = "CLK6"
+        dm._roll_detected = True
+        dm._roll_ratios.append(1.5)
+        dm._save_roll_metadata()
 
-            # Second roll
-            dm.front_month_id = "CLM6"
-            dm._roll_ratios.append(1.2)
-            dm._save_roll_metadata()
+        meta = dm._load_roll_metadata()
+        assert len(meta["roll_history"]) == 1
+        assert meta["roll_history"][0]["ratio"] == 1.50
+        assert meta["cumulative_ratio"] == 1.50
 
-            meta = dm._load_roll_metadata()
-            assert len(meta["roll_history"]) == 2
-            assert abs(meta["cumulative_ratio"] - 1.8) < 0.01
+        # Second roll
+        dm.front_month_id = "CLM6"
+        dm._roll_ratios.append(1.2)
+        dm._save_roll_metadata()
+
+        meta = dm._load_roll_metadata()
+        assert len(meta["roll_history"]) == 2
+        assert abs(meta["cumulative_ratio"] - 1.8) < 0.01
 
     def test_no_history_without_roll(self, dm, tmp_dir):
         """No roll history entry added when no roll was detected."""
         meta_file = tmp_dir / ".roll_metadata.json"
-        with patch(
-            "src.live_execution.data_manager._ROLL_METADATA_PATH",
-            str(meta_file),
-        ):
-            dm._roll_detected = False
-            dm._roll_ratios.append(1.0)
-            dm._save_roll_metadata()
+        dm.roll_metadata_path = str(meta_file)
 
-            meta = dm._load_roll_metadata()
-            assert meta.get("roll_history", []) == []
-            assert meta.get("cumulative_ratio", 1.0) == 1.0
+        dm._roll_detected = False
+        dm._roll_ratios.append(1.0)
+        dm._save_roll_metadata()
+
+        meta = dm._load_roll_metadata()
+        assert meta.get("roll_history", []) == []
+        assert meta.get("cumulative_ratio", 1.0) == 1.0
 
 
 # ---------------------------------------------------------------------------

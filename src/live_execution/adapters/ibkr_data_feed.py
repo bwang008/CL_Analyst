@@ -1,13 +1,27 @@
 import pandas as pd
 from typing import Any, Optional
 
+from src.core.instrument_master import get_instrument
 from src.live_execution.interfaces.data_feed_interface import DataFeedClient
 from src.live_execution.ibkr_client import IBKRConnectionManager
+from src.live_execution.instrument_context import InstrumentContext
 
 class IBKRDataFeedClient(DataFeedClient):
-    def __init__(self, host: str = "127.0.0.1", port: int = 4001, client_id: int = 1, fallback_ports: list[int] = None):
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 4001,
+        client_id: int = 1,
+        fallback_ports: list[int] = None,
+        *,
+        instrument_context: InstrumentContext,
+    ):
+        # T2 (D1): the instrument context is REQUIRED — no silent CL default.
+        # Historical fetches are brain-stream continuous fetches, so the
+        # symbol is bound once at construction (symbol=ctx.brain_symbol).
         if fallback_ports is None:
             fallback_ports = [7496]
+        self._instrument_context = instrument_context
         self.manager = IBKRConnectionManager(host=host, port=port, client_id=client_id, readonly=True, fallback_ports=fallback_ports)
 
     def connect(self) -> None:
@@ -29,6 +43,7 @@ class IBKRDataFeedClient(DataFeedClient):
         use_rth: bool = False
     ) -> pd.DataFrame:
         return self.manager.fetch_historical_bars(
+            symbol=self._instrument_context.brain_symbol,
             days_back=days_back,
             continuous=continuous,
             contract_month=contract_month,
@@ -47,6 +62,7 @@ class IBKRDataFeedClient(DataFeedClient):
         use_rth: bool = False
     ) -> pd.DataFrame:
         return self.manager.fetch_historical_bars_by_duration(
+            symbol=self._instrument_context.brain_symbol,
             duration_str=duration_str,
             continuous=continuous,
             contract_month=contract_month,
@@ -65,6 +81,7 @@ class IBKRDataFeedClient(DataFeedClient):
         use_rth: bool = False
     ) -> pd.DataFrame:
         return await self.manager.fetch_historical_bars_by_duration_async(
+            symbol=self._instrument_context.brain_symbol,
             duration_str=duration_str,
             continuous=continuous,
             contract_month=contract_month,
@@ -89,14 +106,17 @@ class IBKRDataFeedClient(DataFeedClient):
         elif symbol == "DX":
             contract = Index("DX", "NYBOT", "USD")
         elif continuous:
-            from src.live_execution.ibkr_client import build_cl_contract, build_mcl_contract
-            if symbol == "MCL":
-                contract = build_mcl_contract(continuous=True)
-            else:
-                contract = build_cl_contract(continuous=True)
+            # T2: build the REQUESTED symbol's continuous contract — the
+            # legacy not-MCL->CL fallback is dead; unknown symbols raise.
+            from src.live_execution.ibkr_client import build_future_contract
+            contract = build_future_contract(symbol, continuous=True)
         else:
             local_sym, _ = self.manager.get_front_month_contract(symbol=symbol)
-            contract = Future(symbol=symbol, localSymbol=local_sym, exchange="NYMEX")
+            contract = Future(
+                symbol=symbol,
+                localSymbol=local_sym,
+                exchange=get_instrument(symbol).exchange,
+            )
         
         # We don't qualify indices like DX on NYBOT as easily, but qualify_contract works for most.
         try:
@@ -131,14 +151,17 @@ class IBKRDataFeedClient(DataFeedClient):
         elif symbol == "DX":
             contract = Index("DX", "NYBOT", "USD")
         elif continuous:
-            from src.live_execution.ibkr_client import build_cl_contract, build_mcl_contract
-            if symbol == "MCL":
-                contract = build_mcl_contract(continuous=True)
-            else:
-                contract = build_cl_contract(continuous=True)
+            # T2: build the REQUESTED symbol's continuous contract — the
+            # legacy not-MCL->CL fallback is dead; unknown symbols raise.
+            from src.live_execution.ibkr_client import build_future_contract
+            contract = build_future_contract(symbol, continuous=True)
         else:
             local_sym, _ = await self.manager.get_front_month_contract_async(symbol=symbol)
-            contract = Future(symbol=symbol, localSymbol=local_sym, exchange="NYMEX")
+            contract = Future(
+                symbol=symbol,
+                localSymbol=local_sym,
+                exchange=get_instrument(symbol).exchange,
+            )
         
         try:
             contract = await self.manager.qualify_contract_async(contract)
@@ -176,7 +199,9 @@ class IBKRDataFeedClient(DataFeedClient):
     def cancel_subscription(self, bars: Any) -> None:
         self.manager.cancel_subscription(bars)
 
-    def get_front_month_contract(self, symbol: str = "CL") -> tuple[str, str]:
+    def get_front_month_contract(self, symbol: str) -> tuple[str, str]:
+        # T2 (C6): the silent '= "CL"' default is dropped — all callers
+        # pass the symbol explicitly.
         return self.manager.get_front_month_contract(symbol=symbol)
         
     def get_bid_ask(self, contract: Any, timeout: float = 2.0) -> tuple:

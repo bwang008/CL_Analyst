@@ -112,6 +112,7 @@ class TestSeedLoading:
     def test_seed_creates_cache(self, mock_seed, cache_path):
         """DataManager should create a Parquet cache on first init."""
         dm = DataManager(
+            symbol="CL",
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
             data_client=None,
@@ -124,6 +125,7 @@ class TestSeedLoading:
     def test_seed_loads_last_200_days(self, mock_seed, cache_path):
         """Seed should only contain last 200 days of data."""
         dm = DataManager(
+            symbol="CL",
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
             data_client=None,
@@ -138,6 +140,7 @@ class TestSeedLoading:
     def test_seed_has_correct_columns(self, mock_seed, cache_path):
         """Seed DataFrame should have standard OHLCV + DateTime columns."""
         dm = DataManager(
+            symbol="CL",
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
             data_client=None,
@@ -150,6 +153,7 @@ class TestSeedLoading:
     def test_missing_seed_raises(self, cache_path):
         """Should raise FileNotFoundError if seed doesn't exist."""
         dm = DataManager(
+            symbol="CL",
             seed_path="/nonexistent/seed.csv",
             cache_path=str(cache_path),
             data_client=None,
@@ -160,6 +164,7 @@ class TestSeedLoading:
     def test_seed_datetime_index(self, mock_seed, cache_path):
         """DateTime should be the index of the returned DataFrame."""
         dm = DataManager(
+            symbol="CL",
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
             data_client=None,
@@ -180,6 +185,7 @@ class TestCacheReuse:
     def test_cache_reuse_on_second_init(self, mock_seed, cache_path):
         """Second init should load from cache, not re-read seed."""
         dm1 = DataManager(
+            symbol="CL",
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
             data_client=None,
@@ -189,6 +195,7 @@ class TestCacheReuse:
 
         # Second time — should read from cache
         dm2 = DataManager(
+            symbol="CL",
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
             data_client=None,
@@ -208,6 +215,7 @@ class TestDedupAndSort:
     def test_dedup_removes_duplicates(self, mock_seed, cache_path):
         """Appending a duplicate bar should not increase row count."""
         dm = DataManager(
+            symbol="CL",
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
             data_client=None,
@@ -224,6 +232,7 @@ class TestDedupAndSort:
     def test_monotonic_index_after_append(self, mock_seed, cache_path):
         """Index should be monotonically increasing after appending."""
         dm = DataManager(
+            symbol="CL",
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
             data_client=None,
@@ -248,6 +257,7 @@ class TestDedupAndSort:
     def test_out_of_order_append_gets_sorted(self, mock_seed, cache_path):
         """Appending an out-of-order bar should still result in sorted index."""
         dm = DataManager(
+            symbol="CL",
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
             data_client=None,
@@ -279,6 +289,7 @@ class TestAppendAndFlush:
     def test_append_increases_count(self, mock_seed, cache_path):
         """Appending a new bar should increase the bar count by 1."""
         dm = DataManager(
+            symbol="CL",
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
             data_client=None,
@@ -302,6 +313,7 @@ class TestAppendAndFlush:
     def test_save_cache_creates_parquet(self, mock_seed, cache_path):
         """save_cache should create a valid Parquet file."""
         dm = DataManager(
+            symbol="CL",
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
             data_client=None,
@@ -317,6 +329,7 @@ class TestAppendAndFlush:
     def test_last_timestamp_property(self, mock_seed, cache_path):
         """last_timestamp should return the max DateTime."""
         dm = DataManager(
+            symbol="CL",
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
             data_client=None,
@@ -328,6 +341,7 @@ class TestAppendAndFlush:
     def test_last_timestamp_none_before_init(self, mock_seed, cache_path):
         """last_timestamp should be None before initialization."""
         dm = DataManager(
+            symbol="CL",
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
             data_client=None,
@@ -337,6 +351,7 @@ class TestAppendAndFlush:
     def test_append_before_init_raises(self, mock_seed, cache_path):
         """Appending before initialization should raise RuntimeError."""
         dm = DataManager(
+            symbol="CL",
             seed_path=str(mock_seed),
             cache_path=str(cache_path),
             data_client=None,

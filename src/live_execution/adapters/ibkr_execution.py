@@ -1,6 +1,7 @@
 from typing import Callable, Any, Optional
+from src.core.instrument_master import get_instrument
 from src.live_execution.interfaces.execution_interface import ExecutionClient, StandardExecutionEvent
-from src.live_execution.ibkr_client import IBKRConnectionManager, build_cl_contract
+from src.live_execution.ibkr_client import IBKRConnectionManager
 import logging
 
 log = logging.getLogger("IBKRExecAdapter")
@@ -70,7 +71,12 @@ class IBKRExecutionClient(ExecutionClient):
         """
         from ib_insync import Future
         local_sym, _ = self.manager.get_front_month_contract(symbol=symbol)
-        contract = Future(symbol=symbol, localSymbol=local_sym, exchange="NYMEX")
+        # T2: exchange from the instrument registry (was hardcoded NYMEX —
+        # behavior-identical for CL/MCL, enables non-NYMEX symbols).
+        contract = Future(
+            symbol=symbol, localSymbol=local_sym,
+            exchange=get_instrument(symbol).exchange,
+        )
         contract = self.manager.qualify_contract(contract)
         self._cached_contracts[symbol] = contract
         log.info(

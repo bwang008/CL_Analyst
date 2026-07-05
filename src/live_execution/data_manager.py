@@ -25,12 +25,14 @@ import logging
 import os
 import shutil
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 import pandas as pd
 
+from src.core.instrument_master import get_instrument
 from src.live_execution.utils.time_utils import (
     split_duration_into_chunks,
     timedelta_to_ib_duration,
@@ -41,7 +43,7 @@ from src.live_execution.interfaces.data_feed_interface import DataFeedClient
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Defaults
+# Per-symbol data-path derivation (T2 — single naming authority)
 # ---------------------------------------------------------------------------
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -49,14 +51,61 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # Resolve data paths via centralized helper (CL_DATA_ROOT primary, repo-local fallback)
 from src.data_paths import get_data_path, get_data_root, mirror_file as _dp_mirror
 
-_DEFAULT_SEED_PATH = str(get_data_path("raw/cl-5m_bk.csv"))
-_DEFAULT_CACHE_PATH = str(get_data_root() / "processed" / "warm_start_cache.parquet")
-_DEFAULT_MASTER_LEDGER_PATH = str(
-    get_data_root() / "processed" / "cl_continuous_master.parquet"
-)
-_ROLL_METADATA_PATH = str(
-    get_data_root() / "processed" / ".roll_metadata.json"
-)
+
+@dataclass(frozen=True)
+class DataPaths:
+    """The 7 per-symbol live data artifacts (audit D4 naming table)."""
+
+    seed_5m: Path
+    cache_5m: Path
+    ledger_5m: Path
+    seed_1h: Path
+    cache_1h: Path
+    ledger_1h: Path
+    roll_metadata: Path
+
+
+def derive_data_paths(symbol: str) -> DataPaths:
+    """Single naming authority for per-symbol live data artifacts (T2, D2/D4).
+
+    Expression fidelity (C1): the 5m seed resolves via the existence-aware
+    ``get_data_path()`` (CL_DATA_ROOT primary, repo-local fallback); the
+    other six artifacts are composed from ``get_data_root()`` — exactly the
+    expressions the legacy CL literals used.
+
+    CL keeps its 3 legacy exception names (5m cache, 1h cache, roll
+    metadata); every other artifact already follows the generic pattern.
+
+    Raises:
+        ValueError: unknown symbol (via get_instrument — no silent CL
+            fallback).
+    """
+    get_instrument(symbol)  # fail-fast: ValueError("Unknown instrument symbol: ...")
+    sym_u = symbol.upper()
+    sym_l = symbol.lower()
+
+    seed_5m = Path(get_data_path(f"raw/{sym_l}-5m_bk.csv"))
+    processed = get_data_root() / "processed"
+
+    if sym_u == "CL":
+        # Legacy CL exceptions — byte-identical to the pre-T2 literals.
+        cache_5m = processed / "warm_start_cache.parquet"
+        cache_1h = processed / "warm_start_cache_1h.parquet"
+        roll_metadata = processed / ".roll_metadata.json"
+    else:
+        cache_5m = processed / f"warm_start_cache_{sym_u}.parquet"
+        cache_1h = processed / f"warm_start_cache_{sym_u}_1h.parquet"
+        roll_metadata = processed / f".roll_metadata_{sym_u}.json"
+
+    return DataPaths(
+        seed_5m=seed_5m,
+        cache_5m=cache_5m,
+        ledger_5m=processed / f"{sym_l}_continuous_master.parquet",
+        seed_1h=processed / f"{sym_u}_raw_1h.parquet",
+        cache_1h=cache_1h,
+        ledger_1h=processed / f"{sym_l}_continuous_master_1h.parquet",
+        roll_metadata=roll_metadata,
+    )
 
 # How many days of seed data to load into the initial cache.
 # Minimum requirements (from AlphaFactory feature lookback windows):
@@ -110,17 +159,37 @@ class DataManager:
     def __init__(
         self,
         *,
-        seed_path: str = _DEFAULT_SEED_PATH,
-        cache_path: str = _DEFAULT_CACHE_PATH,
-        master_ledger_path: str = _DEFAULT_MASTER_LEDGER_PATH,
+        symbol: str,
+        seed_path: Optional[str] = None,
+        cache_path: Optional[str] = None,
+        master_ledger_path: Optional[str] = None,
+        roll_metadata_path: Optional[str] = None,
         data_client: Optional["DataFeedClient"] = None,
         front_month_id: Optional[str] = None,
         bar_size: str = "5 mins",
         bars_per_day: int = 288,
     ) -> None:
-        self.seed_path = Path(seed_path)
-        self.cache_path = Path(cache_path)
-        self.master_ledger_path = Path(master_ledger_path)
+        # T2 (D2): symbol is REQUIRED keyword-only (no silent CL default) and
+        # validated against the instrument registry via derive_data_paths
+        # (raises ValueError on unknown symbols). Explicit path arguments
+        # always win; None falls back to the per-symbol derived default.
+        paths = derive_data_paths(symbol)
+        self.symbol = symbol
+        self.seed_path = Path(seed_path) if seed_path is not None else paths.seed_5m
+        self.cache_path = Path(cache_path) if cache_path is not None else paths.cache_5m
+        self.master_ledger_path = (
+            Path(master_ledger_path)
+            if master_ledger_path is not None
+            else paths.ledger_5m
+        )
+        # Roll metadata is a per-instance attribute (pre-T2 it was the module
+        # global _ROLL_METADATA_PATH). The 5m and 1h managers of one process
+        # intentionally share the same per-symbol file.
+        self.roll_metadata_path = (
+            Path(roll_metadata_path)
+            if roll_metadata_path is not None
+            else paths.roll_metadata
+        )
         self.data_client = data_client
         self.front_month_id = front_month_id  # e.g. "CLJ6"
         self.bar_size = bar_size
@@ -185,7 +254,7 @@ class DataManager:
                     self.seed_path,
                 )
                 raise FileNotFoundError(
-                    f"Seed file not found: {self.seed_path}\n"
+                    f"Seed file not found for {self.symbol}: {self.seed_path}\n"
                     f"The warm-start seed must exist before the live trader starts.\n"
                     f"Check CL_DATA_ROOT ({os.environ.get('CL_DATA_ROOT', '(not set)')}) "
                     f"and verify the file is present at the expected path."
@@ -357,10 +426,10 @@ class DataManager:
             pd.DataFrame with DateTime index and OHLCV columns.
         """
         if not self.seed_path.exists():
-            _alt = _PROJECT_ROOT / "data" / "raw" / "cl-5m_bk.csv"
+            _alt = _PROJECT_ROOT / "data" / "raw" / self.seed_path.name
             raise FileNotFoundError(
                 f"Seed file not found: {self.seed_path}\n"
-                f"The CL seed CSV (cl-5m_bk.csv) must exist in one of:\n"
+                f"The {self.symbol} seed file ({self.seed_path.name}) must exist in one of:\n"
                 f"  1. CL_DATA_ROOT env var location: "
                 f"{os.environ.get('CL_DATA_ROOT', '(not set)')}\n"
                 f"  2. Project-relative path: {_alt}\n"
@@ -560,7 +629,7 @@ class DataManager:
 
     def _load_roll_metadata(self) -> dict:
         """Load the last known front-month ID from metadata file."""
-        meta_path = Path(_ROLL_METADATA_PATH)
+        meta_path = Path(self.roll_metadata_path)
         if meta_path.exists():
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
@@ -571,7 +640,7 @@ class DataManager:
 
     def _save_roll_metadata(self) -> None:
         """Save the current front-month ID and roll history to metadata file."""
-        meta_path = Path(_ROLL_METADATA_PATH)
+        meta_path = Path(self.roll_metadata_path)
         meta_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Load existing metadata to preserve roll history
@@ -639,7 +708,7 @@ class DataManager:
                 log.warning("Failed to backup cache: %s", exc)
 
         # Backup roll metadata
-        meta_src = Path(_ROLL_METADATA_PATH)
+        meta_src = Path(self.roll_metadata_path)
         if meta_src.exists():
             meta_backup = backup_dir / f"roll_metadata_{ts}_{reason}.json"
             try:
@@ -852,11 +921,6 @@ class DataManager:
 
         The original seed file is never modified.
         """
-        from src.live_execution.ibkr_client import (
-            build_cl_contract,
-            ib_bars_to_dataframe,
-        )
-
         if self.master_ledger_path.exists():
             ledger = pd.read_parquet(
                 self.master_ledger_path, engine="pyarrow"
@@ -920,10 +984,10 @@ class DataManager:
     def _load_full_seed(self) -> pd.DataFrame:
         """Load the entire seed file (not just the last N days)."""
         if not self.seed_path.exists():
-            _alt = _PROJECT_ROOT / "data" / "raw" / "cl-5m_bk.csv"
+            _alt = _PROJECT_ROOT / "data" / "raw" / self.seed_path.name
             raise FileNotFoundError(
                 f"Seed file not found: {self.seed_path}\n"
-                f"The CL seed file must exist in one of:\n"
+                f"The {self.symbol} seed file must exist in one of:\n"
                 f"  1. CL_DATA_ROOT env var location: "
                 f"{os.environ.get('CL_DATA_ROOT', '(not set)')}\n"
                 f"  2. Project-relative path: {_alt}\n"

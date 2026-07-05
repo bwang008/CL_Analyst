@@ -105,8 +105,6 @@ def main() -> None:
         _STRATEGY_REGISTRY,
         _DEFAULT_STRATEGY,
         _DEFAULT_DB_PATH,
-        _DEFAULT_SEED_PATH,
-        _DEFAULT_CACHE_PATH,
         _DEFAULT_QUANTITY,
     )
     from src.live_execution.strategies.configurable_strategy import (
@@ -164,12 +162,18 @@ def main() -> None:
         help="Run without placing real orders (log signals only)",
     )
     parser.add_argument(
-        "--seed-path", default=_DEFAULT_SEED_PATH,
-        help="Path to the immutable seed CSV (cl-5m_bk.csv)",
+        "--seed-path", default=None,
+        help=(
+            "Path to the immutable seed CSV (default: derived from the "
+            "config's execution symbol; CL keeps legacy names)"
+        ),
     )
     parser.add_argument(
-        "--cache-path", default=_DEFAULT_CACHE_PATH,
-        help="Path to the warm-start Parquet cache",
+        "--cache-path", default=None,
+        help=(
+            "Path to the warm-start Parquet cache (default: derived from "
+            "the config's execution symbol; CL keeps legacy names)"
+        ),
     )
     parser.add_argument(
         "--entry-mode", default=None,
@@ -235,12 +239,22 @@ def main() -> None:
     if resolved_client_id == 1 and config_client_id is not None:
         resolved_client_id = config_client_id
 
+    # ── Per-symbol data-path defaults (T2) ────────────────────────
+    # Derived from the config's BRAIN symbol via the single naming
+    # authority (CL keeps its legacy names byte-for-byte); explicit
+    # --seed-path/--cache-path always win.
+    from src.live_execution.data_manager import derive_data_paths
+
+    paths = derive_data_paths(ctx.brain_symbol)
+    resolved_seed_path = args.seed_path or str(paths.seed_5m)
+
     # ── Per-strategy isolation ────────────────────────────────────
     # Telemetry DB is per-client (contains strategy-specific signals,
-    # predictions, trades). OHLCV warm-start cache is SHARED — all
-    # strategies receive the same CL continuous bars.
+    # predictions, trades). OHLCV warm-start cache is SHARED per brain
+    # symbol — all strategies on the same brain symbol receive the same
+    # continuous bars.
     resolved_db_path = args.db_path
-    resolved_cache_path = args.cache_path  # always shared (no cid suffix)
+    resolved_cache_path = args.cache_path or str(paths.cache_5m)  # shared (no cid suffix)
 
     if resolved_client_id != 1:
         cid_suffix = f"_cid{resolved_client_id}"
@@ -253,7 +267,12 @@ def main() -> None:
 
         # Merge any existing per-client caches into the shared cache
         # so no historical bars are lost from prior per-cid runs.
-        _merge_legacy_cid_caches(resolved_cache_path)
+        # C8: legacy warm_start_cache_cid*.parquet files are CL bars by
+        # definition — only brain=CL instances (CL and MCL configs) may
+        # merge them. Merging them into a non-CL cache would be silent
+        # misdata.
+        if ctx.brain_symbol == "CL":
+            _merge_legacy_cid_caches(resolved_cache_path)
 
         log.info(
             "Multi-instance isolation: client_id=%d  "
@@ -286,7 +305,9 @@ def main() -> None:
 
     from src.live_execution.factories import DataFeedFactory, ExecutionFactory
 
-    data_client = DataFeedFactory.create(args.data_source, host=args.host, port=args.data_port, client_id=resolved_client_id)
+    # T2: the data feed binds its historical-fetch symbol at construction
+    # (instrument_context passes through the factory's **kwargs).
+    data_client = DataFeedFactory.create(args.data_source, host=args.host, port=args.data_port, client_id=resolved_client_id, instrument_context=ctx)
     exec_client = ExecutionFactory.create(args.exec_source, host=args.host, port=args.exec_port, client_id=resolved_client_id + 1)
 
     trader = LiveTrader(
@@ -294,7 +315,7 @@ def main() -> None:
         exec_client=exec_client,
         strategy=strategy,
         db_path=resolved_db_path,
-        seed_path=args.seed_path,
+        seed_path=resolved_seed_path,
         cache_path=resolved_cache_path,
         quantity=args.quantity,
         dry_run=args.dry_run,

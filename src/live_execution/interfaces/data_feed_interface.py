@@ -80,7 +80,11 @@ class DataFeedClient(ABC):
         pass
 
     @abstractmethod
-    def get_front_month_contract(self, symbol: str = "CL") -> tuple:
+    def get_front_month_contract(self, symbol: str) -> tuple:
+        # T2 (C6): the silent '= "CL"' default is dropped from the abstract
+        # signature. NOTE: SimulatedDataFeed keeps its own "CL" default —
+        # Python does not enforce abstract signature parity and the parity
+        # harness depends on the sim staying byte-untouched.
         pass
         
     @abstractmethod

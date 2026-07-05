@@ -11,6 +11,10 @@ from ib_insync import (
     Order, StopOrder, TagValue, Trade, util,
 )
 
+# Pure stdlib leaf — no import cycle (instrument_master imports nothing
+# from live_execution).
+from src.core.instrument_master import get_instrument
+
 log = logging.getLogger(__name__)
 
 _PACING_ERROR_CODES = {162}
@@ -20,6 +24,47 @@ _DEFAULT_TARGET_TZ = "UTC"
 # Port defaults: IB Gateway paper = 4002, TWS paper = 7497
 _PORT_GATEWAY = 4002
 _PORT_TWS = 7497
+
+
+def build_future_contract(
+    symbol: str,
+    *,
+    continuous: bool = True,
+    contract_month: Optional[str] = None,
+    exchange: Optional[str] = None,
+    currency: str = "USD",
+) -> Contract:
+    """
+    Build a futures contract for any INSTRUMENT_REGISTRY symbol (T2, D6).
+
+    Args:
+        symbol: Futures symbol. Must exist in INSTRUMENT_REGISTRY —
+            unknown symbols raise ValueError (no silent CL fallback).
+        continuous: If True, use IB's continuous futures contract.
+        contract_month: Specific front-month (YYYYMM), required if continuous=False.
+        exchange: Futures exchange. None resolves the exchange from the
+            instrument registry.
+        currency: Contract currency.
+    """
+    # Fail-fast symbol validation (raises ValueError on unknown symbol)
+    # even when an explicit exchange is supplied.
+    instrument = get_instrument(symbol)
+    if exchange is None:
+        exchange = instrument.exchange
+
+    if continuous:
+        # C3: includeExpired=True on the ContFuture branch ONLY (legacy parity).
+        return ContFuture(symbol=symbol, exchange=exchange, currency=currency, includeExpired=True)
+
+    if not contract_month:
+        raise ValueError("contract_month is required when continuous=False (format: YYYYMM).")
+
+    return Future(
+        symbol=symbol,
+        lastTradeDateOrContractMonth=contract_month,
+        exchange=exchange,
+        currency=currency,
+    )
 
 
 def build_cl_contract(
@@ -32,21 +77,19 @@ def build_cl_contract(
     """
     Build a CL futures contract for IBKR.
 
+    Thin wrapper over build_future_contract (T2, D5) — kept for CL-bound
+    scripts (e.g. scripts/download_ibkr_history.py). Field-identical output.
+
     Args:
         continuous: If True, use IB's continuous futures contract.
         contract_month: Specific front-month (YYYYMM), required if continuous=False.
         exchange: Futures exchange (NYMEX for CL).
         currency: Contract currency.
     """
-    if continuous:
-        return ContFuture(symbol="CL", exchange=exchange, currency=currency, includeExpired=True)
-
-    if not contract_month:
-        raise ValueError("contract_month is required when continuous=False (format: YYYYMM).")
-
-    return Future(
-        symbol="CL",
-        lastTradeDateOrContractMonth=contract_month,
+    return build_future_contract(
+        "CL",
+        continuous=continuous,
+        contract_month=contract_month,
         exchange=exchange,
         currency=currency,
     )
@@ -61,9 +104,10 @@ def build_mcl_contract(
 ) -> Contract:
     """Build a Micro WTI Crude Oil (MCL) futures contract for IBKR.
 
-    MCL is 1/10th the size of CL ($100/point vs $1,000/point).
-    Used for the 'Hands' execution stream when the strategy wants
-    to trade smaller size while reading CL signals ('Brain').
+    Thin wrapper over build_future_contract (T2, D5). MCL is 1/10th the
+    size of CL ($100/point vs $1,000/point). Used for the 'Hands'
+    execution stream when the strategy wants to trade smaller size while
+    reading CL signals ('Brain').
 
     Args:
         continuous: If True, use IB's continuous futures contract.
@@ -71,15 +115,10 @@ def build_mcl_contract(
         exchange: Futures exchange (NYMEX for MCL).
         currency: Contract currency.
     """
-    if continuous:
-        return ContFuture(symbol="MCL", exchange=exchange, currency=currency, includeExpired=True)
-
-    if not contract_month:
-        raise ValueError("contract_month is required when continuous=False (format: YYYYMM).")
-
-    return Future(
-        symbol="MCL",
-        lastTradeDateOrContractMonth=contract_month,
+    return build_future_contract(
+        "MCL",
+        continuous=continuous,
+        contract_month=contract_month,
         exchange=exchange,
         currency=currency,
     )
@@ -255,6 +294,7 @@ class IBKRConnectionManager:
     def fetch_historical_bars(
         self,
         *,
+        symbol: str,
         days_back: int = 5,
         continuous: bool = True,
         contract_month: Optional[str] = None,
@@ -271,12 +311,16 @@ class IBKRConnectionManager:
         set_index: bool = True,
     ) -> pd.DataFrame:
         """
-        Request historical 5-minute CL bars from IBKR and return as DataFrame.
+        Request historical bars for a symbol from IBKR and return as DataFrame.
+
+        T2: ``symbol`` is REQUIRED (no silent CL default); the contract is
+        built for the requested symbol with the exchange from the registry.
 
         Output columns: DateTime, Open, High, Low, Close, Volume
         """
         self.ensure_connected()
-        contract = build_cl_contract(
+        contract = build_future_contract(
+            symbol,
             continuous=continuous,
             contract_month=contract_month,
         )
@@ -605,7 +649,8 @@ class IBKRConnectionManager:
     ) -> tuple[str, str]:
         """Resolve the current front-month futures contract.
 
-        Supports both CL (WTI Crude Oil) and MCL (Micro WTI).
+        Supports any INSTRUMENT_REGISTRY symbol (exchange resolved from
+        the registry — T2).
 
         Uses reqContractDetails to find the nearest-expiry contract
         that is still tradable.  Contracts expiring within
@@ -613,7 +658,7 @@ class IBKRConnectionManager:
         near-expiration physical delivery restrictions.
 
         Args:
-            symbol: Futures symbol — "CL" (default) or "MCL".
+            symbol: Futures symbol — "CL" (default), "MCL", "ES", ...
 
         Returns:
             tuple: (qualified Contract, contract_month string e.g. '202504')
@@ -622,7 +667,9 @@ class IBKRConnectionManager:
 
         self.ensure_connected()
         # Use a generic Future to search for available contracts
-        search = Future(symbol=symbol, exchange="NYMEX", currency="USD")
+        search = Future(
+            symbol=symbol, exchange=get_instrument(symbol).exchange, currency="USD"
+        )
         details = self.ib.reqContractDetails(search)
 
         if not details:
@@ -672,7 +719,9 @@ class IBKRConnectionManager:
         from datetime import datetime, timedelta
 
         self.ensure_connected()
-        search = Future(symbol=symbol, exchange="NYMEX", currency="USD")
+        search = Future(
+            symbol=symbol, exchange=get_instrument(symbol).exchange, currency="USD"
+        )
         details = await self.ib.reqContractDetailsAsync(search)
 
         if not details:
@@ -716,6 +765,7 @@ class IBKRConnectionManager:
         self,
         *,
         duration_str: str,
+        symbol: str,
         continuous: bool = True,
         contract_month: Optional[str] = None,
         bar_size: str = "5 mins",
@@ -736,9 +786,12 @@ class IBKRConnectionManager:
         Unlike fetch_historical_bars (which takes days_back), this accepts
         the IBKR duration string directly (e.g. '5 D', '2 W').
         Used by DataManager for precise backfill requests.
+
+        T2: ``symbol`` is REQUIRED (no silent CL default).
         """
         self.ensure_connected()
-        contract = build_cl_contract(
+        contract = build_future_contract(
+            symbol,
             continuous=continuous,
             contract_month=contract_month,
         )
@@ -767,6 +820,7 @@ class IBKRConnectionManager:
         self,
         *,
         duration_str: str,
+        symbol: str,
         continuous: bool = True,
         contract_month: Optional[str] = None,
         bar_size: str = "5 mins",
@@ -783,10 +837,13 @@ class IBKRConnectionManager:
     ) -> pd.DataFrame:
         """
         Fetch historical bars asynchronously using a raw duration string.
+
+        T2: ``symbol`` is REQUIRED (no silent CL default).
         """
         if not self.ib.isConnected():
             raise ConnectionError("Not connected to IBKR. Cannot fetch historical bars asynchronously.")
-        contract = build_cl_contract(
+        contract = build_future_contract(
+            symbol,
             continuous=continuous,
             contract_month=contract_month,
         )
@@ -1302,11 +1359,15 @@ def fetch_historical_bars(
 ) -> pd.DataFrame:
     """
     Convenience function to fetch CL historical bars with default settings.
+
+    Deliberately CL-bound (documented CL helper) — passes symbol="CL"
+    explicitly to the symbol-required manager method (T2).
     """
     manager = IBKRConnectionManager(host=host, port=port, client_id=client_id)
     try:
         manager.connect()
         return manager.fetch_historical_bars(
+            symbol="CL",
             days_back=days_back,
             continuous=continuous,
             contract_month=contract_month,
