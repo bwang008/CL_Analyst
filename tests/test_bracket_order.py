@@ -197,8 +197,10 @@ class TestMarketableLimitOrder:
         # Mock get_bid_ask to return a known spread
         mgr.get_bid_ask = MagicMock(return_value=(64.98, 65.00))
 
+        contract = MagicMock()
+        contract.symbol = "CL"  # T3: tick now resolved from the registry
         mgr.place_bracket_order(
-            contract=MagicMock(),
+            contract=contract,
             action="BUY",
             quantity=1,
             limit_price=65.00,
@@ -214,8 +216,10 @@ class TestMarketableLimitOrder:
         """SELL: limit = limit_price - 2 ticks ($0.02)."""
         mgr, parent, _, _ = manager
 
+        contract = MagicMock()
+        contract.symbol = "CL"  # T3: tick now resolved from the registry
         mgr.place_bracket_order(
-            contract=MagicMock(),
+            contract=contract,
             action="SELL",
             quantity=1,
             limit_price=65.00,
@@ -231,8 +235,10 @@ class TestMarketableLimitOrder:
         """BUY marketable_limit uses limit_price (no live NBBO fetch)."""
         mgr, parent, _, _ = manager
 
+        contract = MagicMock()
+        contract.symbol = "CL"  # T3: tick now resolved from the registry
         mgr.place_bracket_order(
-            contract=MagicMock(),
+            contract=contract,
             action="BUY",
             quantity=1,
             limit_price=64.50,
@@ -248,8 +254,10 @@ class TestMarketableLimitOrder:
         """SELL marketable_limit uses limit_price (no live NBBO fetch)."""
         mgr, parent, _, _ = manager
 
+        contract = MagicMock()
+        contract.symbol = "CL"  # T3: tick now resolved from the registry
         mgr.place_bracket_order(
-            contract=MagicMock(),
+            contract=contract,
             action="SELL",
             quantity=1,
             limit_price=72.00,

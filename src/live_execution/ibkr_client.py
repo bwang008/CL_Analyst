@@ -13,7 +13,7 @@ from ib_insync import (
 
 # Pure stdlib leaf — no import cycle (instrument_master imports nothing
 # from live_execution).
-from src.core.instrument_master import get_instrument
+from src.core.instrument_master import get_instrument, round_to_tick
 
 log = logging.getLogger(__name__)
 
@@ -500,8 +500,11 @@ class IBKRConnectionManager:
             if int(pos.position) == 0:
                 continue
 
-            # IBKR positions() returns contracts without exchange — inject it
-            pos.contract.exchange = "NYMEX"
+            # IBKR positions() returns contracts without exchange — inject
+            # the registry exchange for the position's OWN contract symbol
+            # (MCL≠CL-safe; unknown symbols raise, no order transmitted).
+            inst = get_instrument(pos.contract.symbol)
+            pos.contract.exchange = inst.exchange
 
             action = "SELL" if pos.position > 0 else "BUY"
             qty = abs(int(pos.position))
@@ -541,27 +544,36 @@ class IBKRConnectionManager:
             if int(pos.position) == 0:
                 continue
 
-            # IBKR positions() returns contracts without exchange — inject it
-            pos.contract.exchange = "NYMEX"
+            # IBKR positions() returns contracts without exchange — inject
+            # the registry exchange for the position's OWN contract symbol
+            # (MCL≠CL-safe; unknown symbols raise, no order transmitted).
+            inst = get_instrument(pos.contract.symbol)
+            pos.contract.exchange = inst.exchange
 
             action = "SELL" if pos.position > 0 else "BUY"
             qty = abs(int(pos.position))
 
             if exit_mode == "marketable_limit" and current_price is not None:
-                tick2 = 2 * self._CL_TICK_SIZE  # $0.02
+                buf = 2 * inst.tick_size  # 2 instrument ticks (CL: $0.02)
                 if action == "BUY":
-                    lmt_price = round(current_price + tick2, 2)
+                    lmt_price = round_to_tick(current_price + buf, inst.tick_size)
                 else:
-                    lmt_price = round(current_price - tick2, 2)
+                    lmt_price = round_to_tick(current_price - buf, inst.tick_size)
                 order = LimitOrder(action, qty, lmt_price)
                 log.info(
                     "Exit mode: MARKETABLE_LIMIT %s "
                     "(price=%.2f, limit=%.2f, buffer=%.2f)",
-                    action, current_price, lmt_price, tick2,
+                    action, current_price, lmt_price, buf,
                 )
 
             elif exit_mode == "adaptive" and current_price is not None:
-                order = LimitOrder(action, qty, current_price)
+                # R1 (T3): snap the adaptive limit to the instrument grid —
+                # identity for on-grid inputs (all real bar closes); an
+                # off-grid input today would draw Error 110 on an EXIT
+                # (stuck position), after: a valid order.
+                order = LimitOrder(
+                    action, qty, round_to_tick(current_price, inst.tick_size)
+                )
                 order.algoStrategy = "Adaptive"
                 order.algoParams = [
                     TagValue("adaptivePriority", "Urgent"),
@@ -981,8 +993,6 @@ class IBKRConnectionManager:
     # Real-time quote snapshot
     # ------------------------------------------------------------------
 
-    _CL_TICK_SIZE = 0.01  # CL futures minimum tick = $0.01
-
     def get_bid_ask(
         self,
         contract: Contract,
@@ -1130,25 +1140,28 @@ class IBKRConnectionManager:
             # live NBBO via reqTickers(), because reqTickers() is an
             # async call that fails inside ib_insync callbacks with
             # "RuntimeError: This event loop is already running".
-            tick2 = 2 * self._CL_TICK_SIZE  # $0.02 for CL
+            # T3: tick resolved from the registry via the contract symbol
+            # (raises for unknown symbols BEFORE anything is transmitted).
+            tick = get_instrument(contract.symbol).tick_size
+            buf = 2 * tick  # 2 instrument ticks (CL: $0.02, unchanged)
 
             if action.upper() == "BUY":
-                ml_price = round(limit_price + tick2, 2)
+                ml_price = round_to_tick(limit_price + buf, tick)
                 parent.orderType = "LMT"
                 parent.lmtPrice = ml_price
                 log.info(
                     "Entry mode: MARKETABLE_LIMIT BUY "
                     "(price=%.2f, limit=%.2f, buffer=%.2f)",
-                    limit_price, ml_price, tick2,
+                    limit_price, ml_price, buf,
                 )
             else:  # SELL
-                ml_price = round(limit_price - tick2, 2)
+                ml_price = round_to_tick(limit_price - buf, tick)
                 parent.orderType = "LMT"
                 parent.lmtPrice = ml_price
                 log.info(
                     "Entry mode: MARKETABLE_LIMIT SELL "
                     "(price=%.2f, limit=%.2f, buffer=%.2f)",
-                    limit_price, ml_price, tick2,
+                    limit_price, ml_price, buf,
                 )
 
         else:  # entry_mode == "market"
@@ -1224,16 +1237,19 @@ class IBKRConnectionManager:
             )
 
         elif entry_mode == "marketable_limit":
-            tick2 = 2 * self._CL_TICK_SIZE  # $0.02
+            # T3: tick resolved from the registry via the contract symbol
+            # (raises for unknown symbols BEFORE anything is transmitted).
+            tick = get_instrument(contract.symbol).tick_size
+            buf = 2 * tick  # 2 instrument ticks (CL: $0.02, unchanged)
             if action.upper() == "BUY":
-                ml_price = round(limit_price + tick2, 2)
+                ml_price = round_to_tick(limit_price + buf, tick)
             else:
-                ml_price = round(limit_price - tick2, 2)
+                ml_price = round_to_tick(limit_price - buf, tick)
             order = LimitOrder(action, quantity, ml_price)
             log.info(
                 "Entry mode: MARKETABLE_LIMIT %s "
                 "(price=%.2f, limit=%.2f, buffer=%.2f)",
-                action, limit_price, ml_price, tick2,
+                action, limit_price, ml_price, buf,
             )
 
         else:  # market

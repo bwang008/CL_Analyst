@@ -326,3 +326,39 @@ def get_instrument(symbol: str) -> Instrument:
     if upper_symbol not in INSTRUMENT_REGISTRY:
         raise ValueError(f"Unknown instrument symbol: {symbol}")
     return INSTRUMENT_REGISTRY[upper_symbol]
+
+
+# ---------------------------------------------------------------------------
+# T3 (t3-tick-order-pricing): order-price quantization helper.
+# APPEND-ONLY block — transcribed VERBATIM from the ticket audit section 3.1
+# (validated bit-exact by auditor + reviewer; the power-of-ten fast path is
+# MANDATORY for CL byte-identity with legacy round(price, 2)).
+# ---------------------------------------------------------------------------
+
+import math
+from decimal import Decimal
+from functools import lru_cache
+
+@lru_cache(maxsize=None)
+def _tick_grid(tick_size: float) -> tuple[int, bool]:
+    """(decimals, is_power_of_ten) for a tick size, via its shortest repr."""
+    if not (isinstance(tick_size, float) and math.isfinite(tick_size) and tick_size > 0):
+        raise ValueError(f"Invalid tick_size {tick_size!r}: must be a finite float > 0")
+    d = Decimal(str(tick_size)).normalize()
+    return max(0, -d.as_tuple().exponent), d.as_tuple().digits == (1,)
+
+def round_to_tick(price: float, tick_size: float) -> float:
+    """Snap a price to the instrument tick grid, round-half-even to nearest.
+
+    Power-of-ten ticks (0.01, 0.1, 0.001) use round(price, n) — BIT-IDENTICAL
+    to the legacy CL cent rounding by construction (hard constraint: a naive
+    round(price/tick)*tick mismatches round(price, 2) on ~1.4% of inputs).
+    Other ticks (0.25, 0.005) round the tick count and reconstruct the
+    canonical n-decimal double. Raises on non-finite price / invalid tick.
+    """
+    if not math.isfinite(price):
+        raise ValueError(f"Cannot round non-finite price {price!r} to tick")
+    nd, pow10 = _tick_grid(tick_size)
+    if pow10:
+        return round(price, nd)
+    return round(round(price / tick_size) * tick_size, nd)

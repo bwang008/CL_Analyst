@@ -58,6 +58,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
 # Project imports
+from src.core.instrument_master import round_to_tick
 from src.features.alpha_factory import AlphaFactory
 from src.features.macro_features import MacroFeatureEngine, StaleDataException
 from src.live_execution.strategy import Strategy, TradeSignal
@@ -1090,7 +1091,9 @@ class LiveTrader:
             new_sl = self._entry_price + offset
         else:
             new_sl = self._entry_price - offset
-        new_sl = round(new_sl, 2)
+        # S6 (T3): snap to the instrument grid (CL: bit-identical to the
+        # legacy round(new_sl, 2) via the power-of-ten fast path).
+        new_sl = round_to_tick(new_sl, self._tick_size)
 
         log.info(
             "TRAILING STOP: activated — entry=%.2f  ATR=%.4f  "
@@ -1507,6 +1510,14 @@ class LiveTrader:
         except Exception:
             log.debug("[RECOVERY] cancel_open_cl_orders failed", exc_info=True)
 
+        # R2 (T3): snap re-placed ledger prices to the instrument grid —
+        # identity for rows written by the (tick-snapped) S7 path; protects
+        # the recovery path (whose whole job is preventing naked positions)
+        # against off-grid ledger rows (pre-T3 non-CL shapes, manual DB
+        # edits) drawing Error 110.
+        tp_price = round_to_tick(tp_price, self._tick_size)
+        sl_price = round_to_tick(sl_price, self._tick_size)
+
         # Place fresh TP/SL
         exit_action = "SELL" if self._position_side == 1 else "BUY"
         try:
@@ -1649,10 +1660,15 @@ class LiveTrader:
             )
             return
 
-        # Compute bracket prices from fill price
+        # Compute bracket prices from fill price.
+        # S7 (T3): snap every child price to the instrument grid — the
+        # naked-stop site (a rejected TP/SL child after a filled entry is a
+        # naked position). CL stays bit-identical to the legacy
+        # round(fill ± offset, 2) via the power-of-ten fast path.
+        tick = self._tick_size
         exit_action = "SELL" if entry_action == "BUY" else "BUY"
         if entry_action == "BUY":
-            sl_price = round(fill_price - sl_offset, 2)
+            sl_price = round_to_tick(fill_price - sl_offset, tick)
             if tiered_tp_offsets:
                 tp_price = []
                 rem_lots = lots
@@ -1660,12 +1676,12 @@ class LiveTrader:
                     t_lots = rem_lots if i == len(tiered_tp_offsets) - 1 else max(1, int(round(lots * pct)))
                     t_lots = min(t_lots, rem_lots)
                     if t_lots > 0:
-                        tp_price.append((t_lots, round(fill_price + off, 2)))
+                        tp_price.append((t_lots, round_to_tick(fill_price + off, tick)))
                     rem_lots -= t_lots
             else:
-                tp_price = round(fill_price + tp_offset, 2)
+                tp_price = round_to_tick(fill_price + tp_offset, tick)
         else:  # SELL (short)
-            sl_price = round(fill_price + sl_offset, 2)
+            sl_price = round_to_tick(fill_price + sl_offset, tick)
             if tiered_tp_offsets:
                 tp_price = []
                 rem_lots = lots
@@ -1673,10 +1689,10 @@ class LiveTrader:
                     t_lots = rem_lots if i == len(tiered_tp_offsets) - 1 else max(1, int(round(lots * pct)))
                     t_lots = min(t_lots, rem_lots)
                     if t_lots > 0:
-                        tp_price.append((t_lots, round(fill_price - off, 2)))
+                        tp_price.append((t_lots, round_to_tick(fill_price - off, tick)))
                     rem_lots -= t_lots
             else:
-                tp_price = round(fill_price - tp_offset, 2)
+                tp_price = round_to_tick(fill_price - tp_offset, tick)
 
         log.info(
             "[TRADE] BRACKET CHILDREN: fill=%.2f  TPs=%s  SL=%.2f  "
@@ -2075,6 +2091,25 @@ class LiveTrader:
             return ctx.brain_symbol
         from src.core.instrument_master import get_instrument
         return get_instrument(self._execution_symbol).micro_of or self._execution_symbol
+
+    @property
+    def _tick_size(self) -> float:
+        """Execution-instrument tick size for order-price snapping (T3).
+
+        Prefers the resolved InstrumentContext (always set by __init__).
+        Orders are placed on the EXECUTION contract, so this is the
+        execution instrument's tick, never the brain's (micros share the
+        parent tick in the registry, so MCL/MES are unaffected either way).
+        Falls back to the registry via _execution_symbol for test stubs
+        built with object.__new__ — the same structural derivation as
+        _brain_symbol, NOT a silent default: unknown symbols raise via
+        get_instrument and a missing seam raises AttributeError.
+        """
+        ctx = getattr(self, "_instrument_context", None)
+        if ctx is not None:
+            return ctx.execution_instrument.tick_size
+        from src.core.instrument_master import get_instrument
+        return get_instrument(self._execution_symbol).tick_size
 
     def _subscribe(self) -> None:
         """Subscribe to live bars (Brain streams).
