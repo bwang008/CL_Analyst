@@ -1,0 +1,107 @@
+{
+  "_comment": "ZC HourSet_01A CUTOFF-2024 SCOUT (exploration S2). A/B partner to the longhorizon manifest (S1): identical 4 long-horizon targets and true ZC economics, but train_cutoff_date moved 2022-01-01 -> 2024-07-01. Trains on 2010->2024-07 (2.5y MORE data incl. the 2022 vol regime), evaluates on a 2-year OOS window (2024-07 -> 2026-07) with the last 6 months as holdout. Tests the 'raise the training window, narrow the backtest' hypothesis. CAVEAT for analysis: optimizer window is only ~18 months (~18 monthly PnL points) - selection bias risk is higher; compare holdout PF with binomial/bootstrap CI before trusting.",
+  "infrastructure": {
+    "machine_type": "c2-standard-16",
+    "provisioning_model": "STANDARD",
+    "timeout_minutes": 360,
+    "max_concurrent_vcpus": 288,
+    "vcpus_per_vm": 16,
+    "max_concurrent_vms": 12
+  },
+  "baseline": {
+    "symbol": "ZC",
+    "data_workflow": {
+      "dataset_version": "HourSet_01A",
+      "resolution": "1h",
+      "output_dir": "data/processed",
+      "features": {
+        "windows": [24, 72, 168],
+        "macro_windows": {"1W": 168}
+      },
+      "targets": {
+        "raw_horizon": 120,
+        "atr_period": 14,
+        "definitions": [
+          { "type": "triple_barrier", "tp_multiplier": 5.0, "sl_multiplier": 1.0, "horizon": 36 },
+          { "type": "triple_barrier", "tp_multiplier": 8.0, "sl_multiplier": 2.0, "horizon": 36 },
+          { "type": "triple_barrier", "tp_multiplier": 5.0, "sl_multiplier": 1.0, "horizon": 48 },
+          { "type": "triple_barrier", "tp_multiplier": 8.0, "sl_multiplier": 2.0, "horizon": 48 }
+        ]
+      }
+    },
+    "training_workflow": {
+      "train_cutoff_date": "2024-07-01",
+      "holdout_cutoff_date": null,
+      "target_columns": [],
+      "gcs_base_dir": "gs://cltrainer-optuna-results/scout",
+      "random_seed": 42,
+      "optuna": {
+        "n_trials": 100,
+        "metrics": ["logloss", "average_precision"],
+        "max_depth_min": 3,
+        "max_depth_max": 8,
+        "num_leaves_min": 15,
+        "num_leaves_max": 64,
+        "max_n_estimators": 1500,
+        "early_stopping_rounds": 30,
+        "max_folds": 5,
+        "learning_rate_min": 0.001,
+        "learning_rate_max": 0.05,
+        "min_child_samples_min": 100,
+        "min_child_samples_max": 500,
+        "feature_fraction_min": 0.4,
+        "feature_fraction_max": 0.8,
+        "post_optimizer_trials": 200,
+        "post_optimizer_holdout_months": 6
+      }
+    },
+    "execution_workflow": {
+      "slippage_per_side": 0.25,
+      "opt_mode": "individual",
+      "execution_data_path": "gs://cltrainer-optuna-results/data/ZC_raw.parquet",
+      "strategy_config_path": "configs/strategies/hourly_ensemble_010.json"
+    }
+  },
+  "experiments": [
+    {
+      "label": "ZC HS01A 5x1 36H C24",
+      "gcs_prefix": "sweep_zc_hs01a_5x1_36h_c24",
+      "overrides": {
+        "symbol": "ZC",
+        "training_workflow": {
+          "target_columns": ["TARGET_TRIPLE_5x1_36H_LONG", "TARGET_TRIPLE_5x1_36H_SHORT"]
+        }
+      }
+    },
+    {
+      "label": "ZC HS01A 8x2 36H C24",
+      "gcs_prefix": "sweep_zc_hs01a_8x2_36h_c24",
+      "overrides": {
+        "symbol": "ZC",
+        "training_workflow": {
+          "target_columns": ["TARGET_TRIPLE_8x2_36H_LONG", "TARGET_TRIPLE_8x2_36H_SHORT"]
+        }
+      }
+    },
+    {
+      "label": "ZC HS01A 5x1 48H C24",
+      "gcs_prefix": "sweep_zc_hs01a_5x1_48h_c24",
+      "overrides": {
+        "symbol": "ZC",
+        "training_workflow": {
+          "target_columns": ["TARGET_TRIPLE_5x1_48H_LONG", "TARGET_TRIPLE_5x1_48H_SHORT"]
+        }
+      }
+    },
+    {
+      "label": "ZC HS01A 8x2 48H C24",
+      "gcs_prefix": "sweep_zc_hs01a_8x2_48h_c24",
+      "overrides": {
+        "symbol": "ZC",
+        "training_workflow": {
+          "target_columns": ["TARGET_TRIPLE_8x2_48H_LONG", "TARGET_TRIPLE_8x2_48H_SHORT"]
+        }
+      }
+    }
+  ]
+}
