@@ -134,6 +134,8 @@ if ($existingStatus) {
     Write-Host "  Creating new VM ($MachineType, $ProvisioningModel)..."
     $startupScript = Join-Path $ScriptDir "vm_startup.sh"
     
+    # ORPHAN BACKSTOP: control-plane-enforced TTL so a dead local monitor can
+    # never orphan this VM (post-opt runs ~1-2h; 360m is a generous ceiling).
     $createArgs = @(
         "compute", "instances", "create", $VmName,
         "--project=$Project",
@@ -145,6 +147,8 @@ if ($existingStatus) {
         "--boot-disk-type=pd-ssd",
         "--metadata-from-file=startup-script=$startupScript",
         "--scopes=compute-rw,storage-full",
+        "--max-run-duration=360m",
+        "--instance-termination-action=DELETE",
         "--quiet"
     )
     

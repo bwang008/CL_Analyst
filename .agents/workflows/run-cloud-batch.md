@@ -18,6 +18,28 @@ format is retired.
 > silently falls back to the CL base `hourly_ensemble_010.json` when `defaults` is absent. See
 > [build-symbol-pipeline](build-symbol-pipeline.md) Phase 5 (C2).
 
+## Orphaned-VM prevention (RULES — added 2026-07-05 after the 0805/0807/0808 incident)
+
+VM teardown is driven by **local** PowerShell monitor processes. If that process dies
+(machine reboot, killed terminal, IDE/workspace refresh, an agent broad-killing
+`powershell.exe`), the cloud VMs are orphaned and burn credits silently. Defenses, in order:
+
+1. **Control-plane TTL (automatic, primary):** every VM is now created with
+   `--max-run-duration` (`gcp_deploy_sweep.ps1`: 480m; `gcp_deploy_optimizer.ps1`: 360m,
+   `--instance-termination-action=DELETE` for STANDARD / `STOP` for SPOT). GCP kills the VM
+   at the deadline even if this machine is off. Do not remove these flags; if an experiment
+   legitimately needs longer, raise the TTL alongside `timeout_minutes`, keeping TTL > timeout.
+2. **Agents MUST NEVER broad-kill processes** (`Stop-Process powershell`, `taskkill /im
+   powershell.exe`, etc.) — each running orchestrator is some batch's only local teardown path.
+   Kill a specific PID only when you launched it and know its batch is finished.
+3. **Reconcile after any interruption:** if this machine rebooted, a terminal was killed, or
+   you inherit a session with unknown state, run `.\scripts\reap_orphan_vms.ps1` (report-only)
+   and review; add `-Delete` to remove anything older than its legitimate runtime. Also run it
+   as a routine end-of-day check while pre-TTL VMs may still exist.
+4. **Batch completion check:** a finished batch should leave ZERO `optuna-sweep-*`/`opt-post-*`
+   instances for its batch-id timestamp. The monitor prints teardown; if you didn't see it,
+   assume orphans and reconcile.
+
 ## Tiers
 
 | Tier | Manifest (v2) | Experiments | Sweep `n_trials` | Post-opt trials | Use |

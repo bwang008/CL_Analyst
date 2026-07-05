@@ -94,7 +94,12 @@ if (-not $SkipProvision) {
         Write-Host "  Creating new VM ($MachineType, $ProvisioningModel)..."
         $startupScript = Join-Path $ScriptDir "vm_startup.sh"
         
-        # Build gcloud create args - termination-action only valid for SPOT
+        # Build gcloud create args.
+        # ORPHAN BACKSTOP: teardown normally comes from the LOCAL monitor process;
+        # if that dies (reboot, killed terminal, IDE refresh) the VM would spin
+        # forever. --max-run-duration is enforced by the GCP control plane, so the
+        # VM dies at the deadline no matter what happens on this machine.
+        # 480m >> the 360m experiment timeout — it is a backstop, not a scheduler.
         $createArgs = @(
             "compute", "instances", "create", $VmName,
             "--project=$Project",
@@ -106,11 +111,17 @@ if (-not $SkipProvision) {
             "--boot-disk-type=pd-ssd",
             "--metadata-from-file=startup-script=$startupScript",
             "--scopes=storage-full",
+            "--max-run-duration=480m",
             "--quiet"
         )
         if ($ProvisioningModel -eq "SPOT") {
             $createArgs += "--provisioning-model=SPOT"
+            # STOP preserved for preemption semantics (zone-failover relies on it);
+            # at max-run-duration expiry the VM stops -> compute billing ends.
             $createArgs += "--instance-termination-action=STOP"
+        } else {
+            # STANDARD: hard-DELETE at the deadline (disk + IP freed too).
+            $createArgs += "--instance-termination-action=DELETE"
         }
         
         & gcloud @createArgs
