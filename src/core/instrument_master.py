@@ -355,6 +355,25 @@ def get_instrument(symbol: str) -> Instrument:
     return INSTRUMENT_REGISTRY[upper_symbol]
 
 
+def dollars_per_point(symbol: str) -> float:
+    """USD PnL per 1.0 quoted-price-unit move per contract.
+
+    This is the value backtest engines call ``contract_multiplier``:
+    CL 1000.0, ES 50.0, NG 10000.0, ZC 50.0 (5000 bu x $0.01/cent).
+    """
+    inst = get_instrument(symbol)
+    return float(inst.multiplier) * float(inst.quote_unit_usd)
+
+
+def default_slippage_points(symbol: str) -> float:
+    """Default per-side slippage in quoted price units (slippage_ticks x tick_size).
+
+    CL resolves to 0.01 — identical to the legacy hardcoded constant.
+    """
+    inst = get_instrument(symbol)
+    return float(inst.slippage_ticks) * float(inst.tick_size)
+
+
 # ---------------------------------------------------------------------------
 # T3 (t3-tick-order-pricing): order-price quantization helper.
 # APPEND-ONLY block — transcribed VERBATIM from the ticket audit section 3.1

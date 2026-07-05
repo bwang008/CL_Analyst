@@ -1,0 +1,1 @@
+[2026-07-05 09:30:00] | per-symbol-economics_07052026_0930 | TICKET-MANAGER | STATUS: Root-caused inline (measured -$15.8k true PnL vs +$603k reported on ZC E01). Blueprint written; design pre-vetted by global-backtest-pipeline_07042026_0332 gap analysis [HIGH] item. Proceeding to implementation on branch `exploration`.

@@ -1,5 +1,5 @@
 {
-  "_comment": "ZC (Corn) HourSet_01A SCOUT - mirrors batch_manifest_v2_hourset14a_scout.json (CL template). SCOUT TIER: heavier exploration than canary -> n_trials=100, post_optimizer_trials=200, timeout=360m, wide LGBM box matched to HS14B (source of truth), 4 experiments. Baseline strategy hourly_ensemble_010.json is CL-derived - follow-up: ZC-tuned baseline.",
+  "_comment": "ZC HourSet_01A CUTOFF-2024 SCOUT (exploration S2). A/B partner to the longhorizon manifest (S1): identical 4 long-horizon targets and true ZC economics, but train_cutoff_date moved 2022-01-01 -> 2024-07-01. Trains on 2010->2024-07 (2.5y MORE data incl. the 2022 vol regime), evaluates on a 2-year OOS window (2024-07 -> 2026-07) with the last 6 months as holdout. Tests the 'raise the training window, narrow the backtest' hypothesis. CAVEAT for analysis: optimizer window is only ~18 months (~18 monthly PnL points) - selection bias risk is higher; compare holdout PF with binomial/bootstrap CI before trusting.",
   "infrastructure": {
     "machine_type": "c2-standard-16",
     "provisioning_model": "STANDARD",
@@ -22,21 +22,20 @@
         "raw_horizon": 120,
         "atr_period": 14,
         "definitions": [
-          { "type": "triple_barrier", "tp_multiplier": 2.0, "sl_multiplier": 1.0, "horizon": 6 },
-          { "type": "triple_barrier", "tp_multiplier": 3.0, "sl_multiplier": 1.0, "horizon": 6 },
-          { "type": "triple_barrier", "tp_multiplier": 2.0, "sl_multiplier": 1.0, "horizon": 3 },
-          { "type": "triple_barrier", "tp_multiplier": 4.0, "sl_multiplier": 1.0, "horizon": 36 }
+          { "type": "triple_barrier", "tp_multiplier": 5.0, "sl_multiplier": 1.0, "horizon": 36 },
+          { "type": "triple_barrier", "tp_multiplier": 8.0, "sl_multiplier": 2.0, "horizon": 36 },
+          { "type": "triple_barrier", "tp_multiplier": 5.0, "sl_multiplier": 1.0, "horizon": 48 },
+          { "type": "triple_barrier", "tp_multiplier": 8.0, "sl_multiplier": 2.0, "horizon": 48 }
         ]
       }
     },
     "training_workflow": {
-      "train_cutoff_date": "2022-01-01",
+      "train_cutoff_date": "2024-07-01",
       "holdout_cutoff_date": null,
       "target_columns": [],
       "gcs_base_dir": "gs://cltrainer-optuna-results/scout",
       "random_seed": 42,
       "optuna": {
-        "_comment_lgbm_ranges": "Widened to match HS14B (source of truth) wide LGBM box. Was narrow: depth_max 6 / leaves_max 31 / est 500 / lr 0.005-0.02 / folds 3 / es 15 / min_child 150-400 / n_trials 200.",
         "n_trials": 100,
         "metrics": ["logloss", "average_precision"],
         "max_depth_min": 3,
@@ -65,42 +64,42 @@
   },
   "experiments": [
     {
-      "label": "ZC HS01A 2x1 6H",
-      "gcs_prefix": "sweep_zc_hs01a_2x1_6h_scout",
+      "label": "ZC HS01A 5x1 36H C24",
+      "gcs_prefix": "sweep_zc_hs01a_5x1_36h_c24",
       "overrides": {
         "symbol": "ZC",
         "training_workflow": {
-          "target_columns": ["TARGET_TRIPLE_2x1_6H_LONG", "TARGET_TRIPLE_2x1_6H_SHORT"]
+          "target_columns": ["TARGET_TRIPLE_5x1_36H_LONG", "TARGET_TRIPLE_5x1_36H_SHORT"]
         }
       }
     },
     {
-      "label": "ZC HS01A 3x1 6H",
-      "gcs_prefix": "sweep_zc_hs01a_3x1_6h_scout",
+      "label": "ZC HS01A 8x2 36H C24",
+      "gcs_prefix": "sweep_zc_hs01a_8x2_36h_c24",
       "overrides": {
         "symbol": "ZC",
         "training_workflow": {
-          "target_columns": ["TARGET_TRIPLE_3x1_6H_LONG", "TARGET_TRIPLE_3x1_6H_SHORT"]
+          "target_columns": ["TARGET_TRIPLE_8x2_36H_LONG", "TARGET_TRIPLE_8x2_36H_SHORT"]
         }
       }
     },
     {
-      "label": "ZC HS01A 2x1 3H",
-      "gcs_prefix": "sweep_zc_hs01a_2x1_3h_scout",
+      "label": "ZC HS01A 5x1 48H C24",
+      "gcs_prefix": "sweep_zc_hs01a_5x1_48h_c24",
       "overrides": {
         "symbol": "ZC",
         "training_workflow": {
-          "target_columns": ["TARGET_TRIPLE_2x1_3H_LONG", "TARGET_TRIPLE_2x1_3H_SHORT"]
+          "target_columns": ["TARGET_TRIPLE_5x1_48H_LONG", "TARGET_TRIPLE_5x1_48H_SHORT"]
         }
       }
     },
     {
-      "label": "ZC HS01A 4x1 36H",
-      "gcs_prefix": "sweep_zc_hs01a_4x1_36h_scout",
+      "label": "ZC HS01A 8x2 48H C24",
+      "gcs_prefix": "sweep_zc_hs01a_8x2_48h_c24",
       "overrides": {
         "symbol": "ZC",
         "training_workflow": {
-          "target_columns": ["TARGET_TRIPLE_4x1_36H_LONG", "TARGET_TRIPLE_4x1_36H_SHORT"]
+          "target_columns": ["TARGET_TRIPLE_8x2_48H_LONG", "TARGET_TRIPLE_8x2_48H_SHORT"]
         }
       }
     }

@@ -19,7 +19,11 @@ if PROJECT_ROOT not in sys.path:
 # invocation is unaffected. Identity of derive_dataset_tag is test-pinned —
 # do NOT re-implement the derivation inline.
 from src.core.dataset_tag import derive_dataset_tag
-from src.core.instrument_master import get_instrument
+from src.core.instrument_master import (
+    default_slippage_points,
+    dollars_per_point,
+    get_instrument,
+)
 from src.live_execution.instrument_context import resolve_instrument_context
 
 def parse_experiment_key(key, direction):
@@ -241,7 +245,11 @@ def main():
     parser.add_argument("--batch-dir", required=True, help="Path to batch directory")
     parser.add_argument("--data", default=None, help="Path to OHLCV parquet (overrides manifest local_data_path)")
     parser.add_argument("--exec-data", default="", help="Path to raw execution parquet")
-    parser.add_argument("--slippage-per-side", type=float, default=0.01, help="Slippage per side")
+    parser.add_argument(
+        "--slippage-per-side", type=float, default=None,
+        help="Slippage per side in price points. Default: the batch symbol's "
+             "1-tick value from the instrument registry (CL resolves to 0.01, "
+             "identical to the old hardcoded default).")
     parser.add_argument("--objectives", default="sharpe,sortino", help="Objectives to process")
     args = parser.parse_args()
 
@@ -280,6 +288,14 @@ def main():
         )
     # Fail-fast: unknown symbols raise ValueError('Unknown instrument symbol: ...')
     get_instrument(baseline_symbol)
+
+    # Per-symbol economics: dollars-per-point always from the registry; slippage
+    # defaults to the symbol's 1-tick value unless explicitly overridden.
+    contract_multiplier = dollars_per_point(baseline_symbol)
+    if args.slippage_per_side is None:
+        args.slippage_per_side = default_slippage_points(baseline_symbol)
+    print(f"Economics: symbol={baseline_symbol}  $/pt={contract_multiplier}  "
+          f"slippage/side={args.slippage_per_side}")
 
     # -------------------------------------------------------------------------
     # Resolve Data Path (Manifest -> CLI Fallback)
@@ -505,19 +521,24 @@ def main():
             markdown_lines.append("### Verification Command")
             markdown_lines.append("```bash")
             rel_config_path = f"{batch_dir}/configs/{config_name}".replace("\\", "/")
+            _econ_flags = (
+                f"--slippage-per-side {args.slippage_per_side} "
+                f"--contract-multiplier {contract_multiplier}"
+            )
             if args.exec_data:
-                markdown_lines.append(f'python agent/backtest_engine.py --config "{rel_config_path}" --data "{args.data}" --exec-data "{args.exec_data}" --slippage-per-side {args.slippage_per_side}')
+                markdown_lines.append(f'python agent/backtest_engine.py --config "{rel_config_path}" --data "{args.data}" --exec-data "{args.exec_data}" {_econ_flags}')
             else:
-                markdown_lines.append(f'python agent/backtest_engine.py --config "{rel_config_path}" --data "{args.data}" --slippage-per-side {args.slippage_per_side}')
+                markdown_lines.append(f'python agent/backtest_engine.py --config "{rel_config_path}" --data "{args.data}" {_econ_flags}')
             markdown_lines.append("```")
             markdown_lines.append("")
-            
+
             # Run Backtest
             cmd = [
                 sys.executable, "agent/backtest_engine.py",
                 "--config", config_path,
                 "--data", args.data,
-                "--slippage-per-side", str(args.slippage_per_side)
+                "--slippage-per-side", str(args.slippage_per_side),
+                "--contract-multiplier", str(contract_multiplier),
             ]
             if args.exec_data:
                 cmd.extend(["--exec-data", args.exec_data])

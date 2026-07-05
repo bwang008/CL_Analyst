@@ -255,6 +255,42 @@ def generate_oos_predictions(
 # ---------------------------------------------------------------------------
 
 
+def _normalize_exec_index(exec_df: pd.DataFrame, source_path: str) -> pd.DataFrame:
+    """Ensure the execution frame is DatetimeIndex-ed.
+
+    Non-CL <SYM>_raw.parquet files carry an int64 RangeIndex with DateTime as a
+    column; reindexing that against the signals' DatetimeIndex silently yields
+    all-NaN exec columns -> 0 trades / $0 in every baseline backtest (the
+    ES/ZC zero-metrics bug). Raise on anything unresolvable — no silent
+    fallback.
+    """
+    if isinstance(exec_df.index, pd.DatetimeIndex):
+        return exec_df
+    if "DateTime" in exec_df.columns:
+        exec_df = exec_df.set_index(pd.to_datetime(exec_df["DateTime"])).drop(columns=["DateTime"])
+        exec_df.index.name = "DateTime"
+        print(f"  Exec data index normalized from 'DateTime' column: "
+              f"{exec_df.index.min()} -> {exec_df.index.max()} ({source_path})")
+        return exec_df
+    # Only string/object indexes are safe to coerce: pd.to_datetime on an
+    # int64 index "succeeds" as nanoseconds-since-1970 — garbage dates that
+    # reintroduce the silent all-NaN reindex.
+    if exec_df.index.dtype == object:
+        try:
+            exec_df.index = pd.to_datetime(exec_df.index)
+            print(f"  Exec data index coerced to DatetimeIndex: "
+                  f"{exec_df.index.min()} -> {exec_df.index.max()} ({source_path})")
+            return exec_df
+        except (ValueError, TypeError, OverflowError):
+            pass
+    raise ValueError(
+        f"Execution data at {source_path} has neither a DatetimeIndex nor a "
+        f"'DateTime' column (index dtype: {exec_df.index.dtype}). Refusing to "
+        f"reindex against a DatetimeIndex — that silently produces all-NaN "
+        f"exec columns and zeroed backtests."
+    )
+
+
 def run_backtest(
     predictions_df: pd.DataFrame,
     strategy_cfg: dict,
@@ -277,6 +313,7 @@ def run_backtest(
             exec_df = pd.read_parquet(exec_data_path)
         else:
             exec_df = pd.read_csv(exec_data_path, index_col=0, parse_dates=True)
+        exec_df = _normalize_exec_index(exec_df, exec_data_path)
     else:
         exec_df = predictions_df
 
@@ -641,6 +678,10 @@ def run_pipeline(
             overrides = {}
             if slippage_per_side is not None:
                 overrides["slippage_per_side"] = slippage_per_side
+            # Per-symbol economics: baseline metrics feed pair selection —
+            # they must use the instrument's dollars-per-point, not CL's 1000.
+            from src.core.instrument_master import dollars_per_point
+            overrides["contract_multiplier"] = dollars_per_point(symbol)
 
             report = run_backtest(
                 predictions_df=preds_df,
@@ -798,7 +839,8 @@ def run_pipeline(
                 predictions_path=val_merged_path,
                 ohlcv_path=data_path,
                 exec_ohlcv_path=exec_data_path,
-                slippage_per_side=slippage_per_side
+                slippage_per_side=slippage_per_side,
+                symbol=symbol,
             )
 
             long_preds_rel = f"data/predictions/{os.path.basename(direction_paths['long'])}"
@@ -870,6 +912,8 @@ def run_pipeline(
             overrides = {}
             if slippage_per_side is not None:
                 overrides["slippage_per_side"] = slippage_per_side
+            from src.core.instrument_master import dollars_per_point
+            overrides["contract_multiplier"] = dollars_per_point(symbol)
 
             bt = BacktestEngine.from_config(ensemble_cfg, **overrides)
 
@@ -894,9 +938,10 @@ def run_pipeline(
                     exec_ohlcv = pd.read_parquet(exec_data_path)
                 else:
                     exec_ohlcv = pd.read_csv(exec_data_path, index_col=0, parse_dates=True)
+                exec_ohlcv = _normalize_exec_index(exec_ohlcv, exec_data_path)
             else:
                 exec_ohlcv = ohlcv
-                
+
             result = bt.run(preds, exec_ohlcv, label=f"Ensemble ({metric_name})")
 
             # Generate report
