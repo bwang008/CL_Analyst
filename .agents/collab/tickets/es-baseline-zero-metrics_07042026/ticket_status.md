@@ -1,0 +1,7 @@
+# Ticket Dashboard — es-baseline-zero-metrics_07042026
+
+[2026-07-04 22:58:18] | es-baseline-zero-metrics_07042026 | TICKET-MANAGER | STATUS: Ticket minted. Read-only RCA investigation of ES baseline zero metrics in batch_summary.md. Spawning Ticket-Auditor.
+[2026-07-04 22:59:30] | es-baseline-zero-metrics_07042026 | TICKET-MANAGER | STATUS: Ticket-Auditor spawned with full 4-step investigation plan (bisect producer/collector, RCA, top_pairs blast radius, non-CL batch enumeration). Waiting for Auditor's RCA proposal.
+[2026-07-04 23:14:00] | es-baseline-zero-metrics_07042026 | TICKET-MANAGER | STATUS: Auditor RCA received. Producer-side: int64-indexed <SYM>_raw.parquet + unnormalized read at gcp/vm_e2e_pipeline.py:272/897 -> silent prob_buy_lookup.get(ts, 0.0) in backtest_engine.py:1221. Latent since c5111ca1 (2026-06-16), NOT a recent regression. top_pairs NOT contaminated. Proposed fix A(+B, C doc). Not fast-trackable -> spawning Ticket-Impact-Reviewer.
+[2026-07-04 23:21:00] | es-baseline-zero-metrics_07042026 | TICKET-MANAGER | STATUS: Impact-Reviewer APPROVED A+B (C as follow-up), no human authorization needed. Interface Rule not triggered; Base Class Rule triggered but justification met; Refactor Veto not triggered. Binding guard-scoping conditions recorded.
+[2026-07-04 23:24:00] | es-baseline-zero-metrics_07042026 | TICKET-MANAGER | STATUS: CLOSED (investigation). case_report.md and blueprint.md written. No code/data/report files modified (read-only ticket). Ready for /tdd-manager handoff when user authorizes implementation.

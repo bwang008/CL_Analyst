@@ -27,6 +27,21 @@ I'm more skeptical about this, not to mention it's a massive rework so we sidebo
 but the prompt is in the research folder for more information from the agent.
 
 ========================================================================
+====FLEET RUN=======
+
+configs/fleet/fleet_manifest.json   ← list your configs here
+        │
+        ▼
+python -m src.live_execution.fleet_runner --manifest configs/fleet/fleet_manifest.json
+        │  validates ALL configs before launching anything:
+        │  client_id present/unique/spaced ≥2, ≤16 instances, files exist
+        ▼
+spawns one process per config (60s stagger for IBKR pacing):
+    python -m src.live_execution.cli --config <your.json> --data-port 4002 --exec-port 4002
+        │
+        └─ crashed children restarted with capped backoff; Ctrl+C stops all
+
+=======================================================================
 
 # References for steps
 
