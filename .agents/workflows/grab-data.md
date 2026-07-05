@@ -9,8 +9,8 @@ Download historical OHLCV futures data from Databento (training source) and IBKR
 
 > [!IMPORTANT]
 > **Hourly-only ruling (T7, user ruling):** data acquisition in this repo is **HOURLY-ONLY** —
-> never acquire 5m data. New symbols run the live engine in hourly-only mode: their configs set
-> `live_config.enable_5m_stream: false`.
+> never acquire 5m data. (Live 5m STREAMING is unaffected: seedless symbols shallow-bootstrap
+> their live 5m window from IBKR at startup — no historical 5m purchase involved.)
 
 ## Prerequisites
 

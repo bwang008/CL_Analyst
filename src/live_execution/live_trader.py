@@ -407,6 +407,11 @@ class LiveTrader:
                 bar_size="5 mins",
                 bars_per_day=self._instrument_context.brain_instrument.bars_per_day_5m,
                 execution_symbol=self._instrument_context.execution_symbol,
+                # seedless-5m-live-stream_07052026_0546: only 5m MODELS
+                # consume deep 5m features (parity note at _MAX_ROLLING_BARS)
+                # — hourly models may shallow-bootstrap a seedless 5m window
+                # from IBKR. 5m models keep the hard seed requirement.
+                allow_shallow_bootstrap=(self._bar_size in ("1h", "2h", "4h")),
             )
         else:
             self.data_manager_5m = None
@@ -485,6 +490,10 @@ class LiveTrader:
         self._front_month_str: Optional[str] = None
         self._front_month_last_close: Optional[float] = None  # Hands stream price
         self._running = False
+        # seedless-5m-live-stream_07052026_0546: latched by _warm_start when
+        # the 5m window was founded by the shallow IBKR bootstrap (read by
+        # the startup Telegram Mode stamp — 3-surface disclosure).
+        self._shallow_5m_bootstrap: bool = False
         self._last_bar_time_5m: Optional[pd.Timestamp] = None
         self._last_bar_time_1h: Optional[pd.Timestamp] = None
         self._subscriptions_lost = False  # Track connectivity drops
@@ -537,7 +546,23 @@ class LiveTrader:
         self._environment = "unknown"
 
         # Telegram alerts (fire-and-forget — failures never affect trading)
-        self._telegram = TelegramAlerter()
+        self._telegram = TelegramAlerter(prefix=self._execution_symbol)
+
+        class _SymbolPrefixFilter(logging.Filter):
+            def __init__(self, symbol: str):
+                super().__init__()
+                self.symbol = symbol
+
+            def filter(self, record: logging.LogRecord) -> bool:
+                if not getattr(record, "_symbol_prefixed", False):
+                    record.msg = f"[{self.symbol}] {record.msg}"
+                    record._symbol_prefixed = True
+                return True
+
+        # Prevent duplicate filters in test environments with many instantiations
+        log.filters = [f for f in log.filters if not isinstance(f, _SymbolPrefixFilter)]
+        self._symbol_filter = _SymbolPrefixFilter(self._execution_symbol)
+        log.addFilter(self._symbol_filter)
         self._bot_start_time = datetime.now(timezone.utc)
         self._last_inference_time_sec: float = 0.0
         self._last_inference_bar_time: Optional[pd.Timestamp] = None
@@ -841,6 +866,13 @@ class LiveTrader:
             if not self._enable_5m_stream:
                 startup_msg += (
                     "Mode: `HOURLY-ONLY (enable_5m_stream=false)`\n"
+                )
+            # seedless-5m-live-stream_07052026_0546: stamp the shallow 5m
+            # bootstrap mode (3-surface disclosure, mirrors HOURLY-ONLY).
+            if getattr(self, "_shallow_5m_bootstrap", False):
+                startup_msg += (
+                    "Mode: `5M SHALLOW BOOTSTRAP (no 5m seed — IBKR-fetched "
+                    "window)`\n"
                 )
             startup_msg += "\n"
             startup_msg += self._build_heartbeat_payload()
@@ -2035,6 +2067,20 @@ class LiveTrader:
                 "5m rolling window initialized: %d bars, latest=%s",
                 len(self.rolling_df_5m), self._last_bar_time_5m,
             )
+
+            # seedless-5m-live-stream_07052026_0546: latch + loudly banner
+            # the shallow bootstrap (log surface of the 3-surface
+            # discipline; the startup Telegram Mode stamp reads this flag).
+            self._shallow_5m_bootstrap = bool(
+                getattr(self.data_manager_5m, "shallow_bootstrapped", False)
+            )
+            if self._shallow_5m_bootstrap:
+                log.warning(
+                    "SHALLOW 5M MODE: no 5m seed/cache existed — window "
+                    "bootstrapped from IBKR (%d bars). Run 2+ warm-starts "
+                    "from the saved cache.",
+                    len(self.rolling_df_5m),
+                )
         else:
             log.info(
                 "HOURLY-ONLY MODE: 5m warm start skipped "

@@ -38,8 +38,9 @@ This workflow adds/removes a model safely: validate → dry-run → live.
    - `live_config.client_id` — UNIQUE across the manifest and **spaced ≥ 2** from every
      other (each instance consumes cid AND cid+1). Also avoid cids of any manually
      started instance still connected to the gateway.
-   - `live_config.enable_5m_stream: false` for any non-CL hourly model (no 5m seeds
-     exist for new symbols by design — all data is hourly).
+   - NO 5m seed or `enable_5m_stream` key is needed: hourly models shallow-bootstrap
+     the 5m window from IBKR on first run (loud banner + Telegram stamp);
+     `enable_5m_stream: false` is an explicit opt-out only.
 2. **Per-symbol data prerequisites** (for a symbol's FIRST fleet model):
    - 1h seed `CL_DATA_ROOT/data/processed/{SYM}_raw_1h.parquet` (brain symbol, e.g. ES
      for an MES config). Copy from `{SYM}_raw.parquet` if absent (it is hourly).
@@ -56,6 +57,9 @@ This workflow adds/removes a model safely: validate → dry-run → live.
    # (c) referenced artifacts exist (model_path / predictions_path / seeds) — resolver
    #     covers config-internal checks; spot-check the per-symbol seed:
    #     Test-Path $env:CL_DATA_ROOT\data\processed\{SYM}_raw_1h.parquet
+   # (d) shipped-config sentinel pins — ANY edit to a shipped strategy JSON must evolve
+   #     its test pins in the SAME change (336d29f lesson):
+   conda run -n trader python -m pytest tests/test_hourly_only_equity_session.py tests/test_instrument_context.py tests/test_config_generator_symbols.py -q
    ```
    Any raise = fix before proceeding. Do NOT launch a fleet whose validation fails.
 5. **Pre-launch check:** no manually started live_trader may hold this config's cids

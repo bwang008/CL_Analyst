@@ -148,9 +148,10 @@ src.live_execution.cli` fail-fasts via `resolve_instrument_context`,
   `{SYM}_raw_1h.parquet` (>= 4,320 1h bars), `fred_macro_data_<sym>.csv`, and
   `cftc_cot_<sym>.csv`. A missing seed/macro file raises at startup and the
   child crash-loops under the runner's capped restart backoff.
-- **`enable_5m_stream: false`** for symbols without a 5m seed (hourly-only
-  symbols) — the key defaults to `true`, and startup then fails on the
-  missing 5m seed.
+- **No 5m seed needed for hourly models** — a seedless symbol
+  shallow-bootstraps its 5m window from IBKR on first run (loud SHALLOW 5M
+  banner + Telegram Mode stamp) and warm-starts from the saved cache
+  thereafter; `enable_5m_stream: false` is an explicit opt-out only.
 
 ### Install / migration (replacing live-trader.service)
 

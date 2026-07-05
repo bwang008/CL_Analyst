@@ -44,9 +44,10 @@ Before starting, verify — for the config's symbol `<SYM>`/`<sym>`:
    `derive_data_paths`; missing seed raises at startup).
 3. **Macro files present:** `fred_macro_data_<sym>.csv` + `cftc_cot_<sym>.csv` (missing file or
    missing vol column raises).
-4. **Hourly-only symbols** (no 5m seed — all new symbols): the config must set
-   `"live_config": {"enable_5m_stream": false, ...}` — the key defaults to `true` and startup then
-   fails on the missing 5m seed.
+4. **5m seed NOT required for hourly models:** a seedless symbol shallow-bootstraps its 5m window
+   from IBKR on first run (loud SHALLOW 5M banner + Telegram Mode stamp) and warm-starts from the
+   saved cache thereafter; `"enable_5m_stream": false` is an explicit opt-out only. 5m MODELS
+   (`bar_size` "5m") still hard-require a real 5m seed.
 
 ## Starting from Scratch (No systemd service yet)
 

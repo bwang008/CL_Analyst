@@ -601,9 +601,14 @@ def _load_es01b() -> dict:
 
 class TestES01BPatchedConfig:
     def test_patched_fields_match_audit_table(self):
-        """audit section 2 — the complete 10-field delta, pinned exactly."""
+        """audit section 2 — the complete 10-field delta, pinned exactly.
+        EVOLVED (ticket seedless-5m-live-stream_07052026_0546, sanctioned
+        336d29f repair): 336d29f flipped execution_symbol ES->MES without
+        evolving this pin (broken at HEAD f165b9d) — pins the CURRENT
+        shipped value; brain handshake (models.*.symbol == "ES")
+        unchanged."""
         cfg = _load_es01b()
-        assert cfg["execution_symbol"] == "ES"
+        assert cfg["execution_symbol"] == "MES"
         assert "brain_symbol" not in cfg, (
             "audit section 2: do NOT add brain_symbol — ES is its own brain "
             "(structural derivation covers it)"
@@ -619,12 +624,18 @@ class TestES01BPatchedConfig:
         assert cfg["models"]["long"]["symbol"] == cfg["models"]["short"]["symbol"] == "ES"
 
     def test_resolves_as_es_es_cme(self):
+        """EVOLVED (ticket seedless-5m-live-stream_07052026_0546,
+        sanctioned 336d29f repair): 336d29f flipped ES01B to execution MES
+        without evolving this pin (broken at HEAD f165b9d). Repaired to
+        the CURRENT shipped resolution: execution MES / brain ES /
+        exchange CME / tick 0.25 — the execution instrument is now the
+        MICRO, so the multiplier pin follows the MES registry value (5)."""
         cfg = _load_es01b()
         ctx = resolve_instrument_context(cfg)
-        assert ctx.execution_symbol == "ES"
+        assert ctx.execution_symbol == "MES"
         assert ctx.brain_symbol == "ES"
         assert ctx.execution_instrument.exchange == "CME"
-        assert ctx.execution_instrument.multiplier == 50
+        assert ctx.execution_instrument.multiplier == 5
         assert ctx.execution_instrument.tick_size == 0.25
 
     def test_referenced_artifacts_exist_on_disk(self):
@@ -644,10 +655,14 @@ class TestES01BPatchedConfig:
 
     def test_untouched_fields_pinned(self):
         """audit section 2: 'everything else unchanged' — sentinel pins.
-        (Passes at Red by design; guards the Coder's patch surface.)"""
+        Guards the Coder's patch surface.
+        EVOLVED (ticket seedless-5m-live-stream_07052026_0546, sanctioned
+        336d29f repair): client_id 1010->2000 pins the CURRENT shipped
+        value (336d29f flipped the config without evolving this pin —
+        broken at HEAD f165b9d). All other sentinels unchanged."""
         cfg = _load_es01b()
         assert cfg["nickname"] == "ES01B_Sharpe_E03_07042026"
-        assert cfg["live_config"]["client_id"] == 1010
+        assert cfg["live_config"]["client_id"] == 2000
         assert cfg["models"]["long"]["threshold"] == 0.53
         assert cfg["models"]["short"]["threshold"] == 0.56
         assert cfg["holdout_months"] == 6

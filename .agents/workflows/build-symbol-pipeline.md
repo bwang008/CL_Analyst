@@ -85,7 +85,10 @@ Follow [grab-data](grab-data.md). Concretely:
    (`derive_seed_lookback_days(bars_per_day_1h)`: ES 292 calendar days, grains 406) and re-stage
    near launch time (the window decays ~1 trading day/day).
    **NO 5m acquisition — Databento in this repo is hourly-only (USER RULING, T7).** New symbols
-   run the live engine in hourly-only mode (`live_config.enable_5m_stream: false`, Phase 6 gate 2).
+   need NO 5m seed: live 5m streaming is the default — a seedless symbol SHALLOW-bootstraps its 5m
+   window from IBKR on first run (loud banner + Telegram stamp) and warm-starts from the saved
+   cache thereafter; `live_config.enable_5m_stream: false` is an explicit opt-out only (Phase 6
+   gate 2).
 
 ## Phase 2 — Macro data (FRED + COT)  ⚠ symbol-type sensitive
 The feature build calls `MacroFeatureEngine.merge_all` which requires **both** `raw/macro/fred_macro_data_<sym>.csv` and `raw/macro/cftc_cot_<sym>.csv`; COT is mandatory (`include_cot=True`, no config knob) and `_load_cot` hard-raises if the file is missing.
@@ -223,9 +226,10 @@ present, (d) every `model_path` exists on disk, (e) every `predictions_path` exi
   variant: stage a copy as `<tmpdir>\configs\<name>.json` next to a minimal
   `<tmpdir>\manifest.json` stub `{"baseline": {"symbol": "ES"}}`, then run the script on `<tmpdir>`).
 
-**Gate 2 — hourly-only stamp:** any config destined for live on a symbol with no 5m seed (ALL new
-symbols — hourly-only ruling) MUST set `"live_config": {"enable_5m_stream": false, ...}`; the key
-defaults to `true` and startup then fails on the missing 5m seed. Verify on the promoted config.
+**Gate 2 — 5m stream mode:** the promoted config either OMITS `enable_5m_stream` (default: live 5m
+streaming; a seedless hourly model shallow-bootstraps its 5m window from IBKR on first run, loudly)
+or deliberately opts out with `"enable_5m_stream": false`. 5m MODELS (`bar_size` "5m") still
+hard-require a real 5m seed.
 
 **Gate 3 — C1 quarantine:** if the post-optimizer ran in target-pairs mode, list
 `configs/strategies/*_opt_*.json` / `*_hybrid_*.json` created during the run and quarantine them

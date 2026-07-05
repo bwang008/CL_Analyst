@@ -236,9 +236,10 @@ does **not** validate the configs themselves. Each child runs
   `cftc_cot_<sym>.csv`. A missing seed/macro file raises at startup, so the
   child **crash-loops under the runner's restart backoff** until the artifact
   is staged.
-- **`enable_5m_stream: false`** for symbols without a 5m seed (all hourly-only
-  symbols) — the key defaults to `true`, and startup then fails on the missing
-  5m seed.
+- **No 5m seed needed for hourly models** — a seedless symbol shallow-bootstraps
+  its 5m window from IBKR on first run (loud SHALLOW 5M banner + Telegram Mode
+  stamp) and warm-starts from the saved cache thereafter;
+  `enable_5m_stream: false` is an explicit opt-out only.
 
 ### Migration runbook (WSL)
 

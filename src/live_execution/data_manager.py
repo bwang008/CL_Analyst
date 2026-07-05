@@ -142,6 +142,14 @@ def derive_seed_lookback_days(bars_per_day_1h: int) -> int:
 # Flush the in-memory cache to disk every N appended bars.
 _FLUSH_INTERVAL_BARS = 12  # every hour (12 × 5 min)
 
+# Shallow-bootstrap fetch window (seedless non-5m models — ticket
+# seedless-5m-live-stream_07052026_0546, audit §1.2). "5 D" covers the deepest
+# realistic in-position horizon (per-side max_hold_bars / the 288-bar engine
+# rail = 24h) ACROSS a weekend, guarantees full overlap for the "3 D"
+# roll-ratio fetch from day one, and is ONE request well inside IBKR pacing
+# limits (5m history serves ~60 days). NOT training-grade history.
+_SHALLOW_BOOTSTRAP_DURATION = "5 D"
+
 # Number of bars to sample when validating cache after rollover.
 _ROLL_VALIDATION_BARS = 50
 
@@ -182,6 +190,7 @@ class DataManager:
         bar_size: str = "5 mins",
         bars_per_day: int = 288,
         execution_symbol: Optional[str] = None,
+        allow_shallow_bootstrap: bool = False,
     ) -> None:
         # T2 (D2): symbol is REQUIRED keyword-only (no silent CL default) and
         # validated against the instrument registry via derive_data_paths
@@ -213,6 +222,15 @@ class DataManager:
         self.front_month_id = front_month_id  # e.g. "CLJ6"
         self.bar_size = bar_size
         self.bars_per_day = bars_per_day
+        # seedless-5m-live-stream_07052026_0546: when True (live_trader wires
+        # it ONLY for non-5m models, bar_size in ("1h","2h","4h")), a missing
+        # seed+cache triggers ONE shallow "5 D" IBKR fetch instead of the
+        # No-Silent-Bootstrap raise. Defaults False so every existing
+        # construction site stays byte-identical (5m models keep the raise).
+        self.allow_shallow_bootstrap = allow_shallow_bootstrap
+        # True only when THIS run founded the window via the shallow fetch
+        # (read by live_trader for the 3-surface loud disclosure).
+        self.shallow_bootstrapped: bool = False
         # T5: instrument-derived facts from the registry (raises on unknown
         # symbols — no silent defaults). Derived ONLY here in __init__:
         # the ratio/adjustment methods keep working on __new__ test stubs.
@@ -290,22 +308,31 @@ class DataManager:
                     self._df.index.max(),
                 )
             else:
-                # ── HARD FAIL — Design Rule: No Silent Bootstrap ────────────────
-                # There is ONE pipeline for live data: seed file → cache → live append.
-                # Silently substituting IBKR as a seed creates fake environments that
-                # corrupt data quality and mask bugs. If the seed is missing, we stop.
-                log.error(
-                    "CRITICAL: Seed file missing at '%s'. "
-                    "The live trader cannot run without its historical seed. "
-                    "Restore the file or update the seed_path configuration.",
-                    self.seed_path,
-                )
-                raise FileNotFoundError(
-                    f"Seed file not found for {self.symbol}: {self.seed_path}\n"
-                    f"The warm-start seed must exist before the live trader starts.\n"
-                    f"Check CL_DATA_ROOT ({os.environ.get('CL_DATA_ROOT', '(not set)')}) "
-                    f"and verify the file is present at the expected path."
-                )
+                if self.allow_shallow_bootstrap and self.data_client is not None:
+                    # seedless-5m-live-stream_07052026_0546: SANCTIONED
+                    # shallow bootstrap (non-5m models only — user ruling:
+                    # only HISTORICAL 5m purchases are banned; live 5m
+                    # streaming is the default). Loud, cached, never silent.
+                    self._df = self._shallow_bootstrap_from_ibkr()
+                    self.shallow_bootstrapped = True
+                    self.save_cache()  # run 2+ warm-starts from this cache
+                else:
+                    # ── HARD FAIL — Design Rule: No Silent Bootstrap ────────────────
+                    # There is ONE pipeline for live data: seed file → cache → live append.
+                    # Silently substituting IBKR as a seed creates fake environments that
+                    # corrupt data quality and mask bugs. If the seed is missing, we stop.
+                    log.error(
+                        "CRITICAL: Seed file missing at '%s'. "
+                        "The live trader cannot run without its historical seed. "
+                        "Restore the file or update the seed_path configuration.",
+                        self.seed_path,
+                    )
+                    raise FileNotFoundError(
+                        f"Seed file not found for {self.symbol}: {self.seed_path}\n"
+                        f"The warm-start seed must exist before the live trader starts.\n"
+                        f"Check CL_DATA_ROOT ({os.environ.get('CL_DATA_ROOT', '(not set)')}) "
+                        f"and verify the file is present at the expected path."
+                    )
 
         # Step 2: Detect rollover and record ratio (cache stays RAW)
         if self.data_client is not None and self.front_month_id is not None:
@@ -587,7 +614,38 @@ class DataManager:
                 return df[is_complete]
         except Exception as e:
             log.warning("Could not filter incomplete bars: %s", e)
-            
+
+        return df
+
+    def _shallow_bootstrap_from_ibkr(self) -> pd.DataFrame:
+        """SHALLOW 5M BOOTSTRAP (seedless non-5m models): fetch a few days of
+        bars from IBKR to build the rolling window. NOT training-grade
+        history. Ticket seedless-5m-live-stream_07052026_0546 (audit §5.1)."""
+        log.warning(
+            "SHALLOW 5M BOOTSTRAP: no seed/cache for %s — fetching %s of %s "
+            "bars from IBKR (trailing/telemetry window; NOT training data)...",
+            self.symbol, _SHALLOW_BOOTSTRAP_DURATION, self.bar_size,
+        )
+        df = self.data_client.fetch_historical_bars_by_duration(
+            duration_str=_SHALLOW_BOOTSTRAP_DURATION,
+            continuous=True,
+            bar_size=self.bar_size,
+            what_to_show="TRADES",
+            use_rth=False,
+        )
+        if df is not None and not df.empty:
+            df = self._drop_incomplete_bar(df)
+        if df is None or df.empty:
+            # C3: raise BEFORE any save_cache() — never a silent empty
+            # window, never a cache founded on nothing.
+            raise RuntimeError(
+                f"SHALLOW 5M BOOTSTRAP failed: IBKR returned no "
+                f"{self.bar_size} bars for {self.symbol}."
+            )
+        log.warning(
+            "SHALLOW 5M BOOTSTRAP: %d bars  %s → %s",
+            len(df), df.index.min(), df.index.max(),
+        )
         return df
 
     def _backfill(self) -> None:
@@ -1029,6 +1087,20 @@ class DataManager:
                 len(ledger), ledger.index.min(), ledger.index.max(),
             )
         else:
+            # seedless-5m-live-stream_07052026_0546 (audit §1.4): while
+            # seedless, founding a ledger from a shallow IBKR fetch would
+            # masquerade as training-grade history — skip LOUDLY instead.
+            # The warm-start cache still accrues every raw bar + roll
+            # metadata; the ledger founds itself the day a real seed lands.
+            # 5m models (allow_shallow_bootstrap=False) keep the raise below.
+            if self.allow_shallow_bootstrap and not self.seed_path.exists():
+                log.warning(
+                    "SHALLOW MODE: master-ledger accrual SKIPPED for %s — no "
+                    "seed to found a training ledger (cache still accrues raw "
+                    "bars + roll metadata). Provision %s to start the ledger.",
+                    self.symbol, self.seed_path,
+                )
+                return
             # First run: create from seed CSV (full history)
             log.info("Creating master ledger from seed CSV (full file)...")
             ledger = self._load_full_seed()
