@@ -25,7 +25,9 @@ The **livetest engine** replays historical OHLCV bars through the full, unmodifi
 | 6 months | ~6,520 | 2,200 | ~4,320 | **~60 min** |
 | 12 months | ~10,920 | 2,200 | ~8,720 | **~2.5 hours** |
 
-> **Rule of thumb**: ~1 bar/sec for hourly models. Warmup is fast (batch); replay runs full inference per bar.
+> **Rule of thumb**: ~1.5 bars/sec for hourly models (measured 2026-07-04: 336-bar parity replay in 3.6 min). Warmup is fast (batch); replay runs full inference per bar.
+>
+> **Note**: per-bar cost scales with the daily FRED history length in `fred_macro_data_<symbol>.csv`, since macro features are rebuilt over the full history each bar. A slow-lambda percentile implementation made this ~10.6 s/bar (~0.06 bars/sec) until it was replaced with native `Rolling.rank` on 2026-07-04 (ticket `livetest-macro-pctile-slow_07042026_1748`). If throughput regresses far below this table, profile with py-spy before shrinking the replay window.
 
 ## Step 1: Prepare a Data Subset
 

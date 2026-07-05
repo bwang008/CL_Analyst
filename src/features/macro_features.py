@@ -483,10 +483,7 @@ class MacroFeatureEngine:
 
             # Percentile features: rank over N trading days
             for w in PCTILE_WINDOWS:
-                features[f"MACRO_{col}_PCTILE_{w}D"] = series.rolling(w).apply(
-                    lambda x: pd.Series(x).rank(pct=True).iloc[-1],
-                    raw=False,
-                )
+                features[f"MACRO_{col}_PCTILE_{w}D"] = series.rolling(w).rank(pct=True)
 
         # Derived features
         if "VIX" in df.columns and vol_label in df.columns and vol_label != "VIX":
@@ -550,34 +547,22 @@ class MacroFeatureEngine:
         if "MM_Net" in df.columns:
             features["COT_MM_NET"] = df["MM_Net"]
             # Percentile over 52 weeks (1 year)
-            features["COT_MM_NET_PCTILE_52W"] = df["MM_Net"].rolling(52).apply(
-                lambda x: pd.Series(x).rank(pct=True).iloc[-1],
-                raw=False,
-            )
+            features["COT_MM_NET_PCTILE_52W"] = df["MM_Net"].rolling(52).rank(pct=True)
             # Percentiles at shorter windows
             for w in [14, 35]:
-                features[f"COT_MM_NET_PCTILE_{w}W"] = df["MM_Net"].rolling(w).apply(
-                    lambda x: pd.Series(x).rank(pct=True).iloc[-1],
-                    raw=False,
-                )
+                features[f"COT_MM_NET_PCTILE_{w}W"] = df["MM_Net"].rolling(w).rank(pct=True)
             # 4-week momentum
             features["COT_MM_MOMENTUM_4W"] = df["MM_Net"].diff(4)
 
         # Producer/Merchant Net (commercials — "smart money")
         if "Prod_Net" in df.columns:
             features["COT_PROD_NET"] = df["Prod_Net"]
-            features["COT_PROD_NET_PCTILE_52W"] = df["Prod_Net"].rolling(52).apply(
-                lambda x: pd.Series(x).rank(pct=True).iloc[-1],
-                raw=False,
-            )
+            features["COT_PROD_NET_PCTILE_52W"] = df["Prod_Net"].rolling(52).rank(pct=True)
 
         # Spec (Swap Dealer) Net
         if "Spec_Net" in df.columns:
             features["COT_SPEC_NET"] = df["Spec_Net"]
-            features["COT_SPEC_NET_PCTILE_52W"] = df["Spec_Net"].rolling(52).apply(
-                lambda x: pd.Series(x).rank(pct=True).iloc[-1],
-                raw=False,
-            )
+            features["COT_SPEC_NET_PCTILE_52W"] = df["Spec_Net"].rolling(52).rank(pct=True)
 
         log.debug("Built %d COT features", len(features.columns))
         return features
