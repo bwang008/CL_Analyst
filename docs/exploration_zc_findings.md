@@ -137,7 +137,40 @@ E01 holdout ledger, 20k resamples):
 - **Local 01B re-opt** — pruned-feature models under true costs (also validates that the
   "failed" 01B batch was just the zeros bug).
 
-*Results to be appended when the batches land.*
+**01B result (batch_20260705_0458_ZC_01B_TRUECOST):** the "failed" batch was indeed
+healthy — models train fine; only the baseline display was zeroed by the exec-index bug.
+At true costs the pruned-feature models are marginally better than 01A but still not
+deployable: optimizer-window PnL $2.4k-$12k over 4y; holdouts -$1,724 to +$1,483 on
+27-54 trades (noise). The 4x1_36H long side is again the least-bad component —
+consistent with the long-horizon hypothesis S1/S2 are testing.
+
+**S1 result (long-horizon, cutoff 2022):** training completed cleanly (and validated the
+zeros fix in the cloud — first non-CL batch with real baseline metrics). The cloud
+post-optimizer VM crashed on a missing `src/core` in the optimizer deploy whitelist
+(fixed, c2c2adf); post-opt re-run locally with identical parameters (200 trials, seed 42,
+both objectives, true economics). Verdict: 16 individually-optimized models all collapse
+to tiny books (best: $7.5k over 4y on 234 trades, holdout -$692). Ensembles: optimizer
+window $24-$7.5k, **holdouts -$2,384 to +$950** — noise.
+
+**S2 result (long-horizon, cutoff 2024-07 — the "raise training window, narrow backtest"
+variant):** same protocol. 2.5y more training data (including the 2022 regime) changed
+nothing: individual holdouts -$2,944 to +$284; ensemble holdouts **-$1,923 to +$433**.
+
+### Verdict across all four arms
+
+| Arm | Models | Training window | Eval window | Best honest holdout |
+|-----|--------|-----------------|-------------|---------------------|
+| 01A re-opt | existing 3H/6H/36H | 2010→2022 | 4y + 6mo ho | +$219 (7 trades) |
+| 01B re-opt | pruned features | 2010→2022 | 4y + 6mo ho | +$1,483 (27 trades) |
+| S1 (new) | 5x1/8x2 × 36H/48H | 2010→2022 | 4y + 6mo ho | +$950 (23 trades) |
+| S2 (new) | 5x1/8x2 × 36H/48H | 2010→2024-07 | 18mo + 6mo ho | +$433 (39 trades) |
+
+48 individually-optimized models and 24 ensemble optimizations, two objectives, two
+feature sets, five target horizons (3H→48H), two training cutoffs: **nothing clears real
+ZC transaction costs out-of-sample.** Per the discard-don't-crutch rule, ZC should be
+dropped from the fleet roadmap until the feature set contains something actually
+directional for grains (COT positioning, seasonality, WASDE calendar — see §6). The
+scout budget spent: 2 of 10 authorized runs; the other diagnoses were local and free.
 
 ## 6. On the "low-vol specialist" idea
 
