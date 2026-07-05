@@ -15,6 +15,7 @@ import pandas as pd
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
+from src.core.instrument_master import get_instrument
 from src.features.alpha_factory import AlphaFactory
 from src.live_execution.feature_pipeline import build_live_features
 
@@ -53,7 +54,9 @@ def compare_at_timestamp(ohlcv_full, feature_names, target_ts, cache_size=2200):
     start_pos = max(0, ts_pos - cache_size + 1)
     cache_slice = ohlcv_full[ohlcv_cols].iloc[start_pos:ts_pos + 1].copy()
     
-    result = build_live_features(cache_slice, feature_names, lean=False, bar_size="1h")
+    result = build_live_features(cache_slice, feature_names, lean=False,
+                                 bar_size="1h",
+                                 instrument=get_instrument("CL"))
     if result is None:
         return None, ts
     
@@ -166,7 +169,9 @@ def main():
     start_pos = max(0, ts_pos - LIVETEST_CACHE_SIZE + 1)
     cache_slice = ohlcv[["Open", "High", "Low", "Close", "Volume"]].iloc[start_pos:ts_pos + 1].copy()
     
-    result = build_live_features(cache_slice, feature_names, lean=False, bar_size="1h")
+    result = build_live_features(cache_slice, feature_names, lean=False,
+                                 bar_size="1h",
+                                 instrument=get_instrument("CL"))
     if result is not None:
         lt_row = result.iloc[0]
         bt_row_f32 = ohlcv.loc[target_ts, feature_names]

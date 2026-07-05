@@ -6,6 +6,20 @@ from src.live_execution.interfaces.data_feed_interface import DataFeedClient
 from src.live_execution.ibkr_client import IBKRConnectionManager
 from src.live_execution.instrument_context import InstrumentContext
 
+# T4: index-contract routing map — the single source of truth for which
+# (exchange, currency) serves each macro index the live path may fetch.
+# Keys are IB index symbols, which by registry invariant
+# (live_vol_index == volatility_index.replace("CLS", "")) double as the
+# FRED column labels / live-override keys. DX is dormant in the live path
+# (DXY is FRED-only) but kept for the legacy subscribe branches.
+_INDEX_CONTRACT_SPECS: dict[str, tuple[str, str]] = {
+    "VIX": ("CBOE", "USD"),
+    "OVX": ("CBOE", "USD"),
+    "GVZ": ("CBOE", "USD"),
+    "DX": ("NYBOT", "USD"),
+}
+
+
 class IBKRDataFeedClient(DataFeedClient):
     def __init__(
         self,
@@ -100,11 +114,10 @@ class IBKRDataFeedClient(DataFeedClient):
         duration_str: str = "60 S"
     ) -> Any:
         from ib_insync import Future, Index
-        if symbol in ("VIX", "OVX"):
-            contract = Index(symbol, "CBOE", "USD")
-            what_to_show = "TRADES"  # Indices generally use TRADES or MIDPOINT
-        elif symbol == "DX":
-            contract = Index("DX", "NYBOT", "USD")
+        if symbol in _INDEX_CONTRACT_SPECS:
+            contract = Index(symbol, *_INDEX_CONTRACT_SPECS[symbol])
+            if symbol != "DX":
+                what_to_show = "TRADES"  # CBOE vol indices use TRADES or MIDPOINT
         elif continuous:
             # T2: build the REQUESTED symbol's continuous contract — the
             # legacy not-MCL->CL fallback is dead; unknown symbols raise.
@@ -117,12 +130,12 @@ class IBKRDataFeedClient(DataFeedClient):
                 localSymbol=local_sym,
                 exchange=get_instrument(symbol).exchange,
             )
-        
+
         # We don't qualify indices like DX on NYBOT as easily, but qualify_contract works for most.
         try:
             contract = self.manager.qualify_contract(contract)
         except ValueError as e:
-            if symbol in ("VIX", "OVX", "DX"):
+            if symbol in _INDEX_CONTRACT_SPECS:
                 pass  # Sometimes index qualification fails but reqHistoricalData still works
             else:
                 raise e
@@ -145,11 +158,10 @@ class IBKRDataFeedClient(DataFeedClient):
         duration_str: str = "60 S"
     ) -> Any:
         from ib_insync import Future, Index
-        if symbol in ("VIX", "OVX"):
-            contract = Index(symbol, "CBOE", "USD")
-            what_to_show = "TRADES"
-        elif symbol == "DX":
-            contract = Index("DX", "NYBOT", "USD")
+        if symbol in _INDEX_CONTRACT_SPECS:
+            contract = Index(symbol, *_INDEX_CONTRACT_SPECS[symbol])
+            if symbol != "DX":
+                what_to_show = "TRADES"
         elif continuous:
             # T2: build the REQUESTED symbol's continuous contract — the
             # legacy not-MCL->CL fallback is dead; unknown symbols raise.
@@ -162,11 +174,11 @@ class IBKRDataFeedClient(DataFeedClient):
                 localSymbol=local_sym,
                 exchange=get_instrument(symbol).exchange,
             )
-        
+
         try:
             contract = await self.manager.qualify_contract_async(contract)
         except Exception as e:
-            if symbol in ("VIX", "OVX", "DX"):
+            if symbol in _INDEX_CONTRACT_SPECS:
                 pass
             else:
                 raise e
@@ -181,16 +193,19 @@ class IBKRDataFeedClient(DataFeedClient):
 
     async def fetch_daily_close_async(self, symbol: str) -> float:
         from ib_insync import Index
-        if symbol in ("VIX", "OVX"):
-            contract = Index(symbol, "CBOE", "USD")
-        else:
-            raise ValueError(f"fetch_daily_close_async only supports index symbols. Got: {symbol}")
-        
+        spec = _INDEX_CONTRACT_SPECS.get(symbol)
+        if spec is None:
+            raise ValueError(
+                f"fetch_daily_close_async only supports index symbols "
+                f"{sorted(_INDEX_CONTRACT_SPECS)}. Got: {symbol}"
+            )
+        contract = Index(symbol, *spec)
+
         try:
             contract = await self.manager.qualify_contract_async(contract)
-        except Exception as e:
+        except Exception:
             pass  # Index qualification might fail but data fetch often still works
-            
+
         return await self.manager.fetch_daily_close_async(contract)
 
     def fetch_daily_close(self, symbol: str) -> float:

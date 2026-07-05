@@ -60,7 +60,12 @@ load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 # Project imports
 from src.core.instrument_master import round_to_tick
 from src.features.alpha_factory import AlphaFactory
-from src.features.macro_features import MacroFeatureEngine, StaleDataException
+from src.features.macro_features import (
+    MacroFeatureEngine,
+    StaleDataException,
+    has_external_macro_features,
+    validate_external_macro_features,
+)
 from src.live_execution.strategy import Strategy, TradeSignal
 
 from src.live_execution.strategies.configurable_strategy import ConfigurableStrategy
@@ -214,10 +219,13 @@ class LiveTrader:
         # Strategy (owns model, config, threshold, sizing, bracket math)
         self.strategy = strategy
         self.feature_names: list[str] = strategy.feature_names
-        self._needs_macro: bool = any(
-            f.startswith(("MACRO_VIX", "MACRO_OVX", "MACRO_DXY",
-                          "MACRO_YIELD_CURVE", "MACRO_FED_FUNDS", "COT_"))
-            for f in self.feature_names
+        # T4: helper-based external-macro detection (instrument-independent,
+        # so it can run before context resolution). Extensionally identical
+        # to the legacy 6-prefix rule for CL/ES feature sets, adds exactly
+        # MACRO_GVZ_* for GC, and keeps AlphaFactory-internal
+        # MACRO_WIDTH_*/MACRO_POS_* excluded (D1).
+        self._needs_macro: bool = has_external_macro_features(
+            self.feature_names
         )
         self._last_macro_check_time: float = 0.0
         self._macro_daily_closes: dict[str, float] = {}
@@ -277,6 +285,17 @@ class LiveTrader:
         # consume; T1 wires nothing else through it.
         self._instrument_context = resolve_instrument_context(strategy_config)
         self._execution_symbol: str = self._instrument_context.execution_symbol
+        # T4 (D3): the model's feature_names are the ultimate contract —
+        # refuse to start when the model requires external macro/COT
+        # features this brain instrument cannot build (e.g. an ES config
+        # with MACRO_OVX_*). Raises HERE in __init__, before connect() /
+        # any network side-effect (connect happens in start()). Gated on
+        # _needs_macro so non-macro configs never consult the instrument's
+        # macro metadata.
+        if self._needs_macro:
+            validate_external_macro_features(
+                self.feature_names, self._instrument_context.brain_instrument
+            )
         # T2 (D3): all live data artifacts are keyed by the BRAIN symbol —
         # the cached/ledgered series IS the brain-stream continuous series,
         # so an MCL config legitimately shares CL's file set. CL derives
@@ -635,13 +654,25 @@ class LiveTrader:
             # Step 3: Qualify continuous contract (Brain stream) (Now handled by DataFeed)
 
             if self._needs_macro:
-                log.info("Fetching previous daily closes for macro indices (VIX, OVX)...")
-                for sym, alias in [("VIX", "VIX"), ("OVX", "OVX")]:
+                # T4 (D2): instrument-derived index fetch list, ordered
+                # ["VIX"] + [vol] so CL keeps today's exact ["VIX", "OVX"]
+                # byte-order (ES/ZC/ZS/SI -> ["VIX"], GC -> ["VIX", "GVZ"]).
+                # The symbol doubles as the _macro_daily_closes key AND the
+                # FRED column label _build_fred_features' live_overrides
+                # match against (registry invariant:
+                # live_vol_index == volatility_index.replace("CLS", "")).
+                vol = self._brain_instrument.live_vol_index
+                index_syms = ["VIX"] + ([vol] if vol != "VIX" else [])
+                log.info(
+                    "Fetching previous daily closes for macro indices (%s)...",
+                    ", ".join(index_syms),
+                )
+                for sym in index_syms:
                     try:
-                        self._macro_daily_closes[alias] = self.data_client.fetch_daily_close(sym)
+                        self._macro_daily_closes[sym] = self.data_client.fetch_daily_close(sym)
                     except Exception as e:
                         log.warning("Failed to fetch daily close for %s: %s", sym, e)
-                
+
                 log.info("Loaded macro daily closes: %s", self._macro_daily_closes)
 
             # Step 4: Resolve front-month contract (Hands stream)
@@ -693,11 +724,15 @@ class LiveTrader:
             if self._needs_macro:
                 log.info("Model uses external macro features — checking freshness...")
                 try:
-                    MacroFeatureEngine().refresh_if_stale()
+                    MacroFeatureEngine(
+                        instrument=self._brain_instrument
+                    ).refresh_if_stale()
                     # Also verify value-level freshness (file may be
                     # new but contain repeated data from FRED).
                     overrides = getattr(self, "_macro_daily_closes", {})
-                    MacroFeatureEngine()._build_fred_features(
+                    MacroFeatureEngine(
+                        instrument=self._brain_instrument
+                    )._build_fred_features(
                         live_overrides=overrides,
                         live_time=pd.Timestamp.now()
                     )
@@ -2021,7 +2056,11 @@ class LiveTrader:
                 lean=self._lean_features,
                 bar_size=self._bar_size,
                 macro_overrides={},  # no live overrides during warmup
-                return_last_n=N
+                return_last_n=N,
+                # T4: instrument only resolved when the feature list needs
+                # external macro data (non-macro configs never touch the
+                # instrument seam here).
+                instrument=self._brain_instrument if self._needs_macro else None,
             )
         except Exception as exc:
             log.warning("Warmup feature generation failed: %s", exc)
@@ -2110,6 +2149,29 @@ class LiveTrader:
             return ctx.brain_symbol
         from src.core.instrument_master import get_instrument
         return get_instrument(self._execution_symbol).micro_of or self._execution_symbol
+
+    @property
+    def _brain_instrument(self) -> "Instrument":
+        """Brain-stream registry Instrument (T4).
+
+        Drives the live macro path: the startup index daily-close fetch
+        list, the MacroFeatureEngine's per-symbol FRED/COT files, and the
+        buildable MACRO_*/COT_* name set (an MCL config uses CL's macro
+        set — macro features feed the MODEL, which is brain-keyed).
+
+        Prefers the resolved InstrumentContext (always set by __init__).
+        Falls back to the SAME structural derivation the resolver uses
+        (micro -> parent contract, outright -> itself, via _brain_symbol)
+        for test stubs built with object.__new__ that set only
+        _execution_symbol. This is structural derivation, NOT a silent CL
+        default — unknown symbols raise ValueError via get_instrument and
+        a missing seam raises AttributeError naming _execution_symbol.
+        """
+        ctx = getattr(self, "_instrument_context", None)
+        if ctx is not None:
+            return ctx.brain_instrument
+        from src.core.instrument_master import get_instrument
+        return get_instrument(self._brain_symbol)
 
     @property
     def _tick_size(self) -> float:
@@ -2859,11 +2921,15 @@ class LiveTrader:
                     macro_overrides = self._macro_daily_closes.copy()
 
             features = build_live_features(
-                ratio_adjusted_df, 
-                self.feature_names, 
-                lean=self._lean_features, 
+                ratio_adjusted_df,
+                self.feature_names,
+                lean=self._lean_features,
                 bar_size=stream,
-                macro_overrides=macro_overrides
+                macro_overrides=macro_overrides,
+                # T4: instrument only resolved when the feature list needs
+                # external macro data (non-macro configs never touch the
+                # instrument seam here).
+                instrument=self._brain_instrument if self._needs_macro else None,
             )
         except StaleDataException as exc:
             if not self._data_mute:
@@ -3746,13 +3812,17 @@ class LiveTrader:
                 self._last_macro_check_time = now
                 from src.features.macro_features import MacroFeatureEngine, StaleDataException
                 try:
-                    MacroFeatureEngine().refresh_if_stale()
+                    MacroFeatureEngine(
+                        instrument=self._brain_instrument
+                    ).refresh_if_stale()
                     # If refresh_if_stale succeeded, test if staleness
                     # has resolved by doing a trial feature build.
                     if self._data_mute:
                         try:
                             overrides = getattr(self, "_macro_daily_closes", {})
-                            MacroFeatureEngine()._build_fred_features(
+                            MacroFeatureEngine(
+                                instrument=self._brain_instrument
+                            )._build_fred_features(
                                 live_overrides=overrides,
                                 live_time=pd.Timestamp.now()
                             )

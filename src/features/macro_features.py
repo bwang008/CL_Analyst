@@ -42,6 +42,114 @@ CHANGE_WINDOWS = [1, 3, 7, 14, 35]
 # Percentile windows (in trading days) — floor at 14 for meaningful ranks
 PCTILE_WINDOWS = [14, 35, 60]
 
+# ---------------------------------------------------------------------------
+# Instrument-driven external-macro naming (T4 — single source of truth)
+# ---------------------------------------------------------------------------
+
+# AlphaFactory-computed internal macro prefixes (MACRO_WIDTH_*/MACRO_POS_*).
+# These are NOT file-backed — they must never be classified as external
+# FRED/COT features (D1: a naive MACRO_ prefix rule would misclassify
+# internal-macro-only models as needing FRED/COT files + index fetches).
+_INTERNAL_MACRO_PREFIXES = ("MACRO_POS_", "MACRO_WIDTH_")
+
+# Base FRED columns present in every per-symbol fred_macro_data_<sym>.csv
+# (scripts/download_macro_data.py base series map).
+_FRED_BASE_COLS = ("VIX", "DXY", "YIELD_CURVE", "FED_FUNDS")
+
+# The canonical 13 COT feature names emitted by _build_cot_features —
+# identical for every symbol (Disaggregated and TFF adapters both emit the
+# canonical Date,OI,MM_Net,Prod_Net,Spec_Net schema).
+_COT_FEATURE_NAMES = frozenset({
+    "COT_OI", "COT_OI_CHG_1W", "COT_OI_CHG_3W", "COT_OI_CHG_5W",
+    "COT_MM_NET", "COT_MM_NET_PCTILE_52W", "COT_MM_NET_PCTILE_14W",
+    "COT_MM_NET_PCTILE_35W", "COT_MM_MOMENTUM_4W",
+    "COT_PROD_NET", "COT_PROD_NET_PCTILE_52W",
+    "COT_SPEC_NET", "COT_SPEC_NET_PCTILE_52W",
+})
+
+
+def vol_label_for(instrument) -> str:
+    """FRED column label for the instrument's volatility index.
+
+    In lockstep with scripts/download_macro_data.py label derivation
+    (``volatility_index.replace("CLS", "")``) — the registry invariant
+    ``live_vol_index == volatility_index.replace("CLS", "")`` makes this
+    label double as the IB index fetch symbol and the live-override key.
+    """
+    return instrument.volatility_index.replace("CLS", "")
+
+
+def is_external_macro_feature(name: str) -> bool:
+    """True when *name* is an external (file-backed FRED/COT) macro feature.
+
+    Internal AlphaFactory-computed MACRO_WIDTH_*/MACRO_POS_* names are
+    excluded (D1) — they need no FRED/COT files or index fetches.
+    """
+    return name.startswith(("MACRO_", "COT_")) and not name.startswith(
+        _INTERNAL_MACRO_PREFIXES
+    )
+
+
+def has_external_macro_features(feature_names) -> bool:
+    """True when any feature in *feature_names* needs external FRED/COT data."""
+    return any(is_external_macro_feature(f) for f in feature_names)
+
+
+def external_macro_feature_names(instrument) -> frozenset:
+    """Exact FRED+COT feature names buildable for *instrument*.
+
+    Mirrors the name construction of ``_build_fred_features`` (instrument-
+    driven vol label, deduped for VIX-proxy symbols) and
+    ``_build_cot_features`` (canonical 13 names, symbol-independent).
+    """
+    vol_label = vol_label_for(instrument)
+    names: set[str] = set()
+    for col in dict.fromkeys(["VIX", vol_label, "DXY", "YIELD_CURVE"]):
+        names.add(f"MACRO_{col}")
+        for w in CHANGE_WINDOWS:
+            names.add(f"MACRO_{col}_CHG_{w}D")
+        for w in PCTILE_WINDOWS:
+            names.add(f"MACRO_{col}_PCTILE_{w}D")
+    if vol_label != "VIX":
+        names.add(f"MACRO_VIX_{vol_label}_RATIO")
+    names.add("MACRO_YIELD_CURVE_SIGN")
+    names.add("MACRO_FED_FUNDS")
+    return frozenset(names | _COT_FEATURE_NAMES)
+
+
+def validate_external_macro_features(feature_names, instrument) -> None:
+    """Raise ValueError listing every external-macro-shaped feature in
+    *feature_names* that is not buildable for *instrument*.
+
+    Exact-name enumeration (not prefixes) — e.g. ``MACRO_VIX_GVZ_RATIO``
+    starts with ``MACRO_VIX`` but is NOT buildable for ES and must be
+    rejected. No-op when every external-shaped feature is buildable.
+    """
+    buildable = external_macro_feature_names(instrument)
+    bad = sorted(
+        f for f in feature_names
+        if is_external_macro_feature(f) and f not in buildable
+    )
+    if not bad:
+        return
+    sym = instrument.symbol
+    vol_label = vol_label_for(instrument)
+    # Dedupe vol-label stems for VIX-proxy symbols (reviewer condition 4):
+    # MACRO_VIX* and MACRO_{vol_label}* are the same stem when vol == VIX.
+    stems = dict.fromkeys(
+        [f"MACRO_VIX*", f"MACRO_{vol_label}*", "MACRO_DXY*",
+         "MACRO_YIELD_CURVE*"]
+    )
+    stems_str = ", ".join(stems)
+    raise ValueError(
+        f"Model requires external macro/COT features unavailable for "
+        f"instrument '{sym}' (FRED vol column '{vol_label}' from "
+        f"{instrument.volatility_index}): {bad}. "
+        f"Buildable stems for {sym}: {stems_str}, MACRO_FED_FUNDS, COT_*. "
+        f"This model was trained on a different instrument's macro set — "
+        f"refusing to start."
+    )
+
 # Series that must change between consecutive trading days.
 # If any of these have identical values for >= the per-series threshold
 # consecutive days at the tail, StaleDataException is raised.
@@ -111,10 +219,21 @@ class MacroFeatureEngine:
 
     Parameters
     ----------
+    instrument : Instrument or None
+        Registry instrument driving per-symbol file resolution and the
+        vol-column label. ``None -> CL`` is a DOCUMENTED legacy-training
+        shim (Q2, t4-macro-vol-parameterization) kept for the bare
+        ``data_processor.py`` call sites until T8 migrates them. The LIVE
+        boundary never relies on it: ``build_live_features`` raises when
+        external macro is needed and no instrument was passed, and
+        ``live_trader`` always constructs engines with
+        ``instrument=self._brain_instrument``.
     fred_path : Path or None
-        Path to ``fred_macro_data.csv``.  Auto-resolved via data_paths if None.
+        Path to ``fred_macro_data_<sym>.csv``.  Auto-resolved via
+        data_paths if None.
     cot_path : Path or None
-        Path to ``cftc_cot_crude_oil.csv``.  Auto-resolved via data_paths if None.
+        Path to ``cftc_cot_<sym>.csv``.  Auto-resolved via data_paths
+        if None.
     """
 
     def __init__(
@@ -124,8 +243,9 @@ class MacroFeatureEngine:
         cot_path: Path | str | None = None,
     ):
         from src.core.instrument_master import get_instrument
+        # Q2: None -> CL is a training-only shim — see class docstring.
         self.instrument = instrument if instrument else get_instrument("CL")
-        
+
         # Paths resolve dynamically based on symbol
         self.fred_path = Path(fred_path) if fred_path else get_data_path(f"raw/macro/fred_macro_data_{self.instrument.symbol.lower()}.csv")
         self.cot_path = Path(cot_path) if cot_path else get_data_path(f"raw/macro/cftc_cot_{self.instrument.symbol.lower()}.csv")
@@ -247,7 +367,8 @@ class MacroFeatureEngine:
         if not self.fred_path.exists():
             raise FileNotFoundError(
                 f"FRED macro data not found at {self.fred_path}.\n"
-                "Run: python scripts/download_macro_data.py --fred-only"
+                f"Run: python scripts/download_macro_data.py "
+                f"--symbol {self.instrument.symbol} --fred-only"
             )
 
         df = pd.read_csv(self.fred_path, parse_dates=["Date"])
@@ -263,7 +384,8 @@ class MacroFeatureEngine:
         if not self.cot_path.exists():
             raise FileNotFoundError(
                 f"CFTC COT data not found at {self.cot_path}.\n"
-                "Run: python scripts/download_macro_data.py --cot-only"
+                f"Run: python scripts/download_macro_data.py "
+                f"--symbol {self.instrument.symbol} --cot-only"
             )
 
         df = pd.read_csv(self.cot_path, parse_dates=["Date"])
@@ -452,22 +574,30 @@ class MacroFeatureEngine:
 
         features = pd.DataFrame(index=df.index)
 
-        # Process each signal
-        vol_label = "OVX"  # Fallback
-        if hasattr(self, "instrument"):
-            # Depending on if we imported Instrument
-            # Instrument doesn't have a vol_label attribute in the schema, it has volatility_index
-            # Let's map volatility_index to label here or pass it.
-            # In the original plan, the schema had vol_label. In Instrument it has volatility_index.
-            # Let's dynamically find the vol column (it's the one that isn't VIX, DXY, YIELD_CURVE, FED_FUNDS)
-            # Or we can just use the instrument.volatility_index mapping.
-            # Wait, download_macro_data maps VIXCLS -> VIX, OVXCLS -> OVX.
-            pass
+        # Instrument-driven vol label (D4, t4-macro-vol-parameterization):
+        # the registry — not file-content sniffing — decides which vol
+        # column this instrument uses. Output-identical for every real
+        # file shape (CL->OVX, GC->GVZ, ES/ZC/ZS/SI->VIX deduped).
+        vol_label = vol_label_for(self.instrument)
 
-        vol_cols = [c for c in df.columns if c not in ["VIX", "DXY", "YIELD_CURVE", "FED_FUNDS"]]
-        vol_label = vol_cols[0] if vol_cols else "OVX"
+        # Q1 (Manager-ACKed, no-silent-defaults): the FRED file MUST carry
+        # the instrument's vol column. A missing column means the file was
+        # generated for a different instrument (misprovisioning) — hard-raise
+        # instead of the legacy warn-skip -> downstream missing column ->
+        # silent no-trade.
+        if vol_label not in df.columns:
+            raise ValueError(
+                f"FRED macro file {self.fred_path} is missing required "
+                f"column '{vol_label}' for instrument "
+                f"'{self.instrument.symbol}' "
+                f"(volatility_index={self.instrument.volatility_index}). "
+                f"Regenerate: python scripts/download_macro_data.py "
+                f"--symbol {self.instrument.symbol} --fred-only"
+            )
 
-        for col in ["VIX", vol_label, "DXY", "YIELD_CURVE"]:
+        # Dedup for VIX-proxy symbols (vol_label == "VIX") so no column is
+        # processed twice and no spurious skip-warning is emitted.
+        for col in dict.fromkeys(["VIX", vol_label, "DXY", "YIELD_CURVE"]):
             if col not in df.columns:
                 log.warning("FRED column '%s' not found — skipping", col)
                 continue

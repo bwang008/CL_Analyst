@@ -20,6 +20,7 @@ import pandas as pd
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
+from src.core.instrument_master import get_instrument
 from src.features.alpha_factory import AlphaFactory
 from src.live_execution.feature_pipeline import build_live_features
 
@@ -205,6 +206,7 @@ def compute_livetest_features(ohlcv: pd.DataFrame,
         feature_names,
         lean=False,
         bar_size="1h",
+        instrument=get_instrument("CL"),
     )
 
     if result is None:

@@ -19,7 +19,12 @@ import numpy as np
 import pandas as pd
 
 from src.features.alpha_factory import AlphaFactory
-from src.features.macro_features import MacroFeatureEngine, StaleDataException
+from src.features.macro_features import (
+    MacroFeatureEngine,
+    StaleDataException,
+    has_external_macro_features,
+    is_external_macro_feature,
+)
 
 log = logging.getLogger("LiveTrader")
 
@@ -106,6 +111,8 @@ def build_live_features(
     bar_size: str = "5m",
     macro_overrides: dict[str, float] | None = None,
     return_last_n: int = 1,
+    *,
+    instrument=None,
 ) -> pd.DataFrame | None:
     """
     Generate features from a rolling OHLCV DataFrame for live inference.
@@ -126,6 +133,12 @@ def build_live_features(
         feature_names: The exact list of feature column names the model expects.
         lean: Whether to generate only momentum + time features (faster).
         bar_size: The timeframe of the input df ("5m" or "1h").
+        instrument: Registry Instrument driving the MacroFeatureEngine's
+            per-symbol FRED/COT files and vol label. REQUIRED when
+            feature_names contains external macro/COT features (raises
+            ValueError otherwise — no silent CL default). Ignored for
+            internal-only (MACRO_WIDTH_*/MACRO_POS_*) and non-macro
+            feature lists, keeping non-macro callers backward compatible.
 
     Returns:
         Single-row DataFrame with the model's expected features,
@@ -246,18 +259,29 @@ def build_live_features(
             factory.add_stochastic_cluster(window=window)
         work = factory.df
 
-    # 2c. Merge external macro data (FRED + COT) if model expects it
-    _has_external_macro = any(
-        f.startswith(("MACRO_VIX", "MACRO_OVX", "MACRO_DXY",
-                      "MACRO_YIELD_CURVE", "MACRO_FED_FUNDS", "COT_"))
-        for f in feature_names
-    )
+    # 2c. Merge external macro data (FRED + COT) if model expects it.
+    # T4: helper-based classification replaces the hardcoded prefix list —
+    # extensionally identical for CL/ES feature sets, adds MACRO_GVZ_* for
+    # GC, and excludes AlphaFactory-internal MACRO_WIDTH_*/MACRO_POS_* (D1).
+    _has_external_macro = has_external_macro_features(feature_names)
     if _has_external_macro:
+        if instrument is None:
+            _first = next(
+                f for f in feature_names if is_external_macro_feature(f)
+            )
+            # No silent CL default: raise BEFORE any engine construction
+            # or file I/O.
+            raise ValueError(
+                f"build_live_features: model requires external macro/COT "
+                f"features (e.g. '{_first}') but no instrument was passed "
+                f"— no silent CL default. Pass "
+                f"instrument=get_instrument('<SYM>')."
+            )
         try:
             live_time = work.index[-1] if not work.empty else None
-            work = MacroFeatureEngine().merge_all(
-                work, 
-                live_overrides=macro_overrides, 
+            work = MacroFeatureEngine(instrument=instrument).merge_all(
+                work,
+                live_overrides=macro_overrides,
                 live_time=live_time
             )
         except StaleDataException:

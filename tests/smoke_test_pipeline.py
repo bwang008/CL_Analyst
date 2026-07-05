@@ -55,6 +55,7 @@ sys.path.insert(0, str(_project_root))
 from dotenv import load_dotenv
 load_dotenv(_project_root / ".env")
 
+from src.core.instrument_master import get_instrument
 from src.data_paths import get_data_path, get_data_root, get_reports_root
 from src.live_execution.live_trader import build_live_features
 from src.live_execution.strategies.configurable_strategy import ConfigurableStrategy
@@ -397,7 +398,10 @@ def stage_3_train_serve_parity(strategy_config_path: Path) -> tuple[bool, list[f
             rolling_df = df[df.index <= bar_time].tail(5000)
 
             t0 = time.perf_counter()
-            live_features = build_live_features(rolling_df, feature_names, bar_size="1h")
+            live_features = build_live_features(
+                rolling_df, feature_names, bar_size="1h",
+                instrument=get_instrument("CL"),
+            )
             latency = time.perf_counter() - t0
             latencies.append(latency)
 

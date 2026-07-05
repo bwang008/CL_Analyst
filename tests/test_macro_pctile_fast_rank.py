@@ -139,6 +139,9 @@ def _make_engine(fred_df: pd.DataFrame | None = None,
     engine._cot_df = cot_df
     engine.instrument = MagicMock()
     engine.instrument.symbol = "CL"
+    # T4: vol_label_for(instrument) derives the vol column from
+    # volatility_index — a bare MagicMock attribute would break matching.
+    engine.instrument.volatility_index = "OVXCLS"
     return engine
 
 

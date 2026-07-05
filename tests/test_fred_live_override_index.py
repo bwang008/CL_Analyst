@@ -57,6 +57,9 @@ def _make_engine_with_mock_fred(fred_df: pd.DataFrame) -> MacroFeatureEngine:
     engine._cot_df = None
     engine.instrument = MagicMock()
     engine.instrument.symbol = "CL"
+    # T4: vol_label_for(instrument) derives the vol column from
+    # volatility_index — a bare MagicMock attribute would break matching.
+    engine.instrument.volatility_index = "OVXCLS"
     return engine
 
 
