@@ -28,27 +28,90 @@ cleanup() {
         echo "============================================================" | tee -a "$LOG"
         echo " TRAP TRIGGERED: Script exited with code $exit_code" | tee -a "$LOG"
         echo "============================================================" | tee -a "$LOG"
-        
-        # Send Telegram alert
+
+        # --- Root-cause extraction --------------------------------------
+        # The fatal error is often hundreds of lines above the tail (e.g. an
+        # early ModuleNotFoundError that only surfaces at the end as
+        # "0 pairs"). Pull the LAST Python traceback plus FATAL/ERROR lines
+        # so the alert carries the reason, not just the symptom.
+        ERR_SUMMARY=$(python3 - "$LOG" <<'PYEOF'
+import re, sys
+
+try:
+    lines = open(sys.argv[1], errors="replace").read().splitlines()
+except OSError as e:
+    print(f"(could not read log: {e})")
+    raise SystemExit
+
+picked = []
+tb_start = None
+for i in range(len(lines) - 1, -1, -1):
+    if lines[i].startswith("Traceback (most recent call last)"):
+        tb_start = i
+        break
+if tb_start is not None:
+    picked += ["-- last traceback --"] + lines[tb_start:tb_start + 15]
+
+pat = re.compile(r"FATAL|MANIFEST ERROR|ModuleNotFoundError|ERROR|Exception|No such file", re.I)
+skip = re.compile(r"^\s*(File |Traceback)")
+errs = []
+seen = set()
+for l in lines:
+    if pat.search(l) and not skip.match(l):
+        s = l.strip()[:200]
+        if s not in seen:
+            seen.add(s)
+            errs.append(s)
+if errs:
+    head = errs[:3]
+    tail = [e for e in errs[-5:] if e not in head]
+    mid = ["..."] if len(errs) > 8 else []
+    picked += ["-- error lines (first->last) --"] + head + mid + tail
+
+out = "\n".join(picked) if picked else "(no error pattern found; see full log)"
+print(out[:2500])
+PYEOF
+) || ERR_SUMMARY="(root-cause extraction failed; see full log)"
+
+        # --- Persist evidence BEFORE alerting/self-deleting --------------
+        GCS_LOG_PATH="(unknown)"
+        if [ -n "$GCS_OPT_PREFIX" ] && [ -n "$LOG" ]; then
+            GCS_LOG_PATH="$BUCKET/$GCS_OPT_PREFIX/logs/$(basename "$LOG")"
+            gsutil cp "$LOG" "$BUCKET/$GCS_OPT_PREFIX/logs/" 2>/dev/null || GCS_LOG_PATH="(log upload FAILED)"
+            {
+                echo "EXIT CODE: $exit_code"
+                echo "BATCH: $BATCH_ID"
+                echo "FULL LOG: $GCS_LOG_PATH"
+                echo ""
+                echo "ROOT-CAUSE SUMMARY:"
+                echo "$ERR_SUMMARY"
+            } > /tmp/CRASH_REPORT.txt
+            gsutil cp /tmp/CRASH_REPORT.txt "$BUCKET/$GCS_OPT_PREFIX/CRASH_REPORT.txt" 2>/dev/null || true
+        fi
+
+        # --- Telegram alert with the REASON and the persisted log path ---
         python3 -c "
-import os, sys, urllib.request, json
+import html, sys, urllib.request, json
 try:
     with open('/home/$(whoami)/project/.env') as f:
         env = dict(line.strip().split('=', 1) for line in f if '=' in line and not line.startswith('#'))
     token = env.get('TELEGRAM_BOT_TOKEN')
     chat_id = env.get('TELEGRAM_CHAT_ID')
     if token and chat_id:
-        batch = sys.argv[4] if len(sys.argv) > 4 else 'unknown'
-        msg = f'🚨 <b>[VM CRASH] Post-Optimizer</b>\nBatch: <code>{batch}</code>\nExit Code: {sys.argv[2]}\n\n<b>Log Tail:</b>\n<pre>{sys.argv[3]}</pre>'
-        req = urllib.request.Request(f'https://api.telegram.org/bot{token}/sendMessage', 
-            data=json.dumps({'chat_id': chat_id, 'text': msg, 'parse_mode': 'HTML'}).encode('utf-8'),
+        exit_code, summary, batch, gcs_log = sys.argv[1:5]
+        msg = (f'🚨 <b>[VM CRASH] Post-Optimizer</b>\nBatch: <code>{html.escape(batch)}</code>\n'
+               f'Exit Code: {html.escape(exit_code)}\n\n'
+               f'<b>Root cause:</b>\n<pre>{html.escape(summary[:2800])}</pre>\n\n'
+               f'Full log: <code>{html.escape(gcs_log)}</code>')
+        req = urllib.request.Request(f'https://api.telegram.org/bot{token}/sendMessage',
+            data=json.dumps({'chat_id': chat_id, 'text': msg[:4000], 'parse_mode': 'HTML'}).encode('utf-8'),
             headers={'Content-Type': 'application/json'})
         urllib.request.urlopen(req, timeout=10)
 except Exception as e:
     print('Failed to send telegram:', e)
-" "$0" "$exit_code" "$(tail -n 15 "$LOG" 2>/dev/null)" "$BATCH_ID" || true
+" "$exit_code" "$ERR_SUMMARY" "$BATCH_ID" "$GCS_LOG_PATH" || true
     fi
-    
+
     # Upload logs before dying
     if [ -n "$GCS_OPT_PREFIX" ] && [ -n "$LOG" ]; then
         echo "Uploading final logs to gs://$BUCKET/$GCS_OPT_PREFIX/logs/"

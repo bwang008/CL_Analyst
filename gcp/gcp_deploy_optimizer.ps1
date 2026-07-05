@@ -353,6 +353,27 @@ Write-Host "[7/7] Monitoring GCS for completed reports..." -ForegroundColor Cyan
 Write-Host "  Polling every 2 minutes. Press Ctrl+C to stop monitoring (VM continues running)."
 Write-Host ""
 
+# Fetch the crash reason the VM trap persisted to GCS before self-deleting
+# (CRASH_REPORT.txt; falls back to error lines from the newest uploaded log).
+# Without this, a failed run only reports "no reports found" with no cause.
+function Get-CrashReason {
+    $crashLocal = Join-Path $env:TEMP "crash_report_$BatchId.txt"
+    Remove-Item $crashLocal -Force -ErrorAction SilentlyContinue
+    gsutil cp "$Bucket/$GcsOptPrefix/CRASH_REPORT.txt" $crashLocal 2>$null
+    if (Test-Path $crashLocal) { return (Get-Content $crashLocal -Raw) }
+    $latestLog = gsutil ls "$Bucket/$GcsOptPrefix/logs/" 2>$null | Select-Object -Last 1
+    if ($latestLog) {
+        $logLocal = Join-Path $env:TEMP "postopt_lastlog_$BatchId.log"
+        gsutil cp "$latestLog" $logLocal 2>$null
+        if (Test-Path $logLocal) {
+            $errLines = Select-String -Path $logLocal -Pattern "FATAL|MANIFEST ERROR|ModuleNotFoundError|ERROR|Exception" |
+                Select-Object -Last 8 | ForEach-Object { $_.Line.Trim() }
+            if ($errLines) { return "(extracted from $latestLog)`n" + ($errLines -join "`n") }
+        }
+    }
+    return "(no CRASH_REPORT.txt or error lines found under $Bucket/$GcsOptPrefix/)"
+}
+
 $pollInterval = 120  # seconds
 $pollCount = 0
 
@@ -450,7 +471,11 @@ while ($true) {
             } else {
                 Write-Host ""
                 Write-Host "  ERROR: VM $vmStatusStr but no optimized report found on GCS!" -ForegroundColor Red
-                Send-TelegramAlert "[ERROR] Post-Optimizer VM $vmStatusStr but no reports found`nBatch: $BatchId`nGCS: $Bucket/$GcsOptPrefix/"
+                $crashReason = Get-CrashReason
+                Write-Host "  Crash reason:" -ForegroundColor Red
+                Write-Host $crashReason -ForegroundColor Red
+                $reasonShort = $crashReason.Substring(0, [Math]::Min(1500, $crashReason.Length))
+                Send-TelegramAlert "[ERROR] Post-Optimizer VM $vmStatusStr but no reports found`nBatch: $BatchId`nReason:`n$reasonShort`nGCS: $Bucket/$GcsOptPrefix/"
                 exit 1
             }
         } else {
@@ -463,7 +488,11 @@ while ($true) {
         $finalCheck = gsutil ls "$Bucket/$GcsOptPrefix/batch_summary_optimized_*.md" 2>$null
         if (!$finalCheck) {
             Write-Host "  ERROR: VM deleted but no reports found on GCS!" -ForegroundColor Red
-            Send-TelegramAlert "[ERROR] Post-Optimizer VM deleted but no reports found`nBatch: $BatchId`nGCS: $Bucket/$GcsOptPrefix/"
+            $crashReason = Get-CrashReason
+            Write-Host "  Crash reason:" -ForegroundColor Red
+            Write-Host $crashReason -ForegroundColor Red
+            $reasonShort = $crashReason.Substring(0, [Math]::Min(1500, $crashReason.Length))
+            Send-TelegramAlert "[ERROR] Post-Optimizer VM deleted but no reports found`nBatch: $BatchId`nReason:`n$reasonShort`nGCS: $Bucket/$GcsOptPrefix/"
             exit 1
         }
         continue  # Will download on next iteration
