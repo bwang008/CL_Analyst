@@ -1868,7 +1868,10 @@ def main() -> None:
         "--slippage-per-side", type=float, default=0.01, help="Slippage per side"
     )
     parser.add_argument(
-        "--contract-multiplier", type=float, default=1000.0, help="CL multiplier"
+        "--contract-multiplier", type=float, default=None,
+        help="Dollar value per 1.0 price move. Default: resolved from the "
+             "config's execution_symbol via the instrument registry "
+             "(CL resolves to 1000.0); legacy 1000.0 when no config/symbol."
     )
     parser.add_argument(
         "--report-file", default=None,
@@ -1901,6 +1904,22 @@ def main() -> None:
         from src.live_execution.config_loader import load_strategy_config
         strategy_cfg = load_strategy_config(args.config)
 
+        # Resolve contract multiplier: explicit CLI flag wins; otherwise the
+        # config's execution_symbol via the instrument registry (CL -> 1000.0,
+        # byte-identical to the legacy default); legacy 1000.0 + warning when
+        # the config predates symbol stamping.
+        if args.contract_multiplier is None:
+            _cfg_symbol = strategy_cfg.get("execution_symbol")
+            if _cfg_symbol:
+                from src.core.instrument_master import dollars_per_point
+                args.contract_multiplier = dollars_per_point(_cfg_symbol)
+                print(f"Contract multiplier: {args.contract_multiplier} $/pt "
+                      f"(resolved from execution_symbol={_cfg_symbol})")
+            else:
+                args.contract_multiplier = 1000.0
+                print("WARNING: no --contract-multiplier and no execution_symbol "
+                      "in config — falling back to legacy CL 1000.0 $/pt.")
+
         bt = BacktestEngine.from_config(
             strategy_cfg,
             commission_per_side=args.commission_per_side,
@@ -1930,6 +1949,8 @@ def main() -> None:
         strategy_cfg = strategy_cfg  # already loaded
     else:
         strategy_cfg = None  # no config provided
+        if args.contract_multiplier is None:
+            args.contract_multiplier = 1000.0  # legacy CL default (no config to resolve from)
         bt = BacktestEngine(
             tp_atr_mult=args.tp_mult,
             sl_atr_mult=args.sl_mult,

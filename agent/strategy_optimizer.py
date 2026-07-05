@@ -886,6 +886,27 @@ def _compute_objective_score(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_symbol_economics(
+    symbol: str | None,
+    slippage_per_side: float | None,
+) -> tuple[float | None, float | None]:
+    """Resolve (contract_multiplier, slippage_per_side) for a symbol.
+
+    symbol=None preserves legacy behavior exactly (engine default 1000 $/pt,
+    slippage passed through untouched). With a symbol, dollars-per-point comes
+    from the instrument registry, and a missing slippage falls back to the
+    instrument's 1-tick default. CL resolves to (1000.0, 0.01) — byte-identical
+    to the legacy constants (ledger-parity gate).
+    """
+    if not symbol:
+        return None, slippage_per_side
+    from src.core.instrument_master import dollars_per_point, default_slippage_points
+    mult = dollars_per_point(symbol)
+    if slippage_per_side is None:
+        slippage_per_side = default_slippage_points(symbol)
+    return mult, slippage_per_side
+
+
 def make_objective(
     base_cfg: dict,
     predictions_df: pd.DataFrame,
@@ -896,6 +917,7 @@ def make_objective(
     objective_metric: str = "sharpe",
     optimize_side: str | None = None,
     slippage_per_side: float | None = None,
+    contract_multiplier: float | None = None,
 ):
     """Create a closure that Optuna can call with trial params.
 
@@ -991,7 +1013,9 @@ def make_objective(
         overrides = {}
         if slippage_per_side is not None:
             overrides["slippage_per_side"] = slippage_per_side
-            
+        if contract_multiplier is not None:
+            overrides["contract_multiplier"] = contract_multiplier
+
         engine = BacktestEngine.from_config(cfg, **overrides)
         result = engine.run(predictions_df, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df)
 
@@ -1077,6 +1101,7 @@ def run_optimization(
     exec_ohlcv_path: str | None = None,
     slippage_per_side: float | None = None,
     random_seed: int = 42,
+    symbol: str | None = None,
 ) -> tuple[dict, BacktestResult]:
     """Run strategy parameter optimization.
 
@@ -1086,6 +1111,9 @@ def run_optimization(
             Falls back to config key ``holdout_months`` when *None*.
         objective_metric: "sharpe" or "sortino".
         optimize_side: "long", "short", or None (both sides / ensemble).
+        symbol: Instrument symbol for economics resolution (contract
+            multiplier + default 1-tick slippage). None = legacy CL-econ
+            behavior (engine default 1000 $/pt).
 
     Returns:
         Tuple of (best_config, best_result).  Holdout metrics (if any)
@@ -1119,12 +1147,16 @@ def run_optimization(
 
     obj_str = "Annualized Monthly Sortino" if objective_metric == "sortino" else "Annualized Monthly Sharpe"
 
+    contract_multiplier, slippage_per_side = _resolve_symbol_economics(symbol, slippage_per_side)
+
     print("=" * 70)
     print(f"STRATEGY PARAMETER OPTIMIZATION: {model_name}")
     print(f"  Config: {config_path}")
     print(f"  Trials: {n_trials}")
     print(f"  Mode: {mode_str}")
     print(f"  Objective: {obj_str}")
+    if symbol:
+        print(f"  Economics: symbol={symbol}  $/pt={contract_multiplier}  slippage/side={slippage_per_side}")
     print("=" * 70)
 
     # Resolve OHLCV
@@ -1190,7 +1222,9 @@ def run_optimization(
     overrides = {}
     if slippage_per_side is not None:
         overrides["slippage_per_side"] = slippage_per_side
-        
+    if contract_multiplier is not None:
+        overrides["contract_multiplier"] = contract_multiplier
+
     baseline_engine = BacktestEngine.from_config(baseline_cfg, **overrides)
     baseline_result = baseline_engine.run(predictions_df, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df, label="Baseline")
     baseline_metrics = extract_metrics(baseline_result)
@@ -1205,7 +1239,8 @@ def run_optimization(
     tracker = TopKTracker(k=5, save_dir="configs/strategies/candidates")
     objective = make_objective(
         base_cfg, predictions_df, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df, best_tracker=best_result_tracker, tracker=tracker,
-        objective_metric=objective_metric, optimize_side=optimize_side, slippage_per_side=slippage_per_side
+        objective_metric=objective_metric, optimize_side=optimize_side, slippage_per_side=slippage_per_side,
+        contract_multiplier=contract_multiplier,
     )
 
     db_hash = hashlib.md5(f"strategy_opt_{model_name}_{objective_metric}".encode()).hexdigest()[:8]
@@ -1469,6 +1504,7 @@ def run_hybrid_optimization(
     slippage_per_side: float | None = None,
     vbt_top_n: int = 20,
     random_seed: int = 42,
+    symbol: str | None = None,
 ) -> tuple[dict, BacktestResult]:
     """Two-Stage Hybrid optimizer: vectorbt pre-screen → Optuna warm-start.
 
@@ -1587,9 +1623,15 @@ def run_hybrid_optimization(
         if other_side in baseline_cfg and "tiers" in baseline_cfg[other_side]:
             for tier in baseline_cfg[other_side]["tiers"]:
                 tier["min_prob"] = 1.0
+    contract_multiplier, slippage_per_side = _resolve_symbol_economics(symbol, slippage_per_side)
+    if symbol:
+        print(f"  Economics: symbol={symbol}  $/pt={contract_multiplier}  slippage/side={slippage_per_side}")
+
     overrides = {}
     if slippage_per_side is not None:
         overrides["slippage_per_side"] = slippage_per_side
+    if contract_multiplier is not None:
+        overrides["contract_multiplier"] = contract_multiplier
 
     baseline_engine = BacktestEngine.from_config(baseline_cfg, **overrides)
     baseline_result = baseline_engine.run(predictions_df, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df, label="Baseline")
@@ -1609,6 +1651,7 @@ def run_hybrid_optimization(
             optimize_side=optimize_side,
             objective_metric=objective_metric,
             top_n=vbt_top_n,
+            contract_multiplier=contract_multiplier if contract_multiplier is not None else 1000.0,
         )
         print(f"  Stage 1 complete: {len(stage1_configs)} configs to warm-start")
     else:
@@ -1627,6 +1670,7 @@ def run_hybrid_optimization(
         base_cfg, predictions_df, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df, best_tracker=best_result_tracker,
         tracker=tracker, objective_metric=objective_metric,
         optimize_side=optimize_side, slippage_per_side=slippage_per_side,
+        contract_multiplier=contract_multiplier,
     )
 
     db_hash = hashlib.md5(f"hybrid_opt_{model_name}_{objective_metric}".encode()).hexdigest()[:8]

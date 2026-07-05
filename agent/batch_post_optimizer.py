@@ -332,6 +332,7 @@ def run_single_optimization(
     exec_ohlcv_path: str | None = None,
     slippage_per_side: float | None = None,
     random_seed: int | None = None,
+    symbol: str | None = None,
 ) -> dict:
     """Run strategy_optimizer on a single config and return results."""
     # Suppress per-worker Telegram notifications — the batch orchestrator
@@ -359,6 +360,7 @@ def run_single_optimization(
             exec_ohlcv_path=exec_ohlcv_path,
             slippage_per_side=slippage_per_side,
             random_seed=random_seed,
+            symbol=symbol,
         )
         best_metrics = extract_metrics(best_result)
         return {
@@ -906,6 +908,7 @@ def _run_all_objectives_concurrent(
                     exec_ohlcv_path=args.exec_data,
                     slippage_per_side=args.slippage_per_side,
                     random_seed=args.random_seed,
+                    symbol=args.resolved_symbol,
                 )
                 futures[future] = (task_key, merged_path, label, metric, side, obj_metric)
 
@@ -940,6 +943,7 @@ def _run_all_objectives_concurrent(
                 exec_ohlcv_path=args.exec_data,
                 slippage_per_side=args.slippage_per_side,
                 random_seed=args.random_seed,
+                symbol=args.resolved_symbol,
             )
             results_by_objective[obj_metric][task_key] = result
             _completed_count += 1
@@ -976,6 +980,12 @@ def main():
     parser.add_argument("--min-trades", type=int, default=10, help="Min trades for valid trial")
     parser.add_argument("--exec-data", default=None, help="Optional: path to raw unadjusted execution data")
     parser.add_argument("--slippage-per-side", type=float, default=None, help="Slippage to apply per side in points")
+    parser.add_argument(
+        "--symbol", default=None,
+        help="Instrument symbol for economics resolution (contract multiplier + "
+             "1-tick default slippage). Defaults to the batch manifest's "
+             "baseline.symbol; FAILS if neither is available (no silent CL default)."
+    )
     parser.add_argument(
         "--random-seed", type=int, required=True,
         help="Global RNG seed threaded to strategy_optimizer (Optuna sampler/LightGBM/numpy). "
@@ -1025,6 +1035,35 @@ def main():
         manifest_path = os.path.join(PROJECT_ROOT, manifest_path)
     ohlcv_path = find_ohlcv_path(manifest_path)
     print(f"OHLCV data: {ohlcv_path}")
+
+    # ── Resolve instrument symbol for economics (multiplier + tick slippage) ──
+    # Manifest baseline.symbol is the source of truth; --symbol overrides.
+    # House rule: no silent CL default — fail loud if unresolvable.
+    resolved_symbol = args.symbol
+    if not resolved_symbol and os.path.exists(manifest_path):
+        try:
+            with open(manifest_path, encoding="utf-8-sig") as f:
+                _manifest = json.load(f)
+            resolved_symbol = _manifest.get("baseline", {}).get("symbol")
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"  WARNING: could not read manifest for symbol resolution: {e}")
+    if not resolved_symbol:
+        print(
+            "FATAL: cannot resolve instrument symbol — manifest has no "
+            "baseline.symbol and no --symbol was given. Refusing to default "
+            "to CL economics; pass --symbol explicitly (e.g. --symbol CL)."
+        )
+        sys.exit(1)
+    from src.core.instrument_master import dollars_per_point, default_slippage_points
+    _mult = dollars_per_point(resolved_symbol)  # fail-fast on unknown symbol
+    _tick_slip = default_slippage_points(resolved_symbol)
+    _eff_slip = args.slippage_per_side if args.slippage_per_side is not None else _tick_slip
+    args.resolved_symbol = resolved_symbol
+    print(f"Economics: symbol={resolved_symbol}  $/pt={_mult}  slippage/side={_eff_slip}"
+          f"{' (1-tick default)' if args.slippage_per_side is None else ' (manifest/CLI)'}")
+    if args.slippage_per_side is not None and args.slippage_per_side < 0.5 * _tick_slip:
+        print(f"  WARNING: slippage {args.slippage_per_side} is under half a tick "
+              f"({_tick_slip} for {resolved_symbol}) — costs likely understated.")
 
     # Patch strategy_optimizer min_sharpe threshold if --no-filter
     import agent.strategy_optimizer as so
