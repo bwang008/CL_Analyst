@@ -1243,7 +1243,11 @@ def run_optimization(
         contract_multiplier=contract_multiplier,
     )
 
-    db_hash = hashlib.md5(f"strategy_opt_{model_name}_{objective_metric}".encode()).hexdigest()[:8]
+    # PID in the hash: two batches post-optimizing concurrently on one machine
+    # share model_name ("Ensemble_N ... | HourSet_10_Base") — without it they
+    # collide on the same study .db (WinError 32, all tasks fail). The study is
+    # deleted fresh each run, so uniqueness is the only requirement.
+    db_hash = hashlib.md5(f"strategy_opt_{model_name}_{objective_metric}_{os.getpid()}".encode()).hexdigest()[:8]
     db_dir = Path("reports/optuna_db")
     db_dir.mkdir(parents=True, exist_ok=True)
     db_path = db_dir / f"optuna_study_{db_hash}.db"
@@ -1673,7 +1677,7 @@ def run_hybrid_optimization(
         contract_multiplier=contract_multiplier,
     )
 
-    db_hash = hashlib.md5(f"hybrid_opt_{model_name}_{objective_metric}".encode()).hexdigest()[:8]
+    db_hash = hashlib.md5(f"hybrid_opt_{model_name}_{objective_metric}_{os.getpid()}".encode()).hexdigest()[:8]
     db_dir = Path("reports/optuna_db")
     db_dir.mkdir(parents=True, exist_ok=True)
     db_path = db_dir / f"optuna_study_{db_hash}.db"
