@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 from typing import Iterable, Optional
 
 import pandas as pd
@@ -127,6 +128,146 @@ def build_mcl_contract(
 def _is_pacing_error(error: Exception) -> bool:
     message = str(error).lower()
     return "pacing" in message or "rate limit" in message
+
+
+# ---------------------------------------------------------------------------
+# Front-month selection (T5) — pure, IB-free helpers shared by the sync and
+# async get_front_month_contract methods. Registry-driven: active_months
+# filters out illiquid serial listings (GC/SI — B8a), roll_reference/
+# roll_buffer_days replace the deleted one-size-fits-all _EXPIRY_BUFFER_DAYS
+# class constant (CL keeps buffer 6, byte-identical selection).
+# ---------------------------------------------------------------------------
+
+_MONTH_CODES = "FGHJKMNQUVXZ"  # futures month codes, index = month - 1
+
+
+def _first_notice_proxy(contract_month: str) -> date:
+    """Proxy for a physically-delivered contract's First Notice Day.
+
+    GC/SI/HG/ZC/ZS spec: FND is the last business day of the month
+    preceding the delivery month. Proxy = last weekday of that month,
+    additionally stepping back over US Memorial Day (C3): the last Monday
+    of May is the ONLY US holiday that can itself be the last weekday of a
+    month — in May-31-Monday years (next: 2027, then 2032) the naive
+    weekday proxy would land 3 days late and fully consume the 3-day
+    roll buffer, leaving June gold eligible past its true FND (IBKR
+    force-liquidation exposure, B8b). Other holidays (e.g. Good Friday)
+    shift the true FND by at most 1 day, which roll_buffer_days=3 absorbs
+    — documented accepted limit.
+
+    Args:
+        contract_month: Delivery month as "YYYYMM" (ContractDetails.contractMonth).
+
+    Returns:
+        datetime.date of the proxied first notice day.
+    """
+    year = int(contract_month[:4])
+    month = int(contract_month[4:6])
+    d = date(year, month, 1) - timedelta(days=1)  # last day of prior month
+    while d.weekday() >= 5 or (
+        d.month == 5 and d.weekday() == 0 and d.day >= 25  # Memorial Day (C3)
+    ):
+        d -= timedelta(days=1)
+    return d
+
+
+def _select_front_month(details: list, instrument, now_utc: datetime):
+    """Pick the front-month ContractDetails for an instrument.
+
+    Selection (audit §4c):
+      1. Sort by lastTradeDateOrContractMonth (legacy, unchanged).
+      2. Active-month filter — SKIPPED ENTIRELY when the instrument lists
+         all 12 month codes (CL/MCL/NG): ContractDetails.contractMonth is
+         never touched on that path (CL byte-identity — sentinel-tested).
+         Otherwise the detail's contractMonth ("YYYYMM") maps to a month
+         code that must be in instrument.active_months; a BLANK
+         contractMonth on a restricted instrument raises ValueError (no
+         silent pass-through). A detail object that lacks the attribute
+         entirely (test doubles / pre-0.9 API shims — real ib_insync
+         ContractDetails always carries the field) falls back to the LTD
+         month, which lies in the delivery month for every restricted
+         registry instrument.
+      3. Buffer filter by instrument.roll_reference:
+         - "LTD": legacy STRING comparison verbatim — LTD >=
+           (now + roll_buffer_days) as "YYYYMMDD" (CL buffer 6 ->
+           bit-identical; ES/NQ 8 -> volume-roll timing).
+         - "FND": eligible iff _first_notice_proxy(contractMonth) >=
+           (now + roll_buffer_days).date() — avoids IBKR near-FND
+           force-liquidation on physicals (B8b).
+         - anything else raises ValueError (no silent default).
+      4. Buffer filter empty -> warn + nearest ACTIVE-month detail (legacy
+         fallback; details[0] for CL). Active filter empty -> loud
+         RuntimeError (a silent serial-month pick is exactly bug B8a).
+
+    Returns:
+        The selected ContractDetails object (identity-preserving).
+    """
+    ds = sorted(details, key=lambda d: d.contract.lastTradeDateOrContractMonth)
+
+    if set(instrument.active_months) == set(_MONTH_CODES):
+        # All 12 months active: contractMonth must never be read (CL pin).
+        candidates = [(d, None) for d in ds]
+    else:
+        candidates = []
+        for d in ds:
+            try:
+                cm = d.contractMonth
+            except AttributeError:
+                cm = d.contract.lastTradeDateOrContractMonth[:6]
+            if not cm:
+                raise ValueError(
+                    f"Contract details for {instrument.symbol} "
+                    f"({d.contract.localSymbol}) missing contractMonth — "
+                    f"cannot apply active-month filter "
+                    f"'{instrument.active_months}'."
+                )
+            cm = str(cm)
+            month_code = _MONTH_CODES[int(cm[4:6]) - 1]
+            if month_code in instrument.active_months:
+                candidates.append((d, cm))
+        if not candidates:
+            raise RuntimeError(
+                f"No {instrument.symbol} contract in an active month "
+                f"('{instrument.active_months}') among {len(ds)} contract "
+                f"details from IBKR — registry/venue mismatch."
+            )
+
+    if instrument.roll_reference == "LTD":
+        cutoff_str = (
+            now_utc + timedelta(days=instrument.roll_buffer_days)
+        ).strftime("%Y%m%d")
+        tradable = [
+            (d, cm) for d, cm in candidates
+            if d.contract.lastTradeDateOrContractMonth >= cutoff_str
+        ]
+    elif instrument.roll_reference == "FND":
+        cutoff_date = (
+            now_utc + timedelta(days=instrument.roll_buffer_days)
+        ).date()
+        tradable = [
+            (d, cm) for d, cm in candidates
+            if _first_notice_proxy(
+                cm if cm is not None
+                else d.contract.lastTradeDateOrContractMonth[:6]
+            ) >= cutoff_date
+        ]
+    else:
+        raise ValueError(
+            f"Unsupported roll_reference {instrument.roll_reference!r} for "
+            f"{instrument.symbol} (expected 'LTD' or 'FND')."
+        )
+
+    if tradable:
+        return tradable[0][0]
+
+    # Fallback: all active-month contracts are inside the buffer
+    # (shouldn't happen with a healthy chain) — nearest available, as today.
+    log.warning(
+        "All %s contracts expire within %d days — "
+        "using nearest available",
+        instrument.symbol, instrument.roll_buffer_days,
+    )
+    return candidates[0][0]
 
 
 def _normalize_ohlcv_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -651,36 +792,33 @@ class IBKRConnectionManager:
 
         return summary
 
-    # IBKR blocks trading on physically-delivered futures near expiry.
-    # CL contracts within this buffer (days) are skipped in favour of
-    # the next month to avoid Error 201 rejections.
-    _EXPIRY_BUFFER_DAYS = 6
+    # T5: the class-level _EXPIRY_BUFFER_DAYS constant is DELETED — the
+    # single source of truth is the registry's per-instrument
+    # roll_buffer_days (CL keeps 6, identical; ES/NQ 8; FND physicals 3),
+    # consumed by the pure _select_front_month helper below the class.
 
     def get_front_month_contract(
-        self, symbol: str = "CL",
+        self, symbol: str,
     ) -> tuple[str, str]:
         """Resolve the current front-month futures contract.
 
         Supports any INSTRUMENT_REGISTRY symbol (exchange resolved from
-        the registry — T2).
-
-        Uses reqContractDetails to find the nearest-expiry contract
-        that is still tradable.  Contracts expiring within
-        ``_EXPIRY_BUFFER_DAYS`` are skipped to avoid IBKR's
-        near-expiration physical delivery restrictions.
+        the registry — T2; selection via _select_front_month — T5:
+        active-month filter + per-instrument roll_reference/buffer).
 
         Args:
-            symbol: Futures symbol — "CL" (default), "MCL", "ES", ...
+            symbol: Futures symbol — REQUIRED ("CL", "MCL", "ES", ...;
+                no silent CL default).
 
         Returns:
-            tuple: (qualified Contract, contract_month string e.g. '202504')
+            tuple: (front-month localSymbol, contract_month string
+            e.g. '202504' — the LTD month, pinned semantics, Q5)
         """
-        from datetime import datetime, timedelta
-
         self.ensure_connected()
+        instrument = get_instrument(symbol)
         # Use a generic Future to search for available contracts
         search = Future(
-            symbol=symbol, exchange=get_instrument(symbol).exchange, currency="USD"
+            symbol=symbol, exchange=instrument.exchange, currency="USD"
         )
         details = self.ib.reqContractDetails(search)
 
@@ -689,28 +827,7 @@ class IBKRConnectionManager:
                 f"Could not retrieve {symbol} contract details from IBKR."
             )
 
-        # Sort by expiry and pick the nearest one that isn't too close
-        details.sort(key=lambda d: d.contract.lastTradeDateOrContractMonth)
-
-        cutoff = datetime.utcnow() + timedelta(days=self._EXPIRY_BUFFER_DAYS)
-        cutoff_str = cutoff.strftime("%Y%m%d")
-
-        # Filter out near-expiry contracts
-        tradable = [
-            d for d in details
-            if d.contract.lastTradeDateOrContractMonth >= cutoff_str
-        ]
-
-        if tradable:
-            front = tradable[0]
-        else:
-            # Fallback: all contracts are near-expiry (shouldn't happen)
-            log.warning(
-                "All %s contracts expire within %d days — "
-                "using nearest available",
-                symbol, self._EXPIRY_BUFFER_DAYS,
-            )
-            front = details[0]
+        front = _select_front_month(details, instrument, datetime.utcnow())
 
         contract = front.contract
         month_str = contract.lastTradeDateOrContractMonth[:6]  # YYYYMM
@@ -720,19 +837,18 @@ class IBKRConnectionManager:
             "expiry=%s, buffer=%dd)",
             symbol, contract.localSymbol, contract.conId, month_str,
             contract.lastTradeDateOrContractMonth,
-            self._EXPIRY_BUFFER_DAYS,
+            instrument.roll_buffer_days,
         )
         return contract.localSymbol, month_str
 
     async def get_front_month_contract_async(
-        self, symbol: str = "CL",
+        self, symbol: str,
     ) -> tuple[str, str]:
         """Async version of get_front_month_contract."""
-        from datetime import datetime, timedelta
-
         self.ensure_connected()
+        instrument = get_instrument(symbol)
         search = Future(
-            symbol=symbol, exchange=get_instrument(symbol).exchange, currency="USD"
+            symbol=symbol, exchange=instrument.exchange, currency="USD"
         )
         details = await self.ib.reqContractDetailsAsync(search)
 
@@ -741,25 +857,7 @@ class IBKRConnectionManager:
                 f"Could not retrieve {symbol} contract details from IBKR."
             )
 
-        details.sort(key=lambda d: d.contract.lastTradeDateOrContractMonth)
-
-        cutoff = datetime.utcnow() + timedelta(days=self._EXPIRY_BUFFER_DAYS)
-        cutoff_str = cutoff.strftime("%Y%m%d")
-
-        tradable = [
-            d for d in details
-            if d.contract.lastTradeDateOrContractMonth >= cutoff_str
-        ]
-
-        if tradable:
-            front = tradable[0]
-        else:
-            log.warning(
-                "All %s contracts expire within %d days — "
-                "using nearest available",
-                symbol, self._EXPIRY_BUFFER_DAYS,
-            )
-            front = details[0]
+        front = _select_front_month(details, instrument, datetime.utcnow())
 
         contract = front.contract
         month_str = contract.lastTradeDateOrContractMonth[:6]
@@ -769,7 +867,7 @@ class IBKRConnectionManager:
             "expiry=%s, buffer=%dd)",
             symbol, contract.localSymbol, contract.conId, month_str,
             contract.lastTradeDateOrContractMonth,
-            self._EXPIRY_BUFFER_DAYS,
+            instrument.roll_buffer_days,
         )
         return contract.localSymbol, month_str
 

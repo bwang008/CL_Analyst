@@ -20,6 +20,12 @@ class Instrument:
     bars_per_day_5m: int         # conservative provisioning floor (CL pinned to legacy 288)
     bars_per_day_1h: int         # conservative provisioning floor (CL pinned to legacy 24)
     live_vol_index: str          # IBKR CBOE index symbol for daily-close fetch ("VIX"/"OVX"/"GVZ")
+    roll_ratio_tolerance: float  # T5: ratio-space noise floor for roll adjustment —
+                                 # |1 - ratio| <= tolerance means the roll is DETECTED but the
+                                 # adjustment (cache/ledger scale + roll_history) is SKIPPED.
+                                 # CL/MCL 0.01 = legacy _ROLL_PRICE_TOLERANCE (pinned); all
+                                 # others 0.001 (10 bps — below real ES/GC roll gaps, far above
+                                 # overlap-median noise; Q2 ACKed). REQUIRED — no default.
     micro_of: Optional[str] = None   # parent symbol if this IS a micro (MCL→"CL"); None otherwise
     slippage_ticks: int = 1
 
@@ -50,6 +56,7 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         bars_per_day_5m=288,       # legacy data_manager/live_trader constant (zero-change)
         bars_per_day_1h=24,        # legacy constant (zero-change)
         live_vol_index="OVX",
+        roll_ratio_tolerance=0.01,  # legacy _ROLL_PRICE_TOLERANCE (zero-change pin)
     ),
     "MCL": Instrument(
         symbol="MCL",
@@ -68,6 +75,7 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         bars_per_day_5m=288,
         bars_per_day_1h=24,
         live_vol_index="OVX",
+        roll_ratio_tolerance=0.01,  # inherits CL's legacy pin (parent-shared file semantics)
         micro_of="CL",
     ),
     "ES": Instrument(
@@ -87,6 +95,7 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         bars_per_day_5m=276,
         bars_per_day_1h=23,
         live_vol_index="VIX",
+        roll_ratio_tolerance=0.001,  # 10 bps: real ES roll gaps are ~20-70 bps (Q2)
     ),
     "MES": Instrument(
         symbol="MES",
@@ -105,6 +114,7 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         bars_per_day_5m=276,
         bars_per_day_1h=23,
         live_vol_index="VIX",
+        roll_ratio_tolerance=0.001,
         micro_of="ES",
     ),
     "NG": Instrument(
@@ -124,6 +134,7 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         bars_per_day_5m=276,
         bars_per_day_1h=23,
         live_vol_index="OVX",
+        roll_ratio_tolerance=0.001,
     ),
     "HG": Instrument(
         symbol="HG",
@@ -142,6 +153,7 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         bars_per_day_5m=276,
         bars_per_day_1h=23,
         live_vol_index="VIX",
+        roll_ratio_tolerance=0.001,
     ),
     "GC": Instrument(
         symbol="GC",
@@ -160,6 +172,7 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         bars_per_day_5m=276,
         bars_per_day_1h=23,
         live_vol_index="GVZ",
+        roll_ratio_tolerance=0.001,  # 10 bps: real GC roll gaps are ~50-100 bps (Q2)
     ),
     "MGC": Instrument(
         symbol="MGC",
@@ -178,6 +191,7 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         bars_per_day_5m=276,
         bars_per_day_1h=23,
         live_vol_index="GVZ",
+        roll_ratio_tolerance=0.001,
         micro_of="GC",
     ),
     "PA": Instrument(
@@ -200,6 +214,7 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         bars_per_day_5m=276,
         bars_per_day_1h=23,
         live_vol_index="VIX",
+        roll_ratio_tolerance=0.001,
     ),
     "NQ": Instrument(
         symbol="NQ",
@@ -218,6 +233,7 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         bars_per_day_5m=276,
         bars_per_day_1h=23,
         live_vol_index="VIX",
+        roll_ratio_tolerance=0.001,
     ),
     "MNQ": Instrument(
         symbol="MNQ",
@@ -236,6 +252,7 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         bars_per_day_5m=276,
         bars_per_day_1h=23,
         live_vol_index="VIX",
+        roll_ratio_tolerance=0.001,
         micro_of="NQ",
     ),
     "ZC": Instrument(
@@ -258,6 +275,7 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         bars_per_day_5m=200,
         bars_per_day_1h=16,
         live_vol_index="VIX",
+        roll_ratio_tolerance=0.001,
     ),
     "ZS": Instrument(
         symbol="ZS",
@@ -278,6 +296,7 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         bars_per_day_5m=200,
         bars_per_day_1h=16,
         live_vol_index="VIX",
+        roll_ratio_tolerance=0.001,
     ),
     "SI": Instrument(
         symbol="SI",
@@ -297,6 +316,7 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         bars_per_day_5m=276,
         bars_per_day_1h=23,
         live_vol_index="VIX",
+        roll_ratio_tolerance=0.001,
     ),
     "SIL": Instrument(
         symbol="SIL",
@@ -316,6 +336,7 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         bars_per_day_5m=276,
         bars_per_day_1h=23,
         live_vol_index="VIX",
+        roll_ratio_tolerance=0.001,
         micro_of="SI",
     ),
 }

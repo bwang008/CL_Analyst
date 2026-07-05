@@ -70,7 +70,18 @@ from src.live_execution.strategy import Strategy, TradeSignal
 
 from src.live_execution.strategies.configurable_strategy import ConfigurableStrategy
 from src.live_execution.instrument_context import resolve_instrument_context
-from src.live_execution.data_manager import DataManager, derive_data_paths
+from src.live_execution.data_manager import (
+    REQUIRED_1H_BARS,
+    DataManager,
+    derive_data_paths,
+)
+# T5: session calendars (leaf module — stdlib + pytz + instrument_master).
+# Aliased so the local `market_status` variables in the heartbeat/watchdog
+# never shadow the imported callable.
+from src.live_execution.session_calendar import (
+    market_status as _calendar_market_status,
+    session_open_anchor as _session_open_anchor,
+)
 from src.live_execution.interfaces.data_feed_interface import DataFeedClient
 from src.live_execution.interfaces.execution_interface import ExecutionClient, StandardExecutionEvent
 from src.live_execution.telemetry import TelemetryDB
@@ -353,15 +364,12 @@ class LiveTrader:
         )
         log.info("DATA PATHS: 5m seed=%s  cache=%s", seed_path, cache_path)
 
-        # C2 (T2 impact review): the roll-metadata file is shared per BRAIN
-        # symbol, but DataManager.front_month_id stores the EXECUTION
-        # front-month localSymbol. Concurrent CL + MCL instances sharing
-        # .roll_metadata.json therefore ping-pong last_front_month
-        # (CLxx <-> MCLxx), triggering spurious rollover DETECTION churn on
-        # restart. That is detection noise, NOT misdata: the roll ratio is
-        # computed against the same CL-continuous series (~1.0, within
-        # _ROLL_PRICE_TOLERANCE) so no ledger adjustment or roll-history
-        # append occurs. Normalizing the stored identifier is T5 scope.
+        # C2 (T2 impact review) — RESOLVED IN T5: roll metadata is now
+        # namespaced per EXECUTION symbol (last_front_month_by_symbol +
+        # startswith ownership) inside DataManager, so concurrent CL + MCL
+        # instances sharing the brain file no longer ping-pong. bars_per_day
+        # is fed from the registry (CL keeps its legacy 288/24 literals by
+        # construction — pinned).
         self.data_manager_5m = DataManager(
             symbol=self._instrument_context.brain_symbol,
             seed_path=seed_path,
@@ -370,7 +378,8 @@ class LiveTrader:
             roll_metadata_path=str(_paths.roll_metadata),
             data_client=self.data_client,
             bar_size="5 mins",
-            bars_per_day=288,
+            bars_per_day=self._instrument_context.brain_instrument.bars_per_day_5m,
+            execution_symbol=self._instrument_context.execution_symbol,
         )
 
         self.data_manager_1h = None
@@ -411,7 +420,8 @@ class LiveTrader:
                 )
 
             # Same roll-metadata file as the 5m manager — preserves the
-            # intra-symbol 5m+1h sharing (see the C2 note above).
+            # intra-symbol 5m+1h sharing (same execution_symbol, so the T5
+            # ownership filter keeps their sharing intact).
             self.data_manager_1h = DataManager(
                 symbol=self._instrument_context.brain_symbol,
                 seed_path=seed_path_1h,
@@ -420,7 +430,8 @@ class LiveTrader:
                 roll_metadata_path=str(_paths.roll_metadata),
                 data_client=self.data_client,
                 bar_size="1 hour",
-                bars_per_day=24,
+                bars_per_day=self._instrument_context.brain_instrument.bars_per_day_1h,
+                execution_symbol=self._instrument_context.execution_symbol,
             )
 
         # Thread-Safe Virtual Ledger State
@@ -2001,13 +2012,20 @@ class LiveTrader:
             
             # Post-load validation: ensure 1H cache meets minimum requirements
             # MACRO_6M needs 4320 hourly bars — enforce this at startup.
-            _min_required = {"1h": 4320, "2h": 4320, "4h": 4320}
+            _min_required = {
+                "1h": REQUIRED_1H_BARS,
+                "2h": REQUIRED_1H_BARS,
+                "4h": REQUIRED_1H_BARS,
+            }
             _required = _min_required.get(self._bar_size, 0)
             if len(self.rolling_df_1h) < _required:
+                # T5: cache-name-derived so non-CL messages name the REAL
+                # cache file. CL's cache IS warm_start_cache_1h.parquet ->
+                # byte-identical legacy text (pinned).
                 err_msg = (
                     f"1H cache has only {len(self.rolling_df_1h)} bars — "
                     f"need {_required} for {self._bar_size} MACRO_6M feature warmup. "
-                    f"Delete warm_start_cache_1h.parquet to trigger reseed."
+                    f"Delete {self.data_manager_1h.cache_path.name} to trigger reseed."
                 )
                 log.error("CACHE VALIDATION FAILED: %s", err_msg)
                 self._telegram.send(f"[WARNING] *CACHE VALIDATION FAILED*\n`{err_msg}`")
@@ -3898,7 +3916,20 @@ class LiveTrader:
         if last_bar_time is None:
             return False  # No bars received yet — warm start still in progress
 
-        minutes_stale = (now - last_bar_time).total_seconds() / 60
+        # T5 reopen grace: for instruments with in-week session halts
+        # (grains), restart the stale clock at the most recent session open
+        # so the halt-old last bar cannot trigger a reconnect storm at every
+        # reopen. GLOBEX instruments (incl. CL) get anchor=None -> the
+        # arithmetic below is bit-identical to the legacy behavior,
+        # INCLUDING the pre-existing CL reopen false-positive (Q1: pinned
+        # as-is; follow-up ticket cl-watchdog-reopen-grace_07052026_0001).
+        anchor = _session_open_anchor(self._brain_instrument, now)
+        reference = (
+            last_bar_time
+            if anchor is None or anchor <= last_bar_time
+            else anchor
+        )
+        minutes_stale = (now - reference).total_seconds() / 60
         if minutes_stale < _STALE_BAR_THRESHOLD_MINUTES:
             return False  # Not stale enough yet
 
@@ -3925,38 +3956,23 @@ class LiveTrader:
             pass  # disconnect() can fail if already broken — that's fine
         return True  # Caller should invoke _reconnect()
 
-    @staticmethod
-    def _get_market_status(utc_now: datetime) -> str:
-        """Return human-readable CL market status based on UTC time.
+    def _get_market_status(self, utc_now: datetime) -> str:
+        """Return human-readable market status for the BRAIN instrument.
 
-        CL futures trade Sunday 18:00 ET → Friday 17:00 ET with a
-        daily maintenance halt 17:00-18:00 ET (Mon-Thu).
+        T5: delegates to src.live_execution.session_calendar (the legacy
+        CL body moved there VERBATIM as the GLOBEX calendar — CL strings
+        byte-identical, sweep-pinned; grains get their own calendar).
+        Bars are the BRAIN stream, so status follows _brain_instrument
+        (the T4 seam also serves object.__new__ test stubs that set only
+        _execution_symbol).
 
         Args:
             utc_now: Current time in UTC (tz-naive).
 
         Returns:
-            String like "OPEN", "CLOSED (weekend)", or "CLOSED (daily halt)".
+            "OPEN" or a "CLOSED (...)" string.
         """
-        import pytz
-        et = pytz.timezone("America/New_York")
-        et_now = utc_now.replace(tzinfo=pytz.utc).astimezone(et)
-        weekday = et_now.weekday()  # 0=Mon … 6=Sun
-        hour = et_now.hour
-
-        # Saturday: always closed
-        if weekday == 5:
-            return "CLOSED (weekend — opens Sun 6pm ET)"
-        # Sunday before 18:00 ET: closed
-        if weekday == 6 and hour < 18:
-            return "CLOSED (weekend — opens Sun 6pm ET)"
-        # Friday after 17:00 ET: closed
-        if weekday == 4 and hour >= 17:
-            return "CLOSED (weekend — opens Sun 6pm ET)"
-        # Mon-Thu 17:00-18:00 ET: daily maintenance halt
-        if 0 <= weekday <= 3 and hour == 17:
-            return "CLOSED (daily halt 5-6pm ET)"
-        return "OPEN"
+        return _calendar_market_status(self._brain_instrument, utc_now)
 
 
 

@@ -384,10 +384,15 @@ class TestFrontMonthRegistryExchange:
         assert search.symbol == "ES"
         assert search.exchange == "CME"
 
-    def test_expiry_buffer_still_six_days(self):
-        """Pin: T2 must NOT re-source the buffer from roll_buffer_days —
-        that is T5 scope (switching now would silently change ES to 8)."""
-        assert IBKRConnectionManager._EXPIRY_BUFFER_DAYS == 6
+    def test_expiry_buffer_resourced_to_registry(self):
+        """T5 landed (t5-hours-watchdog-rollover_07042026_2305): the buffer
+        is now the registry's per-instrument roll_buffer_days (CL stays 6 —
+        selection byte-identity pinned in tests/test_session_watchdog_
+        rollover.py) and the one-size-fits-all class constant is deleted.
+        This updates the T2-era pin, as its own comment anticipated."""
+        assert not hasattr(IBKRConnectionManager, "_EXPIRY_BUFFER_DAYS")
+        from src.core.instrument_master import get_instrument
+        assert get_instrument("CL").roll_buffer_days == 6
 
 
 # ===========================================================================

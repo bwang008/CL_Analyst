@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import shutil
 import tempfile
@@ -107,30 +108,42 @@ def derive_data_paths(symbol: str) -> DataPaths:
         roll_metadata=roll_metadata,
     )
 
-# How many days of seed data to load into the initial cache.
-# Minimum requirements (from AlphaFactory feature lookback windows):
-#   - MACRO_6M: rolling(4320) on 1H bars = needs 4,320 bars in DataFrame
-#   - CL trades ~23h/day, ~5 days/week → ~115 bars/week on 1H
-#   - 4,320 bars ÷ 115 bars/week ≈ 37.6 weeks ≈ 263 calendar days
-#   - MACRO_3M: 2160 hourly bars = ~132 calendar days
-#   - VOL_VOLVOL_10080: needs 2×10080 5m bars = ~70 calendar days
-# Set to 280 days to cover MACRO_6M (263d) with buffer for holidays.
-_SEED_LOOKBACK_DAYS = 280
+# Deepest 1h feature lookback (MACRO_6M: rolling(4320) on 1H bars). The
+# live_trader startup validation enforces this floor after warm-start; the
+# per-instrument seed lookback below is derived from it (T5).
+REQUIRED_1H_BARS = 4320
 
-# 5-min bars per day (24-hour period × 12 bars/hour)
-_BARS_PER_DAY = 288
+
+def derive_seed_lookback_days(bars_per_day_1h: int) -> int:
+    """Calendar-day seed window that covers REQUIRED_1H_BARS for an instrument.
+
+    Formula (T5, audit §4e): ceil(ceil(4320 / bars_per_day_1h) * 7 / 5) + 28
+      - ceil(4320 / bph)  -> trading days needed,
+      - * 7/5 (ceil)      -> calendar days (5 trading days per week),
+      - + 28              -> holiday/gap buffer (the legacy 280 - 252 margin,
+                             now explicit).
+
+    CL (bars_per_day_1h=24): 180 -> 252 -> 280 — reproduces the legacy
+    _SEED_LOOKBACK_DAYS constant EXACTLY (pinned). ES (23) -> 292;
+    ZC/ZS (16) -> 406.
+
+    Raises:
+        ValueError: bars_per_day_1h <= 0 (no silent default).
+    """
+    if bars_per_day_1h <= 0:
+        raise ValueError(
+            f"bars_per_day_1h must be positive, got {bars_per_day_1h!r} — "
+            "cannot derive a seed lookback window."
+        )
+    trading_days = math.ceil(REQUIRED_1H_BARS / bars_per_day_1h)
+    return math.ceil(trading_days * 7 / 5) + 28
+
 
 # Flush the in-memory cache to disk every N appended bars.
 _FLUSH_INTERVAL_BARS = 12  # every hour (12 × 5 min)
 
-# Max single IBKR request for 5-min bars.
-_MAX_IB_REQUEST_DAYS = 30
-
 # Number of bars to sample when validating cache after rollover.
 _ROLL_VALIDATION_BARS = 50
-
-# Maximum price difference ($) before considering cache stale.
-_ROLL_PRICE_TOLERANCE = 0.01
 
 # Directory in the repo for cache backups (tracked by git).
 _CACHE_BACKUP_DIR = _PROJECT_ROOT / "data" / "cache_backups"
@@ -168,6 +181,7 @@ class DataManager:
         front_month_id: Optional[str] = None,
         bar_size: str = "5 mins",
         bars_per_day: int = 288,
+        execution_symbol: Optional[str] = None,
     ) -> None:
         # T2 (D2): symbol is REQUIRED keyword-only (no silent CL default) and
         # validated against the instrument registry via derive_data_paths
@@ -175,6 +189,11 @@ class DataManager:
         # always win; None falls back to the per-symbol derived default.
         paths = derive_data_paths(symbol)
         self.symbol = symbol
+        # T5 (C2 deferral): execution_symbol namespaces the roll metadata —
+        # an outright's execution symbol IS its brain symbol (structural
+        # derivation, T2 _brain_symbol precedent — NOT a silent default);
+        # live_trader passes micros (MCL/MES/...) explicitly.
+        self.execution_symbol = execution_symbol or symbol
         self.seed_path = Path(seed_path) if seed_path is not None else paths.seed_5m
         self.cache_path = Path(cache_path) if cache_path is not None else paths.cache_5m
         self.master_ledger_path = (
@@ -194,6 +213,19 @@ class DataManager:
         self.front_month_id = front_month_id  # e.g. "CLJ6"
         self.bar_size = bar_size
         self.bars_per_day = bars_per_day
+        # T5: instrument-derived facts from the registry (raises on unknown
+        # symbols — no silent defaults). Derived ONLY here in __init__:
+        # the ratio/adjustment methods keep working on __new__ test stubs.
+        _instrument = get_instrument(symbol)
+        # Ratio-space noise floor: |1 - roll_ratio| <= tolerance means the
+        # roll is DETECTED (front-month string change) but the adjustment
+        # (cache/ledger scale + roll_history append) is SKIPPED.
+        self.roll_ratio_tolerance = _instrument.roll_ratio_tolerance
+        # Calendar-day seed trim window (bar-size independent, like the
+        # legacy shared _SEED_LOOKBACK_DAYS=280 — which CL reproduces).
+        self.seed_lookback_days = derive_seed_lookback_days(
+            _instrument.bars_per_day_1h
+        )
 
         self._df: Optional[pd.DataFrame] = None
         self._bars_since_flush: int = 0
@@ -213,9 +245,24 @@ class DataManager:
             pd.DataFrame: Rolling OHLCV DataFrame with DateTime index,
                 columns [DateTime, Open, High, Low, Close, Volume].
         """
-        # Step 0: Restore roll ratios from saved metadata
+        # Step 0: Restore roll ratios from saved metadata.
+        # C2 (T5): ownership-filtered — a shared brain file (CL+MCL, ES+MES)
+        # accumulates one roll_history entry PER execution symbol for the
+        # same economic roll; restoring them all would double-apply the roll.
+        # Only entries whose "to" contract belongs to this execution symbol
+        # are restored. Entries without a "to" field (pre-history legacy
+        # files were single-symbol by construction) pass through unchanged,
+        # as does every entry of a CL-only file (pinned). The intra-process
+        # 5m/1h managers share one execution_symbol, so their sharing is
+        # preserved. Note: "cumulative_ratio" stays global/mixed across
+        # symbols — it is informational only (no runtime consumer).
         meta = self._load_roll_metadata()
         for entry in meta.get("roll_history", []):
+            to_fm = entry.get("to")
+            if isinstance(to_fm, str) and not to_fm.startswith(
+                self.execution_symbol
+            ):
+                continue
             if "ratio" in entry:
                 self._roll_ratios.append(entry["ratio"])
                 ts = pd.Timestamp(entry.get("timestamp_cutoff", entry.get("timestamp")))
@@ -268,7 +315,7 @@ class DataManager:
                     "CONTRACT ROLLOVER DETECTED — computing roll ratio..."
                 )
                 roll_ratio = self._compute_roll_ratio()
-                if roll_ratio is not None and abs(roll_ratio - 1.0) > _ROLL_PRICE_TOLERANCE:
+                if roll_ratio is not None and abs(roll_ratio - 1.0) > self.roll_ratio_tolerance:
                     self._apply_roll_to_cache(roll_ratio)
                 else:
                     log.info(
@@ -414,7 +461,7 @@ class DataManager:
 
     def _seed_from_csv(self) -> pd.DataFrame:
         """
-        Load the last `_SEED_LOOKBACK_DAYS` of data from the seed file.
+        Load the last `seed_lookback_days` of data from the seed file.
 
         Supports two formats:
           - Parquet (.parquet): read directly, expects DateTime column + OHLCV.
@@ -466,14 +513,14 @@ class DataManager:
             df.index.name = "DateTime"
             df = df.sort_index()
 
-        # Take the last N days
-        cutoff = df.index.max() - timedelta(days=_SEED_LOOKBACK_DAYS)
+        # Take the last N days (instrument-derived window — T5)
+        cutoff = df.index.max() - timedelta(days=self.seed_lookback_days)
         df = df.loc[df.index >= cutoff]
 
         log.info(
             "Seed: extracted %d bars (last %d days) from %s → %s",
             len(df),
-            _SEED_LOOKBACK_DAYS,
+            self.seed_lookback_days,
             df.index.min(),
             df.index.max(),
         )
@@ -638,6 +685,28 @@ class DataManager:
                 log.warning("Could not read roll metadata: %s", exc)
         return {}
 
+    def _stored_front_month(self, meta: dict) -> Optional[str]:
+        """Namespaced read of this execution symbol's last front month (T5).
+
+        Read order (C2/C1 — no cross-symbol reads):
+          1. ``last_front_month_by_symbol[execution_symbol]`` when present;
+          2. else the legacy ``last_front_month`` ONLY when it belongs to
+             this execution symbol (startswith ownership check —
+             "CLQ6".startswith("MCL") and "MCLQ6".startswith("CL") are both
+             False, so shared files cannot cross-read);
+          3. else None (first-run semantics).
+
+        A CL restart on a pre-T5 legacy file resolves through (2) to exactly
+        the value today's code read — comparison-identical (pinned).
+        """
+        by_symbol = meta.get("last_front_month_by_symbol") or {}
+        if self.execution_symbol in by_symbol:
+            return by_symbol[self.execution_symbol]
+        legacy = meta.get("last_front_month")
+        if isinstance(legacy, str) and legacy.startswith(self.execution_symbol):
+            return legacy
+        return None
+
     def _save_roll_metadata(self) -> None:
         """Save the current front-month ID and roll history to metadata file."""
         meta_path = Path(self.roll_metadata_path)
@@ -646,13 +715,18 @@ class DataManager:
         # Load existing metadata to preserve roll history
         existing = self._load_roll_metadata()
         roll_history = existing.get("roll_history", [])
-        import math
         cumulative_ratio = existing.get("cumulative_ratio", 1.0)
 
         # Append this roll event if a ratio was applied
         current_ratio = self._roll_ratios[-1] if self._roll_ratios else 1.0
-        if self._roll_detected and abs(current_ratio - 1.0) > _ROLL_PRICE_TOLERANCE:
-            old_fm = existing.get("last_front_month", "unknown")
+        if self._roll_detected and abs(current_ratio - 1.0) > self.roll_ratio_tolerance:
+            # C1 (T5): "from" uses the SAME namespaced read order as
+            # _detect_rollover — never the raw legacy key, which in a shared
+            # CL+MCL file is last-writer-wins across symbols. CL-only files:
+            # value identical to the legacy read (pinned).
+            old_fm = self._stored_front_month(existing)
+            if old_fm is None:
+                old_fm = "unknown"
             roll_ts = self._roll_timestamps[-1] if self._roll_timestamps else None
             roll_history.append({
                 "from": old_fm,
@@ -663,11 +737,21 @@ class DataManager:
             })
             cumulative_ratio *= current_ratio
 
+        # T5 (C2): per-execution-symbol namespace, MERGED with (never
+        # replacing) other symbols' entries. The legacy last_front_month key
+        # is still written exactly as today (CL-only fleets: the file gains
+        # one redundant key, behavior unchanged). Known residual: concurrent
+        # same-second startups still last-writer-win on the whole JSON
+        # (startup-only write, tiny window) — no file locking added.
+        by_symbol = dict(existing.get("last_front_month_by_symbol") or {})
+        by_symbol[self.execution_symbol] = self.front_month_id
+
         meta = {
             "last_front_month": self.front_month_id,
             "updated_at": datetime.now().isoformat(),
             "roll_history": roll_history,
             "cumulative_ratio": round(cumulative_ratio, 6),
+            "last_front_month_by_symbol": by_symbol,
         }
         try:
             with open(meta_path, "w", encoding="utf-8") as f:
@@ -724,7 +808,10 @@ class DataManager:
         Returns True if a rollover has occurred since the last run.
         """
         meta = self._load_roll_metadata()
-        last_fm = meta.get("last_front_month")
+        # T5 (C2): namespaced read — kills the CL<->MCL shared-file restart
+        # ping-pong (a foreign symbol's legacy key reads as first-run, not
+        # as a phantom rollover + backup spam).
+        last_fm = self._stored_front_month(meta)
 
         if last_fm is None:
             log.info(
@@ -944,7 +1031,7 @@ class DataManager:
             )
 
         current_ratio = self._roll_ratios[-1] if self._roll_ratios else 1.0
-        if self._roll_detected and abs(current_ratio - 1.0) > _ROLL_PRICE_TOLERANCE:
+        if self._roll_detected and abs(current_ratio - 1.0) > self.roll_ratio_tolerance:
             # After rollover: apply ratio adjustment to ENTIRE ledger.
             # Every single row (back to 2008) gets the ratio applied.
             # This is the institutional standard — the model uses
@@ -1042,7 +1129,7 @@ class DataManager:
         """
         Fetch continuous contract bars from IBKR covering start_ts to now.
 
-        Handles chunking for requests longer than _MAX_IB_REQUEST_DAYS.
+        Uses a single NOW-anchored request covering the whole range.
         """
         now = pd.Timestamp.now(tz="UTC").tz_localize(None)
         gap = now - start_ts
