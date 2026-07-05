@@ -839,7 +839,8 @@ def run_pipeline(
                 predictions_path=val_merged_path,
                 ohlcv_path=data_path,
                 exec_ohlcv_path=exec_data_path,
-                slippage_per_side=slippage_per_side
+                slippage_per_side=slippage_per_side,
+                symbol=symbol,
             )
 
             long_preds_rel = f"data/predictions/{os.path.basename(direction_paths['long'])}"
