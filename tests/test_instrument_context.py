@@ -30,6 +30,18 @@ Coverage (audit.md section 6, tests 6-17 + impact_review conditions C2/C4):
 
 Error-message assertions use stable substrings of the exact audit section 4.2
 wording, not full strings.
+
+T6 EVOLUTION (ticket t6-config-generator-fix_07052026_0043): the ONE intended
+Strict-Lock evolution authorized by that ticket's blueprint — exactly two
+self-documented "until T6" pins flipped, nothing else changed:
+  1. TestShippedConfigs::test_es01b_shipped_config_raises_intended_failure
+     -> test_es01b_shipped_config_resolves_as_es: the surgically patched
+     shipped config (audit section 2 10-field table) must RESOLVE as
+     execution ES / brain ES / exchange CME, with models.*.symbol == "ES"
+     and every referenced model_path/predictions_path present on disk.
+  2. TestShippedConfigs::test_all_shipped_configs_resolve_except_es01b
+     -> test_all_shipped_configs_resolve: the intended_failures set is now
+     EMPTY — every shipped config in configs/strategies/ must resolve.
 """
 
 from __future__ import annotations
@@ -270,16 +282,29 @@ class TestModelSymbolCrossCheck:
 # ===========================================================================
 
 class TestShippedConfigs:
-    def test_es01b_shipped_config_raises_intended_failure(self):
-        """INTENDED FAILURE (impact_review C4) — asserts DESIRED post-T1
-        behavior: the shipped ES01B config declares execution_symbol "CL"
-        but its models are E2E_ES_* — exactly the mis-generated config T1
-        exists to catch. It must REFUSE to resolve until T6 regenerates it.
+    def test_es01b_shipped_config_resolves_as_es(self):
+        """T6 EVOLUTION (t6-config-generator-fix_07052026_0043): the shipped
+        ES01B config has been surgically patched per that ticket's audit
+        section 2 (10-field table). The former intended-failure pin flips to
+        the happy path: it must RESOLVE as ES (execution ES, brain ES,
+        exchange CME), carry the explicit models.*.symbol == "ES" handshake,
+        and every referenced artifact must exist on disk.
         """
         cfg = _load_config("ES01B_Sharpe_E03_07042026.json")
-        assert cfg["execution_symbol"] == "CL"  # precondition: bug still shipped
-        with pytest.raises(ValueError, match=_MSG_MODEL_MISMATCH):
-            resolve_instrument_context(cfg)
+        ctx = resolve_instrument_context(cfg)
+        assert ctx.execution_symbol == "ES"
+        assert ctx.brain_symbol == "ES"
+        assert ctx.execution_instrument.exchange == "CME"
+        for side in ("long", "short"):
+            entry = cfg["models"][side]
+            assert entry["symbol"] == "ES"
+            assert (_PROJECT_ROOT / entry["model_path"]).is_file(), (
+                f"models.{side}.model_path missing on disk: {entry['model_path']}"
+            )
+            assert (_PROJECT_ROOT / entry["predictions_path"]).is_file(), (
+                f"models.{side}.predictions_path missing on disk: "
+                f"{entry['predictions_path']}"
+            )
 
     def test_hs14b_shipped_config_resolves(self):
         """Happy-path pin: the live prod config resolves unchanged."""
@@ -302,14 +327,14 @@ class TestShippedConfigs:
         assert ctx.execution_symbol == "CL"
         assert ctx.brain_symbol == "CL"
 
-    def test_all_shipped_configs_resolve_except_es01b(self):
-        """Fleet-wide gate: every config in configs/strategies/ resolves,
-        with the single documented exception of the mis-generated ES01B
-        (which must raise until T6 regenerates it)."""
+    def test_all_shipped_configs_resolve(self):
+        """Fleet-wide gate: every config in configs/strategies/ resolves.
+        T6 EVOLUTION (t6-config-generator-fix_07052026_0043): the ES01B
+        intended-failure exception is retired — intended_failures is EMPTY."""
         config_paths = sorted(_CONFIG_DIR.glob("*.json"))
         assert config_paths, f"No strategy configs found under {_CONFIG_DIR}"
 
-        intended_failures = {"ES01B_Sharpe_E03_07042026.json"}
+        intended_failures: set[str] = set()
         for path in config_paths:
             cfg = json.loads(path.read_text(encoding="utf-8"))
             if path.name in intended_failures:

@@ -768,8 +768,14 @@ class DataManager:
         Save a timestamped snapshot of the cache to the git repo.
 
         Creates data/cache_backups/ in the project root and copies:
-          - warm_start_cache_<timestamp>.parquet
-          - roll_metadata_<timestamp>.json
+          - <cache stem>_<timestamp>_<reason>.parquet
+          - <roll-metadata stem>_<timestamp>_<reason>.json
+
+        T6 cosmetic: names derive from the instance's own cache/metadata
+        filenames, so per-symbol DataManagers cannot collide in the shared
+        backup dir. CL's stems are ``warm_start_cache`` / ``.roll_metadata``
+        -> legacy backup names byte-identical; an ES manager produces
+        ``warm_start_cache_ES_*`` / ``roll_metadata_ES_*``.
 
         Args:
             reason: Why the backup was triggered (for the log filename).
@@ -781,7 +787,7 @@ class DataManager:
 
         # Backup cache
         if self._df is not None and len(self._df) > 0:
-            cache_backup = backup_dir / f"warm_start_cache_{ts}_{reason}.parquet"
+            cache_backup = backup_dir / f"{self.cache_path.stem}_{ts}_{reason}.parquet"
             try:
                 self._df.to_parquet(str(cache_backup), engine="pyarrow")
                 log.info(
@@ -791,10 +797,11 @@ class DataManager:
             except Exception as exc:
                 log.warning("Failed to backup cache: %s", exc)
 
-        # Backup roll metadata
+        # Backup roll metadata (lstrip('.') drops the hidden-file dot from
+        # the stem: '.roll_metadata' -> 'roll_metadata' — today's literal)
         meta_src = Path(self.roll_metadata_path)
         if meta_src.exists():
-            meta_backup = backup_dir / f"roll_metadata_{ts}_{reason}.json"
+            meta_backup = backup_dir / f"{meta_src.stem.lstrip('.')}_{ts}_{reason}.json"
             try:
                 shutil.copy2(str(meta_src), str(meta_backup))
                 log.info("Roll metadata backup saved: %s", meta_backup.name)

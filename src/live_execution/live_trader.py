@@ -1889,9 +1889,15 @@ class LiveTrader:
             )
 
     def _print_account_summary(self) -> None:
-        """Print a CL-only account summary at startup."""
+        """Print a per-symbol account summary at startup.
+
+        T6 m3 cosmetic: banner TEXT is derived from the execution symbol
+        (byte-identical for CL). The account-summary dict KEYS stay cl_*
+        for every symbol pending the m2 rename micro-ticket.
+        """
         w = 60  # box width
         try:
+            sym = self._execution_symbol
             acct = self.exec_client.get_account_summary(symbol=self._execution_symbol)
             ts = self.telemetry.trade_summary()
         except Exception:
@@ -1917,17 +1923,17 @@ class LiveTrader:
 
         lines = [
             "=" * w,
-            "ACCOUNT SUMMARY (CL Only)".center(w),
+            f"ACCOUNT SUMMARY ({sym} Only)".center(w),
             "=" * w,
             f"  Account:           {acct['account'] or 'N/A'}",
             f"  Net Liquidation:   ${acct['net_liquidation']:>14,.2f}",
             f"  Available Funds:   ${acct['available_funds']:>14,.2f}",
             "-" * w,
-            f"  CL Position:       {pos_str}",
-            f"  CL Market Value:   ${acct['cl_market_value']:>14,.2f}",
-            f"  CL Avg Cost:       ${acct['cl_avg_cost']:>14,.2f}",
-            f"  CL Unrealized PnL: ${acct['cl_unrealized_pnl']:>14,.2f}",
-            f"  CL Realized PnL:   ${acct['cl_realized_pnl']:>14,.2f}",
+            f"  {sym} Position:       {pos_str}",
+            f"  {sym} Market Value:   ${acct['cl_market_value']:>14,.2f}",
+            f"  {sym} Avg Cost:       ${acct['cl_avg_cost']:>14,.2f}",
+            f"  {sym} Unrealized PnL: ${acct['cl_unrealized_pnl']:>14,.2f}",
+            f"  {sym} Realized PnL:   ${acct['cl_realized_pnl']:>14,.2f}",
             "-" * w,
             "  Trade History (telemetry):",
             f"    Total Signals:     {ts['total_signals']}",
@@ -2190,6 +2196,23 @@ class LiveTrader:
             return ctx.brain_instrument
         from src.core.instrument_master import get_instrument
         return get_instrument(self._brain_symbol)
+
+    @property
+    def _execution_instrument(self) -> "Instrument":
+        """Execution-instrument registry entry (T6 m1 display seam).
+
+        Prefers the resolved InstrumentContext (always set by __init__).
+        Falls back to the registry via _execution_symbol for test stubs
+        built with object.__new__ — the same structural derivation as
+        _tick_size/_brain_instrument, NOT a silent default: unknown
+        symbols raise via get_instrument and a missing seam raises
+        AttributeError naming _execution_symbol.
+        """
+        ctx = getattr(self, "_instrument_context", None)
+        if ctx is not None:
+            return ctx.execution_instrument
+        from src.core.instrument_master import get_instrument
+        return get_instrument(self._execution_symbol)
 
     @property
     def _tick_size(self) -> float:
@@ -3135,8 +3158,13 @@ class LiveTrader:
                 acct_summary = self.exec_client.get_account_summary(symbol=self._execution_symbol)
                 unrealized_pnl = float(acct_summary.get("cl_unrealized_pnl", 0.0))
                 avg_cost = float(acct_summary.get("cl_avg_cost", 0.0))
-                # IBKR averageCost = price * multiplier (1000 for CL)
-                entry_price = avg_cost / 1000.0 if avg_cost else 0.0
+                # IBKR averageCost = price * contract multiplier (T6 m1:
+                # registry-driven — 1000 for CL, byte-identical output; 50
+                # for ES). Display-only; no trade-path behavior change.
+                entry_price = (
+                    avg_cost / self._execution_instrument.multiplier
+                    if avg_cost else 0.0
+                )
                 log.info(
                     "[PNL] position=%d  unrealizedPnL=$%.2f  "
                     "entryPrice=%.2f  mktPrice=%.2f  %s  %s  %s  held=%d bars",
@@ -3353,8 +3381,9 @@ class LiveTrader:
         # 6. Execute or dry-run (BUY / SELL)
         if self.dry_run:
             log.info(
-                "DRY RUN — would place bracket order %s %d CL (prob=%.2f)",
-                signal.action, signal.lots, signal.probability,
+                "DRY RUN — would place bracket order %s %d %s (prob=%.2f)",
+                signal.action, signal.lots, self._execution_symbol,
+                signal.probability,
             )
             self.telemetry.log_signal(
                 timestamp=bar_time,

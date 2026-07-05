@@ -248,11 +248,26 @@ def stage_2_artifact_validation(strategy_config_path: Path) -> bool:
 
 
 def _expected_cache_timestep(cache_name: str) -> pd.Timedelta | None:
-    """Infer expected timestep from warm-start cache filename."""
+    """Infer expected timestep from warm-start cache filename.
+
+    T6 cosmetic: accepts per-symbol cache names emitted by multi-symbol
+    DataManagers (``warm_start_cache_ES.parquet`` -> 5m base stream,
+    ``warm_start_cache_ES_1h.parquet`` -> 1h). Legacy CL names
+    (``warm_start_cache.parquet`` / ``warm_start_cache_1h.parquet``)
+    resolve exactly as before.
+    """
     if cache_name == "warm_start_cache.parquet":
         return pd.Timedelta(minutes=5)
 
-    match = re.fullmatch(r"warm_start_cache_(\d+)([mh])\.parquet", cache_name)
+    # Per-symbol base cache (no cadence suffix) is the 5m stream.
+    if re.fullmatch(r"warm_start_cache_[A-Z]+\.parquet", cache_name):
+        return pd.Timedelta(minutes=5)
+
+    # Legacy (warm_start_cache_1h) and per-symbol (warm_start_cache_ES_1h)
+    # cadence-suffixed names.
+    match = re.fullmatch(
+        r"warm_start_cache(?:_[A-Z]+)?_(\d+)([mh])\.parquet", cache_name
+    )
     if not match:
         return None
 

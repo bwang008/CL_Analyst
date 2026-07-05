@@ -56,6 +56,10 @@ sys.path.insert(0, PROJECT_ROOT)
 os.chdir(PROJECT_ROOT)
 
 import src.util as util
+# T6 (t6-config-generator-fix_07052026_0043): single-source dataset-tag
+# derivation. Identity of this function is test-pinned against the generator's
+# import — do NOT re-implement the stripping inline.
+from src.core.dataset_tag import derive_dataset_tag
 
 
 # ---------------------------------------------------------------------------
@@ -648,18 +652,11 @@ def run_pipeline(
             )
             all_reports[combo_name] = report
 
-            # Derive dataset tag from data filename
+            # Derive dataset tag from data filename via the shared helper
+            # (strips legacy "bk_" / modern "{symbol}_" prefixes — T6 single source)
             data_basename = os.path.splitext(os.path.basename(data_path))[0]
-            # Strip legacy "bk_" or modern "{symbol}_" prefixes for cleaner bundle names
-            import re
-            match = re.search(r'bk_(.+)$', data_basename)
-            if match:
-                dataset_tag = match.group(1)
-            elif data_basename.upper().startswith(symbol.upper() + "_"):
-                dataset_tag = data_basename[len(symbol) + 1:]
-            else:
-                dataset_tag = data_basename
-            
+            dataset_tag = derive_dataset_tag(data_basename, symbol)
+
             bundle_name = f"E2E_{dataset_tag}_{direction}_{metric_name}"
             bundle_dir = os.path.join(output_dir, "registry", bundle_name)
             create_registry_bundle(
@@ -728,24 +725,23 @@ def run_pipeline(
 
         # Create ensemble config from the base strategy config
         ensemble_cfg = dict(strategy_cfg)
-        # Derive dataset tag
-        import re
+        # T6: stamp the run symbol — kills the CL-base execution_symbol leak
+        # into sweep_{metric}.json and TopKTracker candidates (value-preserving
+        # for CL runs, where symbol == "CL" == the base config's value).
+        ensemble_cfg["execution_symbol"] = symbol
+        # Derive dataset tag via the shared helper (T6 single source)
         data_basename = os.path.splitext(os.path.basename(data_path))[0]
-        match = re.search(r'bk_(.+)$', data_basename)
-        if match:
-            dataset_tag = match.group(1)
-        elif data_basename.upper().startswith(symbol.upper() + "_"):
-            dataset_tag = data_basename[len(symbol) + 1:]
-        else:
-            dataset_tag = data_basename
+        dataset_tag = derive_dataset_tag(data_basename, symbol)
 
         ensemble_cfg["models"] = {
             "long": {
+                "symbol": symbol,
                 "experiment_id": f"E2E_{dataset_tag}_long_{metric_name}",
                 "predictions_path": f"data/predictions/{os.path.basename(direction_paths['long'])}",
                 "threshold": strategy_cfg.get("models", {}).get("long", {}).get("threshold", 0.60),
             },
             "short": {
+                "symbol": symbol,
                 "experiment_id": f"E2E_{dataset_tag}_short_{metric_name}",
                 "predictions_path": f"data/predictions/{os.path.basename(direction_paths['short'])}",
                 "threshold": strategy_cfg.get("models", {}).get("short", {}).get("threshold", 0.60),

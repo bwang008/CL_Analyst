@@ -8,6 +8,20 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+# Ensure project root is on path for script-mode runs
+# (python agent/generate_ensemble_artifacts.py from the repo root / VM).
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+# T6 (t6-config-generator-fix_07052026_0043): shared tag helper + instrument
+# validation. All three are stdlib-leaf-safe (no heavy deps), so the VM-side
+# invocation is unaffected. Identity of derive_dataset_tag is test-pinned —
+# do NOT re-implement the derivation inline.
+from src.core.dataset_tag import derive_dataset_tag
+from src.core.instrument_master import get_instrument
+from src.live_execution.instrument_context import resolve_instrument_context
+
 def parse_experiment_key(key, direction):
     """
     key format: sweep_hs13a_3x1_6h_scout_20260618_1721_E2E_HourSet_13A_long_average_precision
@@ -251,6 +265,23 @@ def main():
         manifest = json.load(f)
 
     # -------------------------------------------------------------------------
+    # Resolve + validate the batch symbol (T6)
+    # -------------------------------------------------------------------------
+    # Every emitted strategy config is stamped from manifest.baseline.symbol
+    # (execution_symbol + models.<side>.symbol). House rule: NO silent
+    # defaults — a manifest without it is a hard batch failure, never a
+    # fallback to CL.
+    baseline_symbol = manifest.get("baseline", {}).get("symbol")
+    if not baseline_symbol:
+        raise ValueError(
+            f"FATAL: manifest 'baseline.symbol' is missing or empty in "
+            f"{manifest_path}. Every batch manifest must declare its "
+            f"instrument symbol explicitly — refusing to default to CL."
+        )
+    # Fail-fast: unknown symbols raise ValueError('Unknown instrument symbol: ...')
+    get_instrument(baseline_symbol)
+
+    # -------------------------------------------------------------------------
     # Resolve Data Path (Manifest -> CLI Fallback)
     # -------------------------------------------------------------------------
     # CLI args.data takes precedence over manifest if explicitly provided
@@ -320,10 +351,10 @@ def main():
         # the non-deterministic opt_data insertion order. See _canonical_pair_order.
         sorted_opt_data = _canonical_pair_order(opt_data, batch_dir)
 
-        # Derive e2e_dataset_tag the exact same way vm_e2e_pipeline.py does
+        # Derive e2e_dataset_tag via the SAME shared helper vm_e2e_pipeline
+        # uses (src.core.dataset_tag) — alignment is true by construction (T6).
         data_basename = os.path.splitext(os.path.basename(args.data))[0]
-        match = re.search(r'bk_(.+)$', data_basename)
-        e2e_dataset_tag = match.group(1) if match else data_basename
+        e2e_dataset_tag = derive_dataset_tag(data_basename, baseline_symbol)
         e2e_prefix = f"E2E_{e2e_dataset_tag}"
 
         for ensemble_idx, (pair_key, pair_val) in enumerate(sorted_opt_data, start=1):
@@ -352,6 +383,10 @@ def main():
 
             # Create config
             cfg = json.loads(json.dumps(base_config))  # deep copy
+            # T6: stamp the batch symbol — in-place overwrite of the base
+            # config's existing key (value-preserving for CL, the fix for
+            # non-CL batches that used to leak the CL base's value).
+            cfg["execution_symbol"] = baseline_symbol
             cfg["nickname"] = nickname
             cfg["description"] = f"{objective.capitalize()} Ensemble #{ensemble_idx}: {long_desc} + {short_desc}"
             cfg["holdout_months"] = manifest.get("defaults", {}).get("post_optimizer_holdout_months", 6)
@@ -400,6 +435,12 @@ def main():
             cfg["models"]["short"]["model_path"] = f"reports/{short_sweep}/registry/{short_dir}/registry/{short_exp}_short_{short_metric}/final_model.pkl"
             cfg["models"]["short"]["predictions_path"] = pred_path_short
 
+            # T6 (D2): explicit model<->symbol handshake on EVERY emitted
+            # config. Post-T6 experiment_ids are symbol-stripped, so this
+            # field is the only surviving model-symbol cross-check.
+            cfg["models"]["long"]["symbol"] = baseline_symbol
+            cfg["models"]["short"]["symbol"] = baseline_symbol
+
             if not regression_triggered:
                 # Override long and short params
                 long_params = opt_info.get("long_params", {})
@@ -435,6 +476,16 @@ def main():
                         "trailing_atr_mult": short_params.get("trailing_atr_mult", 0),
                         "max_hold_bars": short_params.get("max_hold_bars", 0)
                     }]
+
+            # T6 post-emission self-check: an emitted config that cannot
+            # start live is a BATCH FAILURE — let the resolver's ValueError
+            # propagate. model_path existence is WARN only (cloud-side
+            # generation may reference not-yet-synced trees).
+            resolve_instrument_context(cfg)
+            for _side in ("long", "short"):
+                _mp = cfg["models"][_side].get("model_path", "")
+                if _mp and not os.path.isfile(_mp):
+                    print(f"  [WARN] models.{_side}.model_path not found on disk (may be un-synced): {_mp}")
 
             # Save config
             config_path = os.path.join(configs_dir, config_name)

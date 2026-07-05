@@ -421,7 +421,8 @@ class IBKRConnectionManager:
         self.ensure_connected()
         qualified = self.ib.qualifyContracts(contract)
         if not qualified:
-            raise ValueError("Failed to qualify CL contract with IBKR.")
+            # T6 m3: name the actual contract symbol (byte-identical for CL)
+            raise ValueError(f"Failed to qualify {contract.symbol} contract with IBKR.")
         return qualified[0]
 
     async def qualify_contract_async(self, contract: Contract) -> Contract:
@@ -429,7 +430,8 @@ class IBKRConnectionManager:
             raise ConnectionError("Not connected to IBKR. Cannot qualify contract asynchronously.")
         qualified = await self.ib.qualifyContractsAsync(contract)
         if not qualified:
-            raise ValueError("Failed to qualify CL contract with IBKR.")
+            # T6 m3: name the actual contract symbol (byte-identical for CL)
+            raise ValueError(f"Failed to qualify {contract.symbol} contract with IBKR.")
         return qualified[0]
 
     def fetch_historical_bars(

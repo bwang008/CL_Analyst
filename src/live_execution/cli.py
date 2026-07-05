@@ -155,7 +155,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--quantity", type=int, default=_DEFAULT_QUANTITY,
-        help="Number of CL contracts per trade (default: 1)",
+        help="Number of contracts per trade (default: 1)",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
