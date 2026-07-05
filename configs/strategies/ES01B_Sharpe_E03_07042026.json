@@ -18,7 +18,8 @@
     "live_config": {
         "client_id": 1010,
         "entry_mode": "marketable_limit",
-        "exit_mode": "marketable_limit"
+        "exit_mode": "marketable_limit",
+        "enable_5m_stream": false
     },
     "models": {
         "long": {

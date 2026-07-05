@@ -255,27 +255,60 @@ class TestSessionCalendarGlobex:
         )
 
     def test_globex_family_dispatches_to_same_calendar(self):
-        """CL/MCL/ES/GC/SI/NQ all carry _GLOBEX_SESSION -> identical strings
-        at every pinned instant (registry-tuple dispatch, audit test 3)."""
-        for sym in ("CL", "MCL", "ES", "GC", "SI", "NQ"):
+        """CL/MCL/GC/SI all carry _GLOBEX_SESSION -> identical strings
+        at every pinned instant (registry-tuple dispatch, audit test 3).
+
+        T7 EVOLUTION (t7-es-ops-runway_07052026_0214): ES/NQ dropped from
+        the GLOBEX family — they (and their micros) move to the EQUITY
+        session tuple (("17:00","15:15"),("15:30","16:00")), the sanctioned
+        evolution the C4 block in session_calendar.py:29-37 pre-declared.
+        The negative assertion below pins the departure."""
+        for sym in ("CL", "MCL", "GC", "SI"):
             inst = get_instrument(sym)
             for wall, expected in _CL_PINNED_CASES:
                 t = _utc_from_et(*wall)
                 assert market_status(inst, t) == expected, (
                     f"{sym} @ ET{wall} must dispatch to the GLOBEX calendar"
                 )
+        # T7: ES/NQ no longer carry the GLOBEX tuple (equity dispatch)
+        for sym in ("ES", "NQ"):
+            got = get_instrument(sym).session_hours_ct
+            assert got != (("17:00", "16:00"),), (
+                f"{sym} must have LEFT the GLOBEX family (T7 equity "
+                f"session tuple), still carries {got!r}"
+            )
 
     def test_es_maintenance_break_modeled_closed(self):
-        """Blueprint test req: the 16:00-17:00 CT maintenance break IS the
-        Mon-Thu 17:00-18:00 ET halt branch — ES Mon 17:30 ET reads CLOSED.
-        (The additional real ES 15:15-15:30 CT halt is C4 documentation-only
-        — deliberately NOT modeled or tested here.)"""
-        assert market_status(_ES, _utc_from_et(2026, 7, 13, 17, 30)) == _HALT_STR
-        assert market_status(_ES, _utc_from_et(2026, 1, 12, 17, 30)) == _HALT_STR
+        """The 16:00-17:00 CT maintenance break — ES Mon 17:30 ET
+        (= 16:30 CT) reads CLOSED.
+
+        T7 EVOLUTION (t7-es-ops-runway_07052026_0214): re-pinned to the
+        EQUITY calendar semantics. The T5 docstring marked the real ES
+        15:15-15:30 CT halt "C4 documentation-only — deliberately NOT
+        modeled" (written to be evolved); ES now dispatches its own equity
+        calendar, so the maintenance instant returns the equity
+        'maintenance' string (shape-pinned), NOT the CL byte-frozen
+        _HALT_STR. Only "OPEN" is byte-load-bearing (watchdog gate)."""
+        for wall in ((2026, 7, 13, 17, 30), (2026, 1, 12, 17, 30)):
+            status = market_status(_ES, _utc_from_et(*wall))
+            assert status != "OPEN", f"ES @ ET{wall}: got 'OPEN'"
+            assert status.startswith("CLOSED"), (
+                f"ES @ ET{wall}: got {status!r}"
+            )
+            assert "maintenance" in status, (
+                f"ES @ ET{wall}: equity maintenance marker missing "
+                f"from {status!r}"
+            )
 
     def test_session_open_anchor_none_for_globex(self):
         """GLOBEX anchor is ALWAYS None — that keeps the CL watchdog
-        arithmetic bit-identical to today (audit §4b)."""
+        arithmetic bit-identical to today (audit §4b).
+
+        T7 EVOLUTION (t7-es-ops-runway_07052026_0214): _ES dropped from
+        the GLOBEX instrument loop — ES moved to the EQUITY calendar,
+        whose session_open_anchor returns the most recent 15:30 / 17:00 CT
+        open (a NOT-None anchor is asserted below; the exact equity anchor
+        vectors live in tests/test_hourly_only_equity_session.py)."""
         instants = [
             _utc_from_et(2026, 7, 13, 12, 0),   # open hours
             _utc_from_et(2026, 7, 13, 17, 30),  # daily halt
@@ -283,12 +316,18 @@ class TestSessionCalendarGlobex:
             _utc_from_et(2026, 7, 12, 18, 5),   # Sunday open
             _utc_from_et(2026, 7, 11, 12, 0),   # Saturday
         ]
-        for inst in (_CL, _MCL, _ES, _GC):
+        for inst in (_CL, _MCL, _GC):
             for t in instants:
                 assert session_open_anchor(inst, t) is None, (
                     f"{inst.symbol} @ {t}: GLOBEX session_open_anchor must be "
                     "None (no reopen grace — Q1 pinned as-is)"
                 )
+        # T7: ES left the GLOBEX arm — its equity anchor is NOT None
+        for t in instants:
+            assert session_open_anchor(_ES, t) is not None, (
+                f"ES @ {t}: equity session_open_anchor must return the most "
+                "recent 15:30/17:00 CT open, not the GLOBEX None"
+            )
 
     def test_q1_cl_reopen_surface_pinned_open_with_no_anchor(self):
         """Q1 PIN: at Mon 18:03 ET (reopen) the status is OPEN and the anchor
@@ -1272,8 +1311,17 @@ class TestLiveTraderSessionWiring:
             assert call.kwargs.get("execution_symbol") == "ZC"
 
     def test_stale_threshold_pin_15(self):
-        """The threshold stays 15 minutes for ALL instruments (audit §4b:
-        bar-size-driven, not instrument-driven)."""
+        """The 15-minute threshold constant stays pinned (audit §4b:
+        bar-size-driven, not instrument-driven).
+
+        T7 CLARIFICATION (t7-es-ops-runway_07052026_0214, impact_review
+        C7 — docstring-scope only, assertion unchanged): 15 minutes
+        applies to 5m-ENABLED instances (enable_5m_stream true — every
+        CL config; the flag defaults true), watching _last_bar_time_5m.
+        Hourly-only instances (enable_5m_stream false) watch
+        _last_bar_time_1h against the separate
+        _STALE_BAR_THRESHOLD_MINUTES_1H = 135, pinned in
+        tests/test_hourly_only_equity_session.py."""
         assert lt_module._STALE_BAR_THRESHOLD_MINUTES == 15
 
     def test_zc_halt_hours_watchdog_false_despite_stale_clock(self):

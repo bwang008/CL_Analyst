@@ -147,6 +147,11 @@ _DATA_FARM_WAIT_SECONDS = 10.0             # How long to wait for farm OK after 
 
 # Stale bar watchdog: force reconnect when bars stop arriving
 _STALE_BAR_THRESHOLD_MINUTES = 15  # Minutes without a bar before forcing reconnect
+# T7: hourly-only instances (enable_5m_stream=false) watch the 1h stream
+# instead. 1h bars are open-time stamped and delivered at T+60, so normal
+# staleness oscillates 60→120 min — 135 = 120 max normal + the legacy
+# 15-min margin. 5m-enabled instances keep the 15-min constant above.
+_STALE_BAR_THRESHOLD_MINUTES_1H = 135
 
 # Auto-restart parameters (process-level recovery)
 _RESTART_MAX_ATTEMPTS = 5        # Max full restart attempts
@@ -323,6 +328,25 @@ class LiveTrader:
         # Extract designated primary stream from config (e.g. "1h" or "5m")
         self._bar_size: str = strategy_config.get("bar_size", "5m").lower()
 
+        # T7 (t7-es-ops-runway): hourly-only mode. live_config.enable_5m_stream
+        # is OPTIONAL and DEFAULTS TRUE — every config without the key (the
+        # whole CL fleet) constructs byte-identically to HEAD. When false, the
+        # brain 5m artifacts (DataManager/seed/warm-start/subscription) are
+        # skipped entirely; the front-month Hands stream STAYS (order-pricing-
+        # critical). Not a silent fork: the resolved mode is loudly logged and
+        # misuse (false + 5m inference stream) hard-crashes here, before any
+        # network side-effect.
+        _live_cfg_all = strategy_config.get("live_config", {}) or {}
+        self._enable_5m_stream: bool = bool(
+            _live_cfg_all.get("enable_5m_stream", True)
+        )
+        if not self._enable_5m_stream and self._bar_size not in ("1h", "2h", "4h"):
+            raise ValueError(
+                f"live_config.enable_5m_stream=false requires an hourly "
+                f"bar_size (got {self._bar_size!r}) — the 5m stream IS the "
+                f"inference stream for 5m configs."
+            )
+
         # ATR period for bracket sizing (separate from ATR_14 model feature).
         # The model always uses ATR_14 as a feature, but bracket placement
         # (TP/SL/trailing) can use a different ATR period found by optimizer.
@@ -362,25 +386,35 @@ class LiveTrader:
             _CL_DATA_ROOT or "(NOT SET)",
             _get_data_root().parent if _CL_DATA_ROOT else "(fallback)",
         )
-        log.info("DATA PATHS: 5m seed=%s  cache=%s", seed_path, cache_path)
-
         # C2 (T2 impact review) — RESOLVED IN T5: roll metadata is now
         # namespaced per EXECUTION symbol (last_front_month_by_symbol +
         # startswith ownership) inside DataManager, so concurrent CL + MCL
         # instances sharing the brain file no longer ping-pong. bars_per_day
         # is fed from the registry (CL keeps its legacy 288/24 literals by
         # construction — pinned).
-        self.data_manager_5m = DataManager(
-            symbol=self._instrument_context.brain_symbol,
-            seed_path=seed_path,
-            cache_path=cache_path,
-            master_ledger_path=str(_paths.ledger_5m),
-            roll_metadata_path=str(_paths.roll_metadata),
-            data_client=self.data_client,
-            bar_size="5 mins",
-            bars_per_day=self._instrument_context.brain_instrument.bars_per_day_5m,
-            execution_symbol=self._instrument_context.execution_symbol,
-        )
+        # T7: hourly-only instances (enable_5m_stream=false) never construct
+        # the 5m manager — data_manager_5m is None, the design's sentinel
+        # (every downstream 5m touchpoint is None-guarded or flag-gated).
+        if self._enable_5m_stream:
+            log.info("DATA PATHS: 5m seed=%s  cache=%s", seed_path, cache_path)
+            self.data_manager_5m = DataManager(
+                symbol=self._instrument_context.brain_symbol,
+                seed_path=seed_path,
+                cache_path=cache_path,
+                master_ledger_path=str(_paths.ledger_5m),
+                roll_metadata_path=str(_paths.roll_metadata),
+                data_client=self.data_client,
+                bar_size="5 mins",
+                bars_per_day=self._instrument_context.brain_instrument.bars_per_day_5m,
+                execution_symbol=self._instrument_context.execution_symbol,
+            )
+        else:
+            self.data_manager_5m = None
+            log.warning(
+                "HOURLY-ONLY MODE: enable_5m_stream=false — 5m DataManager/"
+                "seed/subscription disabled; trailing evaluates on 1h bars; "
+                "the front-month hands stream stays subscribed."
+            )
 
         self.data_manager_1h = None
         if self._bar_size in ("1h", "2h", "4h"):
@@ -723,9 +757,10 @@ class LiveTrader:
 
             # Step 6: Pass front-month ID to DataManagers for rollover detection
             if self._front_month_local_symbol is not None:
-                self.data_manager_5m.front_month_id = (
-                    self._front_month_local_symbol
-                )
+                if self.data_manager_5m is not None:  # T7: None in hourly-only
+                    self.data_manager_5m.front_month_id = (
+                        self._front_month_local_symbol
+                    )
                 if self.data_manager_1h is not None:
                     self.data_manager_1h.front_month_id = (
                         self._front_month_local_symbol
@@ -800,8 +835,14 @@ class LiveTrader:
                 f"Host: `{self._hostname}`\n"
                 f"Dry-run: `{self.dry_run}`\n"
                 f"Data Port: `{data_port}`\n"
-                f"Exec Port: `{exec_port}`\n\n"
+                f"Exec Port: `{exec_port}`\n"
             )
+            # T7: stamp the resolved stream mode (no silent forks)
+            if not self._enable_5m_stream:
+                startup_msg += (
+                    "Mode: `HOURLY-ONLY (enable_5m_stream=false)`\n"
+                )
+            startup_msg += "\n"
             startup_msg += self._build_heartbeat_payload()
             self._telegram.send(startup_msg)
 
@@ -884,13 +925,20 @@ class LiveTrader:
                 self.data_client.cancel_subscription(self._front_month_bars)
             except Exception:
                 pass
-        # Save warm-start caches on shutdown
-        try:
-            self.data_manager_5m.save_cache()
-            if self.data_manager_1h is not None:
+        # Save warm-start caches on shutdown. T7 (impact_review C2): each
+        # save gets its OWN None-guard + try/except — the former SHARED try
+        # let a 5m-side failure (e.g. the None manager in hourly-only mode)
+        # swallow the AttributeError and silently SKIP the 1h cache save.
+        if self.data_manager_5m is not None:
+            try:
+                self.data_manager_5m.save_cache()
+            except Exception:
+                log.warning("Failed to save warm-start cache on shutdown.")
+        if self.data_manager_1h is not None:
+            try:
                 self.data_manager_1h.save_cache()
-        except Exception:
-            log.warning("Failed to save warm-start cache on shutdown.")
+            except Exception:
+                log.warning("Failed to save warm-start cache on shutdown.")
         # Stop heartbeat thread
         self._heartbeat_stop_event.set()
         self.data_client.disconnect()
@@ -1096,8 +1144,20 @@ class LiveTrader:
         if self._atr_at_entry <= 0:
             return
 
-        # Update bar extremes from the latest bar
-        last_bar = self.rolling_df_5m.iloc[-1]
+        # Update bar extremes from the latest bar. T7 (impact_review C4):
+        # the extremes frame is selected ONCE, by PRESENCE — the 5m frame
+        # whenever it exists (every 5m-enabled instance, including the
+        # parity harness's populated 5m mirror), else the 1h frame
+        # (hourly-only instances, where rolling_df_5m is None by
+        # construction). Deliberately NOT a flag read — frame presence IS
+        # the mode, declared loudly at startup. Extremes stay the same
+        # monotonic max/min accumulators.
+        extremes_df = (
+            self.rolling_df_5m
+            if self.rolling_df_5m is not None
+            else self.rolling_df_1h
+        )
+        last_bar = extremes_df.iloc[-1]
         bar_high = float(last_bar["High"])
         bar_low = float(last_bar["Low"])
         self._highest_high = max(self._highest_high, bar_high)
@@ -1951,25 +2011,35 @@ class LiveTrader:
 
     def _warm_start(self) -> None:
         """Initialize rolling window via DataManager (seed + backfill)."""
-        log.info("Warm-start: initializing 5m DataManager...")
-        self.rolling_df_5m = self.data_manager_5m.initialize()
+        # T7: hourly-only instances skip the 5m warm start ENTIRELY — no 5m
+        # seed/cache is required (rolling_df_5m / _last_bar_time_5m stay
+        # None). The getattr default mirrors the flag's default-true
+        # semantics for object.__new__ test stubs that predate the flag.
+        if getattr(self, "_enable_5m_stream", True):
+            log.info("Warm-start: initializing 5m DataManager...")
+            self.rolling_df_5m = self.data_manager_5m.initialize()
 
-        if len(self.rolling_df_5m) == 0:
-            raise RuntimeError(
-                "Warm-start failed: no data available for 5m stream."
+            if len(self.rolling_df_5m) == 0:
+                raise RuntimeError(
+                    "Warm-start failed: no data available for 5m stream."
+                )
+
+            # Ensure DateTime index
+            if "DateTime" in self.rolling_df_5m.columns and not isinstance(
+                self.rolling_df_5m.index, pd.DatetimeIndex
+            ):
+                self.rolling_df_5m = self.rolling_df_5m.set_index("DateTime", drop=False)
+
+            self._last_bar_time_5m = self.rolling_df_5m.index[-1]
+            log.info(
+                "5m rolling window initialized: %d bars, latest=%s",
+                len(self.rolling_df_5m), self._last_bar_time_5m,
             )
-
-        # Ensure DateTime index
-        if "DateTime" in self.rolling_df_5m.columns and not isinstance(
-            self.rolling_df_5m.index, pd.DatetimeIndex
-        ):
-            self.rolling_df_5m = self.rolling_df_5m.set_index("DateTime", drop=False)
-
-        self._last_bar_time_5m = self.rolling_df_5m.index[-1]
-        log.info(
-            "5m rolling window initialized: %d bars, latest=%s",
-            len(self.rolling_df_5m), self._last_bar_time_5m,
-        )
+        else:
+            log.info(
+                "HOURLY-ONLY MODE: 5m warm start skipped "
+                "(enable_5m_stream=false — no 5m seed required)."
+            )
 
         if self._bar_size in ("1h", "2h", "4h") and self.data_manager_1h is not None:
             log.info("Warm-start: initializing 1h DataManager...")
@@ -2240,15 +2310,24 @@ class LiveTrader:
         continuous contract (an MCL config's brain is CL); the Hands
         stream (_subscribe_front_month) stays on the execution symbol.
         """
-        log.info("Subscribing to live 5-min bars (Stream A)...")
-        self._live_bars_5m = self.data_client.subscribe_live_bars(
-            symbol=self._brain_symbol,
-            continuous=True,
-            bar_size="5 mins",
-            duration_str="60 S",
-        )
-        self._live_bars_5m.updateEvent += self._on_bar_update_5m
-        log.info("Subscribed to 5-min continuous contract live bars")
+        # T7: hourly-only instances never subscribe the continuous 5m brain
+        # stream (the front-month Hands stream is untouched — it is a
+        # separate, seed-free subscription via _subscribe_front_month).
+        if getattr(self, "_enable_5m_stream", True):
+            log.info("Subscribing to live 5-min bars (Stream A)...")
+            self._live_bars_5m = self.data_client.subscribe_live_bars(
+                symbol=self._brain_symbol,
+                continuous=True,
+                bar_size="5 mins",
+                duration_str="60 S",
+            )
+            self._live_bars_5m.updateEvent += self._on_bar_update_5m
+            log.info("Subscribed to 5-min continuous contract live bars")
+        else:
+            log.info(
+                "HOURLY-ONLY MODE: skipping 5m brain subscription "
+                "(enable_5m_stream=false)."
+            )
 
         if self._bar_size in ("1h", "2h", "4h"):
             log.info("Subscribing to live 1-hour bars (Stream B)...")
@@ -2404,7 +2483,8 @@ class LiveTrader:
                 )
 
             # 4. Update DataManager front_month_id for ratio tracking
-            self.data_manager_5m.front_month_id = new_local_sym
+            if self.data_manager_5m is not None:  # T7: None in hourly-only
+                self.data_manager_5m.front_month_id = new_local_sym
             if self.data_manager_1h is not None:
                 self.data_manager_1h.front_month_id = new_local_sym
 
@@ -2514,15 +2594,22 @@ class LiveTrader:
             # 2. Re-subscribe using async API
             # T2 (constraint 3): Brain streams = brain symbol continuous;
             # the Hands (front-month) stream below stays execution symbol.
-            log.info("Subscribing to live 5-min bars (Stream A)...")
-            self._live_bars_5m = await self.data_client.subscribe_live_bars_async(
-                symbol=self._brain_symbol,
-                continuous=True,
-                bar_size="5 mins",
-                duration_str="60 S",
-            )
-            self._live_bars_5m.updateEvent += self._on_bar_update_5m
-            log.info("Subscribed to 5-min continuous contract live bars")
+            # T7: hourly-only instances skip the 5m brain resubscribe too.
+            if getattr(self, "_enable_5m_stream", True):
+                log.info("Subscribing to live 5-min bars (Stream A)...")
+                self._live_bars_5m = await self.data_client.subscribe_live_bars_async(
+                    symbol=self._brain_symbol,
+                    continuous=True,
+                    bar_size="5 mins",
+                    duration_str="60 S",
+                )
+                self._live_bars_5m.updateEvent += self._on_bar_update_5m
+                log.info("Subscribed to 5-min continuous contract live bars")
+            else:
+                log.info(
+                    "HOURLY-ONLY MODE: skipping 5m brain resubscription "
+                    "(enable_5m_stream=false)."
+                )
 
             if self._bar_size == "1h":
                 log.info("Subscribing to live 1-hour bars (Stream B)...")
@@ -3940,8 +4027,19 @@ class LiveTrader:
         if market_status != "OPEN":
             return False
 
-        # Check how long since the last bar
-        last_bar_time = getattr(self, "_last_bar_time_5m", None)
+        # Check how long since the last bar. T7: hourly-only instances
+        # (enable_5m_stream=false) have NO 5m stream — anchor the 1h stream
+        # against the 135-min threshold instead. 5m-enabled instances keep
+        # the byte-identical 15-min/_last_bar_time_5m behavior (a stale 1h
+        # anchor with a fresh 5m stream is a pre-existing, deferred gap —
+        # C6). The getattr default-true mirrors the function's own
+        # _last_bar_time_5m seam for object.__new__ watchdog stubs.
+        if getattr(self, "_enable_5m_stream", True):
+            last_bar_time = getattr(self, "_last_bar_time_5m", None)
+            stale_threshold = _STALE_BAR_THRESHOLD_MINUTES
+        else:
+            last_bar_time = getattr(self, "_last_bar_time_1h", None)
+            stale_threshold = _STALE_BAR_THRESHOLD_MINUTES_1H
         if last_bar_time is None:
             return False  # No bars received yet — warm start still in progress
 
@@ -3959,7 +4057,7 @@ class LiveTrader:
             else anchor
         )
         minutes_stale = (now - reference).total_seconds() / 60
-        if minutes_stale < _STALE_BAR_THRESHOLD_MINUTES:
+        if minutes_stale < stale_threshold:
             return False  # Not stale enough yet
 
         subs_flag = "subs_lost=True" if self._subscriptions_lost else "subs_lost=False (silent death)"

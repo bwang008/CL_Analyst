@@ -33,6 +33,12 @@ class Instrument:
 _GLOBEX_SESSION: Tuple[Tuple[str, str], ...] = (("17:00", "16:00"),)
 # CBOT grains: overnight 19:00–07:45 CT + day 08:30–13:20 CT (daily halts between).
 _GRAINS_SESSION: Tuple[Tuple[str, str], ...] = (("19:00", "07:45"), ("08:30", "13:20"))
+# CME equity index outrights: 17:00-16:00 CT with a REAL 15:15-15:30 CT daily
+# halt (Mon-Fri) — T5 impact_review V4 sourced finding, C4 amendment landed in
+# T7 (t7-es-ops-runway). Segment 1 wraps midnight (17:00 → 15:15 next day);
+# segment 2 is the 15:30-16:00 post-halt reopen. Carried by EXACTLY
+# ES/MES/NQ/MNQ (micros move with parents — pinned).
+_EQUITY_SESSION: Tuple[Tuple[str, str], ...] = (("17:00", "15:15"), ("15:30", "16:00"))
 
 # Invariant (test-enforced): tick_value == tick_size * multiplier * quote_unit_usd.
 # Micros are execution-only: they inherit the parent's cftc_code and
@@ -91,7 +97,7 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         active_months="HMUZ",
         roll_reference="LTD",
         roll_buffer_days=8,        # volume-roll Monday ≈ 8 cal days pre 3rd-Friday expiry
-        session_hours_ct=_GLOBEX_SESSION,
+        session_hours_ct=_EQUITY_SESSION,
         bars_per_day_5m=276,
         bars_per_day_1h=23,
         live_vol_index="VIX",
@@ -110,7 +116,7 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         active_months="HMUZ",
         roll_reference="LTD",
         roll_buffer_days=8,
-        session_hours_ct=_GLOBEX_SESSION,
+        session_hours_ct=_EQUITY_SESSION,
         bars_per_day_5m=276,
         bars_per_day_1h=23,
         live_vol_index="VIX",
@@ -229,7 +235,7 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         active_months="HMUZ",
         roll_reference="LTD",
         roll_buffer_days=8,
-        session_hours_ct=_GLOBEX_SESSION,
+        session_hours_ct=_EQUITY_SESSION,
         bars_per_day_5m=276,
         bars_per_day_1h=23,
         live_vol_index="VIX",
@@ -248,7 +254,7 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         active_months="HMUZ",
         roll_reference="LTD",
         roll_buffer_days=8,
-        session_hours_ct=_GLOBEX_SESSION,
+        session_hours_ct=_EQUITY_SESSION,
         bars_per_day_5m=276,
         bars_per_day_1h=23,
         live_vol_index="VIX",
