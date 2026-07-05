@@ -37,8 +37,8 @@ def objective(trial, base_config_path, data_path, temp_config_path):
     cfg["max_hold_bars"] = trial.suggest_int("max_hold_bars", 120, 300, step=24)
     
     # Thresholds
-    long_thresh = trial.suggest_float("long_threshold", 0.50, 0.65, step=0.01)
-    short_thresh = trial.suggest_float("short_threshold", 0.50, 0.65, step=0.01)
+    long_thresh = trial.suggest_float("long_threshold", 0.30, 0.70, step=0.04)
+    short_thresh = trial.suggest_float("short_threshold", 0.30, 0.70, step=0.04)
     cfg["models"]["long"]["threshold"] = round(long_thresh, 2)
     cfg["models"]["short"]["threshold"] = round(short_thresh, 2)
     

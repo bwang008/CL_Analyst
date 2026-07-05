@@ -696,7 +696,7 @@ _PARAM_RANGES = {
     "cooldown_bars":                  (1,    15,   2,    "int"),
     "max_hold_bars":                  (6,    36,   6,    "int"),
     "consecutive_signal_threshold":   (0,     4,   1,    "int"),
-    "entry_threshold":                (0.50,  0.80, 0.03, "float"),
+    "entry_threshold":                (0.30,  0.70, 0.04, "float"),
     "atr_period":                     (4,    40,   4,    "int"),
 }
 
