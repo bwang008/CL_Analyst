@@ -73,7 +73,7 @@
       }
     },
     "execution_workflow": {
-      "slippage_per_side": 0.01,
+      "slippage_per_side": 0.001,
       "opt_mode": "individual",
       "execution_data_path": "gs://cltrainer-optuna-results/data/NG_raw.parquet",
       "strategy_config_path": "configs/strategies/hourly_ensemble_010.json"
