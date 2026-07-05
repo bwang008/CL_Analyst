@@ -57,9 +57,11 @@ class TelegramAlerter:
         self,
         token: str | None = None,
         chat_id: str | None = None,
+        prefix: str = "",
     ) -> None:
         self.token = token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
         self.chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
+        self.prefix = prefix
         self.enabled = bool(self.token and self.chat_id)
 
         if not self.enabled:
@@ -102,7 +104,8 @@ class TelegramAlerter:
                 tz = timezone.utc
                 
         now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
-        message = f"_{now_str}_\n\n{message}"
+        prefix_str = f"[{self.prefix}] " if getattr(self, "prefix", "") else ""
+        message = f"_{now_str}_\n\n{prefix_str}{message}"
 
         if requests is None:
             log.warning("requests library not installed — cannot send Telegram alert")

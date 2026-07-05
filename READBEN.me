@@ -41,6 +41,10 @@ spawns one process per config (60s stagger for IBKR pacing):
         │
         └─ crashed children restarted with capped backoff; Ctrl+C stops all
 
+
+python -m src.live_execution.cli --help  # optional sanity
+python -m src.live_execution.fleet_runner --manifest configs/fleet/fleet_manifest.json
+
 =======================================================================
 
 # References for steps
