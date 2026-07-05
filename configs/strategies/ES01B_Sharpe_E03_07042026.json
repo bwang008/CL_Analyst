@@ -13,10 +13,10 @@
     "allow_concurrent": false,
     "max_concurrent": 1,
     "max_position_size": 1,
-    "execution_symbol": "ES",
+    "execution_symbol": "MES",
     "bar_size": "1h",
     "live_config": {
-        "client_id": 1010,
+        "client_id": 2000,
         "entry_mode": "marketable_limit",
         "exit_mode": "marketable_limit",
         "enable_5m_stream": false

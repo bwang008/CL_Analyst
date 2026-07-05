@@ -4,6 +4,11 @@
       "config": "configs/strategies/HS14B_Sharpe_E01_06262026.json",
       "enabled": true,
       "extra_args": []
+    },
+    {
+      "config": "configs/strategies/ES01B_Sharpe_E03_07042026.json",
+      "enabled": true,
+      "extra_args": ["--dry-run"]
     }
   ],
   "stagger_seconds": 60,
