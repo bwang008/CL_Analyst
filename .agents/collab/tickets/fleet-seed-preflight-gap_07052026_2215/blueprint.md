@@ -81,3 +81,34 @@ staged from `<SYM>_raw.parquet` and verified ≥4,320 in-window bars; macro CSVs
 6. **Follow-up ticket (separate, not this change):** exit-code contract
    (cli.py EX_CONFIG=78 → runner treats as non-restartable) so deterministic config/data
    failures can't burn restart budgets even if they slip past preflight.
+
+## USER-DIRECTED AMENDMENTS (2026-07-05, verified with user before implementation)
+A. All-or-nothing launch semantics CONFIRMED, with the explicit bypass being
+   `"enabled": false` in the manifest (error message must say so). ✓ implemented.
+B. Cache-corruption + first-start scenarios MUST NOT false-positive:
+   - cache absent + seed present = PASS (first start / post-deletion rebuild);
+   - cache present but UNREADABLE = FAIL with an actionable "delete the corrupted
+     cache and relaunch (seed rebuilds it)" message — matches the operator's
+     established remediation for corrupt warm-start caches;
+   - the check's purpose is exactly what the user stated: guarantee a correct seed
+     exists so the warm-start cache CAN be (re)built. ✓ implemented.
+C. STALENESS GATE (new requirement): IBKR backfill is a single NOW-anchored
+   "{gap_days} D" request — gaps beyond its practical horizon are unfillable and
+   can stitch a silent hole into the series. If the freshest bar across
+   (readable cache, readable seed) is older than the horizon
+   (MAX_BACKFILL_GAP_DAYS_1H=60 per user-observed ~2-month IBKR limit;
+   MAX_BACKFILL_GAP_DAYS_5M=30), FAIL with a "refresh via Databento (/grab-data)
+   and re-stage the seed" remedy. ✓ implemented.
+
+## IMPLEMENTATION RESULT (same session)
+- `data_manager.py`: `required_live_data_artifacts()` + MAX_BACKFILL_GAP_DAYS_* constants.
+- `fleet_runner.py`: `validate_data_prerequisites()` (+ `_load_strategy`/`_newest_bar_ts`/
+  `_check_requirement`), wired in main() between validate() and launch_all().
+- `tests/test_fleet_preflight.py`: 17 tests (new file; Strict-Locked
+  test_fleet_runner.py untouched, 21/21 green).
+- Real-manifest preflight run against the live 4-model fleet: PASS.
+- Incidental (pin rule): shipped ES01B config predictions_path repointed to the
+  renamed PRODUCTION_ batch folder + `_ES01B_PRED` pin evolved in the same change
+  (fixed the pre-existing test_instrument_context/test_config_generator failures
+  the reconnect-fixes workstream had flagged).
+- Full suite: 1456 passed / 0 failed.

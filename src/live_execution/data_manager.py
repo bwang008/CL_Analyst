@@ -139,6 +139,86 @@ def derive_seed_lookback_days(bars_per_day_1h: int) -> int:
     return math.ceil(trading_days * 7 / 5) + 28
 
 
+# ---------------------------------------------------------------------------
+# Launch-time data preflight (ticket fleet-seed-preflight-gap_07052026_2215)
+# ---------------------------------------------------------------------------
+# _backfill() bridges cache-end -> now with a SINGLE NOW-anchored
+# "{gap_days} D" IBKR request. Gaps beyond what one request can serve are
+# UNFILLABLE at startup: the child either crashes or — worse — stitches
+# recent bars onto a stale cache leaving a silent hole mid-series. These
+# horizons are operator-observed practical IBKR limits (user ruling
+# 2026-07-05: ~2 months for 1h), deliberately conservative; exceeding them
+# must fail the launch with a "refresh via Databento" remedy.
+MAX_BACKFILL_GAP_DAYS_1H = 60
+MAX_BACKFILL_GAP_DAYS_5M = 30  # 5m history serves ~60 days; halve for safety
+
+
+def required_live_data_artifacts(strategy_config: dict) -> list[dict]:
+    """The per-symbol data artifacts a LiveTrader for this config hard-requires.
+
+    Single authority consumed by FleetRunner.validate_data_prerequisites()
+    (follow-up ticket: live_trader.__init__ itself) so the preflight can
+    never drift from the trader's real requirements. Mirrors
+    live_trader.__init__ exactly:
+
+      - ``bar_size`` defaults to "5m" (live_trader.py:336);
+      - ``live_config.enable_5m_stream`` defaults True; ``false`` with a
+        non-hourly bar_size is a config error (live_trader.py:350);
+      - hourly models (1h/2h/4h): require cache_1h OR seed_1h, honoring the
+        ``live_config.seed_path_1h`` override (relative paths resolved
+        against get_data_root(); live_trader.py:438-448);
+      - 5m models: require seed_5m OR cache_5m (allow_shallow_bootstrap is
+        False for 5m models — live_trader.py:421 / DataManager.initialize);
+      - hourly models need NO 5m artifacts (shallow bootstrap sanctioned).
+
+    Returns a list of requirement dicts:
+        {"stream": "1h"|"5m", "cache": Path, "seed": Path,
+         "max_gap_days": int}
+
+    Raises:
+        ValueError: enable_5m_stream=false with a non-hourly bar_size
+            (mirror of the live_trader config error), or unknown symbol.
+    """
+    from src.live_execution.instrument_context import resolve_instrument_context
+
+    ctx = resolve_instrument_context(strategy_config)
+    paths = derive_data_paths(ctx.brain_symbol)
+
+    bar_size = strategy_config.get("bar_size", "5m").lower()
+    live_cfg = strategy_config.get("live_config", {}) or {}
+    enable_5m = bool(live_cfg.get("enable_5m_stream", True))
+    if not enable_5m and bar_size not in ("1h", "2h", "4h"):
+        raise ValueError(
+            f"live_config.enable_5m_stream=false requires an hourly bar_size "
+            f"(got {bar_size!r}) — the 5m stream IS the inference stream for "
+            f"5m configs."
+        )
+
+    requirements: list[dict] = []
+    if bar_size in ("1h", "2h", "4h"):
+        seed_1h = paths.seed_1h
+        seed_override = live_cfg.get("seed_path_1h")
+        if seed_override:
+            seed_p = Path(seed_override)
+            if not seed_p.is_absolute():
+                seed_p = get_data_root() / seed_override
+            seed_1h = seed_p
+        requirements.append({
+            "stream": "1h",
+            "cache": Path(paths.cache_1h),
+            "seed": Path(seed_1h),
+            "max_gap_days": MAX_BACKFILL_GAP_DAYS_1H,
+        })
+    else:  # 5m model — hard seed requirement (no shallow bootstrap)
+        requirements.append({
+            "stream": "5m",
+            "cache": Path(paths.cache_5m),
+            "seed": Path(paths.seed_5m),
+            "max_gap_days": MAX_BACKFILL_GAP_DAYS_5M,
+        })
+    return requirements
+
+
 # Flush the in-memory cache to disk every N appended bars.
 _FLUSH_INTERVAL_BARS = 12  # every hour (12 × 5 min)
 

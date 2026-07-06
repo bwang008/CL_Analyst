@@ -25,14 +25,14 @@
             "threshold": 0.53,
             "experiment_id": "E2E_HourSet_01B_long_logloss",
             "model_path": "reports/sweep_es01b_2x1_6h_scout_20260704-0701/registry/production_output/registry/E2E_HourSet_01B_long_logloss/final_model.pkl",
-            "predictions_path": "reports/batch_runs/batch_20260704_0701_ES_01B_SCOUT/predictions/ES01B_Sharpe_E03_predictions.csv",
+            "predictions_path": "reports/batch_runs/PRODUCTION_batch_20260704_0701_ES_01B_SCOUT/predictions/ES01B_Sharpe_E03_predictions.csv",
             "symbol": "ES"
         },
         "short": {
             "threshold": 0.56,
             "experiment_id": "E2E_HourSet_01B_short_logloss",
             "model_path": "reports/sweep_es01b_2x1_6h_scout_20260704-0701/registry/production_output/registry/E2E_HourSet_01B_short_logloss/final_model.pkl",
-            "predictions_path": "reports/batch_runs/batch_20260704_0701_ES_01B_SCOUT/predictions/ES01B_Sharpe_E03_predictions.csv",
+            "predictions_path": "reports/batch_runs/PRODUCTION_batch_20260704_0701_ES_01B_SCOUT/predictions/ES01B_Sharpe_E03_predictions.csv",
             "symbol": "ES"
         }
     },

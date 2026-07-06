@@ -592,7 +592,10 @@ class TestGeneratorSymbolPropagation:
 
 _ES01B_NAME = "ES01B_Sharpe_E03_07042026.json"
 _ES01B_SWEEP = "reports/sweep_es01b_2x1_6h_scout_20260704-0701/registry/production_output/registry"
-_ES01B_PRED = "reports/batch_runs/batch_20260704_0701_ES_01B_SCOUT/predictions/ES01B_Sharpe_E03_predictions.csv"
+# EVOLVED 2026-07-05 (fleet-seed-preflight-gap_07052026_2215 session): the
+# batch folder was renamed with the user's PRODUCTION_ prefix; the shipped
+# config's predictions_path was repointed in the same change (pin rule).
+_ES01B_PRED = "reports/batch_runs/PRODUCTION_batch_20260704_0701_ES_01B_SCOUT/predictions/ES01B_Sharpe_E03_predictions.csv"
 
 
 def _load_es01b() -> dict:

@@ -216,6 +216,208 @@ class FleetRunner:
         )
 
     # ------------------------------------------------------------------
+    # Pre-launch DATA preflight (ticket fleet-seed-preflight-gap_07052026_2215)
+    # ------------------------------------------------------------------
+    # Deliberately a SEPARATE step from validate(): the Strict-Locked
+    # supervision tests exercise validate() on minimal symbol-less fixtures
+    # and must stay untouched. main() runs both before launch_all().
+    # Function-local imports keep this module stdlib-only at import time.
+
+    def _load_strategy(self, config_path):
+        """Load the live strategy exactly as cli.py does (models included).
+
+        Returns (strategy_config_dict, feature_names). Overridable in tests.
+        """
+        from src.live_execution.strategies.configurable_strategy import (
+            ConfigurableStrategy,
+        )
+        strategy = ConfigurableStrategy(config_path=str(config_path))
+        return strategy.config, list(strategy.feature_names)
+
+    @staticmethod
+    def _newest_bar_ts(path):
+        """Newest bar timestamp in a seed/cache artifact. Raises if unreadable.
+
+        Accepts the two on-disk layouts: DatetimeIndex parquet (warm-start
+        caches) and DateTime-column parquet (<SYM>_raw_1h seeds). CSV seeds
+        (5m ``<sym>-5m_bk.csv``) are timestamped in col 0/1 semicolon format;
+        for preflight purposes a cheap tail parse suffices.
+        """
+        import pandas as pd
+        p = Path(path)
+        if p.suffix == ".parquet":
+            df = pd.read_parquet(p)
+            if "DateTime" in df.columns:
+                return pd.to_datetime(df["DateTime"]).max()
+            if isinstance(df.index, pd.DatetimeIndex):
+                return df.index.max()
+            raise ValueError(
+                f"{p} has neither a DatetimeIndex nor a DateTime column"
+            )
+        # CSV seed: semicolon format DD/MM/YYYY;HH:MM;O;H;L;C;V
+        df = pd.read_csv(p, sep=";", header=None, usecols=[0, 1],
+                         names=["d", "t"], dtype=str)
+        last = df.iloc[-1]
+        return pd.to_datetime(f"{last['d']} {last['t']}", dayfirst=True)
+
+    def _check_requirement(self, name, req, now):
+        """Evaluate one stream requirement. Returns a list of problem strings."""
+        problems = []
+        cache, seed = req["cache"], req["seed"]
+        cache_ts = seed_ts = None
+
+        if cache.exists():
+            try:
+                cache_ts = self._newest_bar_ts(cache)
+            except Exception as e:
+                # User ruling 2026-07-05: corrupted caches must be DELETED to
+                # rebuild from seed — tell the operator exactly that.
+                problems.append(
+                    f"{name}: warm-start cache is unreadable/corrupted "
+                    f"({type(e).__name__}: {e}). Delete it and relaunch — the "
+                    f"seed will rebuild it:\n"
+                    f"    Remove-Item \"{cache}\""
+                )
+                return problems
+
+        if seed.exists():
+            try:
+                seed_ts = self._newest_bar_ts(seed)
+            except Exception as e:
+                if cache_ts is None:
+                    problems.append(
+                        f"{name}: seed file is unreadable ({type(e).__name__}: "
+                        f"{e}): {seed}"
+                    )
+                    return problems
+                log.warning(
+                    "%s: seed %s unreadable but cache is healthy — child will "
+                    "run from cache. Re-stage the seed before the next cache "
+                    "rebuild.", name, seed,
+                )
+
+        if cache_ts is None and seed_ts is None:
+            problems.append(
+                f"{name}: neither {req['stream']} cache nor seed found "
+                f"(the child would crash-loop exactly like NG/GC on "
+                f"2026-07-05).\n"
+                f"    cache: {cache}\n"
+                f"    seed:  {seed}\n"
+                f"  Remedy (1h): Copy-Item <SYM>_raw.parquet <SYM>_raw_1h.parquet "
+                f"(already hourly); (5m): stage the Databento 5m seed."
+            )
+            return problems
+
+        freshest = max(ts for ts in (cache_ts, seed_ts) if ts is not None)
+        gap_days = (now - freshest).total_seconds() / 86_400.0
+        if gap_days > req["max_gap_days"]:
+            problems.append(
+                f"{name}: newest {req['stream']} bar is {gap_days:.0f} days old "
+                f"({freshest}) — beyond the ~{req['max_gap_days']}-day IBKR "
+                f"backfill horizon; the gap is UNFILLABLE at startup and would "
+                f"leave a silent hole in the series. Refresh the data via the "
+                f"Databento download (/grab-data workflow) and re-stage "
+                f"{req['seed'].name}."
+            )
+        return problems
+
+    def validate_data_prerequisites(self):
+        """Per-instance data preflight — raises BEFORE any child is spawned.
+
+        Mirrors the artifacts LiveTrader hard-requires (via the shared
+        authority ``required_live_data_artifacts``): seed/cache presence,
+        cache readability (corruption -> actionable delete message),
+        staleness vs the IBKR backfill horizon, macro CSVs + FRED_API_KEY
+        for macro-dependent models. Honors ``--seed-path``/``--cache-path``
+        in an instance's ``extra_args`` (cli.py overrides for the 5m stream).
+        """
+        if not self._validated:
+            raise ValueError(
+                "validate_data_prerequisites() called before validate()."
+            )
+        # src.data_paths loads .env at import — CL_DATA_ROOT / FRED_API_KEY
+        # resolve here exactly as the children will see them.
+        import os
+
+        import pandas as pd
+
+        from src.data_paths import get_data_path  # noqa: F401 (env load side effect + macro paths)
+        from src.live_execution.data_manager import required_live_data_artifacts
+        from src.features.macro_features import (
+            has_external_macro_features,
+            validate_external_macro_features,
+        )
+        from src.live_execution.instrument_context import (
+            resolve_instrument_context,
+        )
+
+        now = pd.Timestamp.now().tz_localize(None)
+        problems = []
+        for inst in self.instances:
+            name = inst.name
+            try:
+                cfg, feature_names = self._load_strategy(inst.config_path)
+                reqs = required_live_data_artifacts(cfg)
+
+                # cli.py --seed-path/--cache-path override the 5m artifacts;
+                # honor them so we never check the wrong files (reviewer
+                # nuance B).
+                overrides = dict(zip(inst.extra_args, inst.extra_args[1:]))
+                for req in reqs:
+                    if req["stream"] == "5m":
+                        if "--seed-path" in overrides:
+                            req["seed"] = Path(overrides["--seed-path"])
+                        if "--cache-path" in overrides:
+                            req["cache"] = Path(overrides["--cache-path"])
+
+                for req in reqs:
+                    problems.extend(self._check_requirement(name, req, now))
+
+                if has_external_macro_features(feature_names):
+                    ctx = resolve_instrument_context(cfg)
+                    validate_external_macro_features(
+                        feature_names, ctx.brain_instrument
+                    )
+                    sym_l = ctx.brain_symbol.lower()
+                    # Deliberate policy (user-approved 2026-07-05): a live
+                    # launch must not depend on a T0 network fetch — the
+                    # macro CSVs must be pre-staged and the FRED key present
+                    # (a stale CSV without the key is a deterministic
+                    # startup ValueError).
+                    for csv_rel in (
+                        f"raw/macro/fred_macro_data_{sym_l}.csv",
+                        f"raw/macro/cftc_cot_{sym_l}.csv",
+                    ):
+                        csv_path = Path(get_data_path(csv_rel))
+                        if not csv_path.exists():
+                            problems.append(
+                                f"{name}: macro artifact missing: {csv_path} — "
+                                f"run: conda run -n trader python "
+                                f"scripts/download_macro_data.py --symbol "
+                                f"{ctx.brain_symbol}"
+                            )
+                    if not os.environ.get("FRED_API_KEY"):
+                        problems.append(
+                            f"{name}: FRED_API_KEY is not set — the macro "
+                            f"refresh raises at startup whenever the FRED CSV "
+                            f"predates the last 7:00 PM ET cutoff. Add it to "
+                            f".env."
+                        )
+            except Exception as e:  # config/resolve/model-load failures
+                problems.append(f"{name}: {type(e).__name__}: {e}")
+
+        if problems:
+            raise RuntimeError(
+                "Fleet data preflight FAILED — NOTHING was launched. Fix the "
+                "items below (or park the instance with \"enabled\": false to "
+                "launch the rest):\n  - " + "\n  - ".join(problems)
+            )
+        log.info(
+            "Fleet data preflight passed: %d instance(s) have their seeds/"
+            "caches/macro artifacts staged and fresh.", len(self.instances),
+        )
+
+    # ------------------------------------------------------------------
     # Launch
     # ------------------------------------------------------------------
     def _build_command(self, instance):
@@ -362,6 +564,10 @@ def main(argv=None):
                          max_restarts=args.max_restarts)
     runner.load_manifest()
     runner.validate()
+    # Data preflight AFTER structural validation, BEFORE any spawn — one
+    # unstaged symbol blocks the WHOLE launch (user-confirmed all-or-nothing;
+    # park an instance with "enabled": false to launch the rest).
+    runner.validate_data_prerequisites()
 
     def _handle_signal(signum, _frame):
         log.info("Received signal %s — shutting down fleet.", signum)
