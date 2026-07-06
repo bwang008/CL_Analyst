@@ -34,11 +34,15 @@ IBKR budget notes (see blueprint):
 
 Error event queue (fleet_error_events.py): when an error_writer is injected
 (main() does this by default; --no-error-queue opts out), each child's
-stderr is redirected to reports/fleet_stderr/<name>.stderr.log and every
-crash detected by poll_once() emits a structured JSON event into
+stderr is TEED — a per-child drain thread copies every line to BOTH the
+runner's console (operator keeps the full interleaved view; --silent
+drops this echo) AND reports/fleet_stderr/<name>.stderr.log, which every
+crash detected by poll_once() reads to emit a structured JSON event into
 .agents/collab/error_queue/pending/ for the AI triage pipeline
-(.agents/skills/fleet-error-monitor/SKILL.md). With error_writer=None the
-runner behaves exactly as before (children inherit stdout/stderr).
+(.agents/skills/fleet-error-monitor/SKILL.md). The pipe is always drained
+by the pump thread, so a chatty child can never block on a full pipe.
+With error_writer=None the runner behaves exactly as before (children
+inherit stdout/stderr).
 
 Usage:
     python -m src.live_execution.fleet_runner \
@@ -51,6 +55,7 @@ import logging
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -84,10 +89,43 @@ class _Instance:
         self.restarts = 0        # restarts consumed so far
         self.gave_up = False     # restart cap exhausted
         self.stderr_sink = None  # open file handle when error queue is on
+        self.stderr_pump = None  # tee thread draining the child's stderr
 
     @property
     def name(self):
         return Path(self.config_path).stem
+
+
+def _pump_stderr(pipe, sink, echo_stream):
+    """Tee one child's stderr: every line goes to the sink file (crash
+    capture) and, when echo_stream is set, to the runner's console.
+
+    Runs on a daemon thread per child; exits at pipe EOF (child death) and
+    closes the sink so poll_once() reads a fully flushed traceback. Write
+    errors on one target never stop the other.
+    """
+    try:
+        for line in iter(pipe.readline, b""):
+            try:
+                sink.write(line)
+                sink.flush()
+            except (ValueError, OSError):
+                pass
+            if echo_stream is not None:
+                try:
+                    echo_stream.write(line)
+                    echo_stream.flush()
+                except (ValueError, OSError):
+                    pass
+    finally:
+        try:
+            sink.close()
+        except OSError:
+            pass
+        try:
+            pipe.close()
+        except OSError:
+            pass
 
 
 class FleetRunner:
@@ -98,7 +136,8 @@ class FleetRunner:
     """
 
     def __init__(self, manifest_path, popen=subprocess.Popen, sleep=time.sleep,
-                 max_restarts=DEFAULT_MAX_RESTARTS, error_writer=None):
+                 max_restarts=DEFAULT_MAX_RESTARTS, error_writer=None,
+                 echo_child_stderr=True, stderr_echo_stream=None):
         self.manifest_path = Path(manifest_path)
         self._popen = popen
         self._sleep = sleep
@@ -106,6 +145,13 @@ class FleetRunner:
         # Optional FleetErrorEventWriter (fleet_error_events.py). None keeps
         # the pre-error-queue behavior byte-identical (Strict-Locked tests).
         self._error_writer = error_writer
+        # Tee target for children's stderr when the error queue is on:
+        # echo to the runner's console by DEFAULT (operators asked for the
+        # full interleaved view back); --silent turns the echo off. The
+        # stream is injectable for tests; None resolves lazily to
+        # sys.stderr.buffer at spawn time.
+        self._echo_child_stderr = bool(echo_child_stderr)
+        self._stderr_echo_stream = stderr_echo_stream
 
         self.manifest = None          # raw parsed manifest dict
         self.instances = []           # _Instance for each ENABLED entry
@@ -447,15 +493,27 @@ class FleetRunner:
             # also keep their own per-cid file logging via _setup_file_logging.
             instance.proc = self._popen(instance.cmd)
         else:
-            # Error queue on: child stderr goes to a per-instance sink FILE
-            # (never PIPE — an unread pipe fills and deadlocks the child) so
-            # poll_once() can read the traceback after a crash.
-            self._close_stderr_sink(instance)
+            # Error queue on: child stderr is TEED via a drain thread to the
+            # per-instance sink file (crash-traceback capture) AND, unless
+            # --silent, the runner's console. The pump always drains the
+            # pipe, so a chatty child can never block on a full pipe buffer.
+            self._reap_stderr_pump(instance)
             instance.stderr_sink = self._error_writer.open_stderr_sink(
                 instance.name
             )
-            instance.proc = self._popen(instance.cmd,
-                                        stderr=instance.stderr_sink)
+            instance.proc = self._popen(instance.cmd, stderr=subprocess.PIPE)
+            echo = None
+            if self._echo_child_stderr:
+                echo = self._stderr_echo_stream
+                if echo is None:
+                    echo = getattr(sys.stderr, "buffer", None)
+            instance.stderr_pump = threading.Thread(
+                target=_pump_stderr,
+                args=(instance.proc.stderr, instance.stderr_sink, echo),
+                name=f"stderr-pump-{instance.name}",
+                daemon=True,
+            )
+            instance.stderr_pump.start()
         log.info(
             "Launched %s (client_id=%s, pid=%s): %s",
             instance.name, instance.client_id,
@@ -463,7 +521,12 @@ class FleetRunner:
         )
 
     @staticmethod
-    def _close_stderr_sink(instance):
+    def _reap_stderr_pump(instance, timeout=2.0):
+        """Wait for the previous pump to flush the sink's tail (the child is
+        dead, so EOF is immediate), then make sure the sink is closed."""
+        if instance.stderr_pump is not None:
+            instance.stderr_pump.join(timeout=timeout)
+            instance.stderr_pump = None
         if instance.stderr_sink is not None:
             try:
                 instance.stderr_sink.close()
@@ -507,15 +570,16 @@ class FleetRunner:
             )
             will_give_up = instance.restarts >= self.max_restarts
             if self._error_writer is not None:
-                # Queue the structured crash event for the AI triage
-                # pipeline BEFORE the backoff/give-up path. Never raises.
+                # Let the pump flush the traceback tail into the sink (the
+                # child is dead, EOF is immediate), THEN queue the
+                # structured crash event. Never raises.
+                self._reap_stderr_pump(instance)
                 self._error_writer.emit_crash_event(
                     instance, exit_code, gave_up=will_give_up,
                 )
             if will_give_up:
                 instance.gave_up = True
                 instance.proc = None
-                self._close_stderr_sink(instance)
                 log.error(
                     "Child %s exhausted its restart cap (%d) — NOT "
                     "restarting. Manual intervention required.",
@@ -569,7 +633,7 @@ class FleetRunner:
                 )
                 proc.kill()
         for instance in self.instances:
-            self._close_stderr_sink(instance)
+            self._reap_stderr_pump(instance)
         log.info("Fleet shutdown complete.")
 
 
@@ -598,7 +662,12 @@ def main(argv=None):
     parser.add_argument(
         "--no-error-queue", action="store_true",
         help="Disable the crash → error-event queue (children then inherit "
-             "stdout/stderr instead of logging stderr to per-instance files)",
+             "stdout/stderr instead of teeing stderr to per-instance files)",
+    )
+    parser.add_argument(
+        "--silent", action="store_true",
+        help="Do not echo children's stderr to this console (it still goes "
+             "to reports/fleet_stderr/ sinks and the shared fleet log)",
     )
     args = parser.parse_args(argv)
 
@@ -633,7 +702,8 @@ def main(argv=None):
 
     runner = FleetRunner(manifest_path=args.manifest,
                          max_restarts=args.max_restarts,
-                         error_writer=error_writer)
+                         error_writer=error_writer,
+                         echo_child_stderr=not args.silent)
     runner.load_manifest()
     runner.validate()
     # Data preflight AFTER structural validation, BEFORE any spawn — one

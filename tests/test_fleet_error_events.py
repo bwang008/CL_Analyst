@@ -11,7 +11,6 @@ for that path).
 """
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -354,18 +353,23 @@ class TestEmitCrashEvent:
 # =============================================================================
 
 class RecordingLauncher:
-    """Fake popen that records kwargs so we can assert stderr wiring."""
+    """Fake popen that records kwargs and hands each spawned proc a real
+    pipe-like stderr (BytesIO) so the tee pump thread runs for real."""
 
     def __init__(self):
-        self.calls = []   # (cmd, kwargs)
+        self.calls = []       # (cmd, kwargs)
         self.procs = []
+        self.next_stderr = b""  # payload the NEXT spawned child emits
 
     def popen(self, cmd, **kwargs):
+        import io
         from unittest.mock import MagicMock
         self.calls.append((tuple(str(c) for c in cmd), kwargs))
         proc = MagicMock(name=f"proc{len(self.procs)}")
         proc.poll.return_value = None
         proc.pid = 20000 + len(self.procs)
+        proc.stderr = io.BytesIO(self.next_stderr)
+        self.next_stderr = b""
         self.procs.append(proc)
         return proc
 
@@ -373,7 +377,8 @@ class RecordingLauncher:
         pass
 
 
-def launched_runner(tmp_path, writer, max_restarts=5):
+def launched_runner(tmp_path, writer, max_restarts=5, first_stderr=b"",
+                    echo_child_stderr=True, stderr_echo_stream=None):
     cfg = tmp_path / "strat_a.json"
     cfg.write_text(json.dumps(
         {"strategy_name": "strat_a", "live_config": {"client_id": 1400}}
@@ -384,9 +389,12 @@ def launched_runner(tmp_path, writer, max_restarts=5):
         "stagger_seconds": 0, "data_port": 4002, "exec_port": 4002,
     }))
     launcher = RecordingLauncher()
+    launcher.next_stderr = first_stderr
     runner = FleetRunner(
         manifest_path=str(manifest), popen=launcher.popen,
         sleep=launcher.sleep, max_restarts=max_restarts, error_writer=writer,
+        echo_child_stderr=echo_child_stderr,
+        stderr_echo_stream=stderr_echo_stream,
     )
     runner.load_manifest()
     runner.validate()
@@ -394,17 +402,58 @@ def launched_runner(tmp_path, writer, max_restarts=5):
     return runner, launcher
 
 
+def join_pump(runner, timeout=2.0):
+    pump = runner.instances[0].stderr_pump
+    if pump is not None:
+        pump.join(timeout=timeout)
+
+
 class TestFleetRunnerIntegration:
 
-    def test_spawn_passes_stderr_sink_file_not_pipe(self, tmp_path):
+    def test_spawn_tees_stderr_via_pipe_and_pump_thread(self, tmp_path):
+        import subprocess
         writer = make_writer(tmp_path)
-        runner, launcher = launched_runner(tmp_path, writer)
+        runner, launcher = launched_runner(
+            tmp_path, writer, first_stderr=b"child stderr line\n",
+        )
 
         _, kwargs = launcher.calls[0]
-        sink = kwargs.get("stderr")
-        assert sink is not None, "_spawn must redirect child stderr"
-        assert hasattr(sink, "fileno"), "stderr must be a real file (no PIPE)"
-        assert Path(sink.name) == writer.stderr_path_for("strat_a")
+        assert kwargs.get("stderr") is subprocess.PIPE, \
+            "_spawn must capture child stderr through a drained PIPE"
+        join_pump(runner)
+        sink = writer.stderr_path_for("strat_a")
+        assert "child stderr line" in sink.read_text(encoding="utf-8"), \
+            "pump must copy the child's stderr into the sink file"
+
+    def test_stderr_echoed_to_console_by_default(self, tmp_path):
+        import io
+        writer = make_writer(tmp_path)
+        console = io.BytesIO()
+        runner, launcher = launched_runner(
+            tmp_path, writer, first_stderr=b"visible to operator\n",
+            stderr_echo_stream=console,
+        )
+
+        join_pump(runner)
+        assert b"visible to operator" in console.getvalue(), \
+            "default mode must TEE child stderr to the console"
+        sink = writer.stderr_path_for("strat_a")
+        assert "visible to operator" in sink.read_text(encoding="utf-8"), \
+            "echo must not steal the line from the sink"
+
+    def test_silent_mode_skips_console_echo_but_keeps_sink(self, tmp_path):
+        import io
+        writer = make_writer(tmp_path)
+        console = io.BytesIO()
+        runner, launcher = launched_runner(
+            tmp_path, writer, first_stderr=b"quiet line\n",
+            echo_child_stderr=False, stderr_echo_stream=console,
+        )
+
+        join_pump(runner)
+        assert console.getvalue() == b"", "--silent must not echo"
+        sink = writer.stderr_path_for("strat_a")
+        assert "quiet line" in sink.read_text(encoding="utf-8")
 
     def test_no_error_writer_keeps_legacy_popen_call(self, tmp_path):
         runner, launcher = launched_runner(tmp_path, writer=None)
@@ -415,10 +464,9 @@ class TestFleetRunnerIntegration:
 
     def test_crash_emits_pending_event_and_restarts(self, tmp_path):
         writer = make_writer(tmp_path)
-        runner, launcher = launched_runner(tmp_path, writer)
-        inst = runner.instances[0]
-        inst.stderr_sink.write(CODE_BUG_TB.encode("utf-8"))
-        inst.stderr_sink.flush()
+        runner, launcher = launched_runner(
+            tmp_path, writer, first_stderr=CODE_BUG_TB.encode("utf-8"),
+        )
 
         launcher.procs[0].poll.return_value = 1  # child died
         live = runner.poll_once()
@@ -429,13 +477,15 @@ class TestFleetRunnerIntegration:
         event = json.loads(files[0].read_text(encoding="utf-8"))
         assert event["model_name"] == "strat_a"
         assert event["gave_up"] is False
-        assert "ZeroDivisionError" in event["traceback"]
+        assert "ZeroDivisionError" in event["traceback"], \
+            "poll_once must reap the pump so the traceback tail is flushed"
 
     def test_restart_cap_exhaustion_emits_gave_up_event(self, tmp_path):
         writer = make_writer(tmp_path)
-        runner, launcher = launched_runner(tmp_path, writer, max_restarts=1)
-        runner.instances[0].stderr_sink.write(CODE_BUG_TB.encode("utf-8"))
-        runner.instances[0].stderr_sink.flush()
+        runner, launcher = launched_runner(
+            tmp_path, writer, max_restarts=1,
+            first_stderr=CODE_BUG_TB.encode("utf-8"),
+        )
 
         for _ in range(3):
             for proc in launcher.procs:
