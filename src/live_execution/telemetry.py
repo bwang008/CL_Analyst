@@ -211,11 +211,139 @@ _CREATE_ACTIVE_POSITIONS_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_active_pos_status ON active_positions(status);
 """
 
+# ---------------------------------------------------------------------------
+# FLEET (shared-DB) schema v2 — one DB file, many bots.
+#
+# Differences from the legacy single-bot schema, each load-bearing:
+# - market_bars / raw_front_month_bars / shadow_log lose their
+#   timestamp-only UNIQUE: with two symbols in one file, INSERT OR IGNORE
+#   against UNIQUE(timestamp) silently DROPS the second symbol's bar.
+#   Rekeyed to (symbol, timestamp[, contract_month]) / (client_id, timestamp).
+# - active_positions loses trade_id as PRIMARY KEY: trade_ids are built from
+#   per-connection IBKR order ids ("trade_5"), so two bots can collide and
+#   INSERT OR REPLACE would clobber the other bot's position row. Surrogate
+#   id + UNIQUE(client_id, trade_id) instead.
+# - identity columns are NOT NULL where uniqueness depends on them.
+#
+# A DB file is either legacy (PRAGMA user_version 0) or fleet (2) — opening
+# one in the wrong mode RAISES (no silent cross-mode reads that would
+# return empty results or clobber rows).
+# ---------------------------------------------------------------------------
+
+_FLEET_SCHEMA_VERSION = 2
+
+_CREATE_MARKET_BARS_V2 = """
+CREATE TABLE IF NOT EXISTS market_bars (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol      TEXT    NOT NULL,
+    client_id   INTEGER NOT NULL,
+    timestamp   TEXT    NOT NULL,
+    open        REAL    NOT NULL,
+    high        REAL    NOT NULL,
+    low         REAL    NOT NULL,
+    close       REAL    NOT NULL,
+    volume      REAL    NOT NULL,
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(symbol, timestamp)
+);
+"""
+
+_CREATE_RAW_FRONT_MONTH_BARS_V2 = """
+CREATE TABLE IF NOT EXISTS raw_front_month_bars (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol          TEXT    NOT NULL,
+    client_id       INTEGER NOT NULL,
+    timestamp       TEXT    NOT NULL,
+    open            REAL    NOT NULL,
+    high            REAL    NOT NULL,
+    low             REAL    NOT NULL,
+    close           REAL    NOT NULL,
+    volume          REAL    NOT NULL,
+    contract_month  TEXT    NOT NULL,
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(symbol, timestamp, contract_month)
+);
+"""
+
+_CREATE_SHADOW_LOG_V2 = """
+CREATE TABLE IF NOT EXISTS shadow_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol          TEXT    NOT NULL,
+    client_id       INTEGER NOT NULL,
+    timestamp       TEXT    NOT NULL,
+    open            REAL    NOT NULL,
+    high            REAL    NOT NULL,
+    low             REAL    NOT NULL,
+    close           REAL    NOT NULL,
+    volume          REAL    NOT NULL,
+    features_json   TEXT,
+    prob_buy        REAL,
+    prob_sell       REAL,
+    strategy_name   TEXT,
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(client_id, timestamp)
+);
+"""
+
+_CREATE_ACTIVE_POSITIONS_V2 = """
+CREATE TABLE IF NOT EXISTS active_positions (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol              TEXT    NOT NULL,
+    client_id           INTEGER NOT NULL,
+    trade_id            TEXT    NOT NULL,
+    status              TEXT    NOT NULL DEFAULT 'OPEN',
+    side                TEXT    NOT NULL,
+    quantity            INTEGER NOT NULL,
+    entry_price         REAL    NOT NULL,
+    entry_order_id      INTEGER,
+    tp_order_id         INTEGER,
+    sl_order_id         INTEGER,
+    tp_price            REAL,
+    sl_price            REAL,
+    initial_sl_price    REAL,
+    atr_at_entry        REAL,
+    entry_time          TEXT    NOT NULL,
+    entry_bar_time      TEXT,
+    close_time          TEXT,
+    close_reason        TEXT,
+    exit_price          REAL,
+    bars_held           INTEGER,
+    trailing_atr_mult   REAL,
+    max_hold_bars       INTEGER,
+    created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(client_id, trade_id)
+);
+"""
+
 
 class TelemetryDB:
-    """Lightweight SQLite telemetry backend for live execution."""
+    """Lightweight SQLite telemetry backend for live execution.
 
-    def __init__(self, db_path: str = _DEFAULT_DB_PATH) -> None:
+    Two modes, chosen at construction and locked to the DB file:
+
+    - **Legacy (unbound)** — ``TelemetryDB(path)``: the original one-bot-
+      one-file behavior, byte-identical SQL. Refuses to open a fleet file.
+    - **Fleet (bound)** — ``TelemetryDB(path, symbol=..., client_id=...)``:
+      many bots share ONE file (SQLite WAL); every write is stamped with
+      the bot's identity and every read is scoped to it (bar tables by
+      symbol — bars are market data shared across same-symbol bots;
+      strategy tables by client_id). Refuses to open a legacy file, whose
+      timestamp-only UNIQUE constraints would silently drop cross-symbol
+      rows.
+    """
+
+    def __init__(self, db_path: str = _DEFAULT_DB_PATH, *,
+                 symbol: Optional[str] = None,
+                 client_id: Optional[int] = None) -> None:
+        if (symbol is None) != (client_id is None):
+            raise ValueError(
+                "TelemetryDB identity must be complete: pass BOTH symbol "
+                f"and client_id (fleet mode) or NEITHER (legacy mode); got "
+                f"symbol={symbol!r}, client_id={client_id!r}."
+            )
+        self.symbol = symbol
+        self.client_id = client_id
+        self._bound = symbol is not None
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: Optional[sqlite3.Connection] = None
@@ -226,8 +354,56 @@ class TelemetryDB:
     # ------------------------------------------------------------------
 
     def _initialize(self) -> None:
-        """Create tables and indexes if they don't exist."""
+        """Create tables and indexes if they don't exist.
+
+        Enforces the mode <-> file pairing: a legacy file (user_version 0)
+        opened in fleet mode, or a fleet file (user_version 2) opened in
+        legacy mode, RAISES instead of silently misbehaving (empty scoped
+        reads / cross-symbol row drops / cross-bot clobbers).
+        """
         conn = self._get_conn()
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        has_tables = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='market_bars'"
+        ).fetchone() is not None
+
+        if self._bound:
+            if has_tables and version < _FLEET_SCHEMA_VERSION:
+                raise ValueError(
+                    f"{self.db_path} is a LEGACY single-bot telemetry DB — "
+                    f"its timestamp-only UNIQUE constraints would silently "
+                    f"drop cross-symbol rows in fleet mode. Point the fleet "
+                    f"at a fresh shared DB file (old per-cid files stay on "
+                    f"disk for history), or open this file without "
+                    f"symbol/client_id for legacy access."
+                )
+            conn.executescript(
+                _CREATE_MARKET_BARS_V2
+                + _CREATE_TRADE_LEDGER
+                + _CREATE_RAW_FRONT_MONTH_BARS_V2
+                + _CREATE_TRADEBOOK_EVENTS
+                + _CREATE_SHADOW_LOG_V2
+                + _CREATE_DECISION_STATE_LOG
+                + _CREATE_ACTIVE_POSITIONS_V2
+                + _CREATE_INDEXES
+                + _CREATE_TRADEBOOK_INDEXES
+                + _CREATE_SHADOW_LOG_INDEXES
+                + _CREATE_DECISION_STATE_LOG_INDEXES
+                + _CREATE_ACTIVE_POSITIONS_INDEXES
+            )
+            self._migrate_fleet_identity_columns(conn)
+            conn.execute(f"PRAGMA user_version = {_FLEET_SCHEMA_VERSION}")
+            conn.commit()
+            return
+
+        if version >= _FLEET_SCHEMA_VERSION:
+            raise ValueError(
+                f"{self.db_path} is a FLEET shared telemetry DB — open it "
+                f"with an explicit identity: TelemetryDB(path, symbol=..., "
+                f"client_id=...). Unscoped legacy access would silently "
+                f"return empty results."
+            )
         conn.executescript(
             _CREATE_MARKET_BARS
             + _CREATE_TRADE_LEDGER
@@ -246,6 +422,27 @@ class TelemetryDB:
         self._migrate_unique_constraints(conn)
         self._migrate_active_positions_columns(conn)
         conn.commit()
+
+    def _migrate_fleet_identity_columns(self, conn: sqlite3.Connection) -> None:
+        """Add identity columns to the fleet tables created from legacy DDL
+        (trade_ledger / decision_state_log / tradebook_events keep their
+        legacy shape; identity is stamped by every bound write)."""
+        for table, columns in (
+            ("trade_ledger", ("symbol TEXT", "client_id INTEGER")),
+            ("decision_state_log", ("symbol TEXT", "client_id INTEGER")),
+            ("tradebook_events", ("client_id INTEGER",)),  # symbol exists
+        ):
+            existing = {
+                row[1]
+                for row in conn.execute(
+                    f"PRAGMA table_info({table})"
+                ).fetchall()
+            }
+            for col_def in columns:
+                if col_def.split()[0] not in existing:
+                    conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {col_def}"
+                    )
 
     def _migrate_trade_ledger_columns(self, conn: sqlite3.Connection) -> None:
         """Add newer nullable columns to trade_ledger for older DB files."""
@@ -315,6 +512,9 @@ class TelemetryDB:
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
             self._conn = sqlite3.connect(str(self.db_path))
+            # Multiple fleet processes share one file: without a busy
+            # timeout, two commits colliding raise "database is locked".
+            self._conn.execute("PRAGMA busy_timeout = 10000;")
             try:
                 self._conn.execute("PRAGMA journal_mode=WAL;")
             except sqlite3.OperationalError as e:
@@ -347,16 +547,32 @@ class TelemetryDB:
         """Record a closed 5-minute bar."""
         ts = timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp)
         conn = self._get_conn()
-        conn.execute(
-            "INSERT OR IGNORE INTO market_bars (timestamp, open, high, low, close, volume) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (ts, open_, high, low, close, volume),
-        )
+        if self._bound:
+            # (symbol, timestamp) unique: same-symbol bots dedup to one row
+            # (bars are market data); different symbols never collide.
+            conn.execute(
+                "INSERT OR IGNORE INTO market_bars "
+                "(symbol, client_id, timestamp, open, high, low, close, volume) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (self.symbol, self.client_id, ts, open_, high, low, close, volume),
+            )
+        else:
+            conn.execute(
+                "INSERT OR IGNORE INTO market_bars (timestamp, open, high, low, close, volume) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (ts, open_, high, low, close, volume),
+            )
         conn.commit()
 
     def bar_count(self) -> int:
-        """Return total number of recorded bars."""
-        cur = self._get_conn().execute("SELECT COUNT(*) FROM market_bars")
+        """Return total number of recorded bars (this symbol's, in fleet mode)."""
+        if self._bound:
+            cur = self._get_conn().execute(
+                "SELECT COUNT(*) FROM market_bars WHERE symbol = ?",
+                (self.symbol,),
+            )
+        else:
+            cur = self._get_conn().execute("SELECT COUNT(*) FROM market_bars")
         return cur.fetchone()[0]
 
     # ------------------------------------------------------------------
@@ -385,13 +601,14 @@ class TelemetryDB:
         """Record a generated signal and any resulting action."""
         ts = timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp)
         conn = self._get_conn()
+        id_cols, id_marks, id_vals = self._identity_insert_fragments()
         conn.execute(
             "INSERT INTO trade_ledger "
-            "(timestamp, signal, confidence_pct, action_taken, order_id, "
+            f"({id_cols}timestamp, signal, confidence_pct, action_taken, order_id, "
             " fill_price, direction, tp_price, sl_price, atr_value, current_price, "
             " signal_id, decision_id, decision_timestamp_utc, exit_reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
+            f"VALUES ({id_marks}?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            id_vals + (
                 ts, signal, confidence_pct, action_taken,
                 order_id, fill_price, direction,
                 tp_price, sl_price, atr_value, current_price,
@@ -401,24 +618,48 @@ class TelemetryDB:
         )
         conn.commit()
 
+    def _identity_insert_fragments(self) -> tuple:
+        """SQL fragments stamping (symbol, client_id) on bound-mode inserts."""
+        if self._bound:
+            return ("symbol, client_id, ", "?, ?, ",
+                    (self.symbol, self.client_id))
+        return ("", "", ())
+
+    def _client_scope(self, prefix: str = " AND ") -> tuple:
+        """WHERE fragment scoping bound-mode reads to this bot's rows.
+
+        IBKR order ids are per-connection sequences — unscoped, bot A's
+        "order 5" UPDATE would hit bot B's row too.
+        """
+        if self._bound:
+            return (f"{prefix}client_id = ?", (self.client_id,))
+        return ("", ())
+
     def update_fill(self, order_id: int, fill_price: float) -> None:
         """Update the fill price for an existing order in the ledger."""
         conn = self._get_conn()
+        scope_sql, scope_vals = self._client_scope()
         conn.execute(
-            "UPDATE trade_ledger SET fill_price = ? WHERE order_id = ?",
-            (fill_price, order_id),
+            f"UPDATE trade_ledger SET fill_price = ? WHERE order_id = ?{scope_sql}",
+            (fill_price, order_id) + scope_vals,
         )
         conn.commit()
 
     def signal_count(self) -> int:
         """Return total number of recorded signals."""
-        cur = self._get_conn().execute("SELECT COUNT(*) FROM trade_ledger")
+        scope_sql, scope_vals = self._client_scope(prefix=" WHERE ")
+        cur = self._get_conn().execute(
+            f"SELECT COUNT(*) FROM trade_ledger{scope_sql}", scope_vals
+        )
         return cur.fetchone()[0]
 
     def trade_count(self) -> int:
         """Return number of executed trades (action_taken = 'EXECUTE')."""
+        scope_sql, scope_vals = self._client_scope()
         cur = self._get_conn().execute(
-            "SELECT COUNT(*) FROM trade_ledger WHERE action_taken = 'EXECUTE'"
+            "SELECT COUNT(*) FROM trade_ledger "
+            f"WHERE action_taken = 'EXECUTE'{scope_sql}",
+            scope_vals,
         )
         return cur.fetchone()[0]
 
@@ -433,24 +674,27 @@ class TelemetryDB:
             total_bars: int — total bars recorded
         """
         conn = self._get_conn()
+        where_sql, where_vals = self._client_scope(prefix=" WHERE ")
+        and_sql, and_vals = self._client_scope()
 
         total_signals = conn.execute(
-            "SELECT COUNT(*) FROM trade_ledger"
+            f"SELECT COUNT(*) FROM trade_ledger{where_sql}", where_vals
         ).fetchone()[0]
 
         executed_trades = conn.execute(
-            "SELECT COUNT(*) FROM trade_ledger WHERE action_taken = 'EXECUTE'"
+            "SELECT COUNT(*) FROM trade_ledger "
+            f"WHERE action_taken = 'EXECUTE'{and_sql}",
+            and_vals,
         ).fetchone()[0]
 
         row = conn.execute(
-            "SELECT MIN(timestamp), MAX(timestamp) FROM trade_ledger"
+            f"SELECT MIN(timestamp), MAX(timestamp) FROM trade_ledger{where_sql}",
+            where_vals,
         ).fetchone()
         first_signal = row[0] if row else None
         last_signal = row[1] if row else None
 
-        total_bars = conn.execute(
-            "SELECT COUNT(*) FROM market_bars"
-        ).fetchone()[0]
+        total_bars = self.bar_count()
 
         return {
             "total_signals": total_signals,
@@ -468,8 +712,10 @@ class TelemetryDB:
         """Return the N most recent signal entries."""
         conn = self._get_conn()
         conn.row_factory = sqlite3.Row
+        scope_sql, scope_vals = self._client_scope(prefix=" WHERE ")
         rows = conn.execute(
-            "SELECT * FROM trade_ledger ORDER BY id DESC LIMIT ?", (n,)
+            f"SELECT * FROM trade_ledger{scope_sql} ORDER BY id DESC LIMIT ?",
+            scope_vals + (n,),
         ).fetchall()
         conn.row_factory = None
         return [dict(r) for r in rows]
@@ -478,9 +724,16 @@ class TelemetryDB:
         """Return the N most recent bar entries."""
         conn = self._get_conn()
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT * FROM market_bars ORDER BY id DESC LIMIT ?", (n,)
-        ).fetchall()
+        if self._bound:
+            rows = conn.execute(
+                "SELECT * FROM market_bars WHERE symbol = ? "
+                "ORDER BY id DESC LIMIT ?",
+                (self.symbol, n),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM market_bars ORDER BY id DESC LIMIT ?", (n,)
+            ).fetchall()
         conn.row_factory = None
         return [dict(r) for r in rows]
 
@@ -501,29 +754,43 @@ class TelemetryDB:
         """Record a raw front-month 5-minute bar for future training."""
         ts = timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp)
         conn = self._get_conn()
+        id_cols, id_marks, id_vals = self._identity_insert_fragments()
         conn.execute(
             "INSERT OR IGNORE INTO raw_front_month_bars "
-            "(timestamp, open, high, low, close, volume, contract_month) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (ts, open_, high, low, close, volume, contract_month),
+            f"({id_cols}timestamp, open, high, low, close, volume, contract_month) "
+            f"VALUES ({id_marks}?, ?, ?, ?, ?, ?, ?)",
+            id_vals + (ts, open_, high, low, close, volume, contract_month),
         )
         conn.commit()
 
     def raw_bar_count(self) -> int:
         """Return total number of recorded raw front-month bars."""
-        cur = self._get_conn().execute(
-            "SELECT COUNT(*) FROM raw_front_month_bars"
-        )
+        if self._bound:
+            cur = self._get_conn().execute(
+                "SELECT COUNT(*) FROM raw_front_month_bars WHERE symbol = ?",
+                (self.symbol,),
+            )
+        else:
+            cur = self._get_conn().execute(
+                "SELECT COUNT(*) FROM raw_front_month_bars"
+            )
         return cur.fetchone()[0]
 
     def recent_raw_bars(self, n: int = 20) -> list[dict]:
         """Return the N most recent raw front-month bar entries."""
         conn = self._get_conn()
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT * FROM raw_front_month_bars ORDER BY id DESC LIMIT ?",
-            (n,),
-        ).fetchall()
+        if self._bound:
+            rows = conn.execute(
+                "SELECT * FROM raw_front_month_bars WHERE symbol = ? "
+                "ORDER BY id DESC LIMIT ?",
+                (self.symbol, n),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM raw_front_month_bars ORDER BY id DESC LIMIT ?",
+                (n,),
+            ).fetchall()
         conn.row_factory = None
         return [dict(r) for r in rows]
 
@@ -580,12 +847,13 @@ class TelemetryDB:
             features_json = json.dumps(sanitized)
 
         conn = self._get_conn()
+        id_cols, id_marks, id_vals = self._identity_insert_fragments()
         conn.execute(
             "INSERT OR IGNORE INTO shadow_log "
-            "(timestamp, open, high, low, close, volume, "
+            f"({id_cols}timestamp, open, high, low, close, volume, "
             " features_json, prob_buy, prob_sell, strategy_name) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
+            f"VALUES ({id_marks}?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            id_vals + (
                 ts, open_, high, low, close, volume,
                 features_json,
                 self._sanitize_float(prob_buy),
@@ -597,7 +865,10 @@ class TelemetryDB:
 
     def shadow_log_count(self) -> int:
         """Return total number of shadow log entries."""
-        cur = self._get_conn().execute("SELECT COUNT(*) FROM shadow_log")
+        scope_sql, scope_vals = self._client_scope(prefix=" WHERE ")
+        cur = self._get_conn().execute(
+            f"SELECT COUNT(*) FROM shadow_log{scope_sql}", scope_vals
+        )
         return cur.fetchone()[0]
 
     # ------------------------------------------------------------------
@@ -626,14 +897,15 @@ class TelemetryDB:
     ) -> None:
         """Record a decision-state snapshot for execution parity auditing."""
         conn = self._get_conn()
+        id_cols, id_marks, id_vals = self._identity_insert_fragments()
         conn.execute(
             "INSERT INTO decision_state_log ("
-            " trade_id, event_type, event_timestamp_utc, entry_price,"
+            f" {id_cols}trade_id, event_type, event_timestamp_utc, entry_price,"
             " position_side, atr_at_entry, bracket_atr, tp_price, sl_price,"
             " trailing_atr_mult, trailing_sl_atr_offset, trailing_activated,"
             " highest_high, lowest_low, bars_held, state_json"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
+            f") VALUES ({id_marks}?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            id_vals + (
                 trade_id, event_type, event_timestamp_utc,
                 self._sanitize_float(entry_price),
                 position_side,
@@ -704,8 +976,18 @@ class TelemetryDB:
             else str(event_timestamp_utc)
         )
         conn = self._get_conn()
+        if self._bound and symbol is None:
+            # Caller-provided symbol (e.g. execution local symbol) wins;
+            # otherwise stamp the bot's brain symbol.
+            symbol = self.symbol
+        # Legacy tables have no client_id column — only stamp when bound.
+        if self._bound:
+            cid_col, cid_mark, cid_vals = "client_id, ", "?, ", (self.client_id,)
+        else:
+            cid_col, cid_mark, cid_vals = "", "", ()
         cur = conn.execute(
             "INSERT OR IGNORE INTO tradebook_events ("
+            f" {cid_col}"
             " event_id, event_type, event_timestamp_utc, decision_timestamp_utc,"
             " signal_id, decision_id, order_id, perm_id, parent_order_id,"
             " broker_execution_id, account, environment, symbol, local_symbol,"
@@ -714,9 +996,9 @@ class TelemetryDB:
             " last_fill_price, limit_price, stop_price, commission, fees,"
             " slippage_estimate, realized_pnl, unrealized_pnl, run_id, session_id,"
             " hostname, process_id"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
+            f") VALUES ({cid_mark}?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
             " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
+            cid_vals + (
                 event_id, event_type, ts, decision_timestamp_utc,
                 signal_id, decision_id, order_id, perm_id, parent_order_id,
                 broker_execution_id, account, environment, symbol, local_symbol,
@@ -734,9 +1016,10 @@ class TelemetryDB:
         """Return the N most recent tradebook events."""
         conn = self._get_conn()
         conn.row_factory = sqlite3.Row
+        scope_sql, scope_vals = self._client_scope(prefix=" WHERE ")
         rows = conn.execute(
-            "SELECT * FROM tradebook_events ORDER BY id DESC LIMIT ?",
-            (n,),
+            f"SELECT * FROM tradebook_events{scope_sql} ORDER BY id DESC LIMIT ?",
+            scope_vals + (n,),
         ).fetchall()
         conn.row_factory = None
         return [dict(r) for r in rows]
@@ -754,6 +1037,9 @@ class TelemetryDB:
 
         where_parts = []
         params: list[object] = []
+        if self._bound:
+            where_parts.append("client_id = ?")
+            params.append(self.client_id)
         if signal_id is not None:
             where_parts.append("signal_id = ?")
             params.append(signal_id)
@@ -791,13 +1077,17 @@ class TelemetryDB:
     ) -> None:
         """Record a new position opening in the ledger."""
         conn = self._get_conn()
+        id_cols, id_marks, id_vals = self._identity_insert_fragments()
+        # Bound mode replaces on UNIQUE(client_id, trade_id) — trade_ids are
+        # built from per-connection IBKR order ids and DO collide across
+        # bots; unscoped OR REPLACE would clobber another bot's row.
         conn.execute(
             "INSERT OR REPLACE INTO active_positions "
-            "(trade_id, status, side, quantity, entry_price, entry_order_id, "
+            f"({id_cols}trade_id, status, side, quantity, entry_price, entry_order_id, "
             " atr_at_entry, entry_time, entry_bar_time, "
             " trailing_atr_mult, max_hold_bars) "
-            "VALUES (?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
+            f"VALUES ({id_marks}?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            id_vals + (
                 trade_id, side, quantity, entry_price, entry_order_id,
                 self._sanitize_float(atr_at_entry),
                 entry_time, entry_bar_time,
@@ -822,12 +1112,14 @@ class TelemetryDB:
         if initial_sl_price has not been set yet.
         """
         conn = self._get_conn()
+        scope_sql, scope_vals = self._client_scope()
         conn.execute(
             "UPDATE active_positions "
             "SET tp_order_id = ?, sl_order_id = ?, tp_price = ?, sl_price = ?, "
             "    initial_sl_price = COALESCE(initial_sl_price, ?) "
-            "WHERE trade_id = ? AND status = 'OPEN'",
-            (tp_order_id, sl_order_id, tp_price, sl_price, sl_price, trade_id),
+            f"WHERE trade_id = ? AND status = 'OPEN'{scope_sql}",
+            (tp_order_id, sl_order_id, tp_price, sl_price, sl_price, trade_id)
+            + scope_vals,
         )
         conn.commit()
 
@@ -840,18 +1132,19 @@ class TelemetryDB:
     ) -> None:
         """Update SL price after trailing stop modification."""
         conn = self._get_conn()
+        scope_sql, scope_vals = self._client_scope()
         if sl_order_id is not None:
             conn.execute(
                 "UPDATE active_positions "
                 "SET sl_price = ?, sl_order_id = ? "
-                "WHERE trade_id = ? AND status = 'OPEN'",
-                (new_sl_price, sl_order_id, trade_id),
+                f"WHERE trade_id = ? AND status = 'OPEN'{scope_sql}",
+                (new_sl_price, sl_order_id, trade_id) + scope_vals,
             )
         else:
             conn.execute(
                 "UPDATE active_positions SET sl_price = ? "
-                "WHERE trade_id = ? AND status = 'OPEN'",
-                (new_sl_price, trade_id),
+                f"WHERE trade_id = ? AND status = 'OPEN'{scope_sql}",
+                (new_sl_price, trade_id) + scope_vals,
             )
         conn.commit()
 
@@ -866,13 +1159,14 @@ class TelemetryDB:
     ) -> None:
         """Mark a position as closed in the ledger."""
         conn = self._get_conn()
+        scope_sql, scope_vals = self._client_scope()
         conn.execute(
             "UPDATE active_positions "
             "SET status = 'CLOSED', close_reason = ?, close_time = ?, "
             "    bars_held = ?, exit_price = ? "
-            "WHERE trade_id = ? AND status = 'OPEN'",
+            f"WHERE trade_id = ? AND status = 'OPEN'{scope_sql}",
             (reason, close_time, bars_held,
-             self._sanitize_float(exit_price), trade_id),
+             self._sanitize_float(exit_price), trade_id) + scope_vals,
         )
         conn.commit()
 
@@ -884,10 +1178,15 @@ class TelemetryDB:
         """
         conn = self._get_conn()
         conn.row_factory = sqlite3.Row
+        # In fleet mode "at most one OPEN position" holds PER BOT — the
+        # client_id scope is what stops a bot adopting a fleet-mate's
+        # position during reconnect recovery.
+        scope_sql, scope_vals = self._client_scope()
         row = conn.execute(
             "SELECT * FROM active_positions "
-            "WHERE status = 'OPEN' "
-            "ORDER BY created_at DESC LIMIT 1"
+            f"WHERE status = 'OPEN'{scope_sql} "
+            "ORDER BY created_at DESC LIMIT 1",
+            scope_vals,
         ).fetchone()
         conn.row_factory = None
         return dict(row) if row else None
@@ -900,10 +1199,12 @@ class TelemetryDB:
         """
         conn = self._get_conn()
         conn.row_factory = sqlite3.Row
+        scope_sql, scope_vals = self._client_scope()
         rows = conn.execute(
             "SELECT * FROM active_positions "
-            "WHERE status = 'CLOSED' "
-            "ORDER BY entry_time ASC"
+            f"WHERE status = 'CLOSED'{scope_sql} "
+            "ORDER BY entry_time ASC",
+            scope_vals,
         ).fetchall()
         conn.row_factory = None
 

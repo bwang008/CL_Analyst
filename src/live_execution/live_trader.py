@@ -229,6 +229,7 @@ class LiveTrader:
         entry_mode: str = "adaptive",
         adaptive_priority: str = "Normal",
         exit_mode: str = "market",
+        client_id: Optional[int] = None,
     ) -> None:
         self.data_client = data_client
         self.exec_client = exec_client
@@ -379,7 +380,19 @@ class LiveTrader:
         )
 
         # Telemetry
-        self.telemetry = TelemetryDB(db_path)
+        # client_id present (fleet/CLI path) -> identity-bound telemetry on
+        # the SHARED fleet DB: writes stamped (symbol, client_id), reads
+        # scoped to this bot. Absent (tests, livetest) -> legacy single-bot
+        # DB, byte-identical behavior.
+        self.client_id = client_id
+        if client_id is not None:
+            self.telemetry = TelemetryDB(
+                db_path,
+                symbol=self._instrument_context.brain_symbol,
+                client_id=client_id,
+            )
+        else:
+            self.telemetry = TelemetryDB(db_path)
         log.info("Telemetry DB: %s", db_path)
 
         # IBKR connection (not yet connected)

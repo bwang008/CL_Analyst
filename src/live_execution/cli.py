@@ -249,22 +249,18 @@ def main() -> None:
     resolved_seed_path = args.seed_path or str(paths.seed_5m)
 
     # ── Per-strategy isolation ────────────────────────────────────
-    # Telemetry DB is per-client (contains strategy-specific signals,
-    # predictions, trades). OHLCV warm-start cache is SHARED per brain
-    # symbol — all strategies on the same brain symbol receive the same
-    # continuous bars.
+    # Telemetry is ONE SHARED fleet DB (SQLite WAL): every row is stamped
+    # with (symbol, client_id) and every read is scoped to this bot by
+    # TelemetryDB's identity binding — see telemetry.py fleet mode. Old
+    # per-cid live_telemetry_cid*.db files stay on disk for history.
+    # OHLCV warm-start cache is SHARED per brain symbol — all strategies
+    # on the same brain symbol receive the same continuous bars.
     resolved_db_path = args.db_path
+    if resolved_db_path == _DEFAULT_DB_PATH:
+        resolved_db_path = str(_dp_data_root() / "fleet_telemetry.db")
     resolved_cache_path = args.cache_path or str(paths.cache_5m)  # shared (no cid suffix)
 
     if resolved_client_id != 1:
-        cid_suffix = f"_cid{resolved_client_id}"
-
-        # Only override DB path if user hasn't explicitly set a custom path
-        if resolved_db_path == _DEFAULT_DB_PATH:
-            resolved_db_path = str(
-                _dp_data_root() / f"live_telemetry{cid_suffix}.db"
-            )
-
         # Merge any existing per-client caches into the shared cache
         # so no historical bars are lost from prior per-cid runs.
         # C8: legacy warm_start_cache_cid*.parquet files are CL bars by
@@ -275,8 +271,8 @@ def main() -> None:
             _merge_legacy_cid_caches(resolved_cache_path)
 
         log.info(
-            "Multi-instance isolation: client_id=%d  "
-            "db=%s  cache=%s (shared)",
+            "Multi-instance: client_id=%d  "
+            "db=%s (shared, identity-scoped)  cache=%s (shared)",
             resolved_client_id,
             Path(resolved_db_path).name,
             Path(resolved_cache_path).name,
@@ -322,9 +318,14 @@ def main() -> None:
         entry_mode=resolved_entry_mode,
         adaptive_priority=resolved_adaptive_priority,
         exit_mode=resolved_exit_mode,
+        client_id=resolved_client_id,
     )
     # Enable persistent file logging now that client_id is resolved
     _setup_file_logging(resolved_client_id)
+    # Shared daily fleet log: every bot appends to reports/fleet/
+    # fleet_YYYYMMDD.log with a per-line source tag (7-day retention).
+    from src.live_execution.fleet_log import setup_fleet_logging
+    setup_fleet_logging(f"{ctx.brain_symbol} cid={resolved_client_id}")
 
     trader.start()
 

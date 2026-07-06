@@ -606,6 +606,10 @@ def main(argv=None):
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    # The runner's own supervision lines join the shared daily fleet log
+    # (children tag themselves "<SYM> cid=<id>" via cli.py).
+    from src.live_execution.fleet_log import setup_fleet_logging
+    setup_fleet_logging("FLEET")
 
     error_writer = None
     if not args.no_error_queue:
