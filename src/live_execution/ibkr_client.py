@@ -22,6 +22,11 @@ _PACING_ERROR_CODES = {162}
 _DEFAULT_SOURCE_TZ = "America/New_York"
 _DEFAULT_TARGET_TZ = "UTC"
 
+# IBKR duration-string units → seconds (empty-snapshot fallback sizing).
+_DURATION_UNIT_SECONDS = {
+    "S": 1, "D": 86400, "W": 604800, "M": 2592000, "Y": 31536000,
+}
+
 # Port defaults: IB Gateway paper = 4002, TWS paper = 7497
 _PORT_GATEWAY = 4002
 _PORT_TWS = 7497
@@ -1017,6 +1022,31 @@ class IBKRConnectionManager:
     # Live bar subscription
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _fallback_duration_str(duration_str: str) -> str:
+        """Widen a duration string for the one-shot empty-snapshot retry.
+
+        IBKR error 162 ("HMDS query returned no data") makes a short
+        keepUpToDate snapshot window (e.g. "60 S") come back as an
+        EMPTY BarDataList without raising — and live updates NEVER
+        arrive on that request.  The retry widens the window to one day
+        more than the original (minimum "1 D"), so weekend/holiday
+        startups — where a 60 S window is legitimately empty but the
+        prior session's bars exist — still succeed.
+
+        Raises ValueError on a malformed duration string — no silent
+        default window.
+        """
+        try:
+            num_str, unit = duration_str.strip().split()
+            seconds = int(num_str) * _DURATION_UNIT_SECONDS[unit.upper()]
+        except (ValueError, KeyError) as exc:
+            raise ValueError(
+                f"Cannot derive a fallback window from IBKR duration "
+                f"string {duration_str!r}"
+            ) from exc
+        return f"{seconds // 86400 + 1} D"
+
     def subscribe_live_bars(
         self,
         contract: Contract,
@@ -1042,6 +1072,11 @@ class IBKRConnectionManager:
 
         Returns:
             BarDataList with live updates enabled.
+
+        Raises:
+            RuntimeError: If the snapshot is empty even after the
+                one-shot fallback retry (error-162 shape — the
+                keepUpToDate stream is dead on arrival).
         """
         self.ensure_connected()
         bars = self.ib.reqHistoricalData(
@@ -1054,6 +1089,36 @@ class IBKRConnectionManager:
             formatDate=1,
             keepUpToDate=True,
         )
+        if not bars:
+            # Empty snapshot = error-162 shape: TWS terminated the
+            # request server-side and live updates will NEVER arrive on
+            # this BarDataList.  Retry ONCE with a wider window
+            # (>= "1 D") before failing loudly — no silent dead stream.
+            fallback_duration = self._fallback_duration_str(duration_str)
+            log.warning(
+                "Live %s subscription for %s returned an empty snapshot "
+                "(%s window) — retrying once with %s",
+                bar_size, contract.localSymbol or contract.symbol,
+                duration_str, fallback_duration,
+            )
+            bars = self.ib.reqHistoricalData(
+                contract,
+                endDateTime="",
+                durationStr=fallback_duration,
+                barSizeSetting=bar_size,
+                whatToShow=what_to_show,
+                useRTH=use_rth,
+                formatDate=1,
+                keepUpToDate=True,
+            )
+            if not bars:
+                raise RuntimeError(
+                    f"Live {bar_size} subscription for "
+                    f"{contract.localSymbol or contract.symbol} returned "
+                    f"no bars even after the {fallback_duration} fallback "
+                    f"retry — the keepUpToDate stream is dead on arrival "
+                    f"(IBKR error-162 shape)"
+                )
         return bars
 
     async def subscribe_live_bars_async(
@@ -1070,6 +1135,8 @@ class IBKRConnectionManager:
         Identical to subscribe_live_bars but uses reqHistoricalDataAsync
         so it can be awaited from an async context (e.g., reconnection
         callbacks) without crashing with 'event loop already running'.
+        Mirrors the sync path's empty-snapshot handling: one fallback
+        retry (>= "1 D"), then RuntimeError — no silent dead stream.
         """
         self.ensure_connected()
         bars = await self.ib.reqHistoricalDataAsync(
@@ -1082,6 +1149,36 @@ class IBKRConnectionManager:
             formatDate=1,
             keepUpToDate=True,
         )
+        if not bars:
+            # Empty snapshot = error-162 shape: TWS terminated the
+            # request server-side and live updates will NEVER arrive on
+            # this BarDataList.  Retry ONCE with a wider window
+            # (>= "1 D") before failing loudly — no silent dead stream.
+            fallback_duration = self._fallback_duration_str(duration_str)
+            log.warning(
+                "Live %s subscription for %s returned an empty snapshot "
+                "(%s window) — retrying once with %s",
+                bar_size, contract.localSymbol or contract.symbol,
+                duration_str, fallback_duration,
+            )
+            bars = await self.ib.reqHistoricalDataAsync(
+                contract,
+                endDateTime="",
+                durationStr=fallback_duration,
+                barSizeSetting=bar_size,
+                whatToShow=what_to_show,
+                useRTH=use_rth,
+                formatDate=1,
+                keepUpToDate=True,
+            )
+            if not bars:
+                raise RuntimeError(
+                    f"Live {bar_size} subscription for "
+                    f"{contract.localSymbol or contract.symbol} returned "
+                    f"no bars even after the {fallback_duration} fallback "
+                    f"retry — the keepUpToDate stream is dead on arrival "
+                    f"(IBKR error-162 shape)"
+                )
         return bars
 
     def cancel_subscription(self, bars) -> None:

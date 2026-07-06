@@ -152,6 +152,13 @@ _STALE_BAR_THRESHOLD_MINUTES = 15  # Minutes without a bar before forcing reconn
 # staleness oscillates 60→120 min — 135 = 120 max normal + the legacy
 # 15-min margin. 5m-enabled instances keep the 15-min constant above.
 _STALE_BAR_THRESHOLD_MINUTES_1H = 135
+# Consecutive stale-bar-watchdog firings with NO new brain-stream bar in
+# between before escalating to a process exit (SystemExit).  fleet_runner
+# only restarts CRASHED children — a child churning through fruitless
+# reconnect cycles ("Reconnected successfully" but zero bars) looks healthy
+# to it, so the child must crash itself to get a fresh start (the startup
+# subscription path demonstrably works).
+_MAX_FRUITLESS_RECONNECTS = 3
 
 # Auto-restart parameters (process-level recovery)
 _RESTART_MAX_ATTEMPTS = 5        # Max full restart attempts
@@ -2709,7 +2716,14 @@ class LiveTrader:
         adapter construction (T2, D1), which keeps this call compatible
         with the untouched SimulatedDataFeed.
         """
-        now = pd.Timestamp.now()
+        # Gap reference must be tz-naive UTC — _last_bar_time_5m/_1h are
+        # normalized tz-naive UTC, so pd.Timestamp.now() (LOCAL wall clock)
+        # computes gap ≈ real_gap - utc_offset on non-UTC hosts and the
+        # backfill never fires.  Matches the stale-bar watchdog
+        # (_check_stale_bars).  Note: pd.Timestamp.utcnow() is tz-AWARE
+        # (pandas 1.5.3) and would raise on comparison with the tz-naive
+        # last-bar timestamps — the tz must be stripped.
+        now = pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
         warmup_count = 0
 
         # ── 5M gap backfill ──────────────────────────────────────────
@@ -2942,6 +2956,9 @@ class LiveTrader:
         if self._last_bar_time_5m is not None and bar_time <= self._last_bar_time_5m:
             return
         self._last_bar_time_5m = bar_time
+        # A live brain-stream bar arrived — the watchdog's fruitless-
+        # reconnect escalation counter resets to zero (R4).
+        self._fruitless_reconnect_count = 0
 
         bar_log = (
             f"NEW 5M BAR: {bar_time}  O={new_row['Open'].iloc[0]:.2f} H={new_row['High'].iloc[0]:.2f} "
@@ -2997,6 +3014,9 @@ class LiveTrader:
         if self._last_bar_time_1h is not None and bar_time <= self._last_bar_time_1h:
             return
         self._last_bar_time_1h = bar_time
+        # A live brain-stream bar arrived — the watchdog's fruitless-
+        # reconnect escalation counter resets to zero (R4).
+        self._fruitless_reconnect_count = 0
 
         bar_log = (
             f"NEW 1H BAR: {bar_time}  O={new_row['Open'].iloc[0]:.2f} H={new_row['High'].iloc[0]:.2f} "
@@ -3736,6 +3756,19 @@ class LiveTrader:
                 # Reset data farm health flags before connecting
                 self._data_farm_ok = False
                 self._data_farm_broken_only = False
+                # Block the async resubscription path (_deferred_resubscribe)
+                # BEFORE connecting.  IBKR delivers 2104/2106 DURING the
+                # connect handshake; with _subscriptions_lost=True those
+                # fire _on_ib_error → _deferred_resubscribe, which races
+                # the sync _resubscribe_and_backfill() call at the end of
+                # this method — both paths subscribe all streams, cancel
+                # each other's in-flight requests, and clobber the
+                # _live_bars_* references.  The guard must already be True
+                # when data_client.connect() runs; it is cleared at the end
+                # of _resubscribe_and_backfill() on success and on the
+                # failure paths below (so a later legitimate 2104 can still
+                # schedule _deferred_resubscribe after _reconnect gives up).
+                self._resubscribe_pending = True
                 # Reconnect
                 self.data_client.connect()
                 self.exec_client.connect()
@@ -3744,12 +3777,6 @@ class LiveTrader:
                 # are simple lists and += appends without dedup.
                 self._callbacks_registered = False
                 self._register_execution_callbacks()
-                # Block the async resubscription path (_deferred_resubscribe)
-                # during the data farm health check below.  Without this,
-                # 2104/2106 codes fire _on_ib_error → _deferred_resubscribe
-                # which races with the sync _resubscribe_and_backfill() call
-                # at the end of this method, causing double subscriptions.
-                self._resubscribe_pending = True
 
                 # ── Data farm health check ─────────────────────────
                 # IBKR fires 2103/2105 (broken) and/or 2104/2106 (OK)
@@ -3787,6 +3814,9 @@ class LiveTrader:
                         self.exec_client.disconnect()
                     except Exception:
                         pass
+                    # Failed attempt — release the guard so it cannot leak
+                    # True past the loop and block the deferred 2104 path.
+                    self._resubscribe_pending = False
                     delay = min(delay * 2, _RECONNECT_MAX_DELAY)
                     continue  # Skip resubscription — it would fail anyway
 
@@ -3803,6 +3833,9 @@ class LiveTrader:
                 return True
             except Exception as exc:
                 log.warning("Reconnect attempt %d failed: %s", attempt, exc)
+                # Failed attempt — release the guard so it cannot leak
+                # True past the loop and block the deferred 2104 path.
+                self._resubscribe_pending = False
                 delay = min(delay * 2, _RECONNECT_MAX_DELAY)
         return False
 
@@ -4105,6 +4138,38 @@ class LiveTrader:
         minutes_stale = (now - reference).total_seconds() / 60
         if minutes_stale < stale_threshold:
             return False  # Not stale enough yet
+
+        # R4: count CONSECUTIVE fruitless firings.  Any new brain-stream
+        # bar (_on_bar_update_5m/_on_bar_update_1h) resets this to zero;
+        # if the watchdog fires _MAX_FRUITLESS_RECONNECTS times with no
+        # bar in between, the reconnect loop is churning without ever
+        # recovering data — crash the process so fleet_runner restarts
+        # the child fresh.  The getattr default mirrors the
+        # _enable_5m_stream / _last_bar_time_5m seams above for
+        # object.__new__ test stubs (a structural seam, not a silent
+        # config default).
+        fruitless_count = getattr(self, "_fruitless_reconnect_count", 0) + 1
+        self._fruitless_reconnect_count = fruitless_count
+        if fruitless_count >= _MAX_FRUITLESS_RECONNECTS:
+            log.critical(
+                "STALE BAR WATCHDOG: %d consecutive reconnect cycles "
+                "produced NO bars (last bar %s, %.0f min stale) — "
+                "escalating to process exit so fleet_runner restarts "
+                "this child fresh",
+                fruitless_count, last_bar_time, minutes_stale,
+            )
+            try:
+                self._telegram.send(
+                    f"*WATCHDOG ESCALATION* - {fruitless_count} consecutive "
+                    f"reconnects produced no bars ({minutes_stale:.0f}m "
+                    f"stale). Terminating process for a fresh restart..."
+                )
+            except Exception:
+                pass  # Telegram failures must never block the escalation exit
+            raise SystemExit(
+                f"stale-bar watchdog: {fruitless_count} consecutive "
+                f"fruitless reconnects — exiting for fleet_runner restart"
+            )
 
         subs_flag = "subs_lost=True" if self._subscriptions_lost else "subs_lost=False (silent death)"
         log.warning(
