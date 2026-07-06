@@ -19,6 +19,11 @@
 # =============================================================================
 
 set -e
+# pipefail (ticket optimizer-vm-deploy-whitelist_07052026_1820): every python/gsutil
+# step is piped through `tee`, whose exit 0 masked the real failure under set -e —
+# the ModuleNotFoundError crashes limped on to a misleading "0 pairs" FATAL.
+# Intentional soft-failures keep their `|| true` / `|| {... }` guards.
+set -o pipefail
 
 export PYTHONIOENCODING=utf8
 

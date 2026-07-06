@@ -187,63 +187,63 @@ if ($elapsed -ge $maxWait) {
 }
 
 # --- [3/7] Create directory structure ---
+# configs/ is NOT in the code zip (reviewer condition 1): configs/strategies must
+# exist for the strategy-config scp below. reports/batch_runs + data/processed are
+# also created VM-side by vm_post_optimize.sh; kept here for first-boot ordering.
 Write-Host "`n[3/7] Creating directory structure..."
 gcloud compute ssh $VmName --zone=$Zone --quiet `
-    --command="mkdir -p $RemoteProject/agent $RemoteProject/src/live_execution/strategies $RemoteProject/src/features $RemoteProject/src/core $RemoteProject/gcp $RemoteProject/configs/strategies $RemoteProject/reports/batch_runs $RemoteProject/data/processed" 2>$null
+    --command="mkdir -p $RemoteProject/configs/strategies $RemoteProject/reports/batch_runs $RemoteProject/data/processed" 2>$null
 
-# --- [4/7] Upload code ---
-Write-Host "`n[4/7] Uploading code..."
+# --- [4/7] Upload code (whole-tree zip) ---
+# Ticket optimizer-vm-deploy-whitelist_07052026_1820: the previous hand-curated
+# file whitelist silently drifted from the import graph and killed 4 batches in
+# one day (src.core, then src.live_execution.instrument_context). Ship the SAME
+# whole src/agent/gcp trees the sweep deploy ships (mechanism transplanted from
+# gcp_deploy_sweep.ps1) so import drift can never strand the optimizer VM again.
+Write-Host "`n[4/7] Uploading code (whole-tree zip)..."
 
-$codeFiles = @(
-    @{ Local = "agent\batch_post_optimizer.py";  Remote = "agent/" },
-    @{ Local = "agent\generate_batch_configs.py"; Remote = "agent/" },
-    @{ Local = "agent\strategy_optimizer.py";    Remote = "agent/" },
-    @{ Local = "agent\sweep_ensembles.py";       Remote = "agent/" },
-    @{ Local = "agent\select_top_ensembles.py";  Remote = "agent/" },
-    @{ Local = "agent\unified_pair_optimizer.py";Remote = "agent/" },
-    @{ Local = "agent\forward_returns.py";       Remote = "agent/" },
-    @{ Local = "agent\alpha_evaluator.py";       Remote = "agent/" },
-    @{ Local = "agent\backtest_engine.py";       Remote = "agent/" },
-    @{ Local = "agent\generate_ensemble_artifacts.py"; Remote = "agent/" },
-    @{ Local = "agent\__init__.py";              Remote = "agent/" },
-    @{ Local = "src\util.py";                    Remote = "src/" },
-    @{ Local = "src\__init__.py";                Remote = "src/" },
-    @{ Local = "src\LGBMLearner.py";             Remote = "src/" },
-    @{ Local = "src\data_processor.py";          Remote = "src/" },
-    @{ Local = "src\data_paths.py";              Remote = "src/" },
-    @{ Local = "src\live_execution\__init__.py";                   Remote = "src/live_execution/" },
-    @{ Local = "src\live_execution\strategy_config.py";            Remote = "src/live_execution/" },
-    @{ Local = "src\live_execution\config_loader.py";              Remote = "src/live_execution/" },
-    @{ Local = "src\live_execution\execution_guard.py";            Remote = "src/live_execution/" },
-    @{ Local = "src\live_execution\strategies\__init__.py";        Remote = "src/live_execution/strategies/" },
-    @{ Local = "src\live_execution\strategies\execution_models.py"; Remote = "src/live_execution/strategies/" },
-    @{ Local = "src\live_execution\strategies\configurable_strategy.py"; Remote = "src/live_execution/strategies/" },
-    @{ Local = "src\live_execution\strategies\buy70_sized_manatee.py"; Remote = "src/live_execution/strategies/" },
-    @{ Local = "src\features\__init__.py";       Remote = "src/features/" },
-    @{ Local = "src\features\feature_buckets.py"; Remote = "src/features/" },
-    # src/core is imported at module level by generate_ensemble_artifacts (dataset_tag,
-    # instrument_master) which batch_post_optimizer imports — omitting it crashes the
-    # optimizer VM with ModuleNotFoundError before any optimization runs (S1/S2 2026-07-05).
-    @{ Local = "src\core\dataset_tag.py";        Remote = "src/core/" },
-    @{ Local = "src\core\instrument_master.py";  Remote = "src/core/" },
-    @{ Local = "gcp\vm_post_optimize.sh";        Remote = "gcp/" }
-)
+# Unique per-VM archive name: parallel deploys must never share a zip filename.
+$zipName = "deploy_$VmName.zip"
+$zipFile = Join-Path $ProjectDir $zipName
+if (Test-Path $zipFile) { Remove-Item $zipFile -Force }
 
-# Upload .env for Telegram (if exists)
-$envFile = Join-Path $ProjectDir ".env"
-if (Test-Path $envFile) {
-    $codeFiles += @{ Local = ".env"; Remote = "" }
+$itemsToZip = @("src", "agent", "gcp", "requirements.txt", ".env")
+$existingItems = @()
+foreach ($item in $itemsToZip) {
+    if (Test-Path (Join-Path $ProjectDir $item)) {
+        $existingItems += $item
+    }
 }
 
-foreach ($file in $codeFiles) {
-    $localPath = Join-Path $ProjectDir $file.Local
-    $remotePath = "$RemoteProject/$($file.Remote)"
-    if (Test-Path $localPath) {
-        gcloud compute scp "$localPath" "${VmName}:${remotePath}" `
-            --zone=$Zone --quiet 2>$null
-    } else {
-        Write-Host "  WARNING: Missing $($file.Local)" -ForegroundColor Yellow
+if ($existingItems.Count -gt 0) {
+    Write-Host "  Zipping codebase (excluding pycache and datasets)..."
+    $tarArgs = @("-a", "-c", "-C", $ProjectDir, "-f", $zipFile, "--exclude=__pycache__", "--exclude=*.parquet", "--exclude=*.csv") + $existingItems
+    & "tar.exe" $tarArgs
+
+    # Upload + unzip + VERIFY with retries; sentinel is vm_post_optimize.sh
+    # (reviewer condition 2 — NOT the sweep's vm_sweep_run.sh).
+    $codeLanded = $false
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        Write-Host "  Uploading code to VM (attempt $attempt/3)..."
+        gcloud compute ssh $VmName --zone=$Zone --command="mkdir -p $RemoteProject" --quiet 2>$null
+        gcloud compute scp "$zipFile" "${VmName}:${RemoteProject}/$zipName" --zone=$Zone --quiet 2>$null
+        gcloud compute ssh $VmName --zone=$Zone --command="cd $RemoteProject && unzip -q -o $zipName && rm -f $zipName" --quiet 2>$null
+        $verify = gcloud compute ssh $VmName --zone=$Zone --command="test -f $RemoteProject/gcp/vm_post_optimize.sh && echo CODE_OK" --quiet 2>$null
+        if ($verify -match "CODE_OK") { $codeLanded = $true; break }
+        Write-Host "  Code not present on VM after attempt $attempt; retrying..." -ForegroundColor Yellow
+        Start-Sleep -Seconds 3
     }
+    Remove-Item $zipFile -ErrorAction SilentlyContinue
+
+    if (-not $codeLanded) {
+        Write-Host "  FATAL: code failed to land on VM (gcp/vm_post_optimize.sh missing after 3 attempts)." -ForegroundColor Red
+        Write-Host "  Aborting deploy to avoid launching the optimizer on an empty VM." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "  Code verified on VM (gcp/vm_post_optimize.sh present)." -ForegroundColor Green
+} else {
+    Write-Host "  FATAL: No code directories found to upload locally." -ForegroundColor Red
+    exit 1
 }
 
 # Upload global risk filters
