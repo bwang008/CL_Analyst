@@ -711,11 +711,17 @@ class TestR3EmptySnapshotSubscription:
         assert "attempt 2" in success_msgs[0]
 
     def test_r3_deferred_resubscribe_failure_keeps_subscriptions_lost_true(self):
-        """FENCE (passes today): when the async resubscription raises (as the
-        R3 empty-after-retry path now will), _deferred_resubscribe must
-        swallow it via its except/log.exception path, leave
-        _subscriptions_lost True (so recovery re-triggers) and clear
-        _resubscribe_pending in finally."""
+        """FENCE: when the async resubscription raises (as the R3
+        empty-after-retry path now will), _deferred_resubscribe must
+        swallow it via its except path and leave _subscriptions_lost True
+        (so recovery re-triggers).
+
+        Pin updated by resubscribe-retry-blindness_07062026_0640: a failed
+        attempt now ARMS A RETRY TIMER (the 2026-07-06 incident proved
+        "wait for the next farm-OK" never fires when the OK already came
+        during an IP-session conflict), so _resubscribe_pending stays True
+        while the timer is outstanding — the old clear-in-finally pin is
+        the exact behavior that left the fleet blind."""
         trader = _deferred_stub()
         trader.data_client.subscribe_live_bars_async = AsyncMock(
             side_effect=RuntimeError(
@@ -731,7 +737,12 @@ class TestR3EmptySnapshotSubscription:
             "a failed deferred resubscription must leave _subscriptions_lost "
             "True so the next 2104/watchdog cycle can re-trigger recovery"
         )
-        assert trader._resubscribe_pending is False
+        assert trader._resubscribe_pending is True, (
+            "guard stays up while the retry timer is outstanding so a racing "
+            "farm-OK event cannot double-schedule "
+            "(resubscribe-retry-blindness_07062026_0640)"
+        )
+        assert trader._resubscribe_retry_count == 1
 
 
 # ===========================================================================

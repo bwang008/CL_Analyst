@@ -29,7 +29,9 @@ def _make_account_value(tag, value, currency="USD", account="DU1899929"):
     return SimpleNamespace(tag=tag, value=str(value), currency=currency, account=account)
 
 
-def _make_portfolio_item(symbol, position, unrealized, realized, market_value, avg_cost):
+def _make_portfolio_item(symbol, position, unrealized, realized, market_value, avg_cost, market_price=0.0):
+    # market_price: real ib_insync PortfolioItems always carry marketPrice;
+    # surfaced as cl_market_price since telemetry-fill-commission_07062026_0640.
     contract = SimpleNamespace(symbol=symbol)
     return SimpleNamespace(
         contract=contract,
@@ -38,6 +40,7 @@ def _make_portfolio_item(symbol, position, unrealized, realized, market_value, a
         realizedPNL=realized,
         marketValue=market_value,
         averageCost=avg_cost,
+        marketPrice=market_price,
     )
 
 

@@ -320,6 +320,12 @@ def main() -> None:
         exit_mode=resolved_exit_mode,
         client_id=resolved_client_id,
     )
+    # Live-path opt-in: real bots surface alive-but-degraded states
+    # (stale-bar watchdog firings, exhausted resubscribe retries) to the
+    # fleet error queue; unit tests never set this, so watchdog tests
+    # cannot pollute the production queue
+    # (resubscribe-retry-blindness_07062026_0640).
+    trader._health_events_enabled = True
     # Enable persistent file logging now that client_id is resolved
     _setup_file_logging(resolved_client_id)
     # Shared daily fleet log: every bot appends to reports/fleet/

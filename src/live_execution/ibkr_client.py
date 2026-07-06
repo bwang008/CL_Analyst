@@ -761,6 +761,8 @@ class IBKRConnectionManager:
             cl_realized_pnl: float — CL realized PnL
             cl_market_value: float — CL market value
             cl_avg_cost: float — CL average cost per contract
+            cl_market_price: float — broker live mark (same source as
+                unrealized PnL; 0.0 when no portfolio item)
         """
         self.ensure_connected()
 
@@ -774,6 +776,7 @@ class IBKRConnectionManager:
             "cl_realized_pnl": 0.0,
             "cl_market_value": 0.0,
             "cl_avg_cost": 0.0,
+            "cl_market_price": 0.0,
         }
 
         # Account summary tags
@@ -796,6 +799,7 @@ class IBKRConnectionManager:
                 summary["cl_realized_pnl"] = float(item.realizedPNL)
                 summary["cl_market_value"] = float(item.marketValue)
                 summary["cl_avg_cost"] = float(item.averageCost)
+                summary["cl_market_price"] = float(item.marketPrice)
 
         return summary
 

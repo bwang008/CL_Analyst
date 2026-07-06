@@ -179,6 +179,7 @@ class SimulatedExecution(ExecutionClient):
             "cl_position": self._position,
             "cl_unrealized_pnl": unrealized,
             "cl_realized_pnl": realized,
+            "cl_market_price": self._current_bar_close,
         }
 
     def resolve_contract(self, symbol: str) -> None:

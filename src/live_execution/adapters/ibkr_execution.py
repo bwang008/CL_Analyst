@@ -1,10 +1,18 @@
 from typing import Callable, Any, Optional
 from src.core.instrument_master import get_instrument
-from src.live_execution.interfaces.execution_interface import ExecutionClient, StandardExecutionEvent
+from src.live_execution.interfaces.execution_interface import (
+    ExecutionClient,
+    StandardCommissionEvent,
+    StandardExecutionEvent,
+)
 from src.live_execution.ibkr_client import IBKRConnectionManager
 import logging
 
 log = logging.getLogger("IBKRExecAdapter")
+
+# IBKR wire sentinel for "no value" on a double field (e.g. realizedPNL on
+# an opening fill) — must map to None, never be stored as 1.8e308.
+_IBKR_UNSET_DOUBLE = 1.7976931348623157e+308
 
 class IBKRExecutionClient(ExecutionClient):
     def __init__(self, host: str = "127.0.0.1", port: int = 4002, client_id: int = 10, fallback_ports: list[int] = None):
@@ -12,6 +20,7 @@ class IBKRExecutionClient(ExecutionClient):
             fallback_ports = [7497]
         self.manager = IBKRConnectionManager(host=host, port=port, client_id=client_id, readonly=False, fallback_ports=fallback_ports)
         self._order_callbacks = []
+        self._commission_callbacks = []
         # Contract cache: symbol -> qualified Contract.
         # Populated by resolve_contract() at startup (outside the event loop).
         # Used by place_bracket_order / place_child_orders to avoid async
@@ -30,6 +39,10 @@ class IBKRExecutionClient(ExecutionClient):
 
         # Attach event handlers to bridge events
         self.manager.ib.orderStatusEvent += self._on_order_status
+        # Commission reports: exec session only — the data client's IB
+        # session receives duplicate commissionReport events (see the
+        # wrapper-logging note above), so bridging here exactly once.
+        self.manager.ib.commissionReportEvent += self._on_commission_report
 
     def connect(self) -> None:
         self.manager.connect()
@@ -42,6 +55,38 @@ class IBKRExecutionClient(ExecutionClient):
 
     def register_order_status_callback(self, callback: Callable[[StandardExecutionEvent], None]) -> None:
         self._order_callbacks.append(callback)
+
+    def register_commission_callback(
+        self, callback: Callable[[StandardCommissionEvent], None]
+    ) -> None:
+        self._commission_callbacks.append(callback)
+
+    def _on_commission_report(self, trade: Any, fill: Any, report: Any):
+        """Bridge ib_insync commissionReportEvent -> StandardCommissionEvent.
+
+        A consumer exception must never propagate into ib_insync's event
+        loop; each callback is isolated.
+        """
+        realized = getattr(report, "realizedPNL", None)
+        if realized is not None and abs(realized) >= _IBKR_UNSET_DOUBLE:
+            realized = None
+        event = StandardCommissionEvent(
+            order_id=str(trade.order.orderId),
+            exec_id=str(fill.execution.execId),
+            symbol=trade.contract.symbol,
+            commission=float(getattr(report, "commission", 0.0) or 0.0),
+            realized_pnl=realized,
+            currency=str(getattr(report, "currency", "") or ""),
+            raw_event=report,
+        )
+        for cb in self._commission_callbacks:
+            try:
+                cb(event)
+            except Exception:
+                log.warning(
+                    "Commission callback failed (execId=%s)",
+                    event.exec_id, exc_info=True,
+                )
 
     def _on_order_status(self, trade: Any):
         event = StandardExecutionEvent(

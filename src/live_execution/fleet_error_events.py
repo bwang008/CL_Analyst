@@ -152,6 +152,93 @@ def extract_traceback(stderr_path):
     return "\n".join(lines[marker_idx:marker_idx + _MAX_TRACEBACK_LINES])
 
 
+def emit_child_health_event(model_name, client_id, kind, detail,
+                            queue_dir=DEFAULT_QUEUE_DIR,
+                            patterns_path=DEFAULT_INFRA_PATTERNS_PATH):
+    """Queue a NON-CRASH health event from inside a trading child.
+
+    2026-07-06 lesson: only process crashes reached the queue, so
+    alive-but-degraded children (stale-bar watchdog firings, exhausted
+    resubscribe retries) were invisible to the hourly monitor. This writes
+    a schema-compatible event with ``event_kind: "health"`` so the same
+    watcher/triage pipeline sees them; infra-flavored details (matched
+    against infra_patterns.json) are auto-filed by the watcher exactly
+    like infra crash events.
+
+    Dedup mirrors emit_crash_event (same model + same normalized
+    kind|detail): pending -> occurrences bump in place; processing ->
+    skip (agent is on it); done-only -> new event (recurrence re-opens).
+
+    NEVER raises — emission failure must not affect the trading child.
+    Returns the pending Path, or None (deduped-into-processing / failure).
+    """
+    try:
+        queue_dir = Path(queue_dir)
+        patterns = load_infra_patterns(patterns_path)
+        classification, matched = classify_traceback(detail, patterns)
+        tb_hash = traceback_hash(model_name, f"{kind}|{detail}")
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for sub in QUEUE_SUBDIRS:
+            (queue_dir / sub).mkdir(parents=True, exist_ok=True)
+
+        name = f"{model_name}_{tb_hash}.json"
+        processing = queue_dir / "processing" / name
+        if processing.exists():
+            log.info(
+                "Health event %s already in processing/ — agent is on it; "
+                "not re-queueing.", processing.name,
+            )
+            return None
+
+        pending = queue_dir / "pending" / name
+        if pending.exists():
+            with open(pending, "r", encoding="utf-8") as fh:
+                event = json.load(fh)
+            event["last_seen"] = now_iso
+            event["occurrences"] = event.get("occurrences", 1) + 1
+            FleetErrorEventWriter._atomic_write(pending, event)
+            log.info(
+                "Health event %s deduplicated (occurrence #%d).",
+                pending.name, event["occurrences"],
+            )
+            return pending
+
+        event = {
+            "schema_version": EVENT_SCHEMA_VERSION,
+            "event_id": f"{model_name}_{tb_hash}",
+            "event_kind": "health",
+            "health_kind": kind,
+            "timestamp": now_iso,
+            "last_seen": now_iso,
+            "occurrences": 1,
+            "model_name": model_name,
+            "config_path": "",
+            "client_id": client_id,
+            "exit_code": None,
+            "restart_count": None,
+            "gave_up": False,
+            "traceback": detail,
+            "traceback_hash": tb_hash,
+            "classification": classification,
+            "matched_infra_pattern": matched,
+            "fleet_manifest_path": "",
+            "stderr_log_path": "",
+        }
+        FleetErrorEventWriter._atomic_write(pending, event)
+        log.warning(
+            "Health event queued: %s (kind=%s, classification=%s%s)",
+            pending.name, kind, classification,
+            f", pattern={matched}" if matched else "",
+        )
+        return pending
+    except Exception:
+        log.error(
+            "Failed to emit health event for %s (kind=%s) — trading "
+            "continues.", model_name, kind, exc_info=True,
+        )
+        return None
+
+
 class FleetErrorEventWriter:
     """Writes crash events into the file-based error queue.
 

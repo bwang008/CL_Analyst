@@ -12,6 +12,22 @@ class StandardExecutionEvent:
     avg_price: float
     raw_event: Optional[Any] = None
 
+
+@dataclass
+class StandardCommissionEvent:
+    """Broker commission report for one fill.
+
+    realized_pnl is None on opening fills (brokers report realized PnL
+    only when a position is reduced/closed).
+    """
+    order_id: str
+    exec_id: str
+    symbol: str
+    commission: float
+    realized_pnl: Optional[float]
+    currency: str
+    raw_event: Optional[Any] = None
+
 class ExecutionClient(ABC):
     @abstractmethod
     def connect(self) -> None:
@@ -27,6 +43,16 @@ class ExecutionClient(ABC):
 
     @abstractmethod
     def register_order_status_callback(self, callback: Callable[[StandardExecutionEvent], None]) -> None:
+        pass
+
+    def register_commission_callback(
+        self, callback: Callable[[StandardCommissionEvent], None]
+    ) -> None:
+        """Register a consumer for broker commission reports.
+
+        Default implementation is a no-op: non-broker adapters (simulation)
+        have no commission stream; the live IBKR adapter overrides this.
+        """
         pass
 
     @abstractmethod

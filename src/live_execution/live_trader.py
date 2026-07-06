@@ -165,6 +165,31 @@ _STALE_BAR_THRESHOLD_MINUTES_1H = 135
 # subscription path demonstrably works).
 _MAX_FRUITLESS_RECONNECTS = 3
 
+# Deferred-resubscription retry timer
+# (resubscribe-retry-blindness_07062026_0640): the 2026-07-06 incident —
+# an IBKR *website* login invalidated the Gateway data session; farm-OK
+# (2106) fired while the conflict still held, every child's resubscribe
+# failed with error-162, and the old "will retry on next reconnect" path
+# never fired again (no new farm-OK ever came). Children sat alive-but-
+# blind until a manual restart. Retry on an event-loop timer instead:
+# 60s, 120s, 240s, then capped at 300s, for at most 5 attempts — beyond
+# that the stale-bar watchdog (30 min / SystemExit) is the backstop.
+_RESUBSCRIBE_RETRY_BASE_SECONDS = 60
+_RESUBSCRIBE_RETRY_CAP_SECONDS = 300
+_MAX_RESUBSCRIBE_RETRIES = 5
+
+
+def _price_decimals(tick_size) -> int:
+    """Decimal places needed to render one tick of an instrument.
+
+    0.001 (NG) -> 3, 0.01 (CL) -> 2, 0.1 (MGC) -> 1, 0.25 (ES) -> 2,
+    1 -> 0. A hardcoded %.2f hides half a tick on NG — $50 per contract
+    (telemetry-fill-commission_07062026_0640 R3).
+    """
+    from decimal import Decimal
+    exponent = Decimal(str(tick_size)).normalize().as_tuple().exponent
+    return max(0, -exponent)
+
 # Watchdog-family Telegram throttle
 # (watchdog-telegram-throttle_07062026_0007, user directive #2): at most
 # ONE watchdog-family Telegram per instance per hour — STALE BAR WATCHDOG,
@@ -550,6 +575,10 @@ class LiveTrader:
         self._resubscribe_pending = False  # Prevent duplicate resubscription scheduling
         self._data_farm_ok = False         # Set True when 2104/2106 received
         self._data_farm_broken_only = False # True if only 2103/2105 received (no OK)
+        # Health-event emission is an explicit live-path opt-in (cli.main
+        # sets True): unit tests driving watchdog/resubscribe paths must
+        # never write into the production error queue.
+        self._health_events_enabled = False
         self._callbacks_registered = False
         # Contract rollover state
         self._rollover_in_progress = False
@@ -1034,11 +1063,41 @@ class LiveTrader:
         if self._callbacks_registered:
             return
         self.exec_client.register_order_status_callback(self._on_standard_execution_event)
+        # Commission reports carry the broker-side commission and realized
+        # PnL per fill — without them the telemetry DB can never reconcile
+        # against IBKR (telemetry-fill-commission_07062026_0640). Exec
+        # session only: the data client's session receives duplicates.
+        if hasattr(self.exec_client, "register_commission_callback"):
+            self.exec_client.register_commission_callback(self._on_commission_event)
         if hasattr(self.data_client, "register_error_callback"):
             self.data_client.register_error_callback(self._on_ib_error)
         if hasattr(self.exec_client, "register_error_callback"):
             self.exec_client.register_error_callback(self._on_ib_error)
         self._callbacks_registered = True
+
+    def _on_commission_event(self, evt) -> None:
+        """Persist a broker commission report as a COMMISSION tradebook row.
+
+        The deterministic event_id (execId-keyed) makes the INSERT OR
+        IGNORE idempotent across sessions and restarts. Telemetry failure
+        must never propagate into the broker event loop.
+        """
+        try:
+            self.telemetry.log_tradebook_event(
+                event_id=f"COMMISSION_{evt.exec_id}",
+                event_type="COMMISSION",
+                event_timestamp_utc=self._utc_iso_now(),
+                order_id=evt.order_id,
+                broker_execution_id=evt.exec_id,
+                symbol=evt.symbol,
+                commission=evt.commission,
+                realized_pnl=evt.realized_pnl,
+            )
+        except Exception:
+            log.warning(
+                "COMMISSION telemetry write failed (execId=%s)",
+                getattr(evt, "exec_id", "?"), exc_info=True,
+            )
 
     def _extract_contract_month(self, contract) -> Optional[str]:
         month = getattr(contract, "lastTradeDateOrContractMonth", None)
@@ -2669,6 +2728,7 @@ class LiveTrader:
         which fails with 'This event loop is already running' even
         from an ensure_future coroutine.
         """
+        retry_scheduled = False
         try:
             # 1. Cancel stale subscriptions (sync, safe — no network request)
             if self._live_bars_5m is not None:
@@ -2733,6 +2793,7 @@ class LiveTrader:
                 log.info("Subscribed to front-month live bars")
 
             self._subscriptions_lost = False
+            self._resubscribe_retry_count = 0
 
             # 3. Backfill any gap from the disconnect period
             await self._backfill_reconnect_gap_async()
@@ -2740,9 +2801,84 @@ class LiveTrader:
             log.info("Reconnection complete — live bars flowing again")
 
         except Exception:
-            log.exception("Deferred resubscription failed — will retry on next reconnect")
+            # 2026-07-06 incident: waiting for the "next reconnect" (a new
+            # farm-OK event) left every child blind when the OK had already
+            # fired during an IP-session conflict. Retry on a timer instead
+            # (resubscribe-retry-blindness_07062026_0640).
+            retry_count = getattr(self, "_resubscribe_retry_count", 0) + 1
+            self._resubscribe_retry_count = retry_count
+            if retry_count <= _MAX_RESUBSCRIBE_RETRIES:
+                delay = min(
+                    _RESUBSCRIBE_RETRY_BASE_SECONDS * (2 ** (retry_count - 1)),
+                    _RESUBSCRIBE_RETRY_CAP_SECONDS,
+                )
+                log.exception(
+                    "Deferred resubscription failed (attempt %d/%d) — "
+                    "retrying in %ds (timer-based; no farm-OK event required)",
+                    retry_count, _MAX_RESUBSCRIBE_RETRIES, delay,
+                )
+                self._schedule_resubscribe_retry(delay)
+                retry_scheduled = True
+            else:
+                log.exception(
+                    "Deferred resubscription failed — %d retries exhausted; "
+                    "the stale-bar watchdog is the remaining backstop",
+                    _MAX_RESUBSCRIBE_RETRIES,
+                )
+                self._emit_health_event(
+                    "resubscribe-retries-exhausted",
+                    f"Deferred resubscription failed {retry_count} times "
+                    f"(base {_RESUBSCRIBE_RETRY_BASE_SECONDS}s, cap "
+                    f"{_RESUBSCRIBE_RETRY_CAP_SECONDS}s) — child is blind "
+                    f"until the stale-bar watchdog escalates.",
+                )
         finally:
-            self._resubscribe_pending = False
+            # The guard stays up while a retry timer is outstanding so a
+            # racing farm-OK event cannot double-schedule; cleared otherwise.
+            self._resubscribe_pending = retry_scheduled
+
+    def _schedule_resubscribe_retry(self, delay_seconds) -> None:
+        """Arm an event-loop timer that re-enters _deferred_resubscribe.
+
+        This is the seam the retry tests mock; kept tiny on purpose.
+        """
+        import asyncio
+        loop = asyncio.get_event_loop()
+        loop.call_later(
+            delay_seconds,
+            lambda: asyncio.ensure_future(self._deferred_resubscribe()),
+        )
+
+    def _emit_health_event(self, kind, detail) -> None:
+        """Queue a non-crash health event into the fleet error queue.
+
+        Alive-but-degraded states (stale-bar watchdog firings, exhausted
+        resubscribe retries) were invisible to the hourly monitor — only
+        process crashes reached the queue. Emission failure must never
+        affect trading.
+        """
+        if not getattr(self, "_health_events_enabled", False):
+            return  # live-path opt-in — see __init__
+        try:
+            from src.live_execution.fleet_error_events import (
+                emit_child_health_event,
+            )
+            model = (
+                getattr(getattr(self, "strategy", None), "name", None)
+                or getattr(self, "_brain_symbol", None)
+                or "unknown"
+            )
+            client_id = getattr(
+                getattr(self, "telemetry", None), "client_id", None,
+            )
+            emit_child_health_event(
+                model_name=model, client_id=client_id,
+                kind=kind, detail=detail,
+            )
+        except Exception:
+            log.warning(
+                "Health-event emission failed (kind=%s)", kind, exc_info=True,
+            )
 
     async def _backfill_reconnect_gap_async(self) -> None:
         """Backfill bars missed during a disconnect/hibernation gap.
@@ -3345,8 +3481,9 @@ class LiveTrader:
             if sl_price_live is None and getattr(self, '_tracked_sl_price', None) is not None:
                 sl_price_live = self._tracked_sl_price
 
-            tp_str = f"TP={tp_price_live:.2f}" if tp_price_live else "TP=N/A"
-            sl_str = f"SL={sl_price_live:.2f}" if sl_price_live else "SL=N/A"
+            dp = _price_decimals(self._tick_size)
+            tp_str = f"TP={tp_price_live:.{dp}f}" if tp_price_live else "TP=N/A"
+            sl_str = f"SL={sl_price_live:.{dp}f}" if sl_price_live else "SL=N/A"
             atr_str = f"ATR={atr_value:.4f}" if atr_value else "ATR=N/A"
 
             try:
@@ -3354,20 +3491,34 @@ class LiveTrader:
                 acct_summary = self.exec_client.get_account_summary(symbol=self._execution_symbol)
                 unrealized_pnl = float(acct_summary.get("cl_unrealized_pnl", 0.0))
                 avg_cost = float(acct_summary.get("cl_avg_cost", 0.0))
-                # IBKR averageCost = price * contract multiplier (T6 m1:
-                # registry-driven — 1000 for CL, byte-identical output; 50
-                # for ES). Display-only; no trade-path behavior change.
-                entry_price = (
-                    avg_cost / self._execution_instrument.multiplier
-                    if avg_cost else 0.0
-                )
+                ibkr_mark = float(acct_summary.get("cl_market_price", 0.0))
+                # Entry: OUR actual fill is the single source of truth.
+                # IBKR averageCost includes commission (misleading on a
+                # per-price display) — used only as a recovery fallback
+                # when no in-memory fill is known. avgCost = price *
+                # contract multiplier (registry-driven).
+                _entry_fill = getattr(self, "_entry_price", None)
+                if _entry_fill is not None:
+                    entry_price = _entry_fill
+                elif avg_cost:
+                    entry_price = avg_cost / self._execution_instrument.multiplier
+                else:
+                    entry_price = 0.0
+                # Mkt: IBKR's live mark (same source as unrealizedPnL) so
+                # the line is internally consistent; bar close only as a
+                # fallback, labeled so a frozen bar can't masquerade as a
+                # live quote (telemetry-fill-commission_07062026_0640 R3).
+                if ibkr_mark > 0:
+                    mkt_price, mkt_src = ibkr_mark, "IBKR"
+                else:
+                    mkt_price, mkt_src = current_price, "bar"
                 log.info(
                     "[PNL] position=%d  unrealizedPnL=$%.2f  "
-                    "entryPrice=%.2f  mktPrice=%.2f  %s  %s  %s  held=%d bars",
+                    "entryPrice=%.*f  mktPrice=%.*f (%s)  %s  %s  %s  held=%d bars",
                     current_position,
                     unrealized_pnl,
-                    entry_price,
-                    current_price,
+                    dp, entry_price,
+                    dp, mkt_price, mkt_src,
                     sl_str, tp_str, atr_str,
                     self._position_bars_held,
                 )
@@ -4324,6 +4475,15 @@ class LiveTrader:
             f"*STALE BAR WATCHDOG* - No bars received for {minutes_stale:.0f}m "
             f"during market hours. Forcing reconnect..."
         )
+        # Surface the firing to the error queue: alive-but-blind states used
+        # to leave only log/Telegram traces, invisible to the hourly monitor
+        # (resubscribe-retry-blindness_07062026_0640 R2).
+        self._emit_health_event(
+            "stale-bars-watchdog",
+            f"STALE BAR WATCHDOG: no bars for {minutes_stale:.0f} min "
+            f"({subs_flag}) during market hours — forcing disconnect + "
+            f"reconnect",
+        )
         # Mark subscriptions as lost so downstream recovery paths are consistent
         self._subscriptions_lost = True
         # Disconnect first so _reconnect() starts with a clean state.
@@ -4518,6 +4678,7 @@ class LiveTrader:
                 decision_timestamp_utc=ctx.get("decision_timestamp_utc"),
                 contract_month=self._front_month_str,
                 action=action_str,
+                avg_fill_price=avg_price,
                 last_fill_price=avg_price,
                 fill_qty=qty,
             )
@@ -4614,19 +4775,34 @@ class LiveTrader:
 
                 try:
                     self.telemetry.open_position(
-                        trade_id=trade_id, 
-                        side=side_str, 
-                        quantity=int(qty), 
-                        entry_price=avg_price, 
-                        entry_order_id=order_id, 
-                        atr_at_entry=self._atr_at_entry, 
-                        entry_time=self._utc_iso_now(), 
-                        entry_bar_time=self._position_entry_bar_time.isoformat() if self._position_entry_bar_time else None, 
-                        trailing_atr_mult=self._trade_trailing_atr_mult, 
+                        trade_id=trade_id,
+                        side=side_str,
+                        quantity=int(qty),
+                        entry_price=avg_price,
+                        entry_order_id=order_id,
+                        atr_at_entry=self._atr_at_entry,
+                        entry_time=self._utc_iso_now(),
+                        entry_bar_time=self._position_entry_bar_time.isoformat() if self._position_entry_bar_time else None,
+                        trailing_atr_mult=self._trade_trailing_atr_mult,
                         max_hold_bars=self._trade_max_hold_bars
                     )
                 except Exception:
                     pass
+
+                # Stamp the actual fill onto the decision-ledger row — the
+                # ledger recorded only decision intent until now; every
+                # historical fill_price was NULL
+                # (telemetry-fill-commission_07062026_0640 R2).
+                try:
+                    self.telemetry.update_fill(
+                        order_id_int if order_id_int is not None else order_id,
+                        avg_price,
+                    )
+                except Exception:
+                    log.warning(
+                        "update_fill failed for order %s", order_id,
+                        exc_info=True,
+                    )
                 
                 try:
                     self._telegram.send(
