@@ -39,6 +39,9 @@ reports/
 configs/strategies/candidates/**
 # Fleet manifests (multi-strategy runner definitions)
 !configs/fleet/*.json
+# Fleet error queue: track the infra-signature collection; runtime event
+# JSONs in pending/processing/done stay untracked (audit_log.md is tracked)
+!.agents/collab/error_queue/infra_patterns.json
 
 # ----- Disaster recovery: track prediction & artifact files -----
 # Prediction CSVs used by backtest configs (typically < 3 MB each)

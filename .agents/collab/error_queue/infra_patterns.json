@@ -1,0 +1,35 @@
+{
+  "_comment": "Growable collection of KNOWN INFRASTRUCTURE error signatures. Events matching any regex (case-insensitive, DOTALL over the full traceback) are classified 'infrastructure' and are NOT investigated by the agent — they are filed straight to done/ with an audit_log.md line. When the agent root-causes an 'unknown' event as infrastructure, it MUST append the signature here (see .agents/skills/fleet-error-monitor/SKILL.md). Never add a pattern that could mask a code bug — signatures must be specific to connectivity/gateway failures.",
+  "patterns": [
+    {
+      "name": "ibkr-connectivity-lost",
+      "regex": "Connectivity between IB(KR)? and (the )?Trader Workstation has been lost|error 1100",
+      "notes": "IBKR error 1100 — TWS/Gateway lost its connection to IBKR servers. Self-heals on 1101/1102; not fixable in code."
+    },
+    {
+      "name": "gateway-unreachable",
+      "regex": "ConnectionRefusedError|\\[WinError 10061\\]|Couldn't connect to TWS|API connection failed",
+      "notes": "TWS/IB Gateway is not running or not listening on the configured port. Start/restart the gateway."
+    },
+    {
+      "name": "connection-reset",
+      "regex": "ConnectionResetError|\\[WinError 10054\\]|Connection reset by peer|Peer closed connection",
+      "notes": "Gateway dropped the socket mid-session (restart, network flap, daily auto-restart window)."
+    },
+    {
+      "name": "connect-timeout",
+      "regex": "TimeoutError[\\s\\S]*connectAsync|connectAsync[\\s\\S]*TimeoutError|timed out while connecting",
+      "notes": "Timeout during the IBKR connect handshake specifically (NOT a blanket TimeoutError match — a generic timeout elsewhere may be a code bug)."
+    },
+    {
+      "name": "data-farm-broken",
+      "regex": "Market data farm connection is broken|HMDS data farm connection is broken|Historical Market Data Service error",
+      "notes": "IBKR-side data farm outage (errors 2110/2103/162 family). Recovers server-side."
+    },
+    {
+      "name": "socket-disconnect",
+      "regex": "Socket disconnect|ib_insync\\.client.*disconnected|API connection lost",
+      "notes": "ib_insync detected the API socket dropping — infra-side unless it correlates with a code change."
+    }
+  ]
+}

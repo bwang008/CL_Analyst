@@ -32,6 +32,14 @@ IBKR budget notes (see blueprint):
 - Startup warm-start backfill can trip historical pacing if instances start
   simultaneously → the runner sleeps `stagger_seconds` between launches.
 
+Error event queue (fleet_error_events.py): when an error_writer is injected
+(main() does this by default; --no-error-queue opts out), each child's
+stderr is redirected to reports/fleet_stderr/<name>.stderr.log and every
+crash detected by poll_once() emits a structured JSON event into
+.agents/collab/error_queue/pending/ for the AI triage pipeline
+(.agents/skills/fleet-error-monitor/SKILL.md). With error_writer=None the
+runner behaves exactly as before (children inherit stdout/stderr).
+
 Usage:
     python -m src.live_execution.fleet_runner \
         --manifest configs/fleet/fleet_manifest.json
@@ -75,6 +83,7 @@ class _Instance:
         self.proc = None         # live Popen handle (None = not running)
         self.restarts = 0        # restarts consumed so far
         self.gave_up = False     # restart cap exhausted
+        self.stderr_sink = None  # open file handle when error queue is on
 
     @property
     def name(self):
@@ -89,11 +98,14 @@ class FleetRunner:
     """
 
     def __init__(self, manifest_path, popen=subprocess.Popen, sleep=time.sleep,
-                 max_restarts=DEFAULT_MAX_RESTARTS):
+                 max_restarts=DEFAULT_MAX_RESTARTS, error_writer=None):
         self.manifest_path = Path(manifest_path)
         self._popen = popen
         self._sleep = sleep
         self.max_restarts = int(max_restarts)
+        # Optional FleetErrorEventWriter (fleet_error_events.py). None keeps
+        # the pre-error-queue behavior byte-identical (Strict-Locked tests).
+        self._error_writer = error_writer
 
         self.manifest = None          # raw parsed manifest dict
         self.instances = []           # _Instance for each ENABLED entry
@@ -430,14 +442,34 @@ class FleetRunner:
 
     def _spawn(self, instance):
         instance.cmd = self._build_command(instance)
-        # Children inherit stdout/stderr (→ journald under systemd); they also
-        # keep their own per-cid file logging via _setup_file_logging.
-        instance.proc = self._popen(instance.cmd)
+        if self._error_writer is None:
+            # Children inherit stdout/stderr (→ journald under systemd); they
+            # also keep their own per-cid file logging via _setup_file_logging.
+            instance.proc = self._popen(instance.cmd)
+        else:
+            # Error queue on: child stderr goes to a per-instance sink FILE
+            # (never PIPE — an unread pipe fills and deadlocks the child) so
+            # poll_once() can read the traceback after a crash.
+            self._close_stderr_sink(instance)
+            instance.stderr_sink = self._error_writer.open_stderr_sink(
+                instance.name
+            )
+            instance.proc = self._popen(instance.cmd,
+                                        stderr=instance.stderr_sink)
         log.info(
             "Launched %s (client_id=%s, pid=%s): %s",
             instance.name, instance.client_id,
             getattr(instance.proc, "pid", "?"), " ".join(instance.cmd),
         )
+
+    @staticmethod
+    def _close_stderr_sink(instance):
+        if instance.stderr_sink is not None:
+            try:
+                instance.stderr_sink.close()
+            except OSError:
+                pass
+            instance.stderr_sink = None
 
     def launch_all(self):
         """Spawn one child per enabled instance, sleeping stagger_seconds
@@ -473,9 +505,17 @@ class FleetRunner:
                 instance.name, instance.client_id, exit_code,
                 instance.restarts, self.max_restarts,
             )
-            if instance.restarts >= self.max_restarts:
+            will_give_up = instance.restarts >= self.max_restarts
+            if self._error_writer is not None:
+                # Queue the structured crash event for the AI triage
+                # pipeline BEFORE the backoff/give-up path. Never raises.
+                self._error_writer.emit_crash_event(
+                    instance, exit_code, gave_up=will_give_up,
+                )
+            if will_give_up:
                 instance.gave_up = True
                 instance.proc = None
+                self._close_stderr_sink(instance)
                 log.error(
                     "Child %s exhausted its restart cap (%d) — NOT "
                     "restarting. Manual intervention required.",
@@ -528,6 +568,8 @@ class FleetRunner:
                     instance.name,
                 )
                 proc.kill()
+        for instance in self.instances:
+            self._close_stderr_sink(instance)
         log.info("Fleet shutdown complete.")
 
 
@@ -553,6 +595,11 @@ def main(argv=None):
         "--max-restarts", type=int, default=DEFAULT_MAX_RESTARTS,
         help=f"Per-instance restart cap (default: {DEFAULT_MAX_RESTARTS})",
     )
+    parser.add_argument(
+        "--no-error-queue", action="store_true",
+        help="Disable the crash → error-event queue (children then inherit "
+             "stdout/stderr instead of logging stderr to per-instance files)",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -560,8 +607,29 @@ def main(argv=None):
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
+    error_writer = None
+    if not args.no_error_queue:
+        # Function-local imports keep this module stdlib-only at import time.
+        from src.live_execution.fleet_error_events import (
+            DEFAULT_INFRA_PATTERNS_PATH,
+            DEFAULT_QUEUE_DIR,
+            DEFAULT_STDERR_DIR,
+            FleetErrorEventWriter,
+        )
+        from src.live_execution.utils.telegram_alert import TelegramAlerter
+        # Raises here (before any spawn) if infra_patterns.json is missing —
+        # no silent null defaults.
+        error_writer = FleetErrorEventWriter(
+            queue_dir=DEFAULT_QUEUE_DIR,
+            stderr_dir=DEFAULT_STDERR_DIR,
+            manifest_path=args.manifest,
+            patterns_path=DEFAULT_INFRA_PATTERNS_PATH,
+            telegram=TelegramAlerter(prefix="FLEET"),
+        )
+
     runner = FleetRunner(manifest_path=args.manifest,
-                         max_restarts=args.max_restarts)
+                         max_restarts=args.max_restarts,
+                         error_writer=error_writer)
     runner.load_manifest()
     runner.validate()
     # Data preflight AFTER structural validation, BEFORE any spawn — one
