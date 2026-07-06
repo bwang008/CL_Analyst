@@ -132,8 +132,29 @@ def setup_fleet_logging(tag, log_dir=DEFAULT_FLEET_LOG_DIR,
 
     `tag` identifies the source on every line — children pass
     "<SYMBOL> cid=<client_id>", the runner passes "FLEET". Returns the
-    handler (callers keep it only for tests/teardown).
+    handler (callers keep it only for tests/teardown), or None when
+    skipped under pytest.
+
+    Guards (both learned from test-suite pollution on 2026-07-06, when
+    fixture ERROR lines appeared in the production log tagged with a
+    stale cid):
+    - Under pytest, the PRODUCTION log dir is off limits: tests that
+      exercise cli.main() must never write reports/fleet/. Tests that
+      target the handler itself pass an explicit tmp dir and are exempt.
+    - Re-calls REPLACE any previously attached fleet handler instead of
+      stacking: a leaked handler would keep logging every later record
+      under the old tag.
     """
+    if (Path(log_dir) == DEFAULT_FLEET_LOG_DIR
+            and "PYTEST_CURRENT_TEST" in os.environ):
+        return None
+
+    root = logging.getLogger()
+    for existing in list(root.handlers):
+        if isinstance(existing, DailyFleetLogHandler):
+            root.removeHandler(existing)
+            existing.close()
+
     handler = DailyFleetLogHandler(
         log_dir=log_dir, retention_days=retention_days, now_fn=now_fn,
     )
@@ -141,5 +162,5 @@ def setup_fleet_logging(tag, log_dir=DEFAULT_FLEET_LOG_DIR,
     handler.setFormatter(
         logging.Formatter(_LINE_FORMAT.format(tag=tag), datefmt=_DATE_FORMAT)
     )
-    logging.getLogger().addHandler(handler)
+    root.addHandler(handler)
     return handler

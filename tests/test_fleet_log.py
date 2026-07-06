@@ -126,6 +126,37 @@ class TestDailyFleetLogHandler:
 
 class TestSetupFleetLogging:
 
+    def test_production_dir_refused_under_pytest(self):
+        """Tests that reach setup_fleet_logging via cli.main() must NEVER
+        write into reports/fleet/ — fixture ERROR lines polluted the real
+        operator log on 2026-07-06."""
+        from src.live_execution.fleet_log import DEFAULT_FLEET_LOG_DIR
+        root = logging.getLogger()
+        before = list(root.handlers)
+
+        handler = setup_fleet_logging("CL cid=7",
+                                      log_dir=DEFAULT_FLEET_LOG_DIR)
+
+        assert handler is None
+        assert root.handlers == before, "nothing may be attached"
+
+    def test_recall_replaces_stale_handler_not_stacks(self, tmp_path):
+        """A leaked handler keeps tagging later records with the OLD cid —
+        re-calls must swap the handler, not accumulate."""
+        root = logging.getLogger()
+        h1 = setup_fleet_logging("CL cid=7", log_dir=tmp_path,
+                                 now_fn=Clock(datetime(2026, 7, 6, 12, 0)))
+        h2 = setup_fleet_logging("ES cid=2000", log_dir=tmp_path,
+                                 now_fn=Clock(datetime(2026, 7, 6, 12, 0)))
+        try:
+            fleet_handlers = [h for h in root.handlers
+                              if isinstance(h, DailyFleetLogHandler)]
+            assert fleet_handlers == [h2], \
+                "exactly one fleet handler (the latest) may be attached"
+        finally:
+            root.removeHandler(h2)
+            h2.close()
+
     def test_attaches_tagged_handler_to_root(self, tmp_path):
         root = logging.getLogger()
         handler = setup_fleet_logging(
