@@ -54,9 +54,20 @@ This workflow adds/removes a model safely: validate → dry-run → live.
    conda run -n trader python -c "import json; from src.live_execution.instrument_context import resolve_instrument_context as r; ctx=r(json.load(open('configs/strategies/<NEW>.json'))); print('OK:', ctx.execution_symbol, '/', ctx.brain_symbol)"
    # (b) whole-manifest validation (client_id uniqueness/spacing, capacity, file existence)
    conda run -n trader python -c "from src.live_execution.fleet_runner import FleetRunner; f=FleetRunner(manifest_path='configs/fleet/fleet_manifest.json'); f.load_manifest(); f.validate(); print('MANIFEST OK:', len([i for i in f.manifest['instances'] if i['enabled']]), 'enabled instances')"
-   # (c) referenced artifacts exist (model_path / predictions_path / seeds) — resolver
-   #     covers config-internal checks; spot-check the per-symbol seed:
-   #     Test-Path $env:CL_DATA_ROOT\data\processed\{SYM}_raw_1h.parquet
+   # (c) per-symbol DATA PREREQUISITES — BLOCKING and EXECUTABLE (2026-07-05 incident:
+   #     this used to be a prose "spot-check"; NG+GC crash-looped 5x each at fleet launch
+   #     on missing 1h seeds because nobody executed it. Run it in PowerShell; every
+   #     line must print True. Brain symbols: micros map to the parent (MES -> ES).)
+   #   foreach ($sym in @("<SYM1>","<SYM2>")) {
+   #     "seed  $sym : $((Test-Path "C:\CL_Analyst_Data\data\processed\${sym}_raw_1h.parquet") -or (Test-Path "C:\CL_Analyst_Data\data\processed\warm_start_cache_${sym}_1h.parquet"))"
+   #     "fred  $sym : $(Test-Path "C:\CL_Analyst_Data\data\raw\macro\fred_macro_data_$($sym.ToLower()).csv")"
+   #     "cot   $sym : $(Test-Path "C:\CL_Analyst_Data\data\raw\macro\cftc_cot_$($sym.ToLower()).csv")"
+   #   }
+   #     Missing-seed remedy: Copy-Item {SYM}_raw.parquet {SYM}_raw_1h.parquet (already
+   #     hourly), then verify >= 4320 in-window bars. Missing macro: scripts/download_macro_data.py --symbol {SYM}.
+   #     NOTE: ticket fleet-seed-preflight-gap_07052026_2215 moves this into the runner
+   #     itself (FleetRunner.validate_data_prerequisites, pre-launch); once landed,
+   #     gate (b) covers it automatically and this manual block becomes the fallback.
    # (d) shipped-config sentinel pins — ANY edit to a shipped strategy JSON must evolve
    #     its test pins in the SAME change (336d29f lesson):
    conda run -n trader python -m pytest tests/test_hourly_only_equity_session.py tests/test_instrument_context.py tests/test_config_generator_symbols.py -q

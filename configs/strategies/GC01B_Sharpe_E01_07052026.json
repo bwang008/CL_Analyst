@@ -1,0 +1,93 @@
+{
+    "nickname": "GC_Sharpe_E01_07052026",
+    "description": "Sharpe Ensemble #1: LL_LONG + LL_SHORT",
+    "execution_class": "TieredEnsembleStrategy",
+    "override_global_filters": true,
+    "exit_mode": "TIERED",
+    "tp_atr_mult": 10.0,
+    "sl_atr_mult": 3.0,
+    "trailing_atr_mult": 1.25,
+    "tp_cooldown_bars": 0,
+    "sl_cooldown_bars": 7,
+    "max_hold_bars": 240,
+    "allow_concurrent": false,
+    "max_concurrent": 1,
+    "max_position_size": 1,
+    "execution_symbol": "MGC",
+    "bar_size": "1h",
+    "live_config": {
+        "client_id": 4000,
+        "entry_mode": "marketable_limit",
+        "exit_mode": "marketable_limit"
+    },
+    "models": {
+        "long": {
+            "threshold": 0.42,
+            "experiment_id": "E2E_HourSet_01B_long_logloss",
+            "model_path": "reports/sweep_gc_hs01b_2x1_6h_scout_20260705-1857/registry/production_output/registry/E2E_HourSet_01B_long_logloss/final_model.pkl",
+            "predictions_path": "reports/batch_runs/batch_20260705_1857/predictions/GC_Sharpe_E01_predictions.csv",
+            "symbol": "GC"
+        },
+        "short": {
+            "threshold": 0.7,
+            "experiment_id": "E2E_HourSet_01B_short_logloss",
+            "model_path": "reports/sweep_gc_hs01b_3x1_6h_scout_20260705-1857/registry/production_output/registry/E2E_HourSet_01B_short_logloss/final_model.pkl",
+            "predictions_path": "reports/batch_runs/batch_20260705_1857/predictions/GC_Sharpe_E01_predictions.csv",
+            "symbol": "GC"
+        }
+    },
+    "long": {
+        "tp_atr_mult": 5.0,
+        "sl_atr_mult": 3.0,
+        "trailing_atr_mult": 2.0,
+        "cooldown_bars": 13,
+        "max_hold_bars": 24,
+        "consecutive_signal_threshold": 2,
+        "atr_period": 36,
+        "trailing_sl_atr_offset": 1.4,
+        "tiered_exits": [
+            {
+                "qty_pct": 1.0,
+                "tp_atr_mult": 5.0
+            }
+        ],
+        "tiers": [
+            {
+                "min_prob": 0.42,
+                "lots": 1,
+                "tp_atr_mult": 5.0,
+                "sl_atr_mult": 3.0,
+                "trailing_atr_mult": 2.0,
+                "max_hold_bars": 24
+            }
+        ]
+    },
+    "short": {
+        "tp_atr_mult": 4.0,
+        "sl_atr_mult": 1.0,
+        "trailing_atr_mult": 2.8,
+        "cooldown_bars": 9,
+        "max_hold_bars": 12,
+        "consecutive_signal_threshold": 1,
+        "atr_period": 24,
+        "trailing_sl_atr_offset": 2.8,
+        "tiered_exits": [
+            {
+                "qty_pct": 1.0,
+                "tp_atr_mult": 4.0
+            }
+        ],
+        "tiers": [
+            {
+                "min_prob": 0.7,
+                "lots": 1,
+                "tp_atr_mult": 4.0,
+                "sl_atr_mult": 1.0,
+                "trailing_atr_mult": 2.8,
+                "max_hold_bars": 12
+            }
+        ]
+    },
+    "holdout_months": 6,
+    "conflict_resolution": "close_existing_position"
+}
