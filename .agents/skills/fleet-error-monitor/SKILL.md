@@ -3,14 +3,31 @@ name: fleet-error-monitor
 description: Self-fixing loop for live-fleet crashes — consumes structured error events from .agents/collab/error_queue/, triages IBKR-infra vs code bugs, drives ticket-manager + tdd-manager to a tested fix, deploys (fleet restart), commits, and audit-logs everything.
 ---
 
-# /fleet-error-monitor — Fleet Crash Self-Fixing Protocol
+# /fleet-error-monitor — Fleet Health & Self-Fixing Protocol
 
 You are the consumer side of the fleet error queue (protocol overview:
-`.agents/collab/error_queue/README.md`). `fleet_runner.py` writes one JSON
-event per unique crash into `pending/`; `scripts/error_watcher.ps1` (cron
-`6 * * * *` — hourly at :06, after the hourly inference bar and first 5m bar
-complete) auto-files known-infrastructure events and moves the rest to
-`processing/` for you.
+`.agents/collab/error_queue/README.md`). The hourly run (cron `6 * * * *` —
+hourly at :06, after the hourly inference bar and first 5m bar complete) is
+THREE steps, all mandatory:
+
+1. **Queue pump** — `powershell -File scripts/error_watcher.ps1`:
+   auto-files known-infrastructure events, moves the rest to `processing/`.
+   Two producers feed the queue: `fleet_runner.py` (one JSON event per
+   unique CRASH) and the children themselves (`event_kind: "health"`
+   events — stale-bar watchdog firings, exhausted resubscribe retries —
+   via `fleet_error_events.emit_child_health_event`).
+2. **Health check** — `python -m src.live_execution.fleet_health`
+   (read-only): scans the fleet log for new ERROR/CRITICAL lines, flags
+   `subs_lost=True` heartbeats, verifies positions/orders line up in the
+   telemetry DB, and checks bars are actually arriving. Prints `HEALTH_OK`
+   or `HEALTH_EVENT: <kind> | <who> | <detail>` lines.
+3. **Triage** — crash/health queue events per the per-event protocol
+   below; HEALTH_EVENT lines per the "Health-event triage" section.
+
+**2026-07-06 lesson (do not regress this):** crash-only capture is
+insufficient — four children sat alive-but-blind for 17 minutes with ERROR
+lines streaming into the log while the monitor saw nothing. The job is
+"the fleet is HEALTHY", not "the fleet hasn't died".
 
 ## Standing authorization & hard limits
 
@@ -35,6 +52,41 @@ complete) auto-files known-infrastructure events and moves the rest to
   - blind retries/sleeps that mask a deterministic bug;
   - hardcoding today's data conditions to dodge the crash.
   If the only fix you can find is on this list, that IS the human gate.
+
+## Health-event triage (HEALTH_EVENT lines + event_kind:"health" queue events)
+
+Judge each finding before opening any ticket — most have a fact-check step:
+
+- `unprotected-position` — HIGHEST severity. Verify on IBKR immediately
+  (`get_open_trades` evidence in the log, or ask the human to check TWS).
+  If truly naked: alert the human NOW (Telegram + summary) — do NOT place
+  or cancel orders yourself beyond the documented recovery/OCA paths. If
+  the DB is simply stale (orders exist broker-side), that's a telemetry
+  bug → normal ticket flow.
+- `stale-bars` / `subs-lost` / `stale-bars-watchdog` — FIRST check market
+  hours (weekend/holiday/daily halt = false positive, file as noise; if
+  the halt pattern recurs, improve fleet_health's gating via ticket). If
+  the market is open: infra vs code judgment exactly like a crash event —
+  IBKR-side connectivity → infra close-out; our reconnect/resubscribe
+  logic failing → ticket. Recurring self-healed watchdog events (rising
+  `occurrences`) mean the fleet is flapping — tell the human even though
+  nothing is "down".
+- `resubscribe-retries-exhausted` — the child is blind and its own timer
+  gave up; the stale-bar watchdog should escalate within ~30 min. If the
+  next hourly run still shows it, treat as DOWN: tell the human a restart
+  is needed (or restart the fleet yourself per standing authorization if
+  the cause is already understood).
+- `missing-fill-price` / `incomplete-close` / `duplicate-open-position` —
+  telemetry/state code bugs → normal ticket flow (these are exactly the
+  "trades don't line up" class the human asked to be caught).
+- `log-error` clusters — read the lines; connectivity flaps during a
+  known incident are noise (file with a one-line audit note), anything
+  novel or repeating → investigate as a code bug.
+
+Close-out: health queue events move pending/ → done/ with an audit line
+like crash events. HEALTH_EVENT console lines need no queue file — audit
+the judgment (`... | MONITOR | HEALTH — <kind> <who>: <one-line verdict>`)
+and notify the human when severity warrants.
 
 ## Per-event protocol
 
