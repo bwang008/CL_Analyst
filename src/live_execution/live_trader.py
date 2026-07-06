@@ -146,11 +146,16 @@ _DATA_FARM_OK_CODES = {2104, 2106}         # Market data / HMDS farm OK
 _DATA_FARM_WAIT_SECONDS = 10.0             # How long to wait for farm OK after connect
 
 # Stale bar watchdog: force reconnect when bars stop arriving
-_STALE_BAR_THRESHOLD_MINUTES = 15  # Minutes without a bar before forcing reconnect
+# 15 -> 30 per the explicit 2026-07-06 user directive
+# (watchdog-telegram-throttle_07062026_0007): thin holiday Globex sessions
+# made the 15-min watchdog cycle spam recovery machinery. Accepted
+# trade-off: the blind window before recovery starts doubles — bracket
+# TP/SL orders rest server-side on IBKR, so open positions stay protected.
+_STALE_BAR_THRESHOLD_MINUTES = 30  # Minutes without a bar before forcing reconnect
 # T7: hourly-only instances (enable_5m_stream=false) watch the 1h stream
 # instead. 1h bars are open-time stamped and delivered at T+60, so normal
 # staleness oscillates 60→120 min — 135 = 120 max normal + the legacy
-# 15-min margin. 5m-enabled instances keep the 15-min constant above.
+# 15-min margin (design-time value; the 5m constant above is now 30).
 _STALE_BAR_THRESHOLD_MINUTES_1H = 135
 # Consecutive stale-bar-watchdog firings with NO new brain-stream bar in
 # between before escalating to a process exit (SystemExit).  fleet_runner
@@ -159,6 +164,15 @@ _STALE_BAR_THRESHOLD_MINUTES_1H = 135
 # to it, so the child must crash itself to get a fresh start (the startup
 # subscription path demonstrably works).
 _MAX_FRUITLESS_RECONNECTS = 3
+
+# Watchdog-family Telegram throttle
+# (watchdog-telegram-throttle_07062026_0007, user directive #2): at most
+# ONE watchdog-family Telegram per instance per hour — STALE BAR WATCHDOG,
+# WATCHDOG ESCALATION, *RECONNECT* (first attempt + farms-broken) and
+# *RECONNECTED* route through LiveTrader._send_watchdog_telegram.
+# Log lines are NEVER throttled (directive #3). Patchable seam: tests set
+# this to 0 to disable the throttle (suppression uses strict <).
+_WATCHDOG_TG_COOLDOWN_SECONDS = 3600
 
 # Auto-restart parameters (process-level recovery)
 _RESTART_MAX_ATTEMPTS = 5        # Max full restart attempts
@@ -394,6 +408,22 @@ class LiveTrader:
         else:
             self.telemetry = TelemetryDB(db_path)
         log.info("Telemetry DB: %s", db_path)
+
+        # Watchdog-family Telegram throttle state
+        # (watchdog-telegram-throttle_07062026_0007). client_id present
+        # (fleet/CLI) -> ONE cid-keyed JSON sidecar BESIDE the shared
+        # telemetry DB (R1: db_path is the ONE shared fleet_telemetry.db —
+        # never derive from the db stem alone) so the hourly budget
+        # survives the R4 SystemExit -> fleet_runner restart cycle
+        # (restarted child re-resolves the same cid -> same file).
+        # client_id None (livetest, tests, object.__new__ stubs) -> None ->
+        # _send_watchdog_telegram runs in-memory-only with ZERO disk I/O.
+        if client_id is not None:
+            self._watchdog_tg_state_path = Path(db_path).with_name(
+                f"watchdog_tg_cid{self.client_id}.json"
+            )
+        else:
+            self._watchdog_tg_state_path = None
 
         # IBKR connection (not yet connected)
 
@@ -3745,15 +3775,14 @@ class LiveTrader:
                 "Reconnect attempt %d/%d (waiting %.0fs)...",
                 attempt, _RECONNECT_MAX_ATTEMPTS, delay,
             )
-            # Telegram alert on FIRST attempt only
+            # Telegram alert on FIRST attempt only — throttled
+            # (watchdog-telegram-throttle_07062026_0007); the helper never
+            # raises, so it can never block reconnection.
             if attempt == 1:
-                try:
-                    self._telegram.send(
-                        f"*RECONNECT* - Connection lost, "
-                        f"attempting recovery (max {_RECONNECT_MAX_ATTEMPTS} attempts)..."
-                    )
-                except Exception:
-                    pass  # Telegram failures must never block reconnection
+                self._send_watchdog_telegram(
+                    f"*RECONNECT* - Connection lost, "
+                    f"attempting recovery (max {_RECONNECT_MAX_ATTEMPTS} attempts)..."
+                )
             # Use _stop_event.wait() instead of time.sleep() so Ctrl+C
             # (which sets _stop_event) interrupts the wait immediately
             # instead of blocking for the full backoff delay.
@@ -3813,15 +3842,15 @@ class LiveTrader:
                         "Gateway has no upstream data — will retry.",
                         attempt, _DATA_FARM_WAIT_SECONDS,
                     )
-                    # Rate-limited Telegram: only every 3rd attempt to avoid spam
+                    # Rate-limited Telegram: only every 3rd attempt to avoid
+                    # spam, PLUS the hourly watchdog-family throttle
+                    # (watchdog-telegram-throttle_07062026_0007); the helper
+                    # never raises, so it can never block reconnection.
                     if attempt % 3 == 0:
-                        try:
-                            self._telegram.send(
-                                f"*RECONNECT* - Attempt {attempt}/{_RECONNECT_MAX_ATTEMPTS}: "
-                                f"Gateway connected but data farms broken (no upstream data)"
-                            )
-                        except Exception:
-                            pass  # Telegram failures must never block reconnection
+                        self._send_watchdog_telegram(
+                            f"*RECONNECT* - Attempt {attempt}/{_RECONNECT_MAX_ATTEMPTS}: "
+                            f"Gateway connected but data farms broken (no upstream data)"
+                        )
                     try:
                         self.data_client.disconnect()
                         self.exec_client.disconnect()
@@ -3837,12 +3866,11 @@ class LiveTrader:
                 self._subscriptions_lost = True
                 self._resubscribe_and_backfill()
                 log.info("Reconnected successfully on attempt %d", attempt)
-                try:
-                    self._telegram.send(
-                        f"*RECONNECTED* - Recovery successful on attempt {attempt}/{_RECONNECT_MAX_ATTEMPTS}"
-                    )
-                except Exception:
-                    pass  # Telegram failures must never block reconnection
+                # Throttled send (watchdog-telegram-throttle_07062026_0007);
+                # the helper never raises, so it can never block reconnection.
+                self._send_watchdog_telegram(
+                    f"*RECONNECTED* - Recovery successful on attempt {attempt}/{_RECONNECT_MAX_ATTEMPTS}"
+                )
                 return True
             except Exception as exc:
                 log.warning("Reconnect attempt %d failed: %s", attempt, exc)
@@ -4097,6 +4125,105 @@ class LiveTrader:
                 except Exception as e:
                     log.error("Macro refresh failed: %s", e, exc_info=True)
 
+    def _send_watchdog_telegram(self, msg: str) -> None:
+        """Send a watchdog-family Telegram alert, throttled to 1/hour/instance.
+
+        watchdog-telegram-throttle_07062026_0007 (user directive #2):
+        during thin sessions the watchdog/reconnect cycle spammed Telegram
+        every ~30-45 min. This helper throttles ONLY the Telegram sends —
+        every log line stays full-fidelity (directive #3), and the recovery
+        machinery itself (return values, disconnects, SystemExit
+        escalation) is untouched.
+
+        Semantics:
+          - SUPPRESS when elapsed-since-last-attempt is strictly <
+            _WATCHDOG_TG_COOLDOWN_SECONDS (patching the constant to 0
+            disables the throttle cleanly): count it, best-effort persist,
+            and log the FULL suppressed message text at INFO.
+          - SEND otherwise, appending a "+N suppressed" consolidation
+            suffix when alerts were swallowed in the closed window.
+          - ATTEMPT CONSUMES BUDGET: the timestamp is recorded whether or
+            not the send succeeds — a Telegram outage must not become
+            per-fire retry spam.
+          - NEVER raises: the send and each persistence I/O are separately
+            try/except-wrapped.
+
+        State lives in-memory (getattr seams — object.__new__ stubs are
+        structural, not silent config defaults) and, when
+        _watchdog_tg_state_path is set (client_id present), in a cid-keyed
+        JSON sidecar hydrated lazily ONCE so the budget survives the R4
+        escalation restart. state path None/missing -> zero disk I/O.
+        """
+        now = datetime.now(timezone.utc)
+        state_path = getattr(self, "_watchdog_tg_state_path", None)
+
+        def _persist() -> None:
+            # Best-effort: an unwritable sidecar degrades to
+            # in-memory-only and must never block or delay the caller
+            # (the escalation path SystemExits right after this helper).
+            if state_path is None:
+                return
+            try:
+                last = self._watchdog_tg_last_send_utc
+                Path(state_path).write_text(json.dumps({
+                    "last_send_utc": last.isoformat() if last else None,
+                    "suppressed_count": self._watchdog_tg_suppressed_count,
+                }))
+            except Exception:
+                pass
+
+        # Lazy one-time hydration from the sidecar (corrupt / missing /
+        # unreadable -> treated as no-state, in-memory-only).
+        if not getattr(self, "_watchdog_tg_hydrated", False):
+            self._watchdog_tg_hydrated = True
+            self._watchdog_tg_last_send_utc = None
+            self._watchdog_tg_suppressed_count = 0
+            if state_path is not None:
+                try:
+                    payload = json.loads(Path(state_path).read_text())
+                    raw = payload.get("last_send_utc")
+                    if raw:
+                        parsed = datetime.fromisoformat(str(raw))
+                        if parsed.tzinfo is None:
+                            parsed = parsed.replace(tzinfo=timezone.utc)
+                        self._watchdog_tg_last_send_utc = parsed
+                    self._watchdog_tg_suppressed_count = int(
+                        payload.get("suppressed_count", 0)
+                    )
+                except Exception:
+                    self._watchdog_tg_last_send_utc = None
+                    self._watchdog_tg_suppressed_count = 0
+
+        last_send = self._watchdog_tg_last_send_utc
+        if last_send is not None:
+            elapsed = (now - last_send).total_seconds()
+            if elapsed < _WATCHDOG_TG_COOLDOWN_SECONDS:
+                self._watchdog_tg_suppressed_count += 1
+                _persist()
+                log.info(
+                    "TELEGRAM SUPPRESSED (watchdog-family cooldown, "
+                    "%.0fm remaining, %d suppressed this window): %s",
+                    (_WATCHDOG_TG_COOLDOWN_SECONDS - elapsed) / 60.0,
+                    self._watchdog_tg_suppressed_count,
+                    msg,
+                )
+                return
+
+        suppressed = self._watchdog_tg_suppressed_count
+        if suppressed > 0:
+            msg = (
+                f"{msg}\n(+{suppressed} watchdog-family alerts suppressed "
+                f"in the last hour — see log)"
+            )
+        # ATTEMPT CONSUMES BUDGET: record before the send outcome is known.
+        self._watchdog_tg_last_send_utc = now
+        self._watchdog_tg_suppressed_count = 0
+        try:
+            self._telegram.send(msg)
+        except Exception:
+            pass  # Telegram failures must never block watchdog machinery
+        _persist()
+
     def _check_stale_bars(self) -> bool:
         """Proactive watchdog — signal reconnect if bars are stale during market hours.
 
@@ -4171,14 +4298,15 @@ class LiveTrader:
                 "this child fresh",
                 fruitless_count, last_bar_time, minutes_stale,
             )
-            try:
-                self._telegram.send(
-                    f"*WATCHDOG ESCALATION* - {fruitless_count} consecutive "
-                    f"reconnects produced no bars ({minutes_stale:.0f}m "
-                    f"stale). Terminating process for a fresh restart..."
-                )
-            except Exception:
-                pass  # Telegram failures must never block the escalation exit
+            # Throttled send (watchdog-telegram-throttle_07062026_0007):
+            # the helper — INCLUDING its sidecar persistence — completes
+            # before the SystemExit below, and it never raises, so a
+            # Telegram/persistence failure cannot block the escalation.
+            self._send_watchdog_telegram(
+                f"*WATCHDOG ESCALATION* - {fruitless_count} consecutive "
+                f"reconnects produced no bars ({minutes_stale:.0f}m "
+                f"stale). Terminating process for a fresh restart..."
+            )
             raise SystemExit(
                 f"stale-bar watchdog: {fruitless_count} consecutive "
                 f"fruitless reconnects — exiting for fleet_runner restart"
@@ -4190,13 +4318,12 @@ class LiveTrader:
             "— forcing disconnect + reconnect",
             minutes_stale, subs_flag,
         )
-        try:
-            self._telegram.send(
-                f"*STALE BAR WATCHDOG* - No bars received for {minutes_stale:.0f}m "
-                f"during market hours. Forcing reconnect..."
-            )
-        except Exception:
-            pass  # Telegram failures must never block reconnection
+        # Throttled send (watchdog-telegram-throttle_07062026_0007) — the
+        # helper never raises, so the old try/except moved inside it.
+        self._send_watchdog_telegram(
+            f"*STALE BAR WATCHDOG* - No bars received for {minutes_stale:.0f}m "
+            f"during market hours. Forcing reconnect..."
+        )
         # Mark subscriptions as lost so downstream recovery paths are consistent
         self._subscriptions_lost = True
         # Disconnect first so _reconnect() starts with a clean state.

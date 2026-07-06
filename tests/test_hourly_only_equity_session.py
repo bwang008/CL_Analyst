@@ -863,7 +863,11 @@ class TestHourlyOnlyWatchdog:
     def test_stale_threshold_1h_constant_135(self):
         """The new module constant (C7 pairing): 135 = 120 max normal
         oscillation (open-time-stamped 1h bars land at T+60) + the legacy
-        15-min margin."""
+        15-min margin.
+        (Comment-only annotation, watchdog-telegram-throttle_07062026_0007:
+        "legacy 15-min margin" is design-time-historical prose — the 5m
+        threshold moved to 30 min on 2026-07-06; this 135 pin is
+        deliberately UNTOUCHED.)"""
         assert getattr(lt_module, "_STALE_BAR_THRESHOLD_MINUTES_1H", None) == 135
 
     @pytest.mark.parametrize("week", _WEEKS)
@@ -889,7 +893,11 @@ class TestHourlyOnlyWatchdog:
         """120 min is NORMAL 1h-bar staleness (bar T arrives at T+60) —
         below the 135 threshold -> False. This is the threshold
         discriminator: re-pointing to _last_bar_time_1h while keeping the
-        15-min constant fails here."""
+        15-min constant fails here.
+        (Comment-only annotation, watchdog-telegram-throttle_07062026_0007:
+        the "15-min constant" reference is design-time-historical — the 5m
+        constant is 30 min since 2026-07-06; the discriminator logic and
+        assertions are UNTOUCHED.)"""
         y, m, d = week["tue"]
         now = _utc_from_ct(y, m, d, 12, 0)
         trader = _watchdog_stub("ES", enable_5m=False)
@@ -921,12 +929,15 @@ class TestHourlyOnlyWatchdog:
             assert trader._check_stale_bars() is False
 
     def test_5m_enabled_16min_stale_true_pin(self):
-        """Pin (passes at Red AND Green): a 5m-enabled CL instance keeps
-        the byte-identical 15-min / _last_bar_time_5m behavior (C7: the
-        15-min pin is CLARIFIED to 5m-enabled instances, not flipped)."""
+        """Pin: a 5m-enabled CL instance keeps the 30-min /
+        _last_bar_time_5m behavior (C7: the pin is CLARIFIED to
+        5m-enabled instances, not flipped).
+        (Vector 16 -> 31 / docstring 15 -> 30 per the 2026-07-06
+        directive, ticket watchdog-telegram-throttle_07062026_0007;
+        the historical name keeps its original C7 pin identity.)"""
         now = _utc_from_et(2026, 7, 13, 12, 0)
         trader = _watchdog_stub("CL", enable_5m=True)
-        trader._last_bar_time_5m = pd.Timestamp(now - timedelta(minutes=16))
+        trader._last_bar_time_5m = pd.Timestamp(now - timedelta(minutes=31))
         with _frozen_lt_clock(now):
             assert trader._check_stale_bars() is True
 

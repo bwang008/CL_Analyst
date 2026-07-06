@@ -505,11 +505,14 @@ class TestSessionCalendarGrains:
         trader._telegram.send.assert_not_called()
 
     def test_zc_grace_expires_after_threshold(self):
-        """Tue 08:50 CT (open 20 min, still no bars) -> the watchdog must
-        still catch a genuinely dead feed -> True + disconnect."""
+        """Tue 09:05 CT (open 35 min, still no bars) -> the watchdog must
+        still catch a genuinely dead feed -> True + disconnect.
+        (Query instant moved 08:50 -> 09:05 CT: 35 min past the 08:30
+        anchor clears the 30-min threshold of the 2026-07-06 directive,
+        ticket watchdog-telegram-throttle_07062026_0007.)"""
         trader = _watchdog_stub("ZC")
         trader._last_bar_time_5m = pd.Timestamp("2026-07-06 18:15:00")
-        with _frozen_lt_clock(_utc_from_ct(2026, 7, 7, 8, 50)):
+        with _frozen_lt_clock(_utc_from_ct(2026, 7, 7, 9, 5)):
             result = trader._check_stale_bars()
         assert result is True
         trader.data_client.disconnect.assert_called_once()
@@ -1310,19 +1313,23 @@ class TestLiveTraderSessionWiring:
             assert call.kwargs.get("symbol") == "ZC"
             assert call.kwargs.get("execution_symbol") == "ZC"
 
-    def test_stale_threshold_pin_15(self):
-        """The 15-minute threshold constant stays pinned (audit §4b:
+    def test_stale_threshold_pin_30(self):
+        """The 30-minute threshold constant stays pinned (audit §4b:
         bar-size-driven, not instrument-driven).
 
+        EVOLVED 15 -> 30 per the explicit 2026-07-06 USER DIRECTIVE
+        (ticket watchdog-telegram-throttle_07062026_0007 — the
+        pin-invalidating event; Impact-Reviewer-approved lock evolution).
+
         T7 CLARIFICATION (t7-es-ops-runway_07052026_0214, impact_review
-        C7 — docstring-scope only, assertion unchanged): 15 minutes
+        C7 — docstring-scope only, assertion unchanged): the threshold
         applies to 5m-ENABLED instances (enable_5m_stream true — every
         CL config; the flag defaults true), watching _last_bar_time_5m.
         Hourly-only instances (enable_5m_stream false) watch
         _last_bar_time_1h against the separate
         _STALE_BAR_THRESHOLD_MINUTES_1H = 135, pinned in
         tests/test_hourly_only_equity_session.py."""
-        assert lt_module._STALE_BAR_THRESHOLD_MINUTES == 15
+        assert lt_module._STALE_BAR_THRESHOLD_MINUTES == 30
 
     def test_zc_halt_hours_watchdog_false_despite_stale_clock(self):
         """Ticket case M4: ZC Tue 15:00 CT (daily halt), last bar 13:15 CT
@@ -1363,13 +1370,25 @@ class TestLiveTraderSessionWiring:
         assert result is True
         trader._telegram.send.assert_called_once()
 
-    def test_cl_open_hours_16min_stale_true(self):
-        """CL arithmetic pin: Mon 12:00 ET, 16 min since last bar -> True."""
+    def test_cl_open_hours_31min_stale_true(self):
+        """CL arithmetic pin: Mon 12:00 ET, 31 min since last bar -> True
+        (vector 16 -> 31 per the 2026-07-06 directive's 30-min threshold,
+        ticket watchdog-telegram-throttle_07062026_0007)."""
         now = _utc_from_et(2026, 7, 13, 12, 0)
         trader = _watchdog_stub("CL")
-        trader._last_bar_time_5m = pd.Timestamp(now - timedelta(minutes=16))
+        trader._last_bar_time_5m = pd.Timestamp(now - timedelta(minutes=31))
         with _frozen_lt_clock(now):
             assert trader._check_stale_bars() is True
+
+    def test_cl_open_hours_29min_stale_false(self):
+        """NEW boundary companion (watchdog-telegram-throttle_07062026_0007):
+        29 min < the 30-min threshold -> False, no Telegram."""
+        now = _utc_from_et(2026, 7, 13, 12, 0)
+        trader = _watchdog_stub("CL")
+        trader._last_bar_time_5m = pd.Timestamp(now - timedelta(minutes=29))
+        with _frozen_lt_clock(now):
+            assert trader._check_stale_bars() is False
+        trader._telegram.send.assert_not_called()
 
     def test_cl_open_hours_10min_stale_false(self):
         now = _utc_from_et(2026, 7, 13, 12, 0)

@@ -679,11 +679,14 @@ class TestR3EmptySnapshotSubscription:
     @patch.object(lt_module, "_RECONNECT_MAX_DELAY", 0.05)
     @patch.object(lt_module, "_RECONNECT_MAX_ATTEMPTS", 5)
     @patch.object(lt_module, "_DATA_FARM_WAIT_SECONDS", 1.0)
+    @patch.object(lt_module, "_WATCHDOG_TG_COOLDOWN_SECONDS", 0)
     def test_r3_reconnect_attempt_counted_failed_when_subscribe_raises(self):
         """FENCE (passes today): the R3 raise must propagate into
         _reconnect's attempt-level except — the attempt is FAILED, retried
         with backoff, and 'Reconnected successfully' is only announced for
-        the attempt whose subscriptions actually came up."""
+        the attempt whose subscriptions actually came up.
+        (throttle disabled here — throttle behavior is pinned in
+        tests/test_watchdog_telegram_throttle.py)"""
         trader = _reconnect_stub()
         trader._subscribe.side_effect = [
             RuntimeError("live 5 mins subscription for MES returned no bars"),
@@ -748,11 +751,14 @@ class TestR4FruitlessReconnectEscalation:
             "_MAX_FRUITLESS_RECONNECTS must be a module-level constant == 3"
         )
 
+    @patch.object(lt_module, "_WATCHDOG_TG_COOLDOWN_SECONDS", 0)
     def test_r4_third_consecutive_fruitless_firing_escalates(self, caplog):
         """Fires 1 and 2 behave exactly like today (return True → caller
         reconnects); the 3rd consecutive fruitless firing must raise
         SystemExit with a non-zero code, emit a CRITICAL log record, and
-        attempt a Telegram notification."""
+        attempt a Telegram notification.
+        (throttle disabled here — throttle behavior is pinned in
+        tests/test_watchdog_telegram_throttle.py)"""
         trader = _watchdog_stub()
 
         with _frozen_clock():
@@ -777,8 +783,11 @@ class TestR4FruitlessReconnectEscalation:
             "escalation must attempt a Telegram notification"
         )
 
+    @patch.object(lt_module, "_WATCHDOG_TG_COOLDOWN_SECONDS", 0)
     def test_r4_telegram_failure_never_blocks_escalation_exit(self):
-        """A broken Telegram must not prevent the SystemExit escalation."""
+        """A broken Telegram must not prevent the SystemExit escalation.
+        (throttle disabled here — throttle behavior is pinned in
+        tests/test_watchdog_telegram_throttle.py)"""
         trader = _watchdog_stub()
         trader._telegram.send.side_effect = Exception("telegram down")
 
@@ -804,7 +813,7 @@ class TestR4FruitlessReconnectEscalation:
             assert trader._check_stale_bars() is True       # fruitless #2
 
             # New brain bar 40 min old: newer than the 60-min-old last bar
-            # (handler accepts it) but still past the 15-min staleness
+            # (handler accepts it) but still past the 30-min staleness
             # threshold (watchdog keeps firing afterwards).
             trader._on_bar_update_5m(
                 _fake_bars(_UTC_NOW - timedelta(minutes=40), step_minutes=5),

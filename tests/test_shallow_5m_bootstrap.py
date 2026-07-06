@@ -631,22 +631,25 @@ class TestLiveTraderShallowWiring:
 
     def test_es01b_watchdog_anchors_5m_15min(self):
         """With the key removed, ES01B is 5m-enabled: the watchdog anchors
-        _last_bar_time_5m against the byte-identical 15-min threshold
-        (16 min stale during equity OPEN -> True; 10 min -> False).
-        FAILS at Red on the flag resolution (key still present/false)."""
+        _last_bar_time_5m against the 30-min threshold
+        (31 min stale during equity OPEN -> True; 10 min -> False).
+        FAILS at Red on the flag resolution (key still present/false).
+        (Vector 16 -> 31 / prose 15-min -> 30-min per the 2026-07-06
+        directive, ticket watchdog-telegram-throttle_07062026_0007;
+        the historical name keeps its original anchor-identity meaning.)"""
         live = _load_es01b().get("live_config", {})
         flag = bool(live.get("enable_5m_stream", True))
         assert flag is True, (
             "ES01B must ride the default-true 5m path — the watchdog "
-            "re-anchors to _last_bar_time_5m/15-min only then (C1/C4)"
+            "re-anchors to _last_bar_time_5m/30-min only then (C1/C4)"
         )
         now = _utc_from_ct(2026, 7, 7, 12, 0)  # Tue 12:00 CT — equity OPEN
         stale = _watchdog_stub("MES", enable_5m=flag)
-        stale._last_bar_time_5m = pd.Timestamp(now - timedelta(minutes=16))
+        stale._last_bar_time_5m = pd.Timestamp(now - timedelta(minutes=31))
         with _frozen_lt_clock(now):
             assert stale._check_stale_bars() is True, (
-                "16-min-stale 5m anchor during OPEN must trigger the "
-                "15-min watchdog"
+                "31-min-stale 5m anchor during OPEN must trigger the "
+                "30-min watchdog"
             )
         fresh = _watchdog_stub("MES", enable_5m=flag)
         fresh._last_bar_time_5m = pd.Timestamp(now - timedelta(minutes=10))
