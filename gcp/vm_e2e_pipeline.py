@@ -689,7 +689,7 @@ def write_auc_report(rows: list[dict], output_path: str, meta: dict) -> str:
     """
     ranked = sorted(
         rows,
-        key=lambda r: (r["pr_auc_holdout"] if r["pr_auc_holdout"] == r["pr_auc_holdout"] else -1.0),
+        key=lambda r: (r["auc_holdout"] if r["auc_holdout"] == r["auc_holdout"] else -1.0),
         reverse=True,
     )
 
@@ -778,8 +778,9 @@ def write_auc_report(rows: list[dict], output_path: str, meta: dict) -> str:
         # --- Legend / caveats ---
         f.write("### Legend\n\n")
         f.write(
-            "- Rows sorted by **PR-AUC (holdout)**, descending. For base rates "
-            "<20% PR-AUC is more trustworthy than ROC-AUC.\n"
+            "- Rows sorted by **ROC-AUC (holdout)**, descending — base-rate-independent "
+            "ranking edge. (Raw PR-AUC is dominated by the base rate and is NOT comparable "
+            "across targets, so it is a column, not the sort key; see PR-AUC / PR-lift.)\n"
         )
         f.write("- `PR-AUC` / `ROC-AUC` = holdout area under the PR / ROC curve.\n")
         f.write(
@@ -916,11 +917,11 @@ def run_screen(
     print(f"  Report: {report_path}")
     print(f"{'='*70}")
 
-    # Return rows sorted by holdout PR-AUC desc (safer than ROC-AUC for base
-    # rates <20%) so callers see the same ranking as the report.
+    # Return rows sorted by holdout ROC-AUC desc (base-rate-independent edge; raw
+    # PR-AUC is not comparable across targets) so callers see the report's ranking.
     return sorted(
         rows,
-        key=lambda r: (r["pr_auc_holdout"] if r["pr_auc_holdout"] == r["pr_auc_holdout"] else -1.0),
+        key=lambda r: (r["auc_holdout"] if r["auc_holdout"] == r["auc_holdout"] else -1.0),
         reverse=True,
     )
 

@@ -349,7 +349,7 @@ class TestRunScreen:
         assert "signals/yr" not in text
         assert len(rows) == 2
 
-    def test_rows_sorted_by_pr_auc_holdout_desc(self, synthetic_parquet, tmp_path):
+    def test_rows_sorted_by_roc_auc_holdout_desc(self, synthetic_parquet, tmp_path):
         out_dir = tmp_path / "screen_out"
         rows = run_screen(
             data_path=synthetic_parquet,
@@ -359,12 +359,13 @@ class TestRunScreen:
             output_dir=str(out_dir),
             random_seed=42,
         )
-        # Rows are sorted best->worst by PR-AUC holdout (nan last).
-        pr = [
-            (r["pr_auc_holdout"] if r["pr_auc_holdout"] == r["pr_auc_holdout"] else -1.0)
+        # Rows are sorted best->worst by ROC-AUC holdout (nan last) — base-rate
+        # independent edge, unlike raw PR-AUC which is dominated by base rate.
+        roc = [
+            (r["auc_holdout"] if r["auc_holdout"] == r["auc_holdout"] else -1.0)
             for r in rows
         ]
-        assert pr == sorted(pr, reverse=True)
+        assert roc == sorted(roc, reverse=True)
 
     def test_reward_risk_reflects_displayed_target_name(self, synthetic_parquet, tmp_path):
         out_dir = tmp_path / "screen_rr"
@@ -422,10 +423,11 @@ class TestRunScreen:
 
 class TestWriteAucReport:
     def _rows(self):
-        # A: well-supported, high ROC-AUC (0.64) -> KEEP, but LOWER PR-AUC (0.40).
-        # B: well-supported, lower ROC-AUC (0.51) but HIGHER PR-AUC (0.55).
-        #    -> B must sort first (PR-AUC desc), and B's ROC-AUC 0.51 -> drop.
-        # C: thin support (n_pos_holdout=40 < 75) -> RARE regardless of AUC.
+        # A: well-supported, high ROC-AUC (0.64) -> KEEP.
+        # B: well-supported, low ROC-AUC (0.51) but HIGH PR-AUC (0.55) -> drop
+        #    (raw PR-AUC != edge; under ROC-AUC sort B goes last).
+        # C: highest ROC-AUC (0.70) but thin support (n_pos=40 < 75) -> RARE.
+        #    -> ROC-AUC desc order: C, A, B.
         return [
             {
                 "target": "TARGET_A_LONG", "direction": "long",
@@ -468,7 +470,7 @@ class TestWriteAucReport:
         # lines[0] = header, lines[1] = separator, rest = data
         return lines
 
-    def test_output_sorted_by_pr_auc_desc_and_has_all_columns(self, tmp_path):
+    def test_output_sorted_by_roc_auc_desc_and_has_all_columns(self, tmp_path):
         out = tmp_path / "AUC_Model_Report.md"
         write_auc_report(self._rows(), str(out), self._meta())
         text = out.read_text(encoding="utf-8")
@@ -481,9 +483,9 @@ class TestWriteAucReport:
             assert header in text
         assert "signals/yr" not in text
 
-        # Sorted by PR-AUC holdout desc: B (0.55) before A (0.40) before C (0.10).
-        assert text.index("TARGET_B_SHORT") < text.index("TARGET_A_LONG")
-        assert text.index("TARGET_A_LONG") < text.index("TARGET_C_LONG")
+        # Sorted by ROC-AUC holdout desc: C (0.70) before A (0.64) before B (0.51).
+        assert text.index("TARGET_C_LONG") < text.index("TARGET_A_LONG")
+        assert text.index("TARGET_A_LONG") < text.index("TARGET_B_SHORT")
 
     def test_flag_logic_rare_keep_drop(self, tmp_path):
         out = tmp_path / "AUC_Model_Report.md"
