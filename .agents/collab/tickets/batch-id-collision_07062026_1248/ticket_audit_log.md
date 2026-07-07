@@ -1,0 +1,3 @@
+# Ticket Audit Log — batch-id-collision_07062026_1248
+
+[2026-07-06T12:50:00-07:00] | batch-id-collision_07062026_1248 | TICKET-AUDITOR | Investigated batch ID generation in run_sweep_batch.ps1 (L49-50) and run_canary_batch.ps1 (L47-48); confirmed root cause is minute-level timestamp format `yyyyMMdd-HHmm` causing collisions when parallel orchestrators launch in the same minute. Verified gcp_deploy_optimizer.ps1 (L126-132) silently reuses existing VMs on name collision. Confirmed no downstream consumers regex-parse the batch ID format (vm_post_optimize.sh, collect_batch_results.ps1, Python code all treat it as opaque string). Proposed fix: add seconds to timestamp format (HHmm → HHmmss) in both batch orchestrators.

@@ -46,7 +46,7 @@ $ProjectDir = Split-Path -Parent $ScriptDir
 $gcloudBin = "C:\Users\bwang\AppData\Local\Google\Cloud SDK\google-cloud-sdk\bin"
 if ($env:PATH -notlike "*$gcloudBin*") { $env:PATH = "$gcloudBin;$env:PATH" }
 
-$BatchTimestamp = Get-Date -Format "yyyyMMdd-HHmm"
+$BatchTimestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $BatchId        = "batch_$($BatchTimestamp -replace '-','_')"
 $BatchDir       = Join-Path $ProjectDir "reports\batch_runs\$BatchId"
 $ProgressFile   = Join-Path $BatchDir "batch_progress.json"
