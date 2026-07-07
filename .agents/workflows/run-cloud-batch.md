@@ -104,6 +104,11 @@ The orchestrator then: deploys sweep VMs across fallback zones (quota-aware), mo
 jobs, runs an artifact-verification gate before deleting each VM, captures crash diagnostics on failure,
 deploys the post-optimizer VM (reads `opt_mode`), downloads results, and writes the consolidated reports.
 
+**Folder Renaming Convention:**
+Once the batch completes successfully, manually rename the generated output directory to append the symbol and experiment type to the batch ID. This prevents ambiguity across multiple runs.
+Format: `batch_<timestamp>_<SYMBOL>_<TIER>`
+Example: `Rename-Item -Path "reports\batch_runs\batch_20260706_143139" -NewName "batch_20260706_143139_ES_01B_SCOUT"`
+
 ## 4. Validate parity (canary/parity runs)
 ```powershell
 conda activate trader
