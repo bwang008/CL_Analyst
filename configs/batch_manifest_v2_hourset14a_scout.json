@@ -60,7 +60,9 @@
       "slippage_per_side": 0.01,
       "opt_mode": "individual",
       "execution_data_path": "gs://cltrainer-optuna-results/data/CL_raw.parquet",
-      "strategy_config_path": "configs/strategies/hourly_ensemble_010.json"
+      "strategy_config_path": "configs/strategies/hourly_ensemble_010.json",
+      "firing_frac_min": 0.05,
+      "firing_frac_max": 0.45
     }
   },
   "experiments": [

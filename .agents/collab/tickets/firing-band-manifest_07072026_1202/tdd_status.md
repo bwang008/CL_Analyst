@@ -1,0 +1,2 @@
+[2026-07-07T19:04:28Z] | firing-band-manifest_07072026_1202 | PHASE: Red | STATUS: Writing failing tests for manifest-tunable firing band (schema defaults/validation + batch_post_optimizer read + threading).
+[2026-07-07T19:16:18Z] | firing-band-manifest_07072026_1202 | PHASE: Green | STATUS: COMPLETE — 14 new tests pass; full fast suite 1692 passed / 10 failed (only the known ES01B sentinels). Tree left uncommitted for review.

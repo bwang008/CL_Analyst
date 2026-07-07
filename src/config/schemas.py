@@ -159,6 +159,27 @@ class ExecutionWorkflowConfig(BaseModel):
     #   "ensemble"   = joint long+short ensemble optimization
     #   "individual" = per-side Long/Short optimization
     opt_mode: Literal["individual", "ensemble"]
+    # Signal-firing band that the post-optimizer uses to derive each model's
+    # dynamic entry_threshold search bounds (fraction of bars in which the model
+    # should fire). OPTIONAL with explicit, non-None defaults mirroring
+    # strategy_optimizer.FIRING_FRAC_MIN / FIRING_FRAC_MAX. These are NOT required:
+    # a required field would break all 36 existing manifests, none of which carry
+    # the band. This is NOT a silent null default — the value is explicit,
+    # documented, non-None, and logged by the post-optimizer.
+    firing_frac_min: float = 0.05
+    firing_frac_max: float = 0.45
+
+    @model_validator(mode="after")
+    def validate_firing_band(self) -> "ExecutionWorkflowConfig":
+        # Reject inverted / zero-width / out-of-range bands loudly.
+        # Require 0.0 < firing_frac_min < firing_frac_max <= 1.0.
+        if not (0.0 < self.firing_frac_min < self.firing_frac_max <= 1.0):
+            raise ValueError(
+                f"Invalid signal-firing band: require 0.0 < firing_frac_min "
+                f"< firing_frac_max <= 1.0, got firing_frac_min="
+                f"{self.firing_frac_min}, firing_frac_max={self.firing_frac_max}."
+            )
+        return self
 
     @field_validator("execution_data_path")
     @classmethod

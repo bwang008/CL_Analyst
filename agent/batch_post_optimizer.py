@@ -31,7 +31,10 @@ os.chdir(PROJECT_ROOT)
 
 import pandas as pd
 from agent.backtest_engine import BacktestEngine, load_ohlcv, load_ohlcv_dual, load_predictions
-from agent.strategy_optimizer import run_optimization, extract_metrics, send_telegram, suppress_telegram
+from agent.strategy_optimizer import (
+    run_optimization, extract_metrics, send_telegram, suppress_telegram,
+    FIRING_FRAC_MIN, FIRING_FRAC_MAX,
+)
 from agent.generate_ensemble_artifacts import _canonical_pair_order
 
 import logging
@@ -301,6 +304,25 @@ def find_ohlcv_path(manifest_path: str) -> str:
     raise FileNotFoundError(f"Cannot find local OHLCV for manifest {manifest_path}. Tried v2 and legacy paths.")
 
 
+def resolve_firing_band(manifest: dict) -> tuple[float, float]:
+    """Resolve the effective signal-firing band from a batch manifest dict.
+
+    Reads ``baseline.execution_workflow.firing_frac_min`` / ``firing_frac_max``.
+    If either is absent (as in all 36 existing manifests), falls back to the
+    ``strategy_optimizer`` module constants ``FIRING_FRAC_MIN`` / ``FIRING_FRAC_MAX``.
+    This is a *best-effort override*: the manifest defaults (0.05 / 0.45) match the
+    module constants, so omitting the band preserves cloud-batch behavior exactly.
+    """
+    ew = (manifest or {}).get("baseline", {}).get("execution_workflow") or {}
+    f_min = ew.get("firing_frac_min")
+    f_max = ew.get("firing_frac_max")
+    if f_min is None:
+        f_min = FIRING_FRAC_MIN
+    if f_max is None:
+        f_max = FIRING_FRAC_MAX
+    return float(f_min), float(f_max)
+
+
 def merge_predictions(long_path: str, short_path: str) -> pd.DataFrame:
     """Merge long + short predictions into a single DataFrame."""
     long_df = load_predictions(long_path)
@@ -333,6 +355,8 @@ def run_single_optimization(
     slippage_per_side: float | None = None,
     random_seed: int | None = None,
     symbol: str | None = None,
+    firing_frac_min: float = FIRING_FRAC_MIN,
+    firing_frac_max: float = FIRING_FRAC_MAX,
 ) -> dict:
     """Run strategy_optimizer on a single config and return results."""
     # Suppress per-worker Telegram notifications — the batch orchestrator
@@ -361,6 +385,8 @@ def run_single_optimization(
             slippage_per_side=slippage_per_side,
             random_seed=random_seed,
             symbol=symbol,
+            firing_frac_min=firing_frac_min,
+            firing_frac_max=firing_frac_max,
         )
         best_metrics = extract_metrics(best_result)
         return {
@@ -909,6 +935,8 @@ def _run_all_objectives_concurrent(
                     slippage_per_side=args.slippage_per_side,
                     random_seed=args.random_seed,
                     symbol=args.resolved_symbol,
+                    firing_frac_min=args.firing_frac_min,
+                    firing_frac_max=args.firing_frac_max,
                 )
                 futures[future] = (task_key, merged_path, label, metric, side, obj_metric)
 
@@ -944,6 +972,8 @@ def _run_all_objectives_concurrent(
                 slippage_per_side=args.slippage_per_side,
                 random_seed=args.random_seed,
                 symbol=args.resolved_symbol,
+                firing_frac_min=args.firing_frac_min,
+                firing_frac_max=args.firing_frac_max,
             )
             results_by_objective[obj_metric][task_key] = result
             _completed_count += 1
@@ -1064,6 +1094,25 @@ def main():
     if args.slippage_per_side is not None and args.slippage_per_side < 0.5 * _tick_slip:
         print(f"  WARNING: slippage {args.slippage_per_side} is under half a tick "
               f"({_tick_slip} for {resolved_symbol}) — costs likely understated.")
+
+    # ── Resolve the signal-firing band (manifest-tunable, best-effort override) ──
+    # baseline.execution_workflow.firing_frac_min/max override the module defaults.
+    # All 36 existing manifests omit the band, so the fallback preserves behavior.
+    _fb_manifest = {}
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path, encoding="utf-8-sig") as f:
+                _fb_manifest = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"  WARNING: could not read manifest for firing-band resolution: {e}")
+    args.firing_frac_min, args.firing_frac_max = resolve_firing_band(_fb_manifest)
+    _band_ew = (_fb_manifest.get("baseline", {}) or {}).get("execution_workflow") or {}
+    _band_from_manifest = (
+        _band_ew.get("firing_frac_min") is not None
+        or _band_ew.get("firing_frac_max") is not None
+    )
+    _band_src = "manifest" if _band_from_manifest else "default (strategy_optimizer constants)"
+    print(f"Firing band: [{args.firing_frac_min}, {args.firing_frac_max}]  source={_band_src}")
 
     # Patch strategy_optimizer min_sharpe threshold if --no-filter
     import agent.strategy_optimizer as so
