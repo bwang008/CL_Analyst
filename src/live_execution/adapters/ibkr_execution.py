@@ -104,6 +104,26 @@ class IBKRExecutionClient(ExecutionClient):
     def get_position(self, symbol: str) -> int:
         return self.manager.get_cl_position(symbol=symbol)
 
+    def get_cached_position(self, symbol: str) -> int:
+        """Net position from ib_insync's LOCAL portfolio/position cache.
+
+        A-2 (hourly housekeeping): this read must be safe under
+        _ledger_lock, so it never calls ensure_connected/connect or any
+        synchronous broker request — ib.portfolio()/ib.positions() are
+        in-memory caches maintained by the account-update subscription.
+        An unheld symbol reads as flat (0).
+        """
+        items = self.manager.ib.portfolio()
+        if not items:
+            items = self.manager.ib.positions()
+        total = 0.0
+        for item in items:
+            contract = getattr(item, "contract", None)
+            if getattr(contract, "symbol", None) != symbol:
+                continue
+            total += float(getattr(item, "position", 0) or 0)
+        return int(total)
+
     def get_account_summary(self, symbol: str) -> dict:
         return self.manager.get_account_summary(symbol=symbol)
 
@@ -316,12 +336,18 @@ class IBKRExecutionClient(ExecutionClient):
     def register_error_callback(self, callback: Any) -> None:
         self.manager.ib.errorEvent += callback
 
-    def get_open_trades(self, symbol: str) -> list:
+    def get_open_trades(self, symbol: Optional[str]) -> list:
         """Query IBKR for all open/pending trades for a given symbol.
 
         Returns a list of StandardExecutionEvent objects built from
         ib_insync's openTrades(), enabling position recovery to verify
         TP/SL orders without relying on subscription callbacks.
+
+        A-10: ``symbol=None`` returns EVERY session order irrespective
+        of contract symbol — an orphaned protective order can rest on an
+        OLD contract symbol after an instrument reconfiguration (the
+        2026-07-06 MGC->GC trade_8 class) and a symbol filter would
+        silently hide it from the housekeeping sweep.
         """
         if not self.is_connected():
             return []
@@ -331,7 +357,7 @@ class IBKRExecutionClient(ExecutionClient):
             order = getattr(trade, "order", None)
             if contract is None or order is None:
                 continue
-            if getattr(contract, "symbol", None) != symbol:
+            if symbol is not None and getattr(contract, "symbol", None) != symbol:
                 continue
             events.append(StandardExecutionEvent(
                 order_id=str(order.orderId),

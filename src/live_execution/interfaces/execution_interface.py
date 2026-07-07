@@ -59,6 +59,24 @@ class ExecutionClient(ABC):
     def get_position(self, symbol: str) -> int:
         pass
 
+    def get_cached_position(self, symbol: str) -> int:
+        """Net position for a symbol from the adapter's LOCAL cache.
+
+        Deadlock-safe position primitive (A-2, hourly housekeeping):
+        ``get_position`` routes through ``ensure_connected``, and a
+        blocking reconnect under ``_ledger_lock`` pumps the event loop
+        into a re-entrant bar-callback deadlock. Implementations MUST
+        read a locally maintained cache and MUST NOT connect,
+        reconnect, or issue synchronous broker requests.
+
+        No silent default: an adapter without a cache read must say so
+        loudly — a fabricated flat (0) would make the housekeeping
+        sweep cancel protective orders on a live position.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement get_cached_position"
+        )
+
     @abstractmethod
     def get_account_summary(self, symbol: str) -> dict:
         pass
@@ -149,12 +167,19 @@ class ExecutionClient(ABC):
     def register_error_callback(self, callback: Any) -> None:
         pass
 
-    def get_open_trades(self, symbol: str) -> list:
-        """Return open/pending trades for a symbol as StandardExecutionEvent list.
+    def get_open_trades(self, symbol: Optional[str]) -> list:
+        """Return open/pending trades as a StandardExecutionEvent list.
 
         Used during startup recovery to verify TP/SL orders exist on
         the broker *before* subscription callbacks have populated the
         in-memory order cache.
+
+        A-10: the parameter stays REQUIRED — ``symbol=None`` is an
+        EXPLICIT "all symbols on this session", never an accidental
+        default. The None form exists for old-contract orphans after an
+        instrument reconfiguration (2026-07-06 MGC->GC trade_8 class),
+        where the resting order lives on a symbol the instance no
+        longer trades.
 
         Default implementation returns an empty list for non-IBKR adapters.
         """

@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -1169,6 +1169,63 @@ class TelemetryDB:
              self._sanitize_float(exit_price), trade_id) + scope_vals,
         )
         conn.commit()
+
+    def repair_closed_position(
+        self,
+        trade_id: str,
+        *,
+        exit_price: float,
+        reason: str,
+        allow_overwrite_reasons,
+    ) -> int:
+        """Repair a CLOSED row's exit_price/close_reason from a proven fill.
+
+        A-9 (hourly housekeeping, A-1(b)): the UPDATE is scoped to
+        trade_id AND status='CLOSED' AND (exit_price IS NULL OR
+        close_reason IN ``allow_overwrite_reasons``) AND this instance's
+        client binding on the shared fleet DB — trade_ids are built from
+        per-connection IBKR order ids, so a fleet-mate's identical
+        trade_id must never be touched (54dc110 collision class). Rows
+        outside the whitelist with a real price (TP_HIT/SL_HIT/...) are
+        structurally unreachable. Returns the UPDATE rowcount so the
+        caller can distinguish "repaired" from "already truthful".
+        """
+        reasons = tuple(allow_overwrite_reasons)
+        conn = self._get_conn()
+        scope_sql, scope_vals = self._client_scope()
+        marks = ", ".join("?" for _ in reasons)
+        cur = conn.execute(
+            "UPDATE active_positions "
+            "SET exit_price = ?, close_reason = ? "
+            "WHERE trade_id = ? AND status = 'CLOSED' "
+            f"AND (exit_price IS NULL OR close_reason IN ({marks}))"
+            f"{scope_sql}",
+            (self._sanitize_float(exit_price), reason, trade_id)
+            + reasons + scope_vals,
+        )
+        conn.commit()
+        return cur.rowcount
+
+    def get_recent_closed_positions(self, hours: int = 48) -> list[dict]:
+        """Return this client's CLOSED rows with close_time in the window.
+
+        A-9 read helper for the hourly housekeeping sweep's orphan and
+        ledger-repair matching (rows carry tp_order_id/sl_order_id/
+        close_reason/exit_price). Client-scoped: order ids are
+        per-connection sequences, so cross-bot rows would false-match.
+        """
+        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        conn = self._get_conn()
+        conn.row_factory = sqlite3.Row
+        scope_sql, scope_vals = self._client_scope()
+        rows = conn.execute(
+            "SELECT * FROM active_positions "
+            f"WHERE status = 'CLOSED' AND close_time >= ?{scope_sql} "
+            "ORDER BY close_time DESC",
+            (cutoff,) + scope_vals,
+        ).fetchall()
+        conn.row_factory = None
+        return [dict(r) for r in rows]
 
     def get_open_position(self) -> Optional[dict]:
         """Return the currently open position, or None if flat.

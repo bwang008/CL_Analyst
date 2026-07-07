@@ -46,7 +46,7 @@ import collections
 import logging as _logging
 import psutil
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -82,6 +82,9 @@ from src.live_execution.session_calendar import (
     market_status as _calendar_market_status,
     session_open_anchor as _session_open_anchor,
 )
+# A-5 activity grace shared with the :06 fleet monitor (fleet_health is a
+# stdlib-only leaf module — no import cycle).
+from src.live_execution.fleet_health import FILL_PRICE_GRACE_MINUTES
 from src.live_execution.interfaces.data_feed_interface import DataFeedClient
 from src.live_execution.interfaces.execution_interface import ExecutionClient, StandardExecutionEvent
 from src.live_execution.telemetry import TelemetryDB
@@ -177,6 +180,19 @@ _MAX_FRUITLESS_RECONNECTS = 3
 _RESUBSCRIBE_RETRY_BASE_SECONDS = 60
 _RESUBSCRIBE_RETRY_CAP_SECONDS = 300
 _MAX_RESUBSCRIBE_RETRIES = 5
+
+# Hourly order housekeeping (hourly-order-housekeeping_07072026_0435):
+# in-child broker-vs-ledger sweep at ~:15 wall clock — after the :00
+# signal bar and the :06 read-only fleet monitor, so each hour composes
+# detect (:06) -> clean (:15) -> verify (next :06).
+_HOUSEKEEPING_MINUTE = 15
+# A-3: a sweep of local-cache reads should take well under a second;
+# anything slower is flagged (never aborted — the work is already done).
+_HOUSEKEEPING_BUDGET_SECONDS = 10.0
+# A-1(b): the ONLY close reasons whose exit_price/close_reason may be
+# overwritten by a proven broker fill. TP_HIT/SL_HIT rows carry real
+# prices and are NEVER touched.
+_HOUSEKEEPING_OVERWRITE_REASONS = ("CLOSED_OOB", "CLOSED_OOB_UNRECOVERED")
 
 
 def _price_decimals(tick_size) -> int:
@@ -583,6 +599,9 @@ class LiveTrader:
         # Contract rollover state
         self._rollover_in_progress = False
         self._last_rollover_check_date = None
+        # Hourly housekeeping latch: (date, hour) of the last swept slot
+        # (A-7 — wall-clock gated, never poll-count gated).
+        self._last_housekeeping_slot = None
         self._last_decision_context_by_order_id: dict[int, dict] = {}
         self._position_entry_bar_time: Optional[pd.Timestamp] = None
         self._position_bars_held: int = 0
@@ -1894,8 +1913,9 @@ class LiveTrader:
                 "[RECOVERY] Failed to re-place TP/SL orders"
             )
 
-    def _recover_oob_close(self, *, trade_id, tp_order_id, sl_order_id) -> None:
-        """Resolve a ledger-OPEN / broker-flat trade at startup (D1).
+    def _recover_oob_close(self, *, trade_id, tp_order_id, sl_order_id):
+        """Resolve a ledger-OPEN / broker-flat trade (startup D1 + hourly
+        housekeeping drift recovery).
 
         2026-07-06 incident: the symbol-scoped sweep silently missed a GTC
         TP resting on the OLD contract symbol after an MGC->GC instance
@@ -1906,6 +1926,11 @@ class LiveTrader:
         recover the true exit leg/price from broker executions; anything
         still unaccounted is a live orphan hazard — ERROR + Telegram,
         never a debug-swallow.
+
+        Returns ``(reason, price)``: ("TP_HIT_OOB"/"SL_HIT_OOB", float)
+        on a matched execution, ("CLOSED_OOB_UNRECOVERED", None)
+        otherwise — the housekeeping drift branch resets position state
+        with the TRUTHFUL reason (cooldown parity with the legacy path).
         """
         expected_ids = [
             oid for oid in (tp_order_id, sl_order_id) if oid is not None
@@ -1998,10 +2023,46 @@ class LiveTrader:
             exit_price=exit_price,
         )
 
-        # Tradebook rows for the recovered fill. A5: event_ids are keyed on
-        # broker execId / order-id+permId — NOT the timestamp-based
-        # _build_event_id — so repeated restarts dedupe via INSERT OR IGNORE.
-        for rec in matched:
+        self._book_recovered_executions(matched)
+
+        # An expected protective order neither found open (cancelled) nor
+        # provably done (matched execution) is a live orphan hazard — the
+        # exact 2026-07-06 failure was silent by construction (success
+        # logged only if cancelled > 0, except -> log.debug).
+        unaccounted = (
+            len(expected_ids) - len(matched) - cancelled_by_id - bulk_cancelled
+        )
+        if unaccounted > 0:
+            log.error(
+                "[RECOVERY] %d protective order(s) of trade %s UNACCOUNTED "
+                "(tp=%s sl=%s): neither found open nor matched to a broker "
+                "execution — possible live orphan on another contract. "
+                "Verify and cancel manually in TWS.",
+                unaccounted, trade_id, tp_order_id, sl_order_id,
+            )
+            try:
+                self._telegram.send(
+                    f"[CRITICAL] *ORPHANED PROTECTIVE ORDER RISK*\n"
+                    f"Trade: `{trade_id}` (closed out-of-band)\n"
+                    f"TP order: `{tp_order_id}` / SL order: `{sl_order_id}`\n"
+                    f"`{unaccounted}` order(s) neither cancelled nor filled "
+                    f"— check TWS for orders resting on an OLD contract."
+                )
+            except Exception:
+                pass  # Never let Telegram failure block recovery
+
+        return exit_reason, exit_price
+
+    def _book_recovered_executions(self, records) -> None:
+        """Book recovered broker fills as tradebook rows.
+
+        Shared by startup OOB recovery and the hourly housekeeping
+        ledger repair. A5: event_ids are keyed on broker execId /
+        order-id+permId — NOT the timestamp-based _build_event_id — so
+        repeated restarts AND hourly sweeps dedupe via INSERT OR IGNORE
+        (byte-stable across wall clocks).
+        """
+        for rec in records:
             exec_id = rec.get("exec_id")
             perm_id = rec.get("perm_id")
             fill_event_id = (
@@ -2064,32 +2125,6 @@ class LiveTrader:
                         "(execId=%s)", exec_id, exc_info=True,
                     )
 
-        # An expected protective order neither found open (cancelled) nor
-        # provably done (matched execution) is a live orphan hazard — the
-        # exact 2026-07-06 failure was silent by construction (success
-        # logged only if cancelled > 0, except -> log.debug).
-        unaccounted = (
-            len(expected_ids) - len(matched) - cancelled_by_id - bulk_cancelled
-        )
-        if unaccounted > 0:
-            log.error(
-                "[RECOVERY] %d protective order(s) of trade %s UNACCOUNTED "
-                "(tp=%s sl=%s): neither found open nor matched to a broker "
-                "execution — possible live orphan on another contract. "
-                "Verify and cancel manually in TWS.",
-                unaccounted, trade_id, tp_order_id, sl_order_id,
-            )
-            try:
-                self._telegram.send(
-                    f"[CRITICAL] *ORPHANED PROTECTIVE ORDER RISK*\n"
-                    f"Trade: `{trade_id}` (closed out-of-band)\n"
-                    f"TP order: `{tp_order_id}` / SL order: `{sl_order_id}`\n"
-                    f"`{unaccounted}` order(s) neither cancelled nor filled "
-                    f"— check TWS for orders resting on an OLD contract."
-                )
-            except Exception:
-                pass  # Never let Telegram failure block recovery
-
     def _cancel_orphaned_orders_on_startup(self) -> None:
         """Cancel any orphaned CL orders on IBKR if the bot considers itself FLAT.
 
@@ -2142,6 +2177,351 @@ class LiveTrader:
                 )
         except Exception:
             log.exception("[STARTUP SWEEP] Failed to scan for orphaned orders")
+
+    # ------------------------------------------------------------------
+    # Hourly order housekeeping (hourly-order-housekeeping_07072026_0435)
+    # ------------------------------------------------------------------
+
+    def _run_hourly_housekeeping(self) -> None:
+        """Hourly broker-vs-ledger housekeeping sweep (~:15 wall clock).
+
+        Invoked UNCONDITIONALLY on every event-loop poll and self-gated
+        here (A-7): fires once per (date, hour) slot at minute >= 15 —
+        after the :00 signal bar and the :06 read-only fleet monitor.
+        Never raises: a housekeeping failure must leave trading
+        untouched (same boundary contract as emit_crash_event); any
+        internal failure surfaces as a housekeeping-error health event.
+        """
+        try:
+            now = datetime.now(timezone.utc)
+            if now.minute < _HOUSEKEEPING_MINUTE:
+                # Latch untouched: consuming the slot early would skip
+                # this hour's real :15 sweep.
+                return
+            slot = (now.date(), now.hour)
+            if slot == self._last_housekeeping_slot:
+                return
+            # Latch BEFORE the sweep body (same pattern as
+            # _last_rollover_check_date): a crashing sweep runs once per
+            # slot instead of hot-looping on every 5s poll.
+            self._last_housekeeping_slot = slot
+
+            # Silent skips — states where a broker/ledger comparison lies.
+            if not self.exec_client.is_connected():
+                return
+            if self._rollover_in_progress or self._emergency_halt:
+                return
+
+            start = time.monotonic()
+            with self._ledger_lock:
+                actions, alerts, aborted = self._housekeeping_sweep(now)
+            elapsed = time.monotonic() - start
+
+            if elapsed > _HOUSEKEEPING_BUDGET_SECONDS:
+                # A-3: the sweep shares the event loop with bar handling —
+                # a slow sweep is a health problem even when it succeeds.
+                self._emit_health_event(
+                    "housekeeping-error",
+                    f"slow housekeeping sweep: {elapsed:.1f}s (budget "
+                    f"{_HOUSEKEEPING_BUDGET_SECONDS:.0f}s) — the event "
+                    f"loop was blocked for the duration",
+                )
+
+            if alerts:
+                # A-3: ALL findings of one sweep batch into ONE send.
+                self._telegram.send(
+                    f"*HOUSEKEEPING ({self._execution_symbol})* — "
+                    f"{len(alerts)} finding(s) need a human:\n"
+                    + "\n".join(f"- {a}" for a in alerts)
+                )
+
+            log.info(
+                "[HOUSEKEEPING] %02d:%02d sweep%s: %d auto-clean "
+                "action(s), %d detect-only alert(s)",
+                now.hour, now.minute,
+                " ABORTED (mid-sweep disconnect)" if aborted else "",
+                len(actions), len(alerts),
+            )
+        except Exception as exc:
+            self._emit_health_event(
+                "housekeeping-error",
+                f"housekeeping sweep failed: {exc!r}",
+            )
+            log.exception("[HOUSEKEEPING] sweep failed")
+
+    def _housekeeping_sweep(self, now) -> tuple:
+        """One housekeeping pass (caller holds ``_ledger_lock``).
+
+        A-2: broker access is restricted to LOCAL-CACHE primitives
+        (get_cached_position / get_open_trades / get_executions) plus
+        the targeted cancel_orders_by_ids — an ensure_connected-routed
+        call here could block on a reconnect under _ledger_lock and
+        deadlock the event loop via a re-entrant bar callback.
+        is_connected() is re-checked before EACH broker touch; any
+        mid-sweep disconnect abandons the remainder. The one sanctioned
+        exception is _recover_oob_close (drift recovery reuses the
+        startup path so reason/price recovery stays single-sourced).
+
+        Returns ``(actions, alerts, aborted)``: auto-clean summaries,
+        detect-only alert lines (batched into one Telegram by the
+        caller), and whether the sweep aborted on a disconnect.
+        """
+        actions: list = []
+        alerts: list = []
+        aborted = (actions, alerts, True)
+
+        now_naive = now.replace(tzinfo=None)
+
+        if not self.exec_client.is_connected():
+            return aborted
+        position = int(
+            self.exec_client.get_cached_position(self._execution_symbol)
+        )
+
+        if not self.exec_client.is_connected():
+            return aborted
+        # symbol=None on purpose (A-10): orphans can rest on an OLD
+        # contract symbol after an instrument reconfiguration.
+        resting = list(self.exec_client.get_open_trades(None) or [])
+
+        if not self.exec_client.is_connected():
+            return aborted
+        executions = list(self.exec_client.get_executions() or [])
+
+        # Ledger reads are local SQLite — no broker connection involved.
+        open_row = self.telemetry.get_open_position()
+        recent_closed = list(
+            self.telemetry.get_recent_closed_positions() or []
+        )
+
+        pending_id = self._pending_entry_order_id
+        # A-4: ids tracked in LIVE state are never cancellable no matter
+        # which CLOSED row they match — TWS id-sequence resets reuse ids.
+        live_ids = {str(oid) for oid in self._tp_order_ids if oid is not None}
+        if self._sl_order_id is not None:
+            live_ids.add(str(self._sl_order_id))
+        if pending_id is not None:
+            live_ids.add(str(pending_id))
+
+        # str/int-robust join keys: ledger ids are ints, broker events
+        # carry str order ids.
+        closed_bracket_ids = {}
+        for row in recent_closed:
+            for key in ("tp_order_id", "sl_order_id"):
+                oid = row.get(key)
+                if oid is not None:
+                    closed_bracket_ids.setdefault(str(oid), row)
+
+        # ── (a) Orphaned protective orders — auto-clean ──────────────
+        # ALL preconditions required: provably flat everywhere AND the
+        # resting id matches a recent CLOSED row's own bracket ids.
+        if (self._active_trade_id is None and pending_id is None
+                and position == 0):
+            orphan_ids = [
+                evt.order_id for evt in resting
+                if str(evt.order_id) not in live_ids
+                and str(evt.order_id) in closed_bracket_ids
+            ]
+            if orphan_ids:
+                if not self.exec_client.is_connected():
+                    return aborted
+                cancelled = self.exec_client.cancel_orders_by_ids(orphan_ids)
+                detail = (
+                    f"cancelled {cancelled} orphaned protective order(s) "
+                    f"matching recent CLOSED brackets: {orphan_ids} — "
+                    f"this class previously rested until the next restart"
+                )
+                self._emit_health_event(
+                    "housekeeping-orphan-cancelled", detail)
+                actions.append(detail)
+                log.info("[HOUSEKEEPING] %s", detail)
+
+        # ── (b) Broker-vs-ledger drift — auto-clean with A-5 grace ───
+        if open_row is not None and position == 0:
+            drift_trade_id = open_row.get("trade_id")
+            row_ids = {
+                str(open_row.get(k))
+                for k in ("entry_order_id", "tp_order_id", "sl_order_id")
+                if open_row.get(k) is not None
+            }
+            grace = timedelta(minutes=FILL_PRICE_GRACE_MINUTES)
+            recent_activity = False
+            for rec in executions:
+                if str(rec.get("order_id")) not in row_ids:
+                    continue
+                rec_time = self._naive_utc_exec_time(rec.get("time"))
+                if rec_time is not None and now_naive - rec_time <= grace:
+                    recent_activity = True
+                    break
+            if recent_activity:
+                # A-5: a fill callback may be in flight — acting now
+                # would double-close. Note it; next sweep acts if the
+                # drift persists.
+                detail = (
+                    f"ledger trade {drift_trade_id} OPEN while broker "
+                    f"cache is flat, but its orders show fill activity "
+                    f"within the last {FILL_PRICE_GRACE_MINUTES} min — "
+                    f"detect-only this sweep"
+                )
+                self._emit_health_event(
+                    "housekeeping-drift-detected", detail)
+                log.warning("[HOUSEKEEPING] %s", detail)
+            else:
+                detail = (
+                    f"ledger trade {drift_trade_id} OPEN while broker "
+                    f"cache is flat — recovering via the OOB close path"
+                )
+                self._emit_health_event(
+                    "housekeeping-drift-detected", detail)
+                log.warning("[HOUSEKEEPING] %s", detail)
+                reason, price = self._recover_oob_close(
+                    trade_id=drift_trade_id,
+                    tp_order_id=open_row.get("tp_order_id"),
+                    sl_order_id=open_row.get("sl_order_id"),
+                )
+                # Truthful recovered reason → strategy cooldown parity
+                # with the legacy broker-flat path.
+                self._reset_position_state(reason=reason)
+                detail = (
+                    f"drift on trade {drift_trade_id} recovered: "
+                    f"{reason} @ {price}"
+                )
+                actions.append(detail)
+                log.info("[HOUSEKEEPING] %s", detail)
+
+        # ── (c) Ledger repair — A-1(b) whitelist only ────────────────
+        exec_by_oid: dict = {}
+        for rec in executions:
+            exec_by_oid.setdefault(str(rec.get("order_id")), []).append(rec)
+
+        for row in recent_closed:
+            if row.get("close_reason") not in _HOUSEKEEPING_OVERWRITE_REASONS:
+                continue  # TP_HIT/SL_HIT/... rows are NEVER touched
+            matched = []
+            upgraded_reason = None
+            # Only the row's OWN bracket ids may prove its exit.
+            for key, upgraded in (("tp_order_id", "TP_HIT_OOB"),
+                                  ("sl_order_id", "SL_HIT_OOB")):
+                oid = row.get(key)
+                if oid is None:
+                    continue
+                recs = exec_by_oid.get(str(oid))
+                if recs:
+                    matched = recs
+                    upgraded_reason = upgraded
+                    break
+            if not matched:
+                continue  # no proof → leave as-is, never synthesize
+            proven_price = matched[0].get("price")
+            updated = self.telemetry.repair_closed_position(
+                row.get("trade_id"),
+                exit_price=proven_price,
+                reason=upgraded_reason,
+                allow_overwrite_reasons=_HOUSEKEEPING_OVERWRITE_REASONS,
+            )
+            if not updated:
+                continue  # row already truthful — idempotent re-run
+            self._book_recovered_executions(matched)
+            detail = (
+                f"repaired CLOSED trade {row.get('trade_id')}: "
+                f"{row.get('close_reason')} @ {row.get('exit_price')} -> "
+                f"{upgraded_reason} @ {proven_price} (proven broker fill)"
+            )
+            self._emit_health_event("housekeeping-ledger-repaired", detail)
+            actions.append(detail)
+            log.info("[HOUSEKEEPING] %s", detail)
+
+        # ── Detect-and-alert ONLY — never place/cancel/close ─────────
+        if position != 0 and pending_id is None:
+            has_resting_sl = any(
+                self._event_order_type(evt) == "STP" for evt in resting
+            )
+            if not has_resting_sl:
+                # Auto-placing protection is order-routing semantics
+                # (human gate) and interacts with the 10-orders/60s halt.
+                detail = (
+                    f"NAKED position: broker position {position:+d} with "
+                    f"no resting stop order — protection needs a human"
+                )
+                self._emit_health_event(
+                    "housekeeping-naked-position", detail)
+                alerts.append(detail)
+
+            if open_row is None and self._active_trade_id is None:
+                detail = (
+                    f"UNTRACKED position: broker position {position:+d} "
+                    f"with no ledger trade — needs human adjudication"
+                )
+                self._emit_health_event(
+                    "housekeeping-untracked-position", detail)
+                alerts.append(detail)
+
+        if pending_id is not None:
+            filled = self._pending_entry_filled_qty()
+            if filled > 0:
+                # A1 (039208d): a partial fill means contracts EXIST
+                # broker-side — cancelling would hide a live position.
+                detail = (
+                    f"AMBIGUOUS pending entry {pending_id}: partially "
+                    f"filled ({filled:.0f}) — leaving for the fill path"
+                )
+                self._emit_health_event("housekeeping-ambiguous", detail)
+                alerts.append(detail)
+
+        # A-6: unknown bot-origin orders while provably flat. Live ids
+        # (including the pending entry — entry orders legitimately rest
+        # while flat) and recent CLOSED brackets (the orphan class,
+        # handled above) are excluded.
+        if (self._active_trade_id is None and open_row is None
+                and position == 0):
+            unknown_ids = [
+                str(evt.order_id) for evt in resting
+                if str(evt.order_id) not in live_ids
+                and str(evt.order_id) not in closed_bracket_ids
+            ]
+            if unknown_ids:
+                detail = (
+                    f"UNKNOWN resting order(s) while flat: "
+                    f"{', '.join(unknown_ids)} — matching neither live "
+                    f"state, recent CLOSED brackets, nor a pending entry; "
+                    f"detect-only (possibly human-placed)"
+                )
+                self._emit_health_event(
+                    "housekeeping-unknown-order", detail)
+                alerts.append(detail)
+
+        return actions, alerts, False
+
+    @staticmethod
+    def _event_order_type(evt):
+        """Broker order type ("LMT"/"STP"/...) off a StandardExecutionEvent."""
+        order = getattr(getattr(evt, "raw_event", None), "order", None)
+        return getattr(order, "orderType", None)
+
+    @staticmethod
+    def _naive_utc_exec_time(value):
+        """Coerce a get_executions record ``time`` to naive-UTC.
+
+        The record contract delivers naive-UTC datetimes; tz-aware and
+        ISO-string forms are tolerated. Unknown shapes → None (the A-5
+        grace then treats the record as non-recent, matching the legacy
+        broker-flat path's behavior when no timing evidence exists).
+        """
+        # Local import: the module-level `datetime` name is the
+        # injectable clock seam — isinstance needs the real class.
+        from datetime import datetime as _dt
+        if value is None:
+            return None
+        if isinstance(value, str):
+            try:
+                value = _dt.fromisoformat(value)
+            except ValueError:
+                return None
+        if not isinstance(value, _dt):
+            return None
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
 
     def _place_bracket_children_on_fill(
         self,
@@ -4384,6 +4764,15 @@ class LiveTrader:
                 else:
                     time.sleep(_POLL_INTERVAL)
                 poll_count += 1
+
+                # Hourly housekeeping sweep — invoked EVERY poll and
+                # self-gated on the wall clock (A-7), deliberately NOT
+                # inside the poll_count % _HEARTBEAT_CYCLES block:
+                # poll_count resets on every reconnect, so a poll-counted
+                # schedule stalls indefinitely under connection flapping.
+                # Runs here (between ib.sleep() calls) for the same
+                # sync-API safety as the rollover check; never raises.
+                self._run_hourly_housekeeping()
 
                 # Periodic heartbeat (only when idle — no bars arriving)
                 if poll_count % _HEARTBEAT_CYCLES == 0:

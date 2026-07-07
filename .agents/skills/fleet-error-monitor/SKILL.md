@@ -82,6 +82,26 @@ Judge each finding before opening any ticket — most have a fact-check step:
 - `log-error` clusters — read the lines; connectivity flaps during a
   known incident are noise (file with a one-line audit note), anything
   novel or repeating → investigate as a code bug.
+- `housekeeping-*` — emitted by each child's in-process hourly sweep at
+  ~:15 (after this monitor's :06 run; the NEXT :06 fleet_health run is
+  the verification pass). Two severity classes, routed on the exact kind
+  string:
+  - `housekeeping-orphan-cancelled` / `housekeeping-drift-detected` /
+    `housekeeping-ledger-repaired` — INFORMATIONAL: the action was
+    already taken in-child (targeted orphan cancel, OOB drift recovery,
+    whitelisted exit-price repair). Verify via the next fleet_health
+    run, file to done/, do NOT re-act. RISING `occurrences` of the same
+    event = something repeatedly manufactures the inconsistency (e.g. a
+    path that keeps orphaning brackets) → ticket.
+  - `housekeeping-naked-position` / `housekeeping-untracked-position` /
+    `housekeeping-ambiguous` / `housekeeping-unknown-order` — HIGHEST
+    severity, exactly like `unprotected-position`: notify the human NOW;
+    NEVER auto-place, auto-cancel, or auto-close (the sweep itself is
+    detect-only for these by design — order-routing semantics are a
+    human gate).
+  - `housekeeping-error` — the sweep itself failed or ran slow (>10s):
+    a code bug in housekeeping, never a market event → normal ticket
+    flow; trading is unaffected by construction (never-raises boundary).
 
 Close-out: health queue events move pending/ → done/ with an audit line
 like crash events. HEALTH_EVENT console lines need no queue file — audit

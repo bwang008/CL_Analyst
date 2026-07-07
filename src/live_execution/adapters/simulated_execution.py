@@ -134,6 +134,9 @@ class SimulatedExecution(ExecutionClient):
         self._current_bar_open: float = 0.0
         self._current_bar_high: float = 0.0
         self._current_bar_low: float = 0.0
+        # No bar seen yet — honest None, never a fabricated timestamp
+        # (an entry before the first on_bar_feed() must not invent time).
+        self._current_bar_time: Optional[pd.Timestamp] = None
 
         # Trade ledger
         self._active_entry: Optional[dict] = None  # entry context for open trade
@@ -170,6 +173,14 @@ class SimulatedExecution(ExecutionClient):
     def get_position(self, symbol: str) -> int:
         return self._position
 
+    def get_cached_position(self, symbol: str) -> int:
+        """True sim net position — the sim's state IS its local cache.
+
+        A4 honesty: never a fabricated flat; the housekeeping sweep's
+        orphan-cancel gate keys on this being real.
+        """
+        return int(self._position)
+
     def get_account_summary(self, symbol: str) -> dict:
         """Return mock account summary matching IBKRExecutionClient format."""
         unrealized = 0.0
@@ -190,10 +201,18 @@ class SimulatedExecution(ExecutionClient):
     def resolve_contract(self, symbol: str) -> None:
         pass  # No contract resolution needed
 
-    def get_open_trades(self, symbol: str) -> list:
-        """Return StandardExecutionEvent list for resting orders."""
+    def get_open_trades(self, symbol: Optional[str]) -> list:
+        """Return StandardExecutionEvent list for resting orders.
+
+        A-10 honesty (A4 precedent): ``symbol=<str>`` returns ONLY that
+        symbol's resting orders — the old ignore-the-parameter behavior
+        fabricated scope; ``symbol=None`` is the explicit all-symbols
+        read the housekeeping sweep uses.
+        """
         events = []
         for oid, order in self._resting_orders.items():
+            if symbol is not None and order.symbol != symbol:
+                continue
             events.append(StandardExecutionEvent(
                 order_id=oid,
                 symbol=order.symbol,
