@@ -25,11 +25,27 @@ Optuna, no backtest), and reports holdout ROC-AUC / PR-AUC + a tradeability prox
 The screen is a mode of the E2E pipeline. It reads a MasterConfig JSON whose
 `training_workflow.mode = "screen"` and `training_workflow.target_columns` is the list to screen.
 
-1. Copy the template and edit `target_columns` (and `symbol` / `dataset_version` /
-   `train_cutoff_date`): [configs/sweeps/screen_si_hourset01b.json](../../configs/sweeps/screen_si_hourset01b.json).
+1. Generate a **validated** screen config with `scripts/build_screen_config.py` (mode is
+   already `screen`; `execution_workflow` is NOT required in screen mode). Use EITHER a
+   dataset (screen the full target grid it contains) OR a v2 batch manifest (screen exactly
+   that batch's targets):
+   ```bash
+   # from a dataset (screen every TARGET_TRIPLE_*_LONG/_SHORT in the parquet)
+   conda run -n trader python scripts/build_screen_config.py \
+     --from-dataset HourSet_14B --symbol CL --train-cutoff-date 2025-06-01
+   # or from a v2 batch manifest (deduped union of every experiment's target_columns;
+   # symbol / dataset_version / train_cutoff_date are read from the manifest baseline)
+   conda run -n trader python scripts/build_screen_config.py \
+     --from-manifest configs/batch_manifest_v2_hourset14b_scout.json
+   ```
+   - Writes `configs/sweeps/screen_<symbol>_<dataset>.json` by default (override with `--out`).
    - `train_cutoff_date` = train on data before it; the screen scores AUC on the vault (>= cutoff).
-     Leave `holdout_cutoff_date: null` for the default 2-way split.
-   - `execution_workflow` is NOT required in screen mode (no backtest).
+     Leave `holdout_cutoff_date` unset for the default 2-way split (`--holdout-cutoff-date` to override).
+   - The generator VALIDATES the config via `MasterConfig(**cfg)` and fails loud (non-zero,
+     writes nothing) on an invalid config or zero targets — no half-written config.
+   - Shape matches the reference template
+     [configs/sweeps/screen_si_hourset01b.json](../../configs/sweeps/screen_si_hourset01b.json)
+     (hand-editing it still works if you prefer).
 2. Dry-run (validates config + resolves the dataset, no training):
    ```bash
    conda run -n trader python gcp/vm_e2e_pipeline.py \
