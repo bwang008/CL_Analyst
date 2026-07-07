@@ -31,8 +31,14 @@ lines streaming into the log while the monitor saw nothing. The job is
 
 ## Standing authorization & hard limits
 
-- **Branch:** all work happens on the `stable-fleet` branch. Never merge to
-  `main`/`development` yourself — that is always the human's call.
+- **Branch:** all work happens on the operator's CURRENT fleet working
+  branch — check `git branch --show-current` and commit there. Do NOT
+  assume a branch name: `stable-fleet` was merged and retired 2026-07-07
+  (the operator renames/merges working branches as the project evolves;
+  you migrate with the worktree). Never merge to `main`/`development`
+  yourself — that is always the human's call. If the working tree has
+  operator WIP (dirty files you didn't touch), stage your commits
+  file-by-file and leave their files alone.
 - **You are authorized end-to-end** for bug fixes: investigate → implement →
   test → deploy (fleet restart) → commit. Do NOT stop to ask permission for
   ordinary fixes.
@@ -108,6 +114,66 @@ like crash events. HEALTH_EVENT console lines need no queue file — audit
 the judgment (`... | MONITOR | HEALTH — <kind> <who>: <one-line verdict>`)
 and notify the human when severity warrants.
 
+## Known recurring patterns (verify, one audit line, do NOT re-investigate)
+
+Learned from the 2026-07-06/07 incident chain — each earned hours of
+investigation once; do not repeat it:
+
+- **~14:15 PT (17:15 ET) daily**: IBKR Gateway restart during the 5-6pm ET
+  futures halt — "Peer closed connection" + ConnectionRefused burst on ALL
+  children, reconnect within ~30s ("Reconnected successfully on attempt
+  1-2"). INFRA noise IF recovery confirmed in the log. A child that does
+  NOT reconnect = real event.
+- **Error 366 "No historical data query found" / Error 162 "query
+  cancelled" clusters**: the resubscription cycle cancelling stale
+  requests — noise whenever adjacent to a known reconnect/reopen event.
+- **~15:00 PT (18:00 ET) reopen watchdog false-fire**: FIXED by
+  cl-watchdog-reopen-grace_07052026_0001 (GLOBEX session_open_anchor).
+  If stale-bars-watchdog events reappear AT the reopen after that commit
+  is deployed, that is a REGRESSION → investigate, don't file as noise.
+- **Nightly (~21:00-03:30 PT) connectivity flaps**: usfarm/ushmds farm
+  drops; the resubscribe retry timer + watchdog self-heal. Judge by
+  recovery evidence, not by line count (100-line storms have been noise;
+  a single silent child has been the real incident).
+- **A resting ENTRY order while a child is flat is LEGITIMATE**
+  (marketable-limit entry born non-marketable when price ran; entry TTL
+  cancels it at the next signal bar, or it fills at the modeled price —
+  both fine). Orphaned BRACKET orders are the disease; entry orders are
+  not orphans.
+- **ALL children stale simultaneously + log silent** = the fleet is DOWN
+  or the machine slept — check `Get-CimInstance Win32_Process` for
+  fleet_runner and the log tail BEFORE any per-child theory. A clean
+  "Received signal 2 → Shutdown complete" cascade = DELIBERATE operator
+  stop: do NOT restart against operator intent; Telegram + report, and
+  state whether positions are bracket-protected server-side (they are,
+  if TP/SL verified on the last recovery).
+- **Suite sentinels**: a fixed set of config-pin tests red from the
+  operator's intentional model swaps / config removals (ES01B family et
+  al.) — enumerate the failure set before and after your change; only
+  DELTAS you caused are yours. Never "fix" the sentinels.
+
+## Environment & tooling rules (each cost real time once)
+
+- ALL project python (pytest, fleet_health, Telegram, DB scripts) runs
+  via `conda run -n trader python ...` — the global interpreter lacks
+  dotenv and pins differ (pandas 1.5.3 in trader).
+- The agent CANNOT (permission-blocked, by design): stop/start/signal the
+  fleet process, write to the live telemetry DB, or open even read-only
+  broker sessions. These are operator actions — when one is needed,
+  Telegram + report with exactly what to run, and do not retry the
+  blocked call.
+- Multi-line git commit messages: write the message to a file with a
+  no-BOM writer and use `git commit -F <file>` — PowerShell 5.1 mangles
+  quoted heredocs into pathspecs, and `Set-Content -Encoding utf8` writes
+  a BOM that corrupts the commit subject (breaks `git log --grep` on
+  ticket IDs).
+- Reading the telemetry DB is always safe read-only via
+  `sqlite3.connect("file:...?mode=ro", uri=True)`.
+- Log timestamps are PT wall clock; bar/DB timestamps are UTC; heartbeat
+  `last_bar` ages are hours. IBKR's realized PnL is per trading day
+  (resets 17:00 ET) and net of commissions — it will NEVER equal the
+  per-session gross ledger sums.
+
 ## Per-event protocol
 
 For each event JSON in `.agents/collab/error_queue/processing/` (oldest
@@ -153,18 +219,25 @@ Audit line: `... | MONITOR | FIX implemented under <TICKET_ID> — files: <list>
    appears on the next supervision cycles (~10 min). A recurrence = deploy
    failed → back to step 2 with the new evidence; after 2 failed fix
    attempts, human gate.
-3. **Commit** (only after successful deploy) on `stable-fleet`:
+3. **Commit** on the current fleet working branch:
    `fix(<TICKET_ID>): <summary>` — include the event_id in the body.
+   Deploy-then-commit is the ideal ordering; when the deploy (fleet
+   restart) is operator-gated, committing first with "deploy pending
+   operator restart" stated in the body is the accepted convention
+   (64ccccb precedent) — never claim DEPLOYED before it happened.
 4. Audit lines:
    `... | MONITOR | DEPLOYED — fleet restarted, all children healthy`
-   `... | MONITOR | COMMITTED <sha> on stable-fleet`
+   `... | MONITOR | COMMITTED <sha> on <branch>`
 
 ### 5. Close out
 - Move the event JSON from `processing/` to `done/`.
 - Audit line: `... | <event_id> | MONITOR | DONE — <resolution: fixed|infra|escalated>`
 - Notify the human with a short summary (event, root cause, fix, commit sha).
   Optionally push a Telegram note:
-  `python -c "from src.live_execution.utils.telegram_alert import TelegramAlerter; TelegramAlerter(prefix='FLEET-AI').send('<summary>')"`
+  `conda run -n trader python -c "from src.live_execution.utils.telegram_alert import TelegramAlerter; TelegramAlerter(prefix='FLEET-AI').send('<summary>')"`
+  (MUST be the trader env — global python lacks dotenv. Telegram parses
+  Markdown: underscores in module paths / snake_case break the send with
+  a 400 "can't parse entities" — avoid them in message text.)
 
 ### 5-infra. Infrastructure close-out (no fix attempted)
 When an event is infrastructure (IBKR connectivity, gateway restarts, data
