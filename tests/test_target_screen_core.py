@@ -93,7 +93,12 @@ DOC_KEYS = {
     "n_holdout",
     "prob_spread",
     "precision_at_ref",
-    "signals_per_yr_at_ref",
+    # New metrics (screen-report-metrics_07072026_1600):
+    "brier_holdout",
+    "n_pos_holdout",
+    "reward_risk",
+    "pr_lift",
+    "ev_floor_at_ref",
 }
 
 
@@ -184,6 +189,81 @@ class TestScreenOneTarget:
         assert row["target"] == LEARNABLE_TARGET
         assert row["direction"] == "long"
 
+    def test_signals_per_yr_key_is_dropped(self, synthetic_screen_df):
+        df_train, df_vault = self._split(synthetic_screen_df)
+        row = _screen_one_target(
+            df_train=df_train,
+            df_vault=df_vault,
+            feature_cols=FEATURE_COLS,
+            target_col=LEARNABLE_TARGET,
+            direction="long",
+            params=SCREEN_LGBM_PARAMS,
+            random_seed=42,
+        )
+        assert "signals_per_yr_at_ref" not in row
+
+    def test_brier_in_unit_interval_and_n_pos_matches(self, synthetic_screen_df):
+        df_train, df_vault = self._split(synthetic_screen_df)
+        row = _screen_one_target(
+            df_train=df_train,
+            df_vault=df_vault,
+            feature_cols=FEATURE_COLS,
+            target_col=LEARNABLE_TARGET,
+            direction="long",
+            params=SCREEN_LGBM_PARAMS,
+            random_seed=42,
+        )
+        # Brier score of probabilities vs {0,1} labels is always in [0, 1].
+        assert 0.0 <= row["brier_holdout"] <= 1.0
+        # n_pos_holdout must equal the count of positive holdout labels.
+        y_holdout = (df_vault[LEARNABLE_TARGET] > 0).astype(int)
+        assert row["n_pos_holdout"] == int(y_holdout.sum())
+        assert isinstance(row["n_pos_holdout"], int)
+
+    def test_pr_lift_equals_pr_auc_over_base_rate(self, synthetic_screen_df):
+        df_train, df_vault = self._split(synthetic_screen_df)
+        row = _screen_one_target(
+            df_train=df_train,
+            df_vault=df_vault,
+            feature_cols=FEATURE_COLS,
+            target_col=LEARNABLE_TARGET,
+            direction="long",
+            params=SCREEN_LGBM_PARAMS,
+            random_seed=42,
+        )
+        expected = row["pr_auc_holdout"] / row["pos_rate_holdout"]
+        assert row["pr_lift"] == pytest.approx(expected, rel=1e-9)
+
+    def test_ev_floor_matches_formula(self, synthetic_screen_df):
+        df_train, df_vault = self._split(synthetic_screen_df)
+        row = _screen_one_target(
+            df_train=df_train,
+            df_vault=df_vault,
+            feature_cols=FEATURE_COLS,
+            target_col=LEARNABLE_TARGET,
+            direction="long",
+            params=SCREEN_LGBM_PARAMS,
+            random_seed=42,
+        )
+        p = row["precision_at_ref"]
+        rr = row["reward_risk"]
+        expected = p * rr - (1.0 - p) * 1.0
+        assert row["ev_floor_at_ref"] == pytest.approx(expected, rel=1e-9)
+
+    def test_reward_risk_parsed_from_target_name(self, synthetic_screen_df):
+        # LEARNABLE_TARGET == TARGET_TRIPLE_2x1_6H_LONG -> RR = 2/1 = 2.0
+        df_train, df_vault = self._split(synthetic_screen_df)
+        row = _screen_one_target(
+            df_train=df_train,
+            df_vault=df_vault,
+            feature_cols=FEATURE_COLS,
+            target_col=LEARNABLE_TARGET,
+            direction="long",
+            params=SCREEN_LGBM_PARAMS,
+            random_seed=42,
+        )
+        assert row["reward_risk"] == pytest.approx(2.0)
+
     def test_auc_holdout_in_unit_interval(self, synthetic_screen_df):
         df_train, df_vault = self._split(synthetic_screen_df)
         row = _screen_one_target(
@@ -260,12 +340,16 @@ class TestRunScreen:
         text = report.read_text(encoding="utf-8")
         assert LEARNABLE_TARGET in text
         assert NOISE_TARGET in text
-        # Column headers present.
-        for header in ("AUC train", "AUC holdout", "PR-AUC holdout", "signals/yr", "precision@ref"):
+        # New column headers present; dropped column absent.
+        for header in (
+            "target", "dir", "PR-AUC", "ROC-AUC", "PR-lift", "Brier",
+            "pos%", "n_pos", "prec@ref", "RR", "EV_flr", "flag",
+        ):
             assert header in text
+        assert "signals/yr" not in text
         assert len(rows) == 2
 
-    def test_rows_sorted_by_auc_holdout_desc(self, synthetic_parquet, tmp_path):
+    def test_rows_sorted_by_pr_auc_holdout_desc(self, synthetic_parquet, tmp_path):
         out_dir = tmp_path / "screen_out"
         rows = run_screen(
             data_path=synthetic_parquet,
@@ -275,10 +359,27 @@ class TestRunScreen:
             output_dir=str(out_dir),
             random_seed=42,
         )
-        aucs = [r["auc_holdout"] for r in rows]
-        assert aucs == sorted(aucs, reverse=True)
-        # The learnable target should come first (highest holdout AUC).
-        assert rows[0]["target"] == LEARNABLE_TARGET
+        # Rows are sorted best->worst by PR-AUC holdout (nan last).
+        pr = [
+            (r["pr_auc_holdout"] if r["pr_auc_holdout"] == r["pr_auc_holdout"] else -1.0)
+            for r in rows
+        ]
+        assert pr == sorted(pr, reverse=True)
+
+    def test_reward_risk_reflects_displayed_target_name(self, synthetic_parquet, tmp_path):
+        out_dir = tmp_path / "screen_rr"
+        rows = run_screen(
+            data_path=synthetic_parquet,
+            train_cutoff_date=TRAIN_CUTOFF,
+            targets=[LEARNABLE_TARGET, NOISE_TARGET],
+            symbol="CL",
+            output_dir=str(out_dir),
+            random_seed=42,
+        )
+        # Both fixture targets are TARGET_TRIPLE_2x1_..., so RR = 2/1 = 2.0,
+        # computed from the displayed row["target"] name.
+        for r in rows:
+            assert r["reward_risk"] == pytest.approx(2.0)
 
     def test_deterministic_across_two_runs_same_seed(self, synthetic_parquet, tmp_path):
         rows_a = run_screen(
@@ -321,49 +422,172 @@ class TestRunScreen:
 
 class TestWriteAucReport:
     def _rows(self):
+        # A: well-supported, high ROC-AUC (0.64) -> KEEP, but LOWER PR-AUC (0.40).
+        # B: well-supported, lower ROC-AUC (0.51) but HIGHER PR-AUC (0.55).
+        #    -> B must sort first (PR-AUC desc), and B's ROC-AUC 0.51 -> drop.
+        # C: thin support (n_pos_holdout=40 < 75) -> RARE regardless of AUC.
         return [
             {
                 "target": "TARGET_A_LONG", "direction": "long",
-                "auc_train": 0.72, "auc_holdout": 0.51, "pr_auc_holdout": 0.40,
+                "auc_train": 0.72, "auc_holdout": 0.64, "pr_auc_holdout": 0.40,
                 "pos_rate_train": 0.50, "pos_rate_holdout": 0.48,
                 "n_train": 500, "n_holdout": 200, "prob_spread": 0.12,
-                "precision_at_ref": 0.55, "signals_per_yr_at_ref": 120.0,
+                "precision_at_ref": 0.55,
+                "brier_holdout": 0.22, "n_pos_holdout": 96,
+                "reward_risk": 5.0, "pr_lift": 0.83, "ev_floor_at_ref": 2.30,
             },
             {
                 "target": "TARGET_B_SHORT", "direction": "short",
-                "auc_train": 0.80, "auc_holdout": 0.64, "pr_auc_holdout": 0.55,
+                "auc_train": 0.80, "auc_holdout": 0.51, "pr_auc_holdout": 0.55,
                 "pos_rate_train": 0.50, "pos_rate_holdout": 0.49,
                 "n_train": 500, "n_holdout": 200, "prob_spread": 0.30,
-                "precision_at_ref": 0.66, "signals_per_yr_at_ref": 120.0,
+                "precision_at_ref": 0.66,
+                "brier_holdout": 0.18, "n_pos_holdout": 98,
+                "reward_risk": 3.0, "pr_lift": 1.12, "ev_floor_at_ref": 1.98,
+            },
+            {
+                "target": "TARGET_C_LONG", "direction": "long",
+                "auc_train": 0.90, "auc_holdout": 0.70, "pr_auc_holdout": 0.10,
+                "pos_rate_train": 0.05, "pos_rate_holdout": 0.04,
+                "n_train": 500, "n_holdout": 200, "prob_spread": 0.40,
+                "precision_at_ref": 0.30,
+                "brier_holdout": 0.04, "n_pos_holdout": 40,
+                "reward_risk": 4.0, "pr_lift": 2.50, "ev_floor_at_ref": 0.20,
             },
         ]
 
-    def test_output_sorted_desc_and_has_all_columns(self, tmp_path):
-        out = tmp_path / "AUC_Model_Report.md"
-        meta = {
+    def _meta(self):
+        return {
             "symbol": "CL", "dataset": "SYNTH", "train_cutoff_date": "2018-01-24",
             "holdout_cutoff_date": None, "params": SCREEN_LGBM_PARAMS, "random_seed": 42,
         }
-        write_auc_report(self._rows(), str(out), meta)
+
+    def _data_rows(self, text):
+        """Return the list of table body rows (pipe-delimited) from the report."""
+        lines = [ln for ln in text.splitlines() if ln.strip().startswith("|")]
+        # lines[0] = header, lines[1] = separator, rest = data
+        return lines
+
+    def test_output_sorted_by_pr_auc_desc_and_has_all_columns(self, tmp_path):
+        out = tmp_path / "AUC_Model_Report.md"
+        write_auc_report(self._rows(), str(out), self._meta())
         text = out.read_text(encoding="utf-8")
 
-        # All columns present.
+        # New columns present; dropped column absent.
         for header in (
-            "target", "dir", "AUC train", "AUC holdout", "PR-AUC holdout",
-            "pos% train", "pos% holdout", "prob spread", "signals/yr", "precision@ref",
+            "target", "dir", "PR-AUC", "ROC-AUC", "PR-lift", "Brier",
+            "pos%", "n_pos", "prec@ref", "RR", "EV_flr", "flag",
         ):
             assert header in text
+        assert "signals/yr" not in text
 
-        # Sorted by auc_holdout desc: B (0.64) must appear before A (0.51).
+        # Sorted by PR-AUC holdout desc: B (0.55) before A (0.40) before C (0.10).
         assert text.index("TARGET_B_SHORT") < text.index("TARGET_A_LONG")
+        assert text.index("TARGET_A_LONG") < text.index("TARGET_C_LONG")
+
+    def test_flag_logic_rare_keep_drop(self, tmp_path):
+        out = tmp_path / "AUC_Model_Report.md"
+        write_auc_report(self._rows(), str(out), self._meta())
+        text = out.read_text(encoding="utf-8")
+
+        def _flag_for(target):
+            for ln in text.splitlines():
+                if target in ln and ln.strip().startswith("|"):
+                    return ln.rsplit("|", 2)[1].strip()
+            raise AssertionError(f"{target} not found in table")
+
+        # A: n_pos=96 (>=75), ROC-AUC 0.64 (>=0.55) -> KEEP
+        assert _flag_for("TARGET_A_LONG") == "KEEP"
+        # B: n_pos=98 (>=75), ROC-AUC 0.51 (<0.53) -> drop
+        assert _flag_for("TARGET_B_SHORT") == "drop"
+        # C: n_pos=40 (<75) -> RARE (regardless of its 0.70 ROC-AUC)
+        assert _flag_for("TARGET_C_LONG") == "RARE"
+
+    def test_flag_tune_band(self, tmp_path):
+        out = tmp_path / "AUC_Model_Report.md"
+        rows = [
+            {
+                "target": "TARGET_T_LONG", "direction": "long",
+                "auc_train": 0.70, "auc_holdout": 0.54, "pr_auc_holdout": 0.30,
+                "pos_rate_train": 0.30, "pos_rate_holdout": 0.30,
+                "n_train": 500, "n_holdout": 200, "prob_spread": 0.20,
+                "precision_at_ref": 0.40,
+                "brier_holdout": 0.20, "n_pos_holdout": 80,
+                "reward_risk": 2.0, "pr_lift": 1.0, "ev_floor_at_ref": 0.20,
+            },
+        ]
+        write_auc_report(rows, str(out), self._meta())
+        text = out.read_text(encoding="utf-8")
+        for ln in text.splitlines():
+            if "TARGET_T_LONG" in ln and ln.strip().startswith("|"):
+                # ROC-AUC 0.54 in [0.53, 0.55) -> ~tune
+                assert ln.rsplit("|", 2)[1].strip() == "~tune"
+                break
+        else:
+            raise AssertionError("TARGET_T_LONG not found")
+
+    def test_columns_aligned_and_consistent_cell_count(self, tmp_path):
+        out = tmp_path / "AUC_Model_Report.md"
+        write_auc_report(self._rows(), str(out), self._meta())
+        text = out.read_text(encoding="utf-8")
+
+        table_lines = self._data_rows(text)
+        # Header + separator + 3 data rows = 5 pipe lines minimum.
+        assert len(table_lines) >= 5
+
+        # Every table line must split into the same number of cells.
+        cell_counts = [len(ln.split("|")) for ln in table_lines]
+        assert len(set(cell_counts)) == 1, f"ragged cell counts: {cell_counts}"
+
+        # Column alignment: for each column index, every row's cell shares the
+        # same width (padded to the column max). Exclude the separator row.
+        body = [ln for ln in table_lines if not set(ln.replace("|", "").strip()) <= {"-", " ", ":"}]
+        split_rows = [ln.split("|") for ln in body]
+        n_cols = len(split_rows[0])
+        for col in range(n_cols):
+            widths = {len(r[col]) for r in split_rows}
+            assert len(widths) == 1, f"column {col} not padded to a common width: {widths}"
+
+    def test_legend_documents_brier_and_ev_caveats(self, tmp_path):
+        out = tmp_path / "AUC_Model_Report.md"
+        write_auc_report(self._rows(), str(out), self._meta())
+        text = out.read_text(encoding="utf-8").lower()
+        # Brier caveat: focal-trained screen model.
+        assert "brier" in text
+        assert "focal" in text
+        # EV floor caveat: pessimistic, not a profitability estimate.
+        assert "ev_flr" in text or "ev floor" in text
+        assert "pessimistic" in text
+
+    def test_nan_metrics_render_as_dash(self, tmp_path):
+        out = tmp_path / "AUC_Model_Report.md"
+        rows = [
+            {
+                "target": "TARGET_N_LONG", "direction": "long",
+                "auc_train": 0.60, "auc_holdout": float("nan"),
+                "pr_auc_holdout": float("nan"),
+                "pos_rate_train": 0.50, "pos_rate_holdout": 0.50,
+                "n_train": 500, "n_holdout": 200, "prob_spread": 0.10,
+                "precision_at_ref": float("nan"),
+                "brier_holdout": float("nan"), "n_pos_holdout": 100,
+                "reward_risk": float("nan"), "pr_lift": float("nan"),
+                "ev_floor_at_ref": float("nan"),
+            },
+        ]
+        write_auc_report(rows, str(out), self._meta())
+        text = out.read_text(encoding="utf-8")
+        # nan values render as '-' (padded), not the literal 'nan'.
+        for ln in text.splitlines():
+            if "TARGET_N_LONG" in ln and ln.strip().startswith("|"):
+                assert "nan" not in ln
+                assert "-" in ln
+                break
+        else:
+            raise AssertionError("TARGET_N_LONG not found")
 
     def test_meta_header_present(self, tmp_path):
         out = tmp_path / "AUC_Model_Report.md"
-        meta = {
-            "symbol": "CL", "dataset": "SYNTH", "train_cutoff_date": "2018-01-24",
-            "holdout_cutoff_date": None, "params": SCREEN_LGBM_PARAMS, "random_seed": 42,
-        }
-        write_auc_report(self._rows(), str(out), meta)
+        write_auc_report(self._rows(), str(out), self._meta())
         text = out.read_text(encoding="utf-8")
         assert "CL" in text
         assert "SYNTH" in text

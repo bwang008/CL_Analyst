@@ -30,6 +30,7 @@ import copy
 import json
 import os
 import pickle
+import re
 import shutil
 import subprocess
 import sys
@@ -480,6 +481,24 @@ SCREEN_LGBM_PARAMS: dict = {
 _HOURS_PER_TRADING_YEAR = 6000.0
 
 
+# TARGET_TRIPLE_<TP>x<SL>_<H>H_<DIR>  e.g. TARGET_TRIPLE_5x1_6H_SHORT
+_TRIPLE_RR_RE = re.compile(r"TRIPLE_(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)_")
+
+
+def _reward_risk_from_name(target_name: str) -> float:
+    """Parse reward:risk (TP/SL) from a TARGET_TRIPLE_<TP>x<SL>_<H>H_<DIR> name.
+
+    e.g. 5x1 -> 5.0, 6x2 -> 3.0, 8x2 -> 4.0. Returns nan on no-match or SL==0.
+    """
+    m = _TRIPLE_RR_RE.search(target_name or "")
+    if not m:
+        return float("nan")
+    tp, sl = float(m.group(1)), float(m.group(2))
+    if sl == 0:
+        return float("nan")
+    return tp / sl
+
+
 def _safe_auc(y_true: np.ndarray, scores: np.ndarray) -> float:
     """ROC-AUC that returns nan on degenerate (single-class) labels instead of
     letting sklearn raise. A screened target whose split collapsed to one class
@@ -544,6 +563,27 @@ def _screen_one_target(
     probs_holdout_s = pd.Series(probs_holdout)
     prob_spread = float(probs_holdout_s.quantile(0.95) - probs_holdout_s.quantile(0.05))
 
+    # ---- Calibration: Brier score on the holdout (lower better; in [0,1]). ----
+    # nan if the holdout is empty. Caveat (documented in the report legend): this
+    # is the fixed-param, focal-trained SCREEN model — a rough/relative signal,
+    # not the tuned Stage-2 model's calibration.
+    if len(y_holdout) > 0:
+        brier_holdout = float(np.mean((probs_holdout - y_holdout) ** 2))
+    else:
+        brier_holdout = float("nan")
+
+    # Minority-class support count (the reviewer's rarity trap detector).
+    n_pos_holdout = int(y_holdout.sum())
+
+    pos_rate_holdout = float(y_holdout.mean()) if len(y_holdout) else float("nan")
+
+    # PR-lift = PR-AUC / base rate ( >1 => better than a random classifier at
+    # that base rate). nan-guard div-by-zero / empty holdout.
+    if pos_rate_holdout and pos_rate_holdout == pos_rate_holdout and pos_rate_holdout > 0:
+        pr_lift = float(pr_auc_holdout / pos_rate_holdout)
+    else:
+        pr_lift = float("nan")
+
     # ---- Tradeability proxy: "edge AND enough trades" ----
     # Reference selective threshold = top-20% firing on the holdout.
     ref_thr = float(probs_holdout_s.quantile(0.80))
@@ -553,17 +593,21 @@ def _screen_one_target(
     else:
         precision_at_ref = float("nan")
 
-    # Convert the 20% firing rate to signals/year via the holdout calendar span.
-    if len(df_vault.index) > 0:
-        span_days = (df_vault.index.max() - df_vault.index.min()).total_seconds() / 86400.0
+    # Reward:risk parsed from the target name (regex). NOTE: run_screen overrides
+    # row["target"] with the caller-facing name afterward; recompute RR/EV there
+    # so they reflect the DISPLAYED target. This local value uses target_col as a
+    # sensible default when _screen_one_target is called directly.
+    reward_risk = _reward_risk_from_name(target_col)
+
+    # Pessimistic EV floor at the top-20% threshold: every non-win is a full -1R
+    # stop (ignores timeouts/partial exits). A trap-detector, NOT a profitability
+    # estimate — true EV comes from the Stage-2 backtest.
+    if precision_at_ref == precision_at_ref and reward_risk == reward_risk:
+        ev_floor_at_ref = float(
+            precision_at_ref * reward_risk - (1.0 - precision_at_ref) * 1.0
+        )
     else:
-        span_days = 0.0
-    if span_days > 0:
-        bars_per_year = len(df_vault) / (span_days / 365.25)
-    else:
-        # Degenerate span (0/1 bars) — fall back to a nominal hourly-year rate.
-        bars_per_year = _HOURS_PER_TRADING_YEAR
-    signals_per_yr_at_ref = float(0.20 * bars_per_year)
+        ev_floor_at_ref = float("nan")
 
     return {
         "target": target_col,
@@ -572,12 +616,16 @@ def _screen_one_target(
         "auc_holdout": auc_holdout,
         "pr_auc_holdout": pr_auc_holdout,
         "pos_rate_train": float(y_train.mean()) if len(y_train) else float("nan"),
-        "pos_rate_holdout": float(y_holdout.mean()) if len(y_holdout) else float("nan"),
+        "pos_rate_holdout": pos_rate_holdout,
         "n_train": int(len(df_train)),
         "n_holdout": int(len(df_vault)),
         "prob_spread": prob_spread,
         "precision_at_ref": precision_at_ref,
-        "signals_per_yr_at_ref": signals_per_yr_at_ref,
+        "brier_holdout": brier_holdout,
+        "n_pos_holdout": n_pos_holdout,
+        "reward_risk": reward_risk,
+        "pr_lift": pr_lift,
+        "ev_floor_at_ref": ev_floor_at_ref,
     }
 
 
@@ -612,18 +660,106 @@ def _split_train_vault(
     return df_train, df_vault
 
 
+def _screen_flag(row: dict) -> str:
+    """Per-row carry/drop flag (ASCII only, evaluated in order):
+      1. n_pos_holdout < 75           -> RARE  (support too thin to trust)
+      2. else roc_auc_holdout >= 0.55 -> KEEP
+      3. else roc_auc_holdout >= 0.53 -> ~tune (may clear the gate post-Optuna)
+      4. else                         -> drop
+    """
+    n_pos = row.get("n_pos_holdout")
+    if n_pos is None or (isinstance(n_pos, float) and n_pos != n_pos) or n_pos < 75:
+        return "RARE"
+    roc = row.get("auc_holdout")
+    if roc is None or (isinstance(roc, float) and roc != roc):
+        return "drop"
+    if roc >= 0.55:
+        return "KEEP"
+    if roc >= 0.53:
+        return "~tune"
+    return "drop"
+
+
 def write_auc_report(rows: list[dict], output_path: str, meta: dict) -> str:
-    """Write the ranked AUC_Model_Report.md (rows sorted by auc_holdout desc)."""
+    """Write the ranked AUC_Model_Report.md.
+
+    Rows sorted best->worst by holdout PR-AUC (safer than ROC-AUC for base rates
+    <20%; nan last). Columns are padded to a common per-column width so the raw
+    Markdown lines up in monospace while staying valid Markdown.
+    """
     ranked = sorted(
         rows,
-        key=lambda r: (r["auc_holdout"] if r["auc_holdout"] == r["auc_holdout"] else -1.0),
+        key=lambda r: (r["pr_auc_holdout"] if r["pr_auc_holdout"] == r["pr_auc_holdout"] else -1.0),
         reverse=True,
     )
 
-    def _fmt(v, spec: str = ".4f") -> str:
+    def _fmt(v, spec: str) -> str:
+        """Format a numeric cell; None/NaN -> '-'."""
         if v is None or (isinstance(v, float) and v != v):  # None or NaN
-            return "nan"
+            return "-"
         return format(v, spec)
+
+    def _fmt_pct(v) -> str:
+        if v is None or (isinstance(v, float) and v != v):
+            return "-"
+        return f"{v * 100.0:.1f}%"
+
+    def _fmt_int(v) -> str:
+        if v is None or (isinstance(v, float) and v != v):
+            return "-"
+        return str(int(v))
+
+    # Column headers, in blueprint order.
+    headers = [
+        "target", "dir", "PR-AUC", "ROC-AUC", "PR-lift", "Brier",
+        "pos%", "n_pos", "prec@ref", "RR", "EV_flr", "flag",
+    ]
+    # Left-align target/dir/flag; right-align everything numeric.
+    left_cols = {"target", "dir", "flag"}
+
+    # Build raw (unpadded) cell text for each data row.
+    body: list[list[str]] = []
+    for r in ranked:
+        body.append([
+            str(r["target"]),
+            str(r["direction"]),
+            _fmt(r["pr_auc_holdout"], ".3f"),
+            _fmt(r["auc_holdout"], ".3f"),
+            _fmt(r["pr_lift"], ".2f"),
+            _fmt(r["brier_holdout"], ".3f"),
+            _fmt_pct(r["pos_rate_holdout"]),
+            _fmt_int(r["n_pos_holdout"]),
+            _fmt(r["precision_at_ref"], ".3f"),
+            _fmt(r["reward_risk"], ".2f"),
+            _fmt(r["ev_floor_at_ref"], ".2f"),
+            _screen_flag(r),
+        ])
+
+    # Per-column width = max over header + all data cells.
+    widths = [len(h) for h in headers]
+    for cells in body:
+        for i, c in enumerate(cells):
+            if len(c) > widths[i]:
+                widths[i] = len(c)
+
+    def _pad(cell: str, i: int) -> str:
+        if headers[i] in left_cols:
+            return cell.ljust(widths[i])
+        return cell.rjust(widths[i])
+
+    def _row_line(cells: list[str]) -> str:
+        return "| " + " | ".join(_pad(c, i) for i, c in enumerate(cells)) + " |\n"
+
+    header_line = _row_line(headers)
+    # Separator row: dashes padded to the same width so pipes line up. Left cols
+    # get a leading ':' alignment marker, numeric cols a trailing ':'.
+    sep_cells = []
+    for i, h in enumerate(headers):
+        if h in left_cols:
+            sep_cells.append(":" + "-" * (widths[i] - 1) if widths[i] >= 1 else "-")
+        else:
+            sep_cells.append("-" * (widths[i] - 1) + ":" if widths[i] >= 1 else "-")
+    separator_line = "| " + " | ".join(sep_cells) + " |\n"
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
@@ -634,27 +770,42 @@ def write_auc_report(rows: list[dict], output_path: str, meta: dict) -> str:
         f.write(f"- Holdout cutoff: {meta.get('holdout_cutoff_date')}\n")
         f.write(f"- Random seed: {meta.get('random_seed')}\n")
         f.write(f"- Fixed LGBM params: {meta.get('params')}\n\n")
+        f.write(header_line)
+        f.write(separator_line)
+        for cells in body:
+            f.write(_row_line(cells))
+        f.write("\n")
+        # --- Legend / caveats ---
+        f.write("### Legend\n\n")
         f.write(
-            "_Legend: holdout AUC ~= 0.50 means no edge (target not worth a full "
-            "sweep); >= ~0.55 indicates real, learnable edge._\n\n"
+            "- Rows sorted by **PR-AUC (holdout)**, descending. For base rates "
+            "<20% PR-AUC is more trustworthy than ROC-AUC.\n"
+        )
+        f.write("- `PR-AUC` / `ROC-AUC` = holdout area under the PR / ROC curve.\n")
+        f.write(
+            "- `PR-lift` = PR-AUC / base rate ( >1 beats a random classifier at "
+            "that base rate).\n"
         )
         f.write(
-            "| target | dir | AUC train | AUC holdout | PR-AUC holdout | "
-            "pos% train | pos% holdout | prob spread | signals/yr | precision@ref |\n"
+            "- `Brier` = calibration (lower is better) of the **fixed-param, "
+            "focal-trained SCREEN model** — a rough/relative signal, NOT the "
+            "tuned Stage-2 model's calibration.\n"
+        )
+        f.write("- `pos%` = holdout positive rate; `n_pos` = positive holdout samples.\n")
+        f.write("- `prec@ref` = precision at the top-20% firing threshold on holdout.\n")
+        f.write(
+            "- `RR` = reward:risk (TP/SL) parsed from the target name. "
+            "`EV_flr` = **pessimistic** expected R per signal at the top-20% "
+            "threshold, assuming every non-win is a full -1R stop (ignores "
+            "timeouts/partial exits). A trap-detector, NOT a profitability "
+            "estimate — true EV comes from the Stage-2 backtest.\n"
         )
         f.write(
-            "|---|---|---|---|---|---|---|---|---|---|\n"
+            "- `flag`: `RARE` if n_pos<75 (support too thin — AUC on hyper-rare "
+            "targets is unreliable); else `KEEP` if ROC-AUC>=0.55; else `~tune` "
+            "if ROC-AUC>=0.53 (borderline, may clear the gate after Optuna); "
+            "else `drop`.\n"
         )
-        for r in ranked:
-            f.write(
-                f"| {r['target']} | {r['direction']} | "
-                f"{_fmt(r['auc_train'])} | {_fmt(r['auc_holdout'])} | "
-                f"{_fmt(r['pr_auc_holdout'])} | "
-                f"{_fmt(r['pos_rate_train'], '.3f')} | {_fmt(r['pos_rate_holdout'], '.3f')} | "
-                f"{_fmt(r['prob_spread'], '.4f')} | "
-                f"{_fmt(r['signals_per_yr_at_ref'], '.1f')} | "
-                f"{_fmt(r['precision_at_ref'], '.4f')} |\n"
-            )
 
     print(f"  AUC report: {output_path} ({len(ranked)} targets)")
     return output_path
@@ -727,6 +878,16 @@ def run_screen(
         # Preserve the caller-supplied target name (get_target_column may
         # resolve legacy aliases, but the report should show what was screened).
         row["target"] = target_name
+        # Recompute name-derived metrics from the DISPLAYED target name so RR /
+        # EV_flr reflect what the report shows (target_col may be a resolved
+        # alias). EV floor rebuilt from the (unchanged) precision_at_ref.
+        row["reward_risk"] = _reward_risk_from_name(target_name)
+        _p = row["precision_at_ref"]
+        _rr = row["reward_risk"]
+        if _p == _p and _rr == _rr:
+            row["ev_floor_at_ref"] = float(_p * _rr - (1.0 - _p) * 1.0)
+        else:
+            row["ev_floor_at_ref"] = float("nan")
         rows.append(row)
         print(
             f"  AUC holdout={row['auc_holdout']:.4f}  "
@@ -755,10 +916,11 @@ def run_screen(
     print(f"  Report: {report_path}")
     print(f"{'='*70}")
 
-    # Return rows sorted by holdout AUC desc so callers see the ranking too.
+    # Return rows sorted by holdout PR-AUC desc (safer than ROC-AUC for base
+    # rates <20%) so callers see the same ranking as the report.
     return sorted(
         rows,
-        key=lambda r: (r["auc_holdout"] if r["auc_holdout"] == r["auc_holdout"] else -1.0),
+        key=lambda r: (r["pr_auc_holdout"] if r["pr_auc_holdout"] == r["pr_auc_holdout"] else -1.0),
         reverse=True,
     )
 
