@@ -1178,12 +1178,49 @@ class LiveTrader:
         self._tracked_sl_price = None
         self._active_trade_id: Optional[str] = None
 
+    def _clear_pending_entry(self) -> None:
+        """Clear ONLY the pending-entry record — never in-position state.
+
+        Entry-cancellation paths (TTL, rollover, kill-switch) call this
+        for orders that NEVER filled: no trade existed, so no
+        strategy.on_exit and no cooldown may fire (D2.4). Real closes of
+        FILLED positions still go through _reset_position_state (A2).
+        """
+        self._pending_entry_order_id = None
+        self._pending_entry_bar_time = None
+
+    def _pending_entry_filled_qty(self) -> float:
+        """Broker-reported filled quantity on the tracked pending entry.
+
+        A1 discriminator: a partially-filled "pending" order is NOT
+        never-filled — contracts exist broker-side. Reads the cached
+        order event (filled_qty, falling back to raw orderStatus);
+        0 when the order is unknown to the cache.
+        """
+        if self._pending_entry_order_id is None:
+            return 0.0
+        evt = self._open_orders.get(str(self._pending_entry_order_id))
+        if evt is None:
+            evt = self._open_orders.get(self._pending_entry_order_id)
+        if evt is None:
+            return 0.0
+        filled = getattr(evt, "filled_qty", None)
+        if filled is None:
+            status = getattr(getattr(evt, "raw_event", None), "orderStatus", None)
+            filled = getattr(status, "filled", 0)
+        return float(filled or 0)
+
     def _check_entry_order_ttl(self, bar_time: pd.Timestamp) -> None:
         """Cancel stale entry orders that haven't filled after 1 bar.
 
         If an Adaptive/Limit entry order was placed on the previous bar
         and is still pending (PreSubmitted/Submitted), cancel it and all
         bracket children so the position guard unblocks for new signals.
+
+        A never-filled entry is NOT a trade: only the pending record is
+        cleared (D2.4). The old _reset_position_state() here fired
+        strategy.on_exit with an SL-flavored cooldown for a trade that
+        never existed.
         """
         if self._pending_entry_order_id is None:
             return
@@ -1213,8 +1250,30 @@ class LiveTrader:
 
         if not still_pending:
             # Order already filled or cancelled — clear pending state
-            self._pending_entry_order_id = None
-            self._pending_entry_bar_time = None
+            self._clear_pending_entry()
+            return
+
+        # A1: a partial fill means contracts EXIST broker-side — silently
+        # cancelling and clearing would hide a live position. Alert loudly
+        # and leave the state for the fill callback / kill switch.
+        filled_qty = self._pending_entry_filled_qty()
+        if filled_qty > 0:
+            log.error(
+                "ENTRY TTL: pending entry order %s is PARTIALLY FILLED "
+                "(filled=%.0f) — NOT cancelling/clearing; a position exists "
+                "broker-side and must be adjudicated by the fill path",
+                self._pending_entry_order_id, filled_qty,
+            )
+            try:
+                self._telegram.send(
+                    f"[CRITICAL] *PARTIAL FILL ON PENDING ENTRY*\n"
+                    f"Order: `{self._pending_entry_order_id}` "
+                    f"filled `{filled_qty:.0f}`\n"
+                    f"TTL cancel SKIPPED — position exists broker-side. "
+                    f"Verify brackets/fill handling."
+                )
+            except Exception:
+                pass  # Never let Telegram failure block safety logic
             return
 
         # Cancel the stale entry + bracket children
@@ -1235,9 +1294,8 @@ class LiveTrader:
         except Exception:
             log.exception("ENTRY TTL: failed to cancel stale orders")
 
-        self._pending_entry_order_id = None
-        self._pending_entry_bar_time = None
-        self._reset_position_state()
+        # Never-filled: pending record only — no on_exit, no cooldown (D2.4)
+        self._clear_pending_entry()
 
     def _snapshot_decision_state(self, event_type: str) -> None:
         """Capture and persist the current FSM state for parity auditing.
@@ -1287,6 +1345,17 @@ class LiveTrader:
           to entry ± trailing_sl_atr_offset × ATR
         - Modify the live IBKR STP child order in-place
         """
+        # D2.3: hard-gate on CONFIRMED in-position state before ANY work —
+        # the extremes update included. Both signals are fill-time-only:
+        # _active_trade_id is set by the entry-fill callback (or ledger
+        # recovery), _sl_order_id by bracket-children placement. A pending
+        # unfilled entry carries neither, so the old repeating
+        # "_sl_order_id is None" warning (NG order 19, 2026-07-06) is
+        # structurally impossible — not merely suppressed. The tracked SL
+        # order alone still counts as confirmation: pinned S6 seams
+        # (test_tick_order_pricing) evidence the fill via the SL order.
+        if self._active_trade_id is None and self._sl_order_id is None:
+            return
         if self._trailing_activated:
             return
         if self._entry_price is None or self._atr_at_entry is None:
@@ -1625,34 +1694,17 @@ class LiveTrader:
 
         # 2. Verify IBKR position exists
         if ibkr_pos == 0:
-            # Position was closed while we were offline
+            # Position was closed while we were offline (filled out-of-band)
             log.info(
                 "[RECOVERY] Ledger trade %s shows OPEN but IBKR is flat "
-                "— marking as CLOSED (filled out-of-band)",
+                "— resolving out-of-band close",
                 trade_id,
             )
-            self.telemetry.close_position(
-                trade_id,
-                reason="CLOSED_OOB",
-                close_time=self._utc_iso_now(),
+            self._recover_oob_close(
+                trade_id=trade_id,
+                tp_order_id=tp_order_id,
+                sl_order_id=sl_order_id,
             )
-            # Clean up any orphaned TP/SL orders still resting on IBKR
-            # (e.g. TP filled offline → software OCA never cancelled the SL)
-            try:
-                cancelled = self.exec_client.cancel_open_orders(
-                    symbol=self._execution_symbol,
-                )
-                if cancelled > 0:
-                    log.info(
-                        "[RECOVERY] Cancelled %d orphaned CL order(s) "
-                        "after OOB close",
-                        cancelled,
-                    )
-            except Exception:
-                log.debug(
-                    "[RECOVERY] cancel_open_cl_orders failed",
-                    exc_info=True,
-                )
             return
 
         # 3. IBKR confirms position exists — restore in-memory state
@@ -1842,6 +1894,202 @@ class LiveTrader:
                 "[RECOVERY] Failed to re-place TP/SL orders"
             )
 
+    def _recover_oob_close(self, *, trade_id, tp_order_id, sl_order_id) -> None:
+        """Resolve a ledger-OPEN / broker-flat trade at startup (D1).
+
+        2026-07-06 incident: the symbol-scoped sweep silently missed a GTC
+        TP resting on the OLD contract symbol after an MGC->GC instance
+        reconfiguration (naked-short trap a human had to defuse), and the
+        close was written without an exit price. Order of operations:
+        cancel the ledger row's exact bracket ids with the symbol-blind
+        targeted primitive FIRST, then the bulk sweep as belt-and-braces;
+        recover the true exit leg/price from broker executions; anything
+        still unaccounted is a live orphan hazard — ERROR + Telegram,
+        never a debug-swallow.
+        """
+        expected_ids = [
+            oid for oid in (tp_order_id, sl_order_id) if oid is not None
+        ]
+
+        # (a) Targeted symbol-blind cancel of the exact protective ids.
+        cancelled_by_id = 0
+        try:
+            if expected_ids:
+                cancelled_by_id = self.exec_client.cancel_orders_by_ids(
+                    expected_ids,
+                )
+                if cancelled_by_id:
+                    log.info(
+                        "[RECOVERY] Cancelled %d protective order(s) by id "
+                        "after OOB close: %s",
+                        cancelled_by_id, expected_ids,
+                    )
+        except Exception:
+            log.error(
+                "[RECOVERY] Targeted cancel of protective orders %s FAILED",
+                expected_ids, exc_info=True,
+            )
+
+        # Belt-and-braces: the existing symbol-scoped sweep (A8: the bulk
+        # primitive and its other call sites are untouched).
+        bulk_cancelled = 0
+        try:
+            bulk_cancelled = self.exec_client.cancel_open_orders(
+                symbol=self._execution_symbol,
+            )
+            if bulk_cancelled > 0:
+                log.info(
+                    "[RECOVERY] Cancelled %d orphaned %s order(s) "
+                    "after OOB close",
+                    bulk_cancelled, self._execution_symbol,
+                )
+        except Exception:
+            log.error(
+                "[RECOVERY] Symbol-scoped sweep failed after OOB close",
+                exc_info=True,
+            )
+
+        # (b) Match broker executions to the protective order ids to learn
+        # which leg actually filled. symbol=None on purpose: after a
+        # contract reconfiguration the fill may live on the OLD symbol —
+        # order ids are the join key (str/int-robust: ledger ids are ints,
+        # execution records carry str order ids).
+        executions = []
+        try:
+            executions = self.exec_client.get_executions() or []
+        except Exception:
+            log.error(
+                "[RECOVERY] get_executions failed — cannot recover the OOB "
+                "exit price", exc_info=True,
+            )
+
+        exit_reason = "CLOSED_OOB_UNRECOVERED"
+        exit_price = None
+        matched = []
+        for rec in executions:
+            rec_oid = str(rec.get("order_id"))
+            if tp_order_id is not None and rec_oid == str(tp_order_id):
+                exit_reason = "TP_HIT_OOB"
+                exit_price = rec.get("price")
+                matched.append(rec)
+            elif sl_order_id is not None and rec_oid == str(sl_order_id):
+                exit_reason = "SL_HIT_OOB"
+                exit_price = rec.get("price")
+                matched.append(rec)
+
+        if exit_reason == "CLOSED_OOB_UNRECOVERED":
+            # (c) Day boundary / no matching execution: exit price stays
+            # NULL — an explicit unknown, never a fabricated price.
+            log.warning(
+                "[RECOVERY] No broker execution matches trade %s brackets "
+                "(tp=%s sl=%s) — closing CLOSED_OOB_UNRECOVERED with NULL "
+                "exit price",
+                trade_id, tp_order_id, sl_order_id,
+            )
+        else:
+            log.info(
+                "[RECOVERY] OOB exit recovered for trade %s: %s @ %s",
+                trade_id, exit_reason, exit_price,
+            )
+        self.telemetry.close_position(
+            trade_id,
+            reason=exit_reason,
+            close_time=self._utc_iso_now(),
+            exit_price=exit_price,
+        )
+
+        # Tradebook rows for the recovered fill. A5: event_ids are keyed on
+        # broker execId / order-id+permId — NOT the timestamp-based
+        # _build_event_id — so repeated restarts dedupe via INSERT OR IGNORE.
+        for rec in matched:
+            exec_id = rec.get("exec_id")
+            perm_id = rec.get("perm_id")
+            fill_event_id = (
+                f"EXECUTION_FILL_{exec_id}" if exec_id
+                else f"EXECUTION_FILL_{rec.get('order_id')}_{perm_id}"
+            )
+            try:
+                self.telemetry.log_tradebook_event(
+                    event_id=fill_event_id,
+                    event_type="EXECUTION_FILL",
+                    event_timestamp_utc=str(
+                        rec.get("time") or self._utc_iso_now()
+                    ),
+                    order_id=rec.get("order_id"),
+                    perm_id=perm_id,
+                    broker_execution_id=exec_id,
+                    symbol=rec.get("symbol"),
+                    local_symbol=rec.get("symbol"),
+                    contract_month=self._front_month_str,
+                    side=rec.get("side"),
+                    action=rec.get("side"),
+                    status="FILLED",
+                    avg_fill_price=rec.get("price"),
+                    last_fill_price=rec.get("price"),
+                    fill_qty=rec.get("qty"),
+                    **self._base_tradebook_fields(),
+                )
+            except Exception:
+                log.warning(
+                    "[RECOVERY] EXECUTION_FILL tradebook write failed "
+                    "(order %s)", rec.get("order_id"), exc_info=True,
+                )
+            report = rec.get("commission_report")
+            if report is not None and exec_id:
+                commission = (
+                    report.get("commission") if isinstance(report, dict)
+                    else getattr(report, "commission", None)
+                )
+                realized = (
+                    report.get("realizedPNL") if isinstance(report, dict)
+                    else getattr(report, "realizedPNL", None)
+                )
+                try:
+                    # Same COMMISSION_<execId> event id as the live
+                    # commission bridge (_on_commission_event) — a later
+                    # live report for the same execId dedupes.
+                    self.telemetry.log_tradebook_event(
+                        event_id=f"COMMISSION_{exec_id}",
+                        event_type="COMMISSION",
+                        event_timestamp_utc=self._utc_iso_now(),
+                        order_id=rec.get("order_id"),
+                        broker_execution_id=exec_id,
+                        symbol=rec.get("symbol"),
+                        commission=commission,
+                        realized_pnl=realized,
+                    )
+                except Exception:
+                    log.warning(
+                        "[RECOVERY] COMMISSION tradebook write failed "
+                        "(execId=%s)", exec_id, exc_info=True,
+                    )
+
+        # An expected protective order neither found open (cancelled) nor
+        # provably done (matched execution) is a live orphan hazard — the
+        # exact 2026-07-06 failure was silent by construction (success
+        # logged only if cancelled > 0, except -> log.debug).
+        unaccounted = (
+            len(expected_ids) - len(matched) - cancelled_by_id - bulk_cancelled
+        )
+        if unaccounted > 0:
+            log.error(
+                "[RECOVERY] %d protective order(s) of trade %s UNACCOUNTED "
+                "(tp=%s sl=%s): neither found open nor matched to a broker "
+                "execution — possible live orphan on another contract. "
+                "Verify and cancel manually in TWS.",
+                unaccounted, trade_id, tp_order_id, sl_order_id,
+            )
+            try:
+                self._telegram.send(
+                    f"[CRITICAL] *ORPHANED PROTECTIVE ORDER RISK*\n"
+                    f"Trade: `{trade_id}` (closed out-of-band)\n"
+                    f"TP order: `{tp_order_id}` / SL order: `{sl_order_id}`\n"
+                    f"`{unaccounted}` order(s) neither cancelled nor filled "
+                    f"— check TWS for orders resting on an OLD contract."
+                )
+            except Exception:
+                pass  # Never let Telegram failure block recovery
+
     def _cancel_orphaned_orders_on_startup(self) -> None:
         """Cancel any orphaned CL orders on IBKR if the bot considers itself FLAT.
 
@@ -1984,8 +2232,9 @@ class LiveTrader:
                 tp_price=tp_price,
                 sl_price=sl_price,
             )
-            # Update entry price to actual fill (for trailing stop)
-            self._entry_price = fill_price
+            # A3: _entry_price is seeded from the fill by the caller
+            # (_on_standard_execution_event) BEFORE children are placed —
+            # state must not be contingent on bracket-children success.
 
             # Store TP and SL order IDs for software-side OCA and
             if len(child_trades) >= 2:
@@ -2609,10 +2858,10 @@ class LiveTrader:
                 except Exception as exc:
                     log.error("Rollover: close_position failed: %s", exc)
 
-                # Reset internal position tracking
+                # Reset internal position tracking — a REAL close of a
+                # filled position: full reset incl. strategy.on_exit (A2).
                 self._reset_position_state(reason="ROLLOVER")
-                self._pending_entry_order_id = None
-                self._pending_entry_bar_time = None
+                self._clear_pending_entry()
 
                 self._telegram.send(
                     f"*CONTRACT ROLLOVER*\n"
@@ -2622,6 +2871,46 @@ class LiveTrader:
                     f"Waiting for next natural signal on `{new_local_sym}`."
                 )
             else:
+                # D2.4/A2 scoping: a pending never-filled entry rests on the
+                # EXPIRING contract — the same old-contract-orphan class as
+                # the OOB incident. Cancel it while the tracked symbol still
+                # matches and clear ONLY pending state (no fill ever existed,
+                # so no cooldown may fire).
+                if self._pending_entry_order_id is not None:
+                    filled_qty = self._pending_entry_filled_qty()
+                    if filled_qty > 0:
+                        # A1: partially filled — contracts exist broker-side;
+                        # never silently discard them.
+                        log.error(
+                            "Rollover: pending entry order %s is PARTIALLY "
+                            "FILLED (filled=%.0f) — NOT clearing; the fill "
+                            "path must adjudicate the broker-side position",
+                            self._pending_entry_order_id, filled_qty,
+                        )
+                        try:
+                            self._telegram.send(
+                                f"[CRITICAL] *PARTIAL FILL AT ROLLOVER*\n"
+                                f"Order: `{self._pending_entry_order_id}` "
+                                f"filled `{filled_qty:.0f}` on expiring "
+                                f"contract — manual verification required."
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            cancelled = self.exec_client.cancel_open_orders(
+                                symbol=self._execution_symbol,
+                            )
+                            log.info(
+                                "Rollover: cancelled %d pending entry "
+                                "order(s) on expiring contract", cancelled,
+                            )
+                        except Exception as exc:
+                            log.error(
+                                "Rollover: pending-entry cancel failed: %s",
+                                exc,
+                            )
+                        self._clear_pending_entry()
                 self._telegram.send(
                     f"*CONTRACT ROLLOVER*\n"
                     f"`{old_sym}` → `{new_local_sym}`\n\n"
@@ -3788,22 +4077,16 @@ class LiveTrader:
             algo_str = getattr(parent_order, "algoStrategy", None)
             if algo_str:
                 order_type_str = f"{order_type_str}+{algo_str}"
-            self._position_entry_bar_time = bar_time
-            self._position_bars_held = 0
-            # Track pending entry for TTL cancellation
+            # D2.1: PLACEMENT stores a pending-entry record ONLY. In-position
+            # state (_entry_price, _atr_at_entry, _position_side, extremes,
+            # _position_entry_bar_time) belongs to the confirmed FILL: the
+            # pre-fill state here ran trailing math off the submission price
+            # on every trade and re-fired the trailing warning bar after bar
+            # for unfilled GTC entries (NG order 19, 2026-07-06). Signal-time
+            # ATR and per-trade overrides travel in the decision context
+            # below; the fill callback seeds all in-position state from them.
             self._pending_entry_order_id = order_id
             self._pending_entry_bar_time = bar_time
-            # Capture trailing stop context at entry (will be updated on fill)
-            self._entry_price = current_price
-            # Use the side-specific ATR from evaluate() for trailing stop parity
-            self._atr_at_entry = signal.atr_at_entry if signal.atr_at_entry is not None else atr_value
-            self._position_side = 1 if signal.action == "BUY" else -1
-            self._trailing_activated = False
-            self._highest_high = float(rolling_df["High"].iloc[-1])
-            self._lowest_low = float(rolling_df["Low"].iloc[-1])
-            # Store per-trade overrides from tier matching (None = use global)
-            self._trade_trailing_atr_mult = signal.trailing_atr_mult
-            self._trade_max_hold_bars = signal.max_hold_bars
             local_sym = self._front_month_local_symbol if self._front_month_local_symbol else self._execution_symbol
             log.info(
                 "[TRADE] ENTRY: %s %d %s @ %s  "
@@ -3857,6 +4140,15 @@ class LiveTrader:
                 "buy_prob_str": buy_prob_str,
                 "sell_prob_str": sell_prob_str,
                 "bar_str": bar_str,
+                # D2.1: fill-time seeding inputs — the side-specific ATR
+                # from evaluate() (trailing-stop parity) and per-trade
+                # overrides from tier matching (None = use global).
+                "atr_at_entry": (
+                    signal.atr_at_entry
+                    if signal.atr_at_entry is not None else atr_value
+                ),
+                "trailing_atr_mult": signal.trailing_atr_mult,
+                "max_hold_bars": signal.max_hold_bars,
             }
             self._last_decision_context_by_order_id[order_id] = decision_ctx
             # Register as a known ENTRY order so the fill handler routes it to
@@ -4633,10 +4925,11 @@ class LiveTrader:
         except Exception:
             pass  # Never let Telegram failure block safety actions
 
-        # 5. Reset state to FLAT
+        # 5. Reset state to FLAT — a REAL close of a filled position (A2:
+        # full reset incl. strategy.on_exit); the pending record is cleared
+        # cooldown-free via _clear_pending_entry.
         self._reset_position_state(reason="NAKED_POSITION_KILL_SWITCH")
-        self._pending_entry_order_id = None
-        self._pending_entry_bar_time = None
+        self._clear_pending_entry()
 
     def _on_standard_execution_event(self, event: StandardExecutionEvent) -> None:
         self._open_orders[event.order_id] = event
@@ -4772,15 +5065,82 @@ class LiveTrader:
                 trade_id = "trade_" + str(order_id)
                 self._active_trade_id = trade_id
 
-                # Resolve side from the raw order action
-                if action_str == "BUY":
-                    side_str = "LONG"
-                elif action_str == "SELL":
-                    side_str = "SHORT"
-                else:
-                    side_str = "LONG" if self._position_side == 1 else (
-                        "SHORT" if self._position_side == -1 else "UNKNOWN"
+                # D2.2: a recognized entry fill MUST resolve its stored
+                # pending context (signal-time ATR, per-trade overrides).
+                # A miss means the seeding inputs are gone — raise loudly,
+                # fabricate nothing (bracket children cannot be placed; the
+                # kill switch protects the naked position).
+                if not ctx:
+                    log.error(
+                        "[TRADE] ENTRY FILL orderId=%s has NO stored decision "
+                        "context — ATR/trailing overrides unrecoverable and "
+                        "TP/SL children cannot be placed; kill switch will "
+                        "flatten the naked position",
+                        order_id,
                     )
+                    try:
+                        self._telegram.send(
+                            f"[CRITICAL] *ENTRY FILL WITHOUT CONTEXT*\n"
+                            f"Order: `{order_id}` fill: `{avg_price}`\n"
+                            f"No stored decision context — TP/SL cannot be "
+                            f"placed; expect kill-switch flatten."
+                        )
+                    except Exception:
+                        pass  # Never let Telegram failure block fill handling
+
+                # D2.2 + A3: ALL in-position state is seeded HERE, from the
+                # FILL — never at submission. The position exists broker-side
+                # from this moment even if bracket children fail below, so
+                # seeding precedes _place_bracket_children_on_fill.
+                if action_str == "BUY":
+                    self._position_side = 1
+                elif action_str == "SELL":
+                    self._position_side = -1
+                else:
+                    _ctx_action = ctx.get("entry_action")
+                    self._position_side = (
+                        1 if _ctx_action == "BUY"
+                        else -1 if _ctx_action == "SELL" else 0
+                    )
+                side_str = (
+                    "LONG" if self._position_side == 1
+                    else "SHORT" if self._position_side == -1 else "UNKNOWN"
+                )
+                self._entry_price = avg_price  # A3: fill, not submission price
+                self._trailing_activated = False
+                self._position_bars_held = 0
+                # Signal-time ATR / per-trade overrides from the pending
+                # context (always written at submission — D2.1; .get keeps
+                # legacy-shaped contexts from crashing the broker callback,
+                # and the ctx-miss ERROR above already covers the loud path).
+                self._atr_at_entry = ctx.get("atr_at_entry")
+                self._trade_trailing_atr_mult = ctx.get("trailing_atr_mult")
+                self._trade_max_hold_bars = ctx.get("max_hold_bars")
+                # Fill-time bar seeding: presence-selected frame — the same
+                # rule as _check_trailing_stop (T7/C4). Extremes are
+                # RE-SEEDED from the fill-time bar, not accumulated from
+                # submission (an unfilled GTC's pre-fill extremes poisoned
+                # the trailing trigger).
+                extremes_df = getattr(self, "rolling_df_5m", None)
+                if extremes_df is None:
+                    extremes_df = getattr(self, "rolling_df_1h", None)
+                if extremes_df is not None and len(extremes_df) > 0:
+                    fill_bar = extremes_df.iloc[-1]
+                    self._highest_high = float(fill_bar["High"])
+                    self._lowest_low = float(fill_bar["Low"])
+                    self._position_entry_bar_time = extremes_df.index[-1]
+                else:
+                    # No frame to seed from (fill before warm data) — say so
+                    # loudly; extremes stay at the accumulator identities.
+                    log.error(
+                        "[TRADE] ENTRY FILL orderId=%s: no rolling frame "
+                        "available to seed fill-time extremes/entry bar",
+                        order_id,
+                    )
+                # D2.2: the pending slot is consumed by this fill — clear it
+                # eagerly so TTL cannot re-arm against a live trade.
+                if str(getattr(self, "_pending_entry_order_id", None)) == str(order_id):
+                    self._clear_pending_entry()
 
                 try:
                     self.telemetry.open_position(

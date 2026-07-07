@@ -16,9 +16,12 @@ Checks (all read-only; the ONLY write is this module's own state file
                 ``subs_lost=True`` is a finding.
 3. Positions  — from fleet_telemetry.db: OPEN rows missing TP/SL order ids
                 (naked position!), duplicate OPEN rows per (symbol,
-                client_id), CLOSED rows missing exit_price/close_reason,
-                and EXECUTE ledger rows still missing fill_price after a
-                10-minute grace (update_fill regression signal).
+                client_id), CLOSED rows missing exit_price/close_reason
+                (closes within 48h only — adjudicated old rows stop
+                nagging), and EXECUTE ledger rows still missing fill_price
+                after a 10-minute grace AND provably filled per tradebook/
+                position evidence (update_fill regression signal; NULL is
+                the legitimate permanent state of never-filled entries).
 4. Bars       — max(market_bars.timestamp) per (symbol, client_id) older
                 than --stale-bars-min (default 45). Market-closed judgment
                 belongs to the AGENT reading the report, not this script.
@@ -46,6 +49,7 @@ DEFAULT_QUEUE_DIR = _PROJECT_ROOT / ".agents" / "collab" / "error_queue"
 STATE_FILENAME = "health_state.json"
 FILL_PRICE_GRACE_MINUTES = 10
 DEFAULT_STALE_BARS_MINUTES = 45
+INCOMPLETE_CLOSE_WINDOW_HOURS = 48
 
 # "2026-07-06 06:00:31 [ERROR] ..." — level token after the timestamp.
 _LEVEL_RE = re.compile(
@@ -136,10 +140,21 @@ def _parse_ts(value):
     return datetime.fromisoformat(str(value).replace("T", " "))
 
 
-def check_positions(active_rows, ledger_rows, now):
-    """DB-internal trade/order consistency findings."""
+def check_positions(active_rows, ledger_rows, now, *, fill_evidence=None):
+    """DB-internal trade/order consistency findings.
+
+    fill_evidence (D3, oob-entry-state-recovery): optional collection of
+    order ids PROVABLY filled (tradebook EXECUTION_FILL order_ids union
+    active_positions.entry_order_id values). With evidence, a NULL-fill
+    EXECUTE row flags only when its order provably filled — a true
+    update_fill regression. NULL fill_price is otherwise the legitimate
+    permanent state of a never-filled/TTL-cancelled entry. None (the
+    default) means evidence UNAVAILABLE -> legacy conservative time-based
+    over-flagging (A6: over-flag, never silently skip).
+    """
     findings = []
     open_seen = {}
+    close_recency = timedelta(hours=INCOMPLETE_CLOSE_WINDOW_HOURS)
     for row in active_rows:
         who = f"{row['symbol']}/{row['client_id']}"
         if row["status"] == "OPEN":
@@ -157,14 +172,25 @@ def check_positions(active_rows, ledger_rows, now):
             open_seen.setdefault(key, []).append(row["trade_id"])
         elif row["status"] == "CLOSED":
             if row.get("exit_price") is None or not row.get("close_reason"):
-                findings.append({
-                    "kind": "incomplete-close", "who": who,
-                    "detail": (
-                        f"{row['trade_id']} is CLOSED with exit_price="
-                        f"{row.get('exit_price')} close_reason="
-                        f"{row.get('close_reason')}"
-                    ),
-                })
+                # D3: adjudicated old rows must stop nagging hourly — scope
+                # to recent closes. NULL/unparseable close_time still flags
+                # ("surface it" precedent).
+                recent = True
+                close_time = row.get("close_time")
+                if close_time is not None:
+                    try:
+                        recent = (now - _parse_ts(close_time)) <= close_recency
+                    except (TypeError, ValueError):
+                        recent = True
+                if recent:
+                    findings.append({
+                        "kind": "incomplete-close", "who": who,
+                        "detail": (
+                            f"{row['trade_id']} is CLOSED with exit_price="
+                            f"{row.get('exit_price')} close_reason="
+                            f"{row.get('close_reason')}"
+                        ),
+                    })
     for (symbol, client_id), trade_ids in open_seen.items():
         if len(trade_ids) > 1:
             findings.append({
@@ -173,11 +199,20 @@ def check_positions(active_rows, ledger_rows, now):
                 "detail": f"{len(trade_ids)} OPEN rows: {', '.join(trade_ids)}",
             })
     grace = timedelta(minutes=FILL_PRICE_GRACE_MINUTES)
+    # str/int-robust: ledger order_ids are ints, tradebook rows may carry
+    # str(orderId) from broker events.
+    evidence_ids = (
+        None if fill_evidence is None
+        else {str(oid) for oid in fill_evidence}
+    )
     for row in ledger_rows:
         if row.get("action_taken") != "EXECUTE":
             continue
         if row.get("fill_price") is not None:
             continue
+        if (evidence_ids is not None
+                and str(row.get("order_id")) not in evidence_ids):
+            continue  # no fill proven — a never-filled entry, not a bug
         created = row.get("created_at") or row.get("timestamp")
         try:
             age_ok = (now - _parse_ts(created)) > grace
@@ -321,10 +356,20 @@ def main(argv=None):
             conn = sqlite3.connect(
                 f"file:{db_path.as_posix()}?mode=ro", uri=True)
             try:
-                active = _query_dicts(conn, (
-                    "SELECT symbol, client_id, trade_id, status,"
-                    " tp_order_id, sl_order_id, entry_price, exit_price,"
-                    " close_reason FROM active_positions"))
+                try:
+                    active = _query_dicts(conn, (
+                        "SELECT symbol, client_id, trade_id, status,"
+                        " tp_order_id, sl_order_id, entry_price, exit_price,"
+                        " close_reason, entry_order_id, close_time"
+                        " FROM active_positions"))
+                except sqlite3.OperationalError:
+                    # Legacy schema without entry_order_id — the positions
+                    # check must keep running; fill evidence degrades to
+                    # None below (A6: over-flag, never silently skip).
+                    active = _query_dicts(conn, (
+                        "SELECT symbol, client_id, trade_id, status,"
+                        " tp_order_id, sl_order_id, entry_price, exit_price,"
+                        " close_reason, close_time FROM active_positions"))
                 ledger = _query_dicts(conn, (
                     "SELECT symbol, client_id, timestamp, action_taken,"
                     " order_id, fill_price, created_at FROM trade_ledger"
@@ -332,9 +377,26 @@ def main(argv=None):
                 bars = _query_dicts(conn, (
                     "SELECT symbol, client_id, MAX(timestamp) AS last_bar"
                     " FROM market_bars GROUP BY symbol, client_id"))
+                # Fill evidence (D3): order ids provably filled — tradebook
+                # EXECUTION_FILL rows union position entry_order_ids.
+                # ORDER_SUBMITTED rows are deliberately NOT evidence.
+                try:
+                    fill_rows = _query_dicts(conn, (
+                        "SELECT DISTINCT order_id FROM tradebook_events"
+                        " WHERE event_type = 'EXECUTION_FILL'"
+                        " AND order_id IS NOT NULL"))
+                    fill_evidence = {r["order_id"] for r in fill_rows}
+                    fill_evidence.update(
+                        row["entry_order_id"] for row in active
+                        if row.get("entry_order_id") is not None)
+                except sqlite3.OperationalError:
+                    fill_evidence = None  # legacy schema — no evidence source
             finally:
                 conn.close()
-            findings.extend(check_positions(active, ledger, now))
+            # A6: fill_evidence is ALWAYS passed explicitly here — the
+            # parameter default exists only for callers without evidence.
+            findings.extend(check_positions(
+                active, ledger, now, fill_evidence=fill_evidence))
             checked.append("positions")
             findings.extend(check_bar_freshness(
                 bars, now, threshold_minutes=args.stale_bars_min))

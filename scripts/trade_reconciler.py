@@ -51,9 +51,14 @@ _EXIT_REASON_MAP = {
     # Live -> Backtest canonical names
     "TP_HIT": "TP",
     "SL_HIT": "SL",
+    # OOB-recovered exits (oob-entry-state-recovery, A7): the same exits,
+    # learned late from broker executions at startup recovery.
+    "TP_HIT_OOB": "TP",
+    "SL_HIT_OOB": "SL",
     "TRAILING_SL": "TRAILING_BE",
     "TIME_BARRIER": "TIME_BARRIER",
     "CLOSED_OOB": "CLOSED_OOB",
+    "CLOSED_OOB_UNRECOVERED": "CLOSED_OOB_UNRECOVERED",
 }
 
 _BACKTEST_EXIT_MAP = {

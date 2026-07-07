@@ -435,7 +435,11 @@ class ConfigurableStrategy(Strategy):
             # treated conservatively as SL-flavored: the backtest flavors
             # TIME_BARRIER exits with sl_cooldown, and an OOB close is an exit
             # whose true reason was lost — the longer cooldown is the safe match.
-            long_cooldown = sl_cd_l if self._last_exit_reason_long in ("SL_HIT", "TIME_BARRIER", "REVERSE", "CLOSED", "CLOSED_OOB") else tp_cd_l
+            # OOB-recovery vocabulary (A7): SL_HIT_OOB IS an SL exit learned
+            # late; CLOSED_OOB_UNRECOVERED keeps the conservative SL cooldown.
+            # TP_HIT_OOB is CONSCIOUSLY EXCLUDED — TP flavor is expressed by
+            # absence from these tuples.
+            long_cooldown = sl_cd_l if self._last_exit_reason_long in ("SL_HIT", "TIME_BARRIER", "REVERSE", "CLOSED", "CLOSED_OOB", "SL_HIT_OOB", "CLOSED_OOB_UNRECOVERED") else tp_cd_l
             # UNION with the flavor-independent per-side cooldown_bars: the
             # backtest enforces it via the TieredEnsembleStrategy re-gate
             # reading REAL EngineState counters; live's re-gate is sentinel-
@@ -447,7 +451,7 @@ class ConfigurableStrategy(Strategy):
             short_cfg = self.config.get("short", {})
             tp_cd_s = short_cfg.get("tp_cooldown_bars", self.config.get("tp_cooldown_bars", 0))
             sl_cd_s = short_cfg.get("sl_cooldown_bars", self.config.get("sl_cooldown_bars", 3))
-            short_cooldown = sl_cd_s if self._last_exit_reason_short in ("SL_HIT", "TIME_BARRIER", "REVERSE", "CLOSED", "CLOSED_OOB") else tp_cd_s
+            short_cooldown = sl_cd_s if self._last_exit_reason_short in ("SL_HIT", "TIME_BARRIER", "REVERSE", "CLOSED", "CLOSED_OOB", "SL_HIT_OOB", "CLOSED_OOB_UNRECOVERED") else tp_cd_s
             short_cooldown = max(short_cooldown, int(short_cfg.get("cooldown_bars", 0)))
             if self._last_exit_bars_ago_short <= short_cooldown:
                 sell_prob = 0.0

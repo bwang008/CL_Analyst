@@ -109,6 +109,38 @@ class ExecutionClient(ABC):
     def cancel_open_orders(self, symbol: str) -> int:
         pass
 
+    def cancel_orders_by_ids(self, order_ids: list) -> int:
+        """Cancel exactly the given order ids, IRRESPECTIVE of contract symbol.
+
+        Targeted OOB-recovery primitive (oob-entry-state-recovery): the
+        symbol-scoped ``cancel_open_orders`` silently missed protective
+        orders resting on an OLD contract symbol after an instance
+        reconfiguration (2026-07-06 MGC->GC orphaned-GTC incident).
+        Returns how many of the requested ids were found open and
+        cancelled; unknown ids are simply not counted.
+
+        No silent default here: an adapter that cannot cancel by id must
+        say so loudly — a fabricated success count would recreate the
+        silent-miss bug this primitive exists to fix.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement cancel_orders_by_ids"
+        )
+
+    def get_executions(self, symbol: Optional[str] = None) -> list:
+        """Return broker execution (fill) records as flat dicts.
+
+        Record contract: each dict carries at least the keys
+        ``order_id``, ``perm_id``, ``exec_id``, ``price``, ``qty``,
+        ``side``, ``time``, ``symbol`` and ``commission_report`` (the
+        broker commissionReport object/mapping when present, else None).
+        ``symbol=None`` returns ALL fills — OOB recovery matches by order
+        id, and the fill may rest on an OLD contract symbol.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement get_executions"
+        )
+
     @abstractmethod
     def close_position(self, symbol: str, exit_mode: str, current_price: float) -> Any:
         pass

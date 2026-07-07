@@ -242,6 +242,74 @@ class IBKRExecutionClient(ExecutionClient):
     def cancel_open_orders(self, symbol: str) -> int:
         return self.manager.cancel_open_cl_orders(symbol=symbol)
 
+    def cancel_orders_by_ids(self, order_ids: list) -> int:
+        """Cancel exactly the requested order ids, irrespective of contract.
+
+        OOB-recovery primitive: matches openTrades() on orderId only —
+        NO symbol filter, so a protective order resting on an OLD contract
+        symbol (post-reconfiguration, e.g. MGC->GC 2026-07-06) is still
+        cancelled. Per-instance client ids mean openTrades() exposes only
+        this instance's own orders, so cross-child interference is
+        structurally impossible. str/int-robust: ledger ids are ints,
+        ib_insync order ids are ints, callers may pass either.
+        """
+        wanted = {str(oid) for oid in order_ids}
+        cancelled = 0
+        for trade in self.manager.ib.openTrades():
+            order = getattr(trade, "order", None)
+            if order is None:
+                continue
+            if str(getattr(order, "orderId", None)) not in wanted:
+                continue
+            self.manager.ib.cancelOrder(trade.order)
+            cancelled += 1
+            log.info(
+                "CANCEL BY ID: orderId=%s (contract=%s)",
+                order.orderId,
+                getattr(getattr(trade, "contract", None), "symbol", "?"),
+            )
+        return cancelled
+
+    def get_executions(self, symbol: Optional[str] = None) -> list:
+        """Return this session's fills as flat record dicts.
+
+        Wraps ib_insync ``ib.fills()`` — current-day executions are
+        locally cached by connect's reqExecutions, so this is a sync-safe
+        read at startup recovery (same pattern as get_open_trades).
+        symbol=None returns every fill: OOB recovery matches by order id
+        and the fill may live on an old contract symbol.
+        """
+        records = []
+        for fill in self.manager.ib.fills():
+            execution = getattr(fill, "execution", None)
+            if execution is None:
+                continue
+            contract = getattr(fill, "contract", None)
+            contract_symbol = getattr(contract, "symbol", None)
+            if symbol is not None and contract_symbol != symbol:
+                continue
+            report = getattr(fill, "commissionReport", None)
+            # ib_insync pre-populates Fill.commissionReport with an empty
+            # placeholder (execId == "") until the broker report arrives —
+            # that placeholder means "no report", never a $0 commission.
+            if report is not None and getattr(report, "execId", None) == "":
+                report = None
+            records.append({
+                "order_id": str(getattr(execution, "orderId", None)),
+                "perm_id": getattr(execution, "permId", None),
+                "exec_id": getattr(execution, "execId", None),
+                "price": float(getattr(execution, "price", 0.0) or 0.0),
+                "qty": float(getattr(execution, "shares", 0) or 0),
+                "side": getattr(execution, "side", None),
+                "time": (
+                    getattr(execution, "time", None)
+                    or getattr(fill, "time", None)
+                ),
+                "symbol": contract_symbol,
+                "commission_report": report,
+            })
+        return records
+
     def close_position(self, symbol: str, exit_mode: str, current_price: float) -> Any:
         return self.manager.close_cl_position(symbol=symbol, exit_mode=exit_mode, current_price=current_price)
 

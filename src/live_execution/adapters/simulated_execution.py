@@ -140,6 +140,11 @@ class SimulatedExecution(ExecutionClient):
         self._completed_trades: list[_SimTrade] = []
         self._bars_since_entry: int = 0
 
+        # Execution records for get_executions() — one dict per sim fill,
+        # in the ExecutionClient record-contract shape (A4: honest sim
+        # domain, never fabricated).
+        self._executions: list[dict] = []
+
         # Deferred callbacks (fired after bar processing)
         self._deferred_callbacks: list[StandardExecutionEvent] = []
 
@@ -292,6 +297,11 @@ class SimulatedExecution(ExecutionClient):
             raw_event=mock_trade,
         )
         self._deferred_callbacks.append(fill_event)
+        self._record_execution(
+            order_id=order_id, symbol=symbol, price=fill_price,
+            qty=quantity, side=action.upper(),
+            time=getattr(self, "_current_bar_time", None),
+        )
 
         return mock_trade
 
@@ -442,6 +452,56 @@ class SimulatedExecution(ExecutionClient):
             )
         return len(to_remove)
 
+    def cancel_orders_by_ids(self, order_ids: list) -> int:
+        """Cancel exactly the given resting order ids, symbol-blind (A4).
+
+        Honest sim-domain implementation: only ids actually resting are
+        removed and counted — an unknown id must never report success.
+        """
+        wanted = {str(oid) for oid in order_ids}
+        to_remove = [
+            oid for oid in self._resting_orders if str(oid) in wanted
+        ]
+        for oid in to_remove:
+            del self._resting_orders[oid]
+        if to_remove:
+            log.info(
+                "SIM CANCEL BY ID: removed %d resting order(s): %s",
+                len(to_remove), to_remove,
+            )
+        return len(to_remove)
+
+    def get_executions(self, symbol: Optional[str] = None) -> list:
+        """Return recorded sim fills in the ExecutionClient record shape (A4).
+
+        A fresh sim has no executions — the list is only ever populated by
+        actual matching-engine fills, never invented.
+        """
+        if symbol is None:
+            return list(self._executions)
+        return [r for r in self._executions if r.get("symbol") == symbol]
+
+    def _record_execution(
+        self, *, order_id, symbol, price, qty, side, time,
+    ) -> None:
+        """Append a get_executions record for a sim fill (record contract).
+
+        commission_report is None on purpose: the sim books commission on
+        the trade ledger, not as per-fill broker reports — None is the
+        honest "no broker report" value.
+        """
+        self._executions.append({
+            "order_id": str(order_id),
+            "perm_id": order_id,
+            "exec_id": f"SIM.{order_id}.{len(self._executions) + 1}",
+            "price": float(price),
+            "qty": float(qty),
+            "side": "BOT" if str(side).upper() == "BUY" else "SLD",
+            "time": time,
+            "symbol": symbol,
+            "commission_report": None,
+        })
+
     def close_position(
         self,
         symbol: str,
@@ -489,8 +549,14 @@ class SimulatedExecution(ExecutionClient):
             exit_action, qty, symbol, exit_base_price, fill_price,
         )
 
+        close_order_id = self._alloc_order_id()
+        self._record_execution(
+            order_id=close_order_id, symbol=symbol, price=fill_price,
+            qty=qty, side=exit_action,
+            time=getattr(self, "_current_bar_time", None),
+        )
         return SimpleNamespace(
-            order=SimpleNamespace(orderId=self._alloc_order_id()),
+            order=SimpleNamespace(orderId=close_order_id),
         )
 
     # ── Matching Engine (called by driver) ───────────────────────────
@@ -721,6 +787,11 @@ class SimulatedExecution(ExecutionClient):
             )
             for cb in self._order_callbacks:
                 cb(event)
+            self._record_execution(
+                order_id=order.order_id, symbol=order.symbol,
+                price=fill_price, qty=order.quantity, side=order.action,
+                time=bar_time,
+            )
 
             # Remove from resting
             self._resting_orders.pop(order.order_id, None)
@@ -766,6 +837,11 @@ class SimulatedExecution(ExecutionClient):
             )
             for cb in self._order_callbacks:
                 cb(event)
+            self._record_execution(
+                order_id=order.order_id, symbol=order.symbol,
+                price=fill_price, qty=order.quantity, side=order.action,
+                time=bar_time,
+            )
 
             # Remove from resting
             self._resting_orders.pop(order.order_id, None)
