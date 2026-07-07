@@ -154,9 +154,17 @@ investigation once; do not repeat it:
 
 ## Environment & tooling rules (each cost real time once)
 
-- ALL project python (pytest, fleet_health, Telegram, DB scripts) runs
-  via `conda run -n trader python ...` — the global interpreter lacks
-  dotenv and pins differ (pandas 1.5.3 in trader).
+- AGENT-run project python (pytest, fleet_health, Telegram, DB scripts)
+  goes via `conda run -n trader python ...`: in the agent's shell, bare
+  `python` is a minimal global interpreter without dotenv. This rule is
+  about the agent's environment, NOT the operator's — the operator's
+  terminal `python` is the Anaconda base env (fully provisioned; the
+  fleet itself runs on it). pytest specifically should ALWAYS use the
+  trader env (the suite is validated against its pandas 1.5.3 pin).
+  `conda run` buffers output until exit: fine for one-shots, WRONG for
+  the live fleet — the fleet launch command is deliberately plain
+  `python` so the operator sees streaming console output
+  (`--live-stream` exists if conda-run streaming is ever needed).
 - The agent CANNOT (permission-blocked, by design): stop/start/signal the
   fleet process, write to the live telemetry DB, or open even read-only
   broker sessions. These are operator actions — when one is needed,
