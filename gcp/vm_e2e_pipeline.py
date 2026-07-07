@@ -26,6 +26,7 @@ Author: CL Analyst
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import pickle
@@ -48,6 +49,7 @@ from sklearn.metrics import (
     log_loss,
     precision_score,
     recall_score,
+    roc_auc_score,
 )
 
 # Ensure project root is on path
@@ -450,6 +452,315 @@ def package_artifacts(output_dir: str, zip_path: str) -> str:
     size_mb = os.path.getsize(zip_path) / (1024 * 1024)
     print(f"  Packaged: {zip_path} ({size_mb:.1f} MB)")
     return zip_path
+
+
+# ---------------------------------------------------------------------------
+# Target screen (fixed-param, no-Optuna pre-screen)
+# ---------------------------------------------------------------------------
+
+# One fixed LightGBM config sitting at the MIDDLE of the Optuna search box, used
+# unchanged for EVERY screened target so holdout AUCs are directly comparable
+# across targets. This is deliberately NOT tuned per-target: the screen answers
+# "does this target carry learnable edge at a reasonable model", not "what is the
+# best possible model for this target" (that is the downstream Optuna sweep's
+# job). Values mirror the OptunaConfig mid-points in src/config/schemas.py.
+SCREEN_LGBM_PARAMS: dict = {
+    "max_depth": 6,
+    "num_leaves": 31,
+    "learning_rate": 0.02,
+    "n_estimators": 1500,
+    "min_child_samples": 200,
+    "feature_fraction": 0.7,
+}
+
+# Bars per calendar year for an hourly futures session — used only as a fallback
+# to convert the top-20% firing rate into a rough signals/year when the holdout
+# span is degenerate (single-bar / zero-span). The primary path derives
+# bars_per_year from the actual holdout span.
+_HOURS_PER_TRADING_YEAR = 6000.0
+
+
+def _safe_auc(y_true: np.ndarray, scores: np.ndarray) -> float:
+    """ROC-AUC that returns nan on degenerate (single-class) labels instead of
+    letting sklearn raise. A screened target whose split collapsed to one class
+    carries no measurable edge — report nan, do not crash the whole screen."""
+    y_true = np.asarray(y_true)
+    if len(np.unique(y_true)) < 2:
+        return float("nan")
+    return float(roc_auc_score(y_true, scores))
+
+
+def _screen_one_target(
+    df_train: pd.DataFrame,
+    df_vault: pd.DataFrame,
+    feature_cols: list[str],
+    target_col: str,
+    direction: str,
+    params: dict,
+    random_seed: int = 42,
+) -> dict:
+    """Train ONE fixed-param LightGBM for a single target and measure its
+    out-of-sample edge + a tradeability proxy.
+
+    Returns a flat dict of comparable metrics (see the report columns). AUCs on
+    degenerate single-class splits are nan (guarded), never a crash.
+    """
+    # train_final_model MUTATES its params dict (.pop of lookback_window_years /
+    # n_estimators). Pass a fresh deepcopy so the shared module constant and any
+    # caller's dict are never clobbered across targets.
+    # The screen only needs metrics, not persisted pickles — train_final_model
+    # always writes one, so direct it to a throwaway temp file (never pollutes
+    # the repo / output dir) and discard it.
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="screen_") as _tmp:
+        model = train_final_model(
+            df_train=df_train,
+            feature_cols=feature_cols,
+            target_col=target_col,
+            params=copy.deepcopy(params),
+            balance_mode="downsample",
+            output_path=os.path.join(_tmp, f"screen_{target_col}.pkl"),
+            random_seed=random_seed,
+        )
+
+    # Evaluate on the FULL (non-downsampled) splits — the training call
+    # downsamples internally for fitting only; AUC must reflect the real,
+    # imbalanced population.
+    probs_train = _sigmoid(model.predict(df_train[feature_cols]))
+    probs_holdout = _sigmoid(model.predict(df_vault[feature_cols]))
+
+    y_train = (df_train[target_col] > 0).astype(int).to_numpy()
+    y_holdout = (df_vault[target_col] > 0).astype(int).to_numpy()
+
+    auc_train = _safe_auc(y_train, probs_train)
+    auc_holdout = _safe_auc(y_holdout, probs_holdout)
+
+    # PR-AUC (average precision) on the holdout — also guarded on single class.
+    if len(np.unique(y_holdout)) < 2:
+        pr_auc_holdout = float("nan")
+    else:
+        pr_auc_holdout = float(average_precision_score(y_holdout, probs_holdout))
+
+    probs_holdout_s = pd.Series(probs_holdout)
+    prob_spread = float(probs_holdout_s.quantile(0.95) - probs_holdout_s.quantile(0.05))
+
+    # ---- Tradeability proxy: "edge AND enough trades" ----
+    # Reference selective threshold = top-20% firing on the holdout.
+    ref_thr = float(probs_holdout_s.quantile(0.80))
+    fired = probs_holdout >= ref_thr
+    if fired.sum() > 0:
+        precision_at_ref = float(np.mean(y_holdout[fired]))
+    else:
+        precision_at_ref = float("nan")
+
+    # Convert the 20% firing rate to signals/year via the holdout calendar span.
+    if len(df_vault.index) > 0:
+        span_days = (df_vault.index.max() - df_vault.index.min()).total_seconds() / 86400.0
+    else:
+        span_days = 0.0
+    if span_days > 0:
+        bars_per_year = len(df_vault) / (span_days / 365.25)
+    else:
+        # Degenerate span (0/1 bars) — fall back to a nominal hourly-year rate.
+        bars_per_year = _HOURS_PER_TRADING_YEAR
+    signals_per_yr_at_ref = float(0.20 * bars_per_year)
+
+    return {
+        "target": target_col,
+        "direction": direction,
+        "auc_train": auc_train,
+        "auc_holdout": auc_holdout,
+        "pr_auc_holdout": pr_auc_holdout,
+        "pos_rate_train": float(y_train.mean()) if len(y_train) else float("nan"),
+        "pos_rate_holdout": float(y_holdout.mean()) if len(y_holdout) else float("nan"),
+        "n_train": int(len(df_train)),
+        "n_holdout": int(len(df_vault)),
+        "prob_spread": prob_spread,
+        "precision_at_ref": precision_at_ref,
+        "signals_per_yr_at_ref": signals_per_yr_at_ref,
+    }
+
+
+def _split_train_vault(
+    df: pd.DataFrame,
+    train_cutoff_date: str,
+    holdout_cutoff_date: str | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Shared split helper mirroring run_pipeline's split semantics.
+
+    2-way (default): train = < cutoff, vault = >= cutoff.
+    3-way (holdout_cutoff set): train = < cutoff, vault = >= holdout_cutoff
+    (the middle [cutoff, holdout_cutoff) window is the execution-optimizer val
+    split, which the screen does not use). run_pipeline's own inline split is
+    left untouched — this helper only serves the screen path.
+    """
+    cutoff = pd.Timestamp(train_cutoff_date)
+    if holdout_cutoff_date is None:
+        holdout_cutoff = cutoff + pd.DateOffset(years=1)
+    else:
+        holdout_cutoff = pd.Timestamp(holdout_cutoff_date)
+    assert cutoff < holdout_cutoff, (
+        f"train_cutoff_date ({cutoff.date()}) must be before "
+        f"holdout_cutoff_date ({holdout_cutoff.date()})"
+    )
+
+    df_train = df[df.index < cutoff].copy()
+    if holdout_cutoff_date is None:
+        df_vault = df[df.index >= cutoff].copy()
+    else:
+        df_vault = df[df.index >= holdout_cutoff].copy()
+    return df_train, df_vault
+
+
+def write_auc_report(rows: list[dict], output_path: str, meta: dict) -> str:
+    """Write the ranked AUC_Model_Report.md (rows sorted by auc_holdout desc)."""
+    ranked = sorted(
+        rows,
+        key=lambda r: (r["auc_holdout"] if r["auc_holdout"] == r["auc_holdout"] else -1.0),
+        reverse=True,
+    )
+
+    def _fmt(v, spec: str = ".4f") -> str:
+        if v is None or (isinstance(v, float) and v != v):  # None or NaN
+            return "nan"
+        return format(v, spec)
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("# Target Screen — AUC Model Report\n\n")
+        f.write(f"- Symbol: {meta.get('symbol')}\n")
+        f.write(f"- Dataset: {meta.get('dataset')}\n")
+        f.write(f"- Train cutoff: {meta.get('train_cutoff_date')}\n")
+        f.write(f"- Holdout cutoff: {meta.get('holdout_cutoff_date')}\n")
+        f.write(f"- Random seed: {meta.get('random_seed')}\n")
+        f.write(f"- Fixed LGBM params: {meta.get('params')}\n\n")
+        f.write(
+            "_Legend: holdout AUC ~= 0.50 means no edge (target not worth a full "
+            "sweep); >= ~0.55 indicates real, learnable edge._\n\n"
+        )
+        f.write(
+            "| target | dir | AUC train | AUC holdout | PR-AUC holdout | "
+            "pos% train | pos% holdout | prob spread | signals/yr | precision@ref |\n"
+        )
+        f.write(
+            "|---|---|---|---|---|---|---|---|---|---|\n"
+        )
+        for r in ranked:
+            f.write(
+                f"| {r['target']} | {r['direction']} | "
+                f"{_fmt(r['auc_train'])} | {_fmt(r['auc_holdout'])} | "
+                f"{_fmt(r['pr_auc_holdout'])} | "
+                f"{_fmt(r['pos_rate_train'], '.3f')} | {_fmt(r['pos_rate_holdout'], '.3f')} | "
+                f"{_fmt(r['prob_spread'], '.4f')} | "
+                f"{_fmt(r['signals_per_yr_at_ref'], '.1f')} | "
+                f"{_fmt(r['precision_at_ref'], '.4f')} |\n"
+            )
+
+    print(f"  AUC report: {output_path} ({len(ranked)} targets)")
+    return output_path
+
+
+def run_screen(
+    data_path: str,
+    train_cutoff_date: str,
+    targets: list[str],
+    symbol: str,
+    output_dir: str,
+    holdout_cutoff_date: str | None = None,
+    random_seed: int = 42,
+) -> list[dict]:
+    """Fixed-param target screen: one LightGBM per target, holdout edge metrics,
+    ranked AUC_Model_Report.md. No Optuna, no backtest.
+
+    Mirrors run_pipeline's split/seed/feature/target-column handling verbatim so
+    screen AUCs are apples-to-apples with what a full sweep would train on.
+    """
+    start_time = time.perf_counter()
+
+    # Reproducibility: seed the process-level numpy RNG (matches run_pipeline).
+    np.random.seed(random_seed)
+
+    print("=" * 70)
+    print("[SCREEN] TARGET SCREEN (fixed-param, no-Optuna)")
+    print("=" * 70)
+    print(f"  Data:    {data_path}")
+    print(f"  Cutoff:  {train_cutoff_date}")
+    print(f"  Symbol:  {symbol}")
+    print(f"  Targets: {targets}")
+    print(f"  Output:  {output_dir}")
+    print("=" * 70)
+
+    df = pd.read_parquet(data_path)
+    feature_cols = util.get_feature_columns(df)
+
+    df_train_all, df_vault_all = _split_train_vault(
+        df, train_cutoff_date, holdout_cutoff_date
+    )
+    print(f"  Split:   train={len(df_train_all):,} rows, vault={len(df_vault_all):,} rows")
+    print(f"  Features: {len(feature_cols)}")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    rows: list[dict] = []
+    for target_name in targets:
+        direction = "long" if target_name.endswith("_LONG") else "short"
+        target_col = util.get_target_column(df, target_name)
+
+        # Per-target dropna on each split (NaN targets can't be scored).
+        df_train = df_train_all.dropna(subset=[target_col])
+        df_vault = df_vault_all.dropna(subset=[target_col])
+
+        print(f"\n{'='*60}")
+        print(f"SCREENING: {target_name} ({direction})")
+        print(f"  train={len(df_train):,}  vault={len(df_vault):,}")
+        print(f"{'='*60}")
+
+        row = _screen_one_target(
+            df_train=df_train,
+            df_vault=df_vault,
+            feature_cols=feature_cols,
+            target_col=target_col,
+            direction=direction,
+            params=SCREEN_LGBM_PARAMS,
+            random_seed=random_seed,
+        )
+        # Preserve the caller-supplied target name (get_target_column may
+        # resolve legacy aliases, but the report should show what was screened).
+        row["target"] = target_name
+        rows.append(row)
+        print(
+            f"  AUC holdout={row['auc_holdout']:.4f}  "
+            f"PR-AUC={row['pr_auc_holdout']:.4f}  "
+            f"precision@ref={row['precision_at_ref']:.4f}"
+        )
+
+    report_path = os.path.join(output_dir, "AUC_Model_Report.md")
+    dataset_tag = os.path.splitext(os.path.basename(data_path))[0]
+    write_auc_report(
+        rows,
+        report_path,
+        meta={
+            "symbol": symbol,
+            "dataset": dataset_tag,
+            "train_cutoff_date": train_cutoff_date,
+            "holdout_cutoff_date": holdout_cutoff_date,
+            "params": SCREEN_LGBM_PARAMS,
+            "random_seed": random_seed,
+        },
+    )
+
+    elapsed = time.perf_counter() - start_time
+    print(f"\n{'='*70}")
+    print(f"SCREEN COMPLETE - {elapsed:.0f}s ({len(rows)} targets)")
+    print(f"  Report: {report_path}")
+    print(f"{'='*70}")
+
+    # Return rows sorted by holdout AUC desc so callers see the ranking too.
+    return sorted(
+        rows,
+        key=lambda r: (r["auc_holdout"] if r["auc_holdout"] == r["auc_holdout"] else -1.0),
+        reverse=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1131,6 +1442,12 @@ def main():
         help="Shared random seed for reproducibility (downsampling, LGBM RNG, "
              "numpy). Default: 42.",
     )
+    parser.add_argument(
+        "--mode", choices=["optimize", "screen"], default=None,
+        help="Pipeline mode. 'optimize' (default) = full Optuna+backtest E2E. "
+             "'screen' = fixed-param target screen (no Optuna, no backtest). "
+             "If omitted, falls back to training_workflow.mode in the manifest.",
+    )
 
     args = parser.parse_args()
     
@@ -1153,7 +1470,15 @@ def main():
         
     if not master_config.training_workflow:
         raise ValueError("MasterConfig must define a training_workflow for this script.")
-    if not master_config.execution_workflow:
+
+    # Resolve pipeline mode: an explicit --mode CLI flag wins; otherwise fall
+    # back to the manifest's training_workflow.mode (single source of truth,
+    # default "optimize"). The screen path does NOT require an
+    # execution_workflow (no backtest), so that requirement is only enforced on
+    # the optimize path below.
+    mode = args.mode if args.mode is not None else master_config.training_workflow.mode
+
+    if mode == "optimize" and not master_config.execution_workflow:
         raise ValueError("MasterConfig must define an execution_workflow for this script.")
 
     # Derive data path from data_workflow dataset_version
@@ -1163,10 +1488,33 @@ def main():
         dataset_name = f"{raw_version}.parquet"
     else:
         dataset_name = f"{master_config.symbol}_{raw_version}.parquet"
-        
+
     data_path = str(get_data_root() / "processed" / dataset_name)
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"Dataset not found at derived path: {data_path}")
+
+    # ---- Screen mode: fixed-param target screen, no Optuna / no backtest ----
+    if mode == "screen":
+        print(f"============================================================")
+        print(f" Target Screen (Parsed MasterConfig)")
+        print(f"============================================================")
+        print(f"  Symbol:     {master_config.symbol}")
+        print(f"  Data Path:  {data_path}")
+        print(f"  Targets:    {master_config.training_workflow.target_columns}")
+        print(f"============================================================")
+        if args.dry_run:
+            print("Dry run successful. Exiting.")
+            return
+        run_screen(
+            data_path=str(data_path),
+            train_cutoff_date=master_config.training_workflow.train_cutoff_date,
+            targets=master_config.training_workflow.target_columns,
+            symbol=master_config.symbol,
+            output_dir=args.output_dir,
+            holdout_cutoff_date=master_config.training_workflow.holdout_cutoff_date,
+            random_seed=args.random_seed,
+        )
+        return
 
     # Resolve Slippage.
     # ABSOLUTE price-units per side, taken directly from the manifest (single source of

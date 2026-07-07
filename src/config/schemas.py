@@ -93,6 +93,12 @@ class TrainingWorkflowConfig(BaseModel):
     holdout_cutoff_date: Optional[str] = None
     target_columns: List[str]
     gcs_base_dir: str
+    # Pipeline mode selector. Optional with an explicit "optimize" default so
+    # every existing manifest keeps today's full Optuna+backtest E2E with zero
+    # blast radius. "screen" selects the cheap fixed-param target-screen path
+    # (one LightGBM per target, holdout ROC/PR-AUC + tradeability proxy, ranked
+    # AUC_Model_Report.md) that decides which targets deserve a full sweep.
+    mode: Literal["optimize", "screen"] = "optimize"
     # Global RNG seed threaded to every stochastic stage (Optuna sampler, LightGBM,
     # numpy). REQUIRED — the manifest is the single source of truth. A missing seed
     # previously left each stage self-seeding non-deterministically, making sweeps
