@@ -85,6 +85,37 @@ class TestGetAccountSummary:
         assert result["cl_market_value"] == 65500.0
         assert result["cl_avg_cost"] == 65000.0
 
+    def test_parses_account_margin_tags(self):
+        """Account-wide margin tags ride the same cached accountValues() feed
+        (ticket heartbeat-margin-report_07062026_2348)."""
+        acct_values = [
+            _make_account_value("NetLiquidation", 1483258.15),
+            _make_account_value("AvailableFunds", 1466758.15),
+            _make_account_value("InitMarginReq", 18150.0),
+            _make_account_value("MaintMarginReq", 16500.0),
+            _make_account_value("ExcessLiquidity", 1466758.15),
+        ]
+        mgr = self._make_manager(acct_values, [])
+
+        result = mgr.get_account_summary()
+
+        assert result["init_margin_req"] == 18150.0
+        assert result["maint_margin_req"] == 16500.0
+        assert result["excess_liquidity"] == 1466758.15
+
+    def test_missing_margin_tags_default_zero(self):
+        """A flat / just-connected account reports no margin tags — the new
+        keys must default to 0.0 (broker value, not a config field) and must
+        not raise."""
+        acct_values = [_make_account_value("NetLiquidation", 500000.0)]
+        mgr = self._make_manager(acct_values, [])
+
+        result = mgr.get_account_summary()
+
+        assert result["init_margin_req"] == 0.0
+        assert result["maint_margin_req"] == 0.0
+        assert result["excess_liquidity"] == 0.0
+
     def test_no_cl_position_returns_zeros(self):
         """When no CL in portfolio, CL fields should be zero."""
         acct_values = [

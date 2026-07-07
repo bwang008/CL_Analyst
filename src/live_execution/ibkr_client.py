@@ -756,6 +756,10 @@ class IBKRConnectionManager:
             account: str — account ID
             net_liquidation: float
             available_funds: float
+            init_margin_req: float — account-wide initial margin requirement
+            maint_margin_req: float — account-wide maintenance margin requirement
+            excess_liquidity: float — account-wide free-cash cushion before a
+                margin call
             cl_position: int — net CL contracts
             cl_unrealized_pnl: float — CL unrealized PnL
             cl_realized_pnl: float — CL realized PnL
@@ -771,6 +775,9 @@ class IBKRConnectionManager:
             "account": "",
             "net_liquidation": 0.0,
             "available_funds": 0.0,
+            "init_margin_req": 0.0,
+            "maint_margin_req": 0.0,
+            "excess_liquidity": 0.0,
             "cl_position": 0,
             "cl_unrealized_pnl": 0.0,
             "cl_realized_pnl": 0.0,
@@ -789,6 +796,15 @@ class IBKRConnectionManager:
                 summary["account"] = av.account
             elif av.tag == "AvailableFunds" and av.currency == "USD":
                 summary["available_funds"] = float(av.value)
+            # Account-wide margin — same cached feed, no extra network call.
+            # In a multi-symbol fleet these span EVERY instance's positions
+            # (shared gateway/account), so they read identically per instance.
+            elif av.tag == "InitMarginReq" and av.currency == "USD":
+                summary["init_margin_req"] = float(av.value)
+            elif av.tag == "MaintMarginReq" and av.currency == "USD":
+                summary["maint_margin_req"] = float(av.value)
+            elif av.tag == "ExcessLiquidity" and av.currency == "USD":
+                summary["excess_liquidity"] = float(av.value)
 
         # CL-only portfolio items
         portfolio = self.ib.portfolio()

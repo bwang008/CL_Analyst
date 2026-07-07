@@ -681,6 +681,9 @@ class LiveTrader:
         unrealized_pnl = 0.0
         realized_pnl = 0.0
         net_liq = 0.0
+        init_margin = 0.0
+        maint_margin = 0.0
+        excess_liq = 0.0
 
         # Guard: only query IBKR if connected.  This method may be called
         # from the TelegramHeartbeat daemon thread, which has no asyncio
@@ -695,6 +698,9 @@ class LiveTrader:
                 unrealized_pnl = acct["cl_unrealized_pnl"]
                 realized_pnl = acct["cl_realized_pnl"]
                 net_liq = acct.get("net_liquidation", 0.0)
+                init_margin = acct.get("init_margin_req", 0.0)
+                maint_margin = acct.get("maint_margin_req", 0.0)
+                excess_liq = acct.get("excess_liquidity", 0.0)
             except Exception:
                 pass
 
@@ -725,7 +731,10 @@ class LiveTrader:
         payload = (
             f"Uptime: `{uptime_str}` | Broker: {broker_status}\n\n"
             f"*Account Balance:*\n"
-            f"Total Liq: `${net_liq:,.2f}`\n\n"
+            f"Total Liq: `${net_liq:,.2f}`\n"
+            f"Init Margin (acct): `${init_margin:,.2f}`\n"
+            f"Maint Margin (acct): `${maint_margin:,.2f}`\n"
+            f"Free Cushion (Excess Liq): `${excess_liq:,.2f}`\n\n"
             f"*Position & PnL*\n"
             f"Position: `{current_position}`\n"
             f"Unrealized PnL: `${unrealized_pnl:,.2f}`\n"
