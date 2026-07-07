@@ -104,6 +104,7 @@ python -m src.live_execution.cli --config configs/strategies/HS11_Prod_Ensemble_
 python -m src.live_execution.cli --config configs/strategies/HS13B_Sharpe_E03_06202026.json --data-port 4002 --exec-port 4002
 python -m src.live_execution.cli --config configs/strategies/HS14B_Sharpe_E01_06262026.json --data-port 4002 --exec-port 4002
 
+python -m src.live_execution.cli --config configs/strategies/SI01B_Sharpe_E02_07062026.json --data-port 4002 --exec-port 4002
 
 Step 3.5: Validate Parity (run before deploying to live)
 python -m pytest tests/test_config_parity.py tests/test_pipeline_parity.py tests/test_per_side_atr.py tests/test_execution_parity.py -v

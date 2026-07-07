@@ -1,0 +1,1 @@
+[2026-07-06 21:24] | es-config-drift-repin_07062026_2124 | TICKET-MANAGER | STATUS: Blueprint authored. USER DECISION: keep ES01B_Sortino_E01 (intentional, best performer); re-pin 12 red sentinel tests to it. Committed regression (a7a0b7d) — flagged for optional Impact-Reviewer before /tdd-manager. Operational: check ES open position before fleet restart.

@@ -1,0 +1,1 @@
+[2026-07-06 21:24] | predictions-path-provenance_07062026_2124 | TICKET-MANAGER | STATUS: Blueprint authored. Fleet-wide gap (4/5 configs incl. CL flagship); ZERO live impact (predictions_path never read in src/live_execution). Fix generator stamping + one-time backfill of 4 live configs. LOW severity / fast-track. Ready for /tdd-manager.

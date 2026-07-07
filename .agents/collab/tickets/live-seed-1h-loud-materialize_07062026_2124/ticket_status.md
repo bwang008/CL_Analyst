@@ -1,0 +1,1 @@
+[2026-07-06 21:24] | live-seed-1h-loud-materialize_07062026_2124 | TICKET-MANAGER | STATUS: Blueprint authored (audit done inline from live investigation). Design per USER RULING: loud idempotent auto-copy of <SYM>_raw.parquet -> <SYM>_raw_1h.parquet + alert, OR hard fail — no silent read-through fallback. Ready for /tdd-manager.

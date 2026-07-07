@@ -1,0 +1,1 @@
+[2026-07-06 21:24] | cli-seed-preflight_07062026_2124 | TICKET-MANAGER | STATUS: Blueprint authored. Extract fleet-runner data preflight into shared helper; wire single-instance CLI to it so direct launches fail-fast/auto-heal instead of raw LiveTrader.__init__ traceback. Depends on live-seed-1h-loud-materialize (shared helper). LOW/enhancement. Ready for /tdd-manager.
