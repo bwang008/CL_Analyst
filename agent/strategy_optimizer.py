@@ -696,9 +696,113 @@ _PARAM_RANGES = {
     "cooldown_bars":                  (1,    15,   2,    "int"),
     "max_hold_bars":                  (6,    36,   6,    "int"),
     "consecutive_signal_threshold":   (0,     4,   1,    "int"),
+    # NOTE: entry_threshold's static tuple is the FALLBACK only (used when a
+    # side's prob series is empty/missing). The live search bounds are derived
+    # per-model / per-side from the prediction distribution — see
+    # _entry_threshold_bounds() and FIRING_FRAC_MIN/MAX below.
     "entry_threshold":                (0.30,  0.70, 0.04, "float"),
     "atr_period":                     (4,    40,   4,    "int"),
 }
+
+# ── Dynamic entry-threshold search band (firing-fraction based) ────────────
+# Different models emit probabilities on completely different scales, so a
+# fixed [0.30, 0.70] entry-threshold grid can sit below a model's entire
+# probability mass and let the optimizer pick an "always-on" threshold that
+# fires on ~100% of bars (throwing away the ranking edge and starving the
+# opposite side in the single-position engine). Instead we derive the search
+# bounds per-model / per-side from that model's own prediction distribution,
+# expressed as a target signal-firing band [f_min, f_max]:
+#     f(t) = P(prob >= t) = 1 - CDF(t)          (upper-tail firing fraction)
+#     threshold_floor   = quantile(1 - f_max)   (most-permissive, fires f_max)
+#     threshold_ceiling = quantile(1 - f_min)   (most-selective,  fires f_min)
+# The band is a parameter (threaded from run_optimization/CLI, and — in a
+# fast-follow ticket — from the v2 manifest). These module constants are the
+# first-run LIBERAL defaults (per user, 2026-07-07).
+FIRING_FRAC_MIN = 0.05
+FIRING_FRAC_MAX = 0.45
+
+# Guard rails for degenerate/compressed prediction distributions.
+_ENTRY_THR_MIN_SPAN = 0.01      # below this span the range is "collapsed"
+_ENTRY_THR_HALF_SPAN = 0.005    # widen symmetrically to +/- this around midpoint
+_ENTRY_THR_MIN_STEP = 1e-3      # avoid a zero / absurdly-fine Optuna step
+
+
+def _entry_threshold_bounds(
+    prob_series: "pd.Series",
+    f_min: float,
+    f_max: float,
+) -> tuple[float, float, float]:
+    """Derive per-side entry-threshold search bounds from a model's own
+    prediction distribution, expressed as a firing band ``[f_min, f_max]``.
+
+    Firing fraction at threshold ``t`` is ``f(t) = P(prob >= t) = 1 - CDF(t)``,
+    so a LARGER firing fraction inverts to a LOWER threshold:
+
+        low  = quantile(1 - f_max)   # most-permissive threshold, fires ~f_max
+        high = quantile(1 - f_min)   # most-selective threshold, fires ~f_min
+        step = max((high - low) / 10, 1e-3)
+
+    NaNs are dropped before quantiling. Degenerate / compressed distributions
+    (``high - low`` below a small epsilon) are widened symmetrically to a
+    minimum span around the midpoint so Optuna receives a valid non-empty
+    range; both bounds are clamped to ``[0.0, 1.0]`` and ``high > low`` is
+    guaranteed.
+
+    Returns ``(low, high, step)``.
+    """
+    clean = prob_series.dropna()
+
+    low = float(clean.quantile(1.0 - f_max))
+    high = float(clean.quantile(1.0 - f_min))
+
+    # Order defensively (a pathological series could invert these).
+    if high < low:
+        low, high = high, low
+
+    # Widen collapsed/degenerate ranges so Optuna gets a usable search space.
+    if (high - low) < _ENTRY_THR_MIN_SPAN:
+        mid = (high + low) / 2.0
+        low = mid - _ENTRY_THR_HALF_SPAN
+        high = mid + _ENTRY_THR_HALF_SPAN
+
+    # Clamp to the valid probability range.
+    low = max(0.0, min(1.0, low))
+    high = max(0.0, min(1.0, high))
+
+    # If clamping collapsed the range (e.g. midpoint at a boundary), nudge apart
+    # while staying inside [0, 1].
+    if high <= low:
+        high = min(1.0, low + _ENTRY_THR_MIN_SPAN)
+        low = max(0.0, high - _ENTRY_THR_MIN_SPAN)
+
+    step = max((high - low) / 10.0, _ENTRY_THR_MIN_STEP)
+    return low, high, step
+
+
+def _compute_entry_thr_bounds(
+    predictions_df: "pd.DataFrame",
+    f_min: float,
+    f_max: float,
+) -> dict:
+    """Precompute per-side dynamic entry-threshold bounds from a predictions df.
+
+    Returns ``{"long": (low, high, step) | None, "short": (low, high, step) | None}``
+    where the long side is derived from ``prob_Buy`` and the short side from
+    ``prob_Sell``. A side maps to ``None`` when its prob column is absent or
+    empty — callers then fall back to the static _PARAM_RANGES grid for that
+    side (single-side configs with no opposite predictions).
+
+    This is computed ONCE per optimization (not per trial), on the
+    optimizer-window predictions only (the holdout is sliced off upstream in
+    run_optimization — never recompute on the holdout).
+    """
+    bounds: dict = {"long": None, "short": None}
+    for side, col in (("long", "prob_Buy"), ("short", "prob_Sell")):
+        if col in predictions_df.columns:
+            series = predictions_df[col].dropna()
+            if len(series) > 0:
+                bounds[side] = _entry_threshold_bounds(series, f_min, f_max)
+    return bounds
 
 
 def _snap_to_grid(value: float, low: float, high: float, step: float,
@@ -710,7 +814,11 @@ def _snap_to_grid(value: float, low: float, high: float, step: float,
     snapped = max(low, min(high, snapped))
     if dtype == "int":
         return int(round(snapped))
-    return round(snapped, 10)  # avoid float precision noise
+    # Re-clamp AFTER rounding: dynamic entry_threshold bounds carry many
+    # decimals, so round(..., 10) can nudge a boundary snap ~1e-11 outside
+    # [low, high] and cause enqueue_trial to reject the warm-start baseline.
+    # (The static grid has clean 2-decimal bounds and is unaffected.)
+    return max(low, min(high, round(snapped, 10)))  # avoid float precision noise
 
 
 def _derive_trailing_params(params: dict) -> dict:
@@ -743,16 +851,43 @@ def _reapply_strategy_level_params(best_cfg: dict, trial_params: dict) -> dict:
     return best_cfg
 
 
+def _entry_threshold_grid(
+    entry_thr_bounds: dict | None,
+    side: str,
+) -> tuple[float, float, float, str]:
+    """Return the (low, high, step, dtype) grid to snap ``entry_threshold`` to.
+
+    Uses the per-side DYNAMIC bounds (``entry_thr_bounds[side]``) so the
+    warm-start baseline is snapped onto the SAME grid the sampler explores.
+    Falls back to the static ``_PARAM_RANGES["entry_threshold"]`` only when
+    dynamic bounds are unavailable (e.g. a side's prob series was empty).
+    """
+    if entry_thr_bounds and side in entry_thr_bounds and entry_thr_bounds[side]:
+        low, high, step = entry_thr_bounds[side]
+        return low, high, step, "float"
+    return _PARAM_RANGES["entry_threshold"]
+
+
 def _extract_warm_start_params(
     base_cfg: dict,
     is_tiered: bool,
     optimize_side: str | None,
+    entry_thr_bounds: dict | None = None,
 ) -> dict | None:
     """Extract baseline config values as an Optuna-compatible param dict.
 
     Maps per-side config blocks (cfg["long"], cfg["short"]) into the flat
     suffixed key convention used by _suggest_side_params(), then snaps every
     value to the Optuna search grid so enqueue_trial() accepts it.
+
+    ``entry_threshold`` is snapped to the per-side DYNAMIC grid supplied in
+    ``entry_thr_bounds`` (``{"long": (low, high, step), "short": (...)}`` for
+    tiered, ``{"long": (...)}`` for non-tiered), NOT the static _PARAM_RANGES
+    grid — this is the 3-way consistency invariant with _suggest_side_params()
+    and the non-tiered objective loop. A mismatch would silently distort or
+    reject the enqueued baseline trial. Every OTHER param stays on the static
+    grid. When ``entry_thr_bounds`` is None/missing a side, the static
+    entry_threshold grid is used as the fallback.
 
     Returns None if extraction fails (e.g. missing config keys).
     """
@@ -790,7 +925,11 @@ def _extract_warm_start_params(
         }
 
         for key, raw_val in raw_values.items():
-            low, high, step, dtype = _PARAM_RANGES[key]
+            if key == "entry_threshold":
+                # Snap onto the per-side DYNAMIC grid (consistency invariant).
+                low, high, step, dtype = _entry_threshold_grid(entry_thr_bounds, side)
+            else:
+                low, high, step, dtype = _PARAM_RANGES[key]
             snapped = _snap_to_grid(raw_val, low, high, step, dtype)
             if snapped != raw_val:
                 print(f"  [WARM-START] {key}_{suffix}: {raw_val} -> {snapped} (snapped to grid)")
@@ -809,15 +948,16 @@ def _extract_warm_start_params(
             warm.update(_extract_side(base_cfg, "short", "short"))
             warm["conflict_resolution"] = base_cfg.get("conflict_resolution", "hold")
         else:
-            # Non-tiered — no suffix
+            # Non-tiered — no suffix. Single-model configs are long-side.
             side_cfg = base_cfg
             for key in _PARAM_RANGES:
-                low, high, step, dtype = _PARAM_RANGES[key]
                 if key == "entry_threshold":
+                    low, high, step, dtype = _entry_threshold_grid(entry_thr_bounds, "long")
                     raw_val = base_cfg.get("models", {}).get("long", {}).get(
                         "threshold", base_cfg.get("entry_threshold", 0.55)
                     )
                 else:
+                    low, high, step, dtype = _PARAM_RANGES[key]
                     raw_val = base_cfg.get(key, low)
                 snapped = _snap_to_grid(raw_val, low, high, step, dtype)
                 if snapped != raw_val:
@@ -918,6 +1058,9 @@ def make_objective(
     optimize_side: str | None = None,
     slippage_per_side: float | None = None,
     contract_multiplier: float | None = None,
+    f_min: float = FIRING_FRAC_MIN,
+    f_max: float = FIRING_FRAC_MAX,
+    entry_thr_bounds: dict | None = None,
 ):
     """Create a closure that Optuna can call with trial params.
 
@@ -939,6 +1082,15 @@ def make_objective(
         tracker: Optional TopKTracker to collect top configs.
         objective_metric: "sharpe" or "sortino".
         optimize_side: "long", "short", or None (both sides / ensemble).
+        f_min, f_max: Signal-firing band used to derive the per-side dynamic
+            entry_threshold search bounds (defaults: the module constants
+            FIRING_FRAC_MIN / FIRING_FRAC_MAX). Passed as params so a downstream
+            ticket can wire them from the manifest without changing the objective.
+        entry_thr_bounds: Optional precomputed per-side bounds
+            ({"long": (low, high, step) | None, "short": ...}). When None they
+            are computed here from ``predictions_df`` (prob_Buy / prob_Sell).
+            run_optimization precomputes and passes these so the warm-start
+            extraction snaps to the SAME grid the sampler uses.
     """
     # Pre-create a strategy instance for parameter routing
     strategy = create_execution_strategy(base_cfg)
@@ -947,6 +1099,38 @@ def make_objective(
         and base_cfg.get("long", {}).get("tiers")
         and base_cfg.get("short", {}).get("tiers")
     )
+
+    # ── Dynamic per-side entry-threshold bounds (once, not per trial) ─────
+    # Derived from THIS model's own prediction distribution on the optimizer
+    # window; the holdout is already sliced off upstream. entry_threshold uses
+    # these bounds; every other param stays on the static _PARAM_RANGES grid.
+    if entry_thr_bounds is None:
+        entry_thr_bounds = _compute_entry_thr_bounds(predictions_df, f_min, f_max)
+
+    def _entry_thr_range(suffix: str) -> tuple[float, float, float]:
+        """Per-side dynamic (low, high, step) for entry_threshold, with the
+        static grid as the fallback when a side's prob series was empty."""
+        b = entry_thr_bounds.get(suffix) if entry_thr_bounds else None
+        if b is not None:
+            return b
+        low, high, step, _ = _PARAM_RANGES["entry_threshold"]
+        return low, high, step
+
+    # Log the derived per-side bounds + implied firing band (parity with the
+    # [WARM-START] prints) so batch logs show exactly what was searched.
+    for _side in ("long", "short"):
+        _b = entry_thr_bounds.get(_side) if entry_thr_bounds else None
+        if _b is not None:
+            _lo, _hi, _st = _b
+            print(
+                f"  [ENTRY-THR] {_side}: range=[{_lo:.4f}, {_hi:.4f}] step={_st:.4f} "
+                f"(firing band [{f_min:.2f}, {f_max:.2f}])"
+            )
+        else:
+            print(
+                f"  [ENTRY-THR] {_side}: no prob series -> static fallback "
+                f"{_PARAM_RANGES['entry_threshold'][:2]}"
+            )
 
     # Compute trade floor from prediction data span (once, not per trial)
     # Use halved floor for single-side optimization (18/year vs 36/year)
@@ -958,7 +1142,13 @@ def make_objective(
         """Suggest params for one side with the given suffix."""
         params = {}
         for key, (low, high, step, dtype) in _PARAM_RANGES.items():
-            if dtype == "float":
+            if key == "entry_threshold":
+                # Dynamic per-side bounds instead of the static tuple.
+                d_low, d_high, d_step = _entry_thr_range(suffix)
+                params[key] = trial.suggest_float(
+                    f"{key}_{suffix}", d_low, d_high, step=d_step
+                )
+            elif dtype == "float":
                 params[key] = trial.suggest_float(f"{key}_{suffix}", low, high, step=step)
             elif dtype == "int":
                 params[key] = trial.suggest_int(f"{key}_{suffix}", int(low), int(high), step=int(step))
@@ -998,10 +1188,15 @@ def make_objective(
                 strategy.apply_trial_params(cfg, long_params, side="long")
                 strategy.apply_trial_params(cfg, short_params, side="short")
         else:
-            # Non-tiered: single set of params
+            # Non-tiered: single set of params. Non-tiered configs are
+            # single-model long, so entry_threshold uses the long-side dynamic
+            # bounds; every other param stays on the static grid.
             params = {}
             for key, (low, high, step, dtype) in _PARAM_RANGES.items():
-                if dtype == "float":
+                if key == "entry_threshold":
+                    d_low, d_high, d_step = _entry_thr_range("long")
+                    params[key] = trial.suggest_float(key, d_low, d_high, step=d_step)
+                elif dtype == "float":
                     params[key] = trial.suggest_float(key, low, high, step=step)
                 elif dtype == "int":
                     params[key] = trial.suggest_int(key, int(low), int(high), step=int(step))
@@ -1102,6 +1297,8 @@ def run_optimization(
     slippage_per_side: float | None = None,
     random_seed: int = 42,
     symbol: str | None = None,
+    firing_frac_min: float = FIRING_FRAC_MIN,
+    firing_frac_max: float = FIRING_FRAC_MAX,
 ) -> tuple[dict, BacktestResult]:
     """Run strategy parameter optimization.
 
@@ -1114,6 +1311,10 @@ def run_optimization(
         symbol: Instrument symbol for economics resolution (contract
             multiplier + default 1-tick slippage). None = legacy CL-econ
             behavior (engine default 1000 $/pt).
+        firing_frac_min, firing_frac_max: Signal-firing band that derives the
+            per-side dynamic entry_threshold search bounds (defaults: module
+            constants FIRING_FRAC_MIN / FIRING_FRAC_MAX). Threaded from the CLI;
+            a fast-follow ticket wires them from the v2 manifest.
 
     Returns:
         Tuple of (best_config, best_result).  Holdout metrics (if any)
@@ -1235,12 +1436,21 @@ def run_optimization(
           f"DD: ${baseline_metrics['max_drawdown']:,.2f}")
 
     # ── Optimization ─────────────────────────────────────────────────
+    # Precompute per-side dynamic entry-threshold bounds ONCE on the optimizer
+    # window (holdout already sliced off above) and share them between the
+    # objective and the warm-start extraction, so the baseline snaps to the
+    # SAME grid the sampler explores (3-way consistency invariant).
+    entry_thr_bounds = _compute_entry_thr_bounds(
+        predictions_df, firing_frac_min, firing_frac_max
+    )
+
     best_result_tracker = BestResultTracker()
     tracker = TopKTracker(k=5, save_dir="configs/strategies/candidates")
     objective = make_objective(
         base_cfg, predictions_df, ohlcv_df, ohlcv_exec_df=ohlcv_exec_df, best_tracker=best_result_tracker, tracker=tracker,
         objective_metric=objective_metric, optimize_side=optimize_side, slippage_per_side=slippage_per_side,
         contract_multiplier=contract_multiplier,
+        f_min=firing_frac_min, f_max=firing_frac_max, entry_thr_bounds=entry_thr_bounds,
     )
 
     # PID in the hash: two batches post-optimizing concurrently on one machine
@@ -1260,7 +1470,9 @@ def run_optimization(
     )
 
     # ── Warm-start: inject baseline as trial #0 ───────────────────────
-    warm_params = _extract_warm_start_params(base_cfg, is_tiered, optimize_side)
+    warm_params = _extract_warm_start_params(
+        base_cfg, is_tiered, optimize_side, entry_thr_bounds=entry_thr_bounds
+    )
     _warm_start_ok = False
     if warm_params:
         try:
@@ -1509,6 +1721,8 @@ def run_hybrid_optimization(
     vbt_top_n: int = 20,
     random_seed: int = 42,
     symbol: str | None = None,
+    firing_frac_min: float = FIRING_FRAC_MIN,
+    firing_frac_max: float = FIRING_FRAC_MAX,
 ) -> tuple[dict, BacktestResult]:
     """Two-Stage Hybrid optimizer: vectorbt pre-screen → Optuna warm-start.
 
@@ -1668,6 +1882,13 @@ def run_hybrid_optimization(
     # ── Stage 2: Optuna warm-started from Stage 1 ────────────────────────────
     score_label = objective_metric.capitalize()
 
+    # Precompute per-side dynamic entry-threshold bounds ONCE on the optimizer
+    # window and share them between the objective and the warm-start extraction
+    # (3-way consistency invariant).
+    entry_thr_bounds = _compute_entry_thr_bounds(
+        predictions_df, firing_frac_min, firing_frac_max
+    )
+
     best_result_tracker = BestResultTracker()
     tracker = TopKTracker(k=5, save_dir="configs/strategies/candidates")
     objective = make_objective(
@@ -1675,6 +1896,7 @@ def run_hybrid_optimization(
         tracker=tracker, objective_metric=objective_metric,
         optimize_side=optimize_side, slippage_per_side=slippage_per_side,
         contract_multiplier=contract_multiplier,
+        f_min=firing_frac_min, f_max=firing_frac_max, entry_thr_bounds=entry_thr_bounds,
     )
 
     db_hash = hashlib.md5(f"hybrid_opt_{model_name}_{objective_metric}_{os.getpid()}".encode()).hexdigest()[:8]
@@ -1690,7 +1912,9 @@ def run_hybrid_optimization(
     )
 
     # ── Warm-start: inject baseline as first trial ────────────────────
-    warm_params = _extract_warm_start_params(base_cfg, is_tiered, optimize_side)
+    warm_params = _extract_warm_start_params(
+        base_cfg, is_tiered, optimize_side, entry_thr_bounds=entry_thr_bounds
+    )
     _warm_start_ok = False
     if warm_params:
         try:
@@ -1973,6 +2197,16 @@ def main() -> None:
         help="Seed for the Optuna TPE sampler and numpy RNG (default: 42). "
              "Same seed => identical study best_trial.params."
     )
+    parser.add_argument(
+        "--firing-frac-min", type=float, default=FIRING_FRAC_MIN,
+        help=f"Min signal-firing fraction for the dynamic entry_threshold "
+             f"ceiling (default: {FIRING_FRAC_MIN}). Smaller => more selective."
+    )
+    parser.add_argument(
+        "--firing-frac-max", type=float, default=FIRING_FRAC_MAX,
+        help=f"Max signal-firing fraction for the dynamic entry_threshold "
+             f"floor (default: {FIRING_FRAC_MAX}). Larger => more permissive."
+    )
     args = parser.parse_args()
 
     _side = None if args.side == "both" else args.side
@@ -1988,6 +2222,8 @@ def main() -> None:
         optimize_side=_side,
         exec_ohlcv_path=args.exec_data,
         random_seed=args.random_seed,
+        firing_frac_min=args.firing_frac_min,
+        firing_frac_max=args.firing_frac_max,
     )
 
 
