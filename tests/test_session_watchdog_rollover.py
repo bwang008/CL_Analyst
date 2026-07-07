@@ -300,46 +300,55 @@ class TestSessionCalendarGlobex:
                 f"from {status!r}"
             )
 
-    def test_session_open_anchor_none_for_globex(self):
-        """GLOBEX anchor is ALWAYS None — that keeps the CL watchdog
-        arithmetic bit-identical to today (audit §4b).
+    def test_session_open_anchor_globex_reopen_grace(self):
+        """PIN UPDATED by cl-watchdog-reopen-grace_07052026_0001 (operator-
+        authorized 2026-07-07): the Q1 anchor-is-None pin was the documented
+        placeholder for exactly this ticket — GLOBEX now anchors at the most
+        recent Sun-Thu 17:00 CT open (18:00 ET), like grains (M4) and equity
+        (T7). Exhaustive anchor vectors live in
+        tests/test_globex_reopen_grace.py.
 
-        T7 EVOLUTION (t7-es-ops-runway_07052026_0214): _ES dropped from
-        the GLOBEX instrument loop — ES moved to the EQUITY calendar,
-        whose session_open_anchor returns the most recent 15:30 / 17:00 CT
-        open (a NOT-None anchor is asserted below; the exact equity anchor
-        vectors live in tests/test_hourly_only_equity_session.py)."""
-        instants = [
-            _utc_from_et(2026, 7, 13, 12, 0),   # open hours
-            _utc_from_et(2026, 7, 13, 17, 30),  # daily halt
-            _utc_from_et(2026, 7, 13, 18, 3),   # reopen window (Q1)
-            _utc_from_et(2026, 7, 12, 18, 5),   # Sunday open
-            _utc_from_et(2026, 7, 11, 12, 0),   # Saturday
+        T7 EVOLUTION (t7-es-ops-runway_07052026_0214): _ES stays on the
+        EQUITY calendar (exact vectors in
+        tests/test_hourly_only_equity_session.py)."""
+        cases = [
+            # (instant, expected anchor) — ET wall clocks; open = 18:00 ET
+            (_utc_from_et(2026, 7, 13, 12, 0),   # Mon open hours
+             _utc_from_et(2026, 7, 12, 18, 0)),  # -> Sunday's open
+            (_utc_from_et(2026, 7, 13, 17, 30),  # Mon daily halt
+             _utc_from_et(2026, 7, 12, 18, 0)),  # -> still Sunday's open
+            (_utc_from_et(2026, 7, 13, 18, 3),   # Mon reopen window (ex-Q1)
+             _utc_from_et(2026, 7, 13, 18, 0)),  # -> Monday's own open
+            (_utc_from_et(2026, 7, 12, 18, 5),   # Sunday open
+             _utc_from_et(2026, 7, 12, 18, 0)),
+            (_utc_from_et(2026, 7, 11, 12, 0),   # Saturday (closed)
+             _utc_from_et(2026, 7, 9, 18, 0)),   # -> Thursday's open
         ]
         for inst in (_CL, _MCL, _GC):
-            for t in instants:
-                assert session_open_anchor(inst, t) is None, (
-                    f"{inst.symbol} @ {t}: GLOBEX session_open_anchor must be "
-                    "None (no reopen grace — Q1 pinned as-is)"
+            for t, expected in cases:
+                assert session_open_anchor(inst, t) == expected, (
+                    f"{inst.symbol} @ {t}: GLOBEX anchor must be the most "
+                    f"recent Sun-Thu 17:00 CT open ({expected})"
                 )
-        # T7: ES left the GLOBEX arm — its equity anchor is NOT None
-        for t in instants:
+        # T7: ES stays on the equity calendar — anchor is NOT None
+        for t, _ in cases:
             assert session_open_anchor(_ES, t) is not None, (
                 f"ES @ {t}: equity session_open_anchor must return the most "
-                "recent 15:30/17:00 CT open, not the GLOBEX None"
+                "recent 15:30/17:00 CT open"
             )
 
-    def test_q1_cl_reopen_surface_pinned_open_with_no_anchor(self):
-        """Q1 PIN: at Mon 18:03 ET (reopen) the status is OPEN and the anchor
-        is None — exactly the combination that leaves the watchdog staleness
-        math with NO grace (the pre-existing false positive, kept AS-IS;
-        follow-up ticket cl-watchdog-reopen-grace_07052026_0001)."""
+    def test_cl_reopen_surface_open_with_grace_anchor(self):
+        """Ex-Q1 PIN (updated by cl-watchdog-reopen-grace_07052026_0001): at
+        Mon 18:03 ET the status is OPEN and the anchor is Monday's own
+        18:00 ET open — the watchdog stale clock restarts at the reopen
+        instead of counting the halt (the 2026-07-06/07 daily false
+        positive, retired)."""
         t = _utc_from_et(2026, 7, 13, 18, 3)
         assert market_status(_CL, t) == "OPEN"
-        assert session_open_anchor(_CL, t) is None
+        assert session_open_anchor(_CL, t) == _utc_from_et(2026, 7, 13, 18, 0)
         t_sun = _utc_from_et(2026, 7, 12, 18, 5)
         assert market_status(_CL, t_sun) == "OPEN"
-        assert session_open_anchor(_CL, t_sun) is None
+        assert session_open_anchor(_CL, t_sun) == _utc_from_et(2026, 7, 12, 18, 0)
 
 
 # ===========================================================================
@@ -1345,30 +1354,33 @@ class TestLiveTraderSessionWiring:
         trader.exec_client.disconnect.assert_not_called()
         assert trader._subscriptions_lost is False
 
-    def test_cl_monday_reopen_false_positive_pinned_true(self):
-        """Q1 PIN (do NOT fix here): Mon 18:03 ET reopen, last bar 16:55 ET
-        -> status OPEN, anchor None, ~68 min stale -> True (the pre-existing
-        spurious reconnect at every CL daily reopen, kept AS-IS)."""
+    def test_cl_monday_reopen_graced_false(self):
+        """Ex-Q1 PIN, updated by cl-watchdog-reopen-grace_07052026_0001
+        (operator-authorized 2026-07-07 after two consecutive days of the
+        scheduled false fire): Mon 18:03 ET reopen, last bar 16:55 ET ->
+        status OPEN, anchor = Monday's own 18:00 ET open, 3 min stale ->
+        False. No disconnect, no spurious reconnect."""
         trader = _watchdog_stub("CL")
         trader._last_bar_time_5m = pd.Timestamp("2026-07-13 20:55:00")  # 16:55 ET
         with _frozen_lt_clock(_utc_from_et(2026, 7, 13, 18, 3)):
             result = trader._check_stale_bars()
-        assert result is True, (
-            "Q1 pin violated: the CL reopen false-positive must remain — "
-            "fixing it is ticket cl-watchdog-reopen-grace_07052026_0001"
+        assert result is False, (
+            "reopen grace violated: the stale clock must restart at the "
+            "17:00 CT open (cl-watchdog-reopen-grace_07052026_0001)"
         )
-        trader.data_client.disconnect.assert_called_once()
-        trader.exec_client.disconnect.assert_called_once()
-        assert trader._subscriptions_lost is True
+        trader.data_client.disconnect.assert_not_called()
+        trader.exec_client.disconnect.assert_not_called()
+        assert trader._subscriptions_lost is False
 
-    def test_cl_sunday_reopen_false_positive_pinned_true(self):
-        """Q1 PIN: Sunday 18:05 ET open, last bar Friday 16:55 ET -> True."""
+    def test_cl_sunday_reopen_graced_false(self):
+        """Ex-Q1 PIN (same ticket): Sunday 18:05 ET open, last bar Friday
+        16:55 ET -> anchored at Sun 18:00 ET, 5 min stale -> False."""
         trader = _watchdog_stub("CL")
         trader._last_bar_time_5m = pd.Timestamp("2026-07-10 20:55:00")  # Fri 16:55 ET
         with _frozen_lt_clock(_utc_from_et(2026, 7, 12, 18, 5)):
             result = trader._check_stale_bars()
-        assert result is True
-        trader._telegram.send.assert_called_once()
+        assert result is False
+        trader._telegram.send.assert_not_called()
 
     def test_cl_open_hours_31min_stale_true(self):
         """CL arithmetic pin: Mon 12:00 ET, 31 min since last bar -> True

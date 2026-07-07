@@ -10,10 +10,11 @@ INSTRUMENT_REGISTRY; an unknown shape RAISES, no silent default):
   ``LiveTrader._get_market_status`` at HEAD 7a861bb, moved VERBATIM
   (byte-identical status strings; a minute-by-minute DST-year sweep in
   ``tests/test_session_watchdog_rollover.py`` pins it against a frozen
-  transcription). ``session_open_anchor`` is always ``None`` for GLOBEX,
-  which keeps the CL stale-bar watchdog arithmetic bit-identical —
-  including the pre-existing reopen false-positive (Q1: PINNED AS-IS;
-  follow-up ticket ``cl-watchdog-reopen-grace_07052026_0001``).
+  transcription). ``session_open_anchor`` returns the most recent
+  Sun-Thu 17:00 CT open (``cl-watchdog-reopen-grace_07052026_0001`` —
+  the former always-``None`` Q1 pin false-fired the watchdog at every
+  daily reopen; status strings remain byte-identical, only the anchor
+  changed).
 
 * GRAINS (``(("19:00", "07:45"), ("08:30", "13:20"))``) — CBOT grains
   evaluated in America/Chicago: overnight 19:00-07:45 CT, day
@@ -145,6 +146,28 @@ def _grains_market_status(utc_now: datetime) -> str:
     return "OPEN"
 
 
+def _globex_session_open_anchor(utc_now: datetime) -> datetime:
+    """Most recent GLOBEX session-open instant (17:00 CT, Sun-Thu), as
+    tz-naive UTC (cl-watchdog-reopen-grace_07052026_0001).
+
+    Sessions run 17:00 CT -> 16:00 CT next day; no Friday/Saturday open
+    (Friday trades on Thursday's open; weekend from Fri 16:00 CT). Walks
+    back day by day like the grains anchor — the farthest open from any
+    instant is the previous Thursday, < 3 days back.
+    """
+    ct_now = utc_now.replace(tzinfo=pytz.utc).astimezone(_CT)
+    for days_back in range(0, 9):
+        day = (ct_now - timedelta(days=days_back)).date()
+        if day.weekday() <= 3 or day.weekday() == 6:      # Sun-Thu 17:00 CT
+            wall = _CT.localize(datetime(day.year, day.month, day.day, 17, 0))
+            if wall <= ct_now:
+                return wall.astimezone(pytz.utc).replace(tzinfo=None)
+    raise RuntimeError(
+        f"No GLOBEX session open found within 9 days before {utc_now!r} — "
+        "calendar bug."
+    )
+
+
 def _grains_session_open_anchor(utc_now: datetime) -> datetime:
     """Most recent grains session-open instant, as tz-naive UTC.
 
@@ -261,9 +284,12 @@ def session_open_anchor(
 ) -> Optional[datetime]:
     """Most recent session-open instant for the watchdog reopen grace.
 
-    GLOBEX → always ``None``: the stale-bar arithmetic stays bit-identical
-    to the legacy CL behavior, INCLUDING the pre-existing reopen
-    false-positive (Q1 — pinned as-is, fixed by the follow-up ticket).
+    GLOBEX → tz-naive UTC datetime of the most recent Sun-Thu 17:00 CT
+    open (cl-watchdog-reopen-grace_07052026_0001, operator-authorized
+    2026-07-07): the former ``None`` kept the stale clock counting the
+    16:00-17:00 CT halt, false-firing the watchdog at every reopen — a
+    confirmed-daily fleet-wide reconnect once health events made it
+    visible.
 
     GRAINS → tz-naive UTC datetime of the most recent 08:30 / 19:00 CT
     open, so the stale clock restarts after each halt.
@@ -275,7 +301,7 @@ def session_open_anchor(
     """
     shape = instrument.session_hours_ct
     if shape == _GLOBEX_SESSION:
-        return None
+        return _globex_session_open_anchor(utc_now)
     if shape == _GRAINS_SESSION:
         return _grains_session_open_anchor(utc_now)
     if shape == _EQUITY_SESSION:

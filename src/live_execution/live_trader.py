@@ -5103,13 +5103,12 @@ class LiveTrader:
         if last_bar_time is None:
             return False  # No bars received yet — warm start still in progress
 
-        # T5 reopen grace: for instruments with in-week session halts
-        # (grains), restart the stale clock at the most recent session open
-        # so the halt-old last bar cannot trigger a reconnect storm at every
-        # reopen. GLOBEX instruments (incl. CL) get anchor=None -> the
-        # arithmetic below is bit-identical to the legacy behavior,
-        # INCLUDING the pre-existing CL reopen false-positive (Q1: pinned
-        # as-is; follow-up ticket cl-watchdog-reopen-grace_07052026_0001).
+        # T5 reopen grace: restart the stale clock at the most recent
+        # session open so a halt-old last bar cannot trigger a reconnect
+        # storm at every reopen. All three calendars anchor now — GLOBEX
+        # joined grains/equity via cl-watchdog-reopen-grace_07052026_0001
+        # (the former anchor=None false-fired the watchdog at every daily
+        # 17:00 CT reopen, confirmed 2026-07-06/07).
         anchor = _session_open_anchor(self._brain_instrument, now)
         reference = (
             last_bar_time

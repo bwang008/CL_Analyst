@@ -377,20 +377,26 @@ class TestEquityAnchor:
         assert session_open_anchor(_MES, t) == session_open_anchor(_ES, t)
         assert session_open_anchor(_MNQ, t) == session_open_anchor(_NQ, t)
 
-    def test_globex_anchor_still_none_pin(self):
-        """Pin (passes at Red AND Green): GLOBEX anchor stays None — the CL
-        watchdog arithmetic stays bit-identical (Q1 reopen false-positive
-        pinned as-is). ES is deliberately ABSENT here (it moved to the
-        equity calendar — the sanctioned T5 evolution)."""
-        instants = [
-            _utc_from_et(2026, 7, 13, 12, 0),   # open hours
-            _utc_from_et(2026, 7, 13, 17, 30),  # daily halt
-            _utc_from_et(2026, 7, 12, 18, 5),   # Sunday open
+    def test_globex_anchor_reopen_grace_pin(self):
+        """Pin UPDATED by cl-watchdog-reopen-grace_07052026_0001 (the former
+        anchor-stays-None pin was that ticket's documented placeholder):
+        GLOBEX now anchors at the most recent Sun-Thu 17:00 CT open. ES is
+        deliberately ABSENT here (it moved to the equity calendar — the
+        sanctioned T5 evolution). Exhaustive GLOBEX vectors live in
+        tests/test_globex_reopen_grace.py."""
+        cases = [
+            (_utc_from_et(2026, 7, 13, 12, 0),   # Mon open hours
+             _utc_from_et(2026, 7, 12, 18, 0)),  # -> Sunday's open
+            (_utc_from_et(2026, 7, 13, 17, 30),  # Mon daily halt
+             _utc_from_et(2026, 7, 12, 18, 0)),
+            (_utc_from_et(2026, 7, 12, 18, 5),   # Sunday open
+             _utc_from_et(2026, 7, 12, 18, 0)),
         ]
         for inst in (_CL, _MCL, _GC):
-            for t in instants:
-                assert session_open_anchor(inst, t) is None, (
-                    f"{inst.symbol} @ {t}: GLOBEX anchor must stay None"
+            for t, expected in cases:
+                assert session_open_anchor(inst, t) == expected, (
+                    f"{inst.symbol} @ {t}: GLOBEX anchor must be the most "
+                    f"recent 17:00 CT open ({expected})"
                 )
 
 
