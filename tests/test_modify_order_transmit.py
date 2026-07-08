@@ -674,3 +674,27 @@ class TestSimulatedModifyOrderContract:
         sim, sl_oid = _sim_with_resting_sl()
         sim.modify_order(str(sl_oid), _sim_event(sl_oid, _NEW_SL))
         assert sim._resting_orders[sl_oid].price == _NEW_SL
+
+
+def test_trailing_ledger_persist_failure_is_loud_no_rollback(caplog):
+    """Ticket unprotected-leg-verification_07082026_0315: if the ledger
+    sl_price persist fails AFTER the broker SL modify committed, it must be
+    LOUD (ERROR + housekeeping-ledger-persist-failed health event), and the
+    broker modify must NOT be rolled back (the broker SL is correct; only the
+    ledger row is stale). Previously this was swallowed at DEBUG."""
+    trader, raw_order, evt = _make_trailing_trader()
+    trader._emit_health_event = MagicMock()
+    trader.telemetry.update_position_sl.side_effect = RuntimeError("db locked")
+
+    with caplog.at_level(logging.INFO):
+        trader._check_trailing_stop()  # must not propagate
+
+    # broker modify committed and was NOT rolled back
+    assert raw_order.auxPrice != _ORIG_SL, "broker SL must stay at the trailed price"
+    assert trader._trailing_activated is True
+    # the persist failure surfaced loudly, not swallowed
+    trader._emit_health_event.assert_called_once()
+    assert trader._emit_health_event.call_args.args[0] == "housekeeping-ledger-persist-failed"
+    assert any(r.levelno >= logging.ERROR for r in caplog.records), (
+        "a ledger persist failure must log at ERROR"
+    )

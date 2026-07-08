@@ -109,18 +109,32 @@ Judge each finding before opening any ticket — most have a fact-check step:
   the verification pass). Two severity classes, routed on the exact kind
   string:
   - `housekeeping-orphan-cancelled` / `housekeeping-drift-detected` /
-    `housekeeping-ledger-repaired` — INFORMATIONAL: the action was
-    already taken in-child (targeted orphan cancel, OOB drift recovery,
-    whitelisted exit-price repair). Verify via the next fleet_health
-    run, file to done/, do NOT re-act. RISING `occurrences` of the same
-    event = something repeatedly manufactures the inconsistency (e.g. a
-    path that keeps orphaning brackets) → ticket.
+    `housekeeping-ledger-repaired` / `housekeeping-protective-leg-healed`
+    — INFORMATIONAL: the action was already taken in-child (targeted
+    orphan cancel, OOB drift recovery, whitelisted exit-price repair, or —
+    operator-authorized 2026-07-08 — a genuinely-missing SL/TP was
+    AUTO-RE-PLACED from the ledger). Verify via the next fleet_health /
+    broker_audit run (the healed leg should now rest), file to done/, do
+    NOT re-act. RISING `occurrences` of the same event = something
+    repeatedly manufactures the inconsistency (e.g. a path that keeps
+    dropping the SL, or the async-cancel bug behind ticket
+    unprotected-leg-verification_07082026_0315) → ticket.
+  - `housekeeping-ledger-persist-failed` — a trailing-stop modify
+    committed at the BROKER but the ledger `sl_price` write failed, so the
+    ledger is stale (the position IS protected at the correct price; only
+    the DB row is wrong). NOT naked. Medium severity: tell the human to
+    repair the ledger row so a future re-place uses the trailed stop, not
+    the original. Recurring → ticket (DB contention).
   - `housekeeping-naked-position` / `housekeeping-untracked-position` /
     `housekeeping-ambiguous` / `housekeeping-unknown-order` — HIGHEST
-    severity, exactly like `unprotected-position`: notify the human NOW;
-    NEVER auto-place, auto-cancel, or auto-close (the sweep itself is
-    detect-only for these by design — order-routing semantics are a
-    human gate).
+    severity, exactly like `unprotected-position`: notify the human NOW.
+    The sweep now AUTO-HEALS a genuinely-missing tracked leg (re-places
+    from the ledger), so `housekeeping-naked-position` means the heal was
+    DEFERRED/COULD-NOT-fire — stale broker cache, active rate-limit halt,
+    mid-sweep disconnect, or a re-place failure — i.e. still unprotected
+    and needing a human. UNTRACKED/ambiguous/unknown-order remain
+    detect-only (no ledger prices to heal from / order-routing human
+    gate): NEVER auto-place/cancel/close those yourself.
   - `housekeeping-error` — the sweep itself failed or ran slow (>10s):
     a code bug in housekeeping, never a market event → normal ticket
     flow; trading is unaffected by construction (never-raises boundary).

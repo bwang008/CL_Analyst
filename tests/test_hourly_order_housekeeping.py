@@ -281,6 +281,8 @@ _ALLOWED_KINDS = frozenset({
     "housekeeping-untracked-position",
     "housekeeping-ambiguous",
     "housekeeping-unknown-order",
+    "housekeeping-protective-leg-healed",
+    "housekeeping-ledger-persist-failed",
     "housekeeping-error",
 })
 
@@ -1960,3 +1962,97 @@ class TestTelemetryRepairA9:
         wide = {r["trade_id"]
                 for r in bot_a.get_recent_closed_positions(hours=200)}
         assert wide == {"trade_recent", "trade_old"}
+
+
+# ---------------------------------------------------------------------------
+# Protective-leg verify + heal (ticket unprotected-leg-verification_07082026_0315)
+# The sweep now AUTO-HEALS a genuinely-missing tracked leg (operator-authorized
+# 2026-07-08); healthy positions are never churned; fail-closed guards defer.
+# ---------------------------------------------------------------------------
+
+class _HealExecClient(_StrictExecClient):
+    """Read-only sweep primitives PLUS the operator-authorized heal's placement
+    seams (place_child_orders / cancel_open_orders)."""
+
+    def __init__(self, *, placed_ids=(50, 51), **kw):
+        super().__init__(**kw)
+        self._placed_ids = tuple(placed_ids)
+        self.place_calls = []
+
+    def cancel_open_orders(self, symbol):
+        self.touches.append("cancel_open_orders")
+        return 0
+
+    def place_child_orders(self, *, symbol, parent_order_id, action,
+                           quantity, tp_price, sl_price):
+        self.touches.append("place_child_orders")
+        self.place_calls.append(
+            {"action": action, "quantity": quantity,
+             "tp_price": tp_price, "sl_price": sl_price})
+        return [SimpleNamespace(order=SimpleNamespace(orderId=oid))
+                for oid in self._placed_ids]
+
+
+def _heal_stub(*, resting, position=1, connected=True, halted=False,
+               placed_ids=(50, 51), sl_price=69.90, tp_price=67.90):
+    """Housekeeping stub whose exec client permits the heal placement."""
+    row = _ledger_open_row(
+        trade_id="trade_9", side="LONG", sl_order_id=202, tp_order_id=201,
+        sl_price=sl_price, tp_price=tp_price,
+    )
+    lt = _housekeeping_stub(
+        exec_client=_HealExecClient(position=position, resting=resting,
+                                    connected=connected, placed_ids=placed_ids),
+        open_position=row, active_trade_id="trade_9", halted=halted,
+    )
+    lt._front_month_local_symbol = "GCQ6"  # non-None → heal may re-place
+    return lt
+
+
+class TestSweepProtectiveLegHeal:
+    def test_both_legs_resting_no_heal(self):
+        lt = _heal_stub(resting=[_resting_evt(201, order_type="LMT"),
+                                 _resting_evt(202, order_type="STP")])
+        _run_sweep(lt)
+        assert lt.exec_client.place_calls == [], "healthy position must not churn"
+        assert "housekeeping-protective-leg-healed" not in _kinds(lt)
+
+    def test_missing_sl_is_healed(self):
+        # SL (202) not resting, TP (201) resting → heal re-places the pair.
+        lt = _heal_stub(resting=[_resting_evt(201, order_type="LMT")])
+        _run_sweep(lt)
+        assert len(lt.exec_client.place_calls) == 1, "missing leg must be re-placed"
+        assert "housekeeping-protective-leg-healed" in _kinds(lt)
+        assert lt._sl_order_id == 51  # registered the new SL id
+
+    def test_empty_broker_cache_defers_heal(self):
+        # Position held but broker returns ZERO orders → possible stale cache.
+        lt = _heal_stub(resting=[])
+        _run_sweep(lt)
+        assert lt.exec_client.place_calls == [], "must not churn on empty cache"
+        assert "housekeeping-naked-position" in _kinds(lt)
+
+    def test_rate_limit_halt_skips_sweep_no_placement(self):
+        # The outer _run_hourly_housekeeping gate skips the whole sweep while
+        # halted → fail-closed: nothing is placed.
+        lt = _heal_stub(resting=[_resting_evt(201, order_type="LMT")], halted=True)
+        _run_sweep(lt)
+        assert lt.exec_client.place_calls == [], "must not place while halted"
+        assert "housekeeping-protective-leg-healed" not in _kinds(lt)
+
+    def test_disconnect_skips_sweep_no_placement(self):
+        # is_connected() gate (outer + per-touch) abandons the sweep → nothing
+        # is placed.
+        lt = _heal_stub(resting=[_resting_evt(201, order_type="LMT")],
+                        connected=False)
+        _run_sweep(lt)
+        assert lt.exec_client.place_calls == [], "must not place while disconnected"
+        assert "housekeeping-protective-leg-healed" not in _kinds(lt)
+
+    def test_cannot_heal_without_ledger_price_is_loud(self):
+        # Leg missing but the ledger has no sl_price → refuse to fabricate.
+        lt = _heal_stub(resting=[_resting_evt(201, order_type="LMT")],
+                        sl_price=None)
+        _run_sweep(lt)
+        assert lt.exec_client.place_calls == [], "never fabricate a price"
+        assert "housekeeping-naked-position" in _kinds(lt)

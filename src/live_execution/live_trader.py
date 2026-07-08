@@ -1501,7 +1501,25 @@ class LiveTrader:
                             sl_order_id=order_id,
                         )
                     except Exception:
-                        log.debug("Failed to update ledger SL", exc_info=True)
+                        # LOUD, not swallowed (ticket
+                        # unprotected-leg-verification_07082026_0315): the
+                        # broker SL is already at the new trailed price (the
+                        # modify above committed), but the ledger now holds a
+                        # STALE sl_price. That matters because the protective-
+                        # leg heal re-places from the ledger's sl_price — a
+                        # silent staleness here would re-place the ORIGINAL
+                        # (looser) stop. Do NOT roll back the broker modify;
+                        # surface it for ledger repair.
+                        detail = (
+                            f"trailing SL modified at the broker to "
+                            f"{new_sl:.4f} (order {order_id}) but the ledger "
+                            f"sl_price persist FAILED — ledger is stale, a "
+                            f"future re-place could use the original stop"
+                        )
+                        log.error(
+                            "[TRAILING STOP] %s", detail, exc_info=True)
+                        self._emit_health_event(
+                            "housekeeping-ledger-persist-failed", detail)
                 # Snapshot decision state at trailing activation
                 try:
                     self.telemetry.log_decision_state(
@@ -1895,8 +1913,38 @@ class LiveTrader:
             self._highest_high = float(self.rolling_df_5m["High"].iloc[-1])
             self._lowest_low = float(self.rolling_df_5m["Low"].iloc[-1])
 
-        # 4. Verify TP/SL orders on IBKR (query directly — self._open_orders
-        #    is empty at startup before subscriptions begin)
+        # 4-5. Verify TP/SL rest on the broker; re-place both if a leg is
+        #      missing (shared with the hourly housekeeping heal).
+        self._verify_and_heal_protective_legs(
+            trade_id=trade_id,
+            tp_order_id=tp_order_id,
+            sl_order_id=sl_order_id,
+            tp_price=tp_price,
+            sl_price=sl_price,
+            quantity=quantity,
+            position_side=self._position_side,
+        )
+
+    def _verify_and_heal_protective_legs(
+        self, *, trade_id, tp_order_id, sl_order_id, tp_price, sl_price,
+        quantity, position_side,
+    ) -> str:
+        """Verify the position's TP/SL rest on the broker; if a leg is missing,
+        cancel stale legs and re-place BOTH from the ledger's current prices.
+
+        Shared by startup recovery (`_recover_inherited_position`) and the
+        hourly housekeeping heal. Idempotent: both-resting is a no-op, so a
+        healthy position is never churned. `place_child_orders` has no
+        single-leg mode, so a missing SL re-cycles a resting TP too — accepted
+        (operator decision 2026-07-08, ticket
+        unprotected-leg-verification_07082026_0315).
+
+        Returns: "verified" (both resting, no action), "healed" (re-placed),
+        "no-prices"/"no-front-month" (cannot re-place — UNPROTECTED),
+        "partial"/"place-failed" (placement problem).
+        """
+        # Verify TP/SL orders on IBKR (query directly — self._open_orders
+        # is empty at startup before subscriptions begin).
         tp_found = False
         sl_found = False
         try:
@@ -1928,23 +1976,23 @@ class LiveTrader:
                 tp_order_id, tp_price or 0.0,
                 sl_order_id, sl_price or 0.0,
             )
-            return
+            return "verified"
 
-        # 5. One or both TP/SL orders missing — re-place them
+        # One or both TP/SL orders missing — re-place them
         if tp_price is None or sl_price is None:
             log.warning(
                 "[RECOVERY] TP/SL orders missing and no stored prices "
                 "in ledger — cannot re-place protective orders. "
                 "Position is UNPROTECTED."
             )
-            return
+            return "no-prices"
 
         if self._front_month_local_symbol is None:
             log.warning(
                 "[RECOVERY] Cannot re-place TP/SL — "
                 "front-month contract not resolved"
             )
-            return
+            return "no-front-month"
 
         # Cancel any stale orders that partially exist
         if tp_found and not sl_found:
@@ -1971,7 +2019,7 @@ class LiveTrader:
         sl_price = round_to_tick(sl_price, self._tick_size)
 
         # Place fresh TP/SL
-        exit_action = "SELL" if self._position_side == 1 else "BUY"
+        exit_action = "SELL" if position_side == 1 else "BUY"
         try:
             child_trades = self.exec_client.place_child_orders(
                 symbol=self._execution_symbol,
@@ -1990,7 +2038,7 @@ class LiveTrader:
                     oid = getattr(getattr(t, "order", None), "orderId", None)
                     if oid is not None:
                         self._tp_order_ids.append(oid)
-                        
+
                 self._sl_order_id = getattr(
                     getattr(sl_trade_obj, "order", None), "orderId", None
                 )
@@ -2008,16 +2056,19 @@ class LiveTrader:
                     self._tp_order_ids, tp_price,
                     self._sl_order_id, sl_price,
                 )
+                return "healed"
             else:
                 log.warning(
                     "[RECOVERY] place_child_orders returned "
                     "%d trades (expected 2)",
                     len(child_trades),
                 )
+                return "partial"
         except Exception:
             log.exception(
                 "[RECOVERY] Failed to re-place TP/SL orders"
             )
+            return "place-failed"
 
     def _recover_oob_close(self, *, trade_id, tp_order_id, sl_order_id):
         """Resolve a ledger-OPEN / broker-flat trade (startup D1 + hourly
@@ -2537,23 +2588,16 @@ class LiveTrader:
             actions.append(detail)
             log.info("[HOUSEKEEPING] %s", detail)
 
-        # ── Detect-and-alert ONLY — never place/cancel/close ─────────
+        # ── Protective-leg verify + heal (operator-authorized 2026-07-08,
+        #    ticket unprotected-leg-verification_07082026_0315) ──────────
+        # A genuinely-missing SL/TP is re-placed from the ledger's current
+        # prices; a healthy position is never touched (idempotent). Fail-closed
+        # guards keep the auto-placement bounded: an empty broker cache
+        # (possible post-reconnect staleness), an active rate-limit halt, or a
+        # mid-sweep disconnect all defer to detect-only rather than churn.
+        # UNTRACKED (position with no ledger row) stays human-only.
         if position != 0 and pending_id is None:
-            has_resting_sl = any(
-                self._event_order_type(evt) == "STP" for evt in resting
-            )
-            if not has_resting_sl:
-                # Auto-placing protection is order-routing semantics
-                # (human gate) and interacts with the 10-orders/60s halt.
-                detail = (
-                    f"NAKED position: broker position {position:+d} with "
-                    f"no resting stop order — protection needs a human"
-                )
-                self._emit_health_event(
-                    "housekeeping-naked-position", detail)
-                alerts.append(detail)
-
-            if open_row is None and self._active_trade_id is None:
+            if open_row is None:
                 detail = (
                     f"UNTRACKED position: broker position {position:+d} "
                     f"with no ledger trade — needs human adjudication"
@@ -2561,6 +2605,84 @@ class LiveTrader:
                 self._emit_health_event(
                     "housekeeping-untracked-position", detail)
                 alerts.append(detail)
+                # An untracked position cannot be healed (no ledger prices);
+                # if it also has no resting stop it is doubly a human concern.
+                if not any(self._event_order_type(evt) == "STP"
+                           for evt in resting):
+                    naked = (
+                        f"NAKED position: broker position {position:+d} with "
+                        f"no resting stop order — protection needs a human"
+                    )
+                    self._emit_health_event(
+                        "housekeeping-naked-position", naked)
+                    alerts.append(naked)
+            else:
+                resting_ids = {str(evt.order_id) for evt in resting}
+                sl_id = open_row.get("sl_order_id")
+                tp_id = open_row.get("tp_order_id")
+                sl_ok = sl_id is not None and str(sl_id) in resting_ids
+                tp_ok = tp_id is not None and str(tp_id) in resting_ids
+                trade_id = open_row.get("trade_id")
+
+                if sl_ok and tp_ok:
+                    pass  # both legs resting on the broker — nothing to do
+                elif not resting:
+                    # Broker shows ZERO open orders while we hold a position —
+                    # the openTrades cache may be transiently stale (e.g. right
+                    # after a reconnect). Do NOT churn; re-check next sweep.
+                    detail = (
+                        f"protective leg(s) missing for {trade_id} but broker "
+                        f"shows ZERO open orders — possible stale cache, "
+                        f"deferring heal (needs a human if it persists)"
+                    )
+                    self._emit_health_event("housekeeping-naked-position", detail)
+                    alerts.append(detail)
+                elif getattr(self, "_emergency_halt", False):
+                    detail = (
+                        f"protective leg(s) missing for {trade_id} but the "
+                        f"order rate-limit HALT is active — cannot heal, "
+                        f"needs a human"
+                    )
+                    self._emit_health_event("housekeeping-naked-position", detail)
+                    alerts.append(detail)
+                elif not self.exec_client.is_connected():
+                    detail = (
+                        f"protective leg(s) missing for {trade_id} but the "
+                        f"broker session is disconnected — deferring heal"
+                    )
+                    self._emit_health_event("housekeeping-naked-position", detail)
+                    alerts.append(detail)
+                else:
+                    status = self._verify_and_heal_protective_legs(
+                        trade_id=trade_id,
+                        tp_order_id=tp_id,
+                        sl_order_id=sl_id,
+                        tp_price=open_row.get("tp_price"),
+                        sl_price=open_row.get("sl_price"),
+                        quantity=abs(position),
+                        position_side=1 if position > 0 else -1,
+                    )
+                    if status == "healed":
+                        detail = (
+                            f"HEALED protective legs for {trade_id} "
+                            f"(pos {position:+d}): re-placed TP/SL from ledger "
+                            f"— new SL id={self._sl_order_id}"
+                        )
+                        self._emit_health_event(
+                            "housekeeping-protective-leg-healed", detail)
+                        actions.append(detail)
+                        log.error("[HOUSEKEEPING] %s", detail)
+                    elif status == "verified":
+                        pass  # heal's own re-query found both — snapshot was stale
+                    else:
+                        detail = (
+                            f"protective leg(s) missing for {trade_id} and the "
+                            f"heal could NOT re-place them ({status}) — position "
+                            f"UNPROTECTED, needs a human"
+                        )
+                        self._emit_health_event(
+                            "housekeeping-naked-position", detail)
+                        alerts.append(detail)
 
         if pending_id is not None:
             filled = self._pending_entry_filled_qty()
