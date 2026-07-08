@@ -125,10 +125,12 @@ class IBKRDataFeedClient(DataFeedClient):
             contract = build_future_contract(symbol, continuous=True)
         else:
             local_sym, _ = self.manager.get_front_month_contract(symbol=symbol)
+            _inst = get_instrument(symbol)
             contract = Future(
-                symbol=symbol,
+                symbol=_inst.ib_search_symbol,
                 localSymbol=local_sym,
-                exchange=get_instrument(symbol).exchange,
+                exchange=_inst.exchange,
+                tradingClass=_inst.ib_trading_class or "",
             )
 
         # We don't qualify indices like DX on NYBOT as easily, but qualify_contract works for most.
@@ -169,10 +171,12 @@ class IBKRDataFeedClient(DataFeedClient):
             contract = build_future_contract(symbol, continuous=True)
         else:
             local_sym, _ = await self.manager.get_front_month_contract_async(symbol=symbol)
+            _inst = get_instrument(symbol)
             contract = Future(
-                symbol=symbol,
+                symbol=_inst.ib_search_symbol,
                 localSymbol=local_sym,
-                exchange=get_instrument(symbol).exchange,
+                exchange=_inst.exchange,
+                tradingClass=_inst.ib_trading_class or "",
             )
 
         try:

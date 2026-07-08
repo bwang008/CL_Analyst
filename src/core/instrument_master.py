@@ -28,6 +28,22 @@ class Instrument:
                                  # overlap-median noise; Q2 ACKed). REQUIRED — no default.
     micro_of: Optional[str] = None   # parent symbol if this IS a micro (MCL→"CL"); None otherwise
     slippage_ticks: int = 1
+    # IBKR search symbol — differs from the registry key ONLY when a product
+    # shares its parent's IB symbol. COMEX Micro Silver (1,000 oz) is NOT a
+    # standalone IB symbol like MGC/MES: IBKR lists it under symbol "SI" with
+    # tradingClass "SIL". None → the IB symbol equals `symbol`.
+    ib_symbol: Optional[str] = None
+    # IBKR tradingClass filter. REQUIRED whenever several futures share one IB
+    # symbol so reqContractDetails / position matching pick the right product:
+    # COMEX "SI" hosts BOTH full SI (×5000, tradingClass "SI") and micro SIL
+    # (×1000, tradingClass "SIL"). None → single-product symbol (CL/ES/MGC/…),
+    # no filter applied (byte-identical to the pre-tradingClass behavior).
+    ib_trading_class: Optional[str] = None
+
+    @property
+    def ib_search_symbol(self) -> str:
+        """Symbol passed to IBKR contract construction (defaults to `symbol`)."""
+        return self.ib_symbol or self.symbol
 
 # Session shorthand: most CME Globex outrights trade 17:00–16:00 CT.
 _GLOBEX_SESSION: Tuple[Tuple[str, str], ...] = (("17:00", "16:00"),)
@@ -323,6 +339,10 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         bars_per_day_1h=23,
         live_vol_index="VIX",
         roll_ratio_tolerance=0.001,
+        # Full silver and micro silver share IBKR symbol "SI"; pin the
+        # tradingClass so reqContractDetails / position matching resolve the
+        # ×5000 contract deterministically (not by IBKR return order).
+        ib_trading_class="SI",
     ),
     "SIL": Instrument(
         symbol="SIL",
@@ -344,6 +364,11 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         live_vol_index="VIX",
         roll_ratio_tolerance=0.001,
         micro_of="SI",
+        # IBKR has NO future under symbol "SIL" (that's the Global X Silver
+        # Miners ETF stock). Micro Silver lists under symbol "SI" +
+        # tradingClass "SIL" (localSymbols SILU6, SILZ6, …), multiplier 1000.
+        ib_symbol="SI",
+        ib_trading_class="SIL",
     ),
 }
 
@@ -353,6 +378,62 @@ def get_instrument(symbol: str) -> Instrument:
     if upper_symbol not in INSTRUMENT_REGISTRY:
         raise ValueError(f"Unknown instrument symbol: {symbol}")
     return INSTRUMENT_REGISTRY[upper_symbol]
+
+
+def contract_matches(
+    symbol: str,
+    contract_symbol: Optional[str],
+    contract_trading_class: Optional[str] = None,
+) -> bool:
+    """True if an IBKR contract belongs to the registry `symbol`.
+
+    Matches on the IBKR search symbol and — only when the instrument pins an
+    ``ib_trading_class`` — on tradingClass too. That tradingClass gate is what
+    keeps full silver (IB symbol "SI", tclass "SI", ×5000) and micro silver
+    (IB symbol "SI", tclass "SIL", ×1000) from being confused in position /
+    portfolio reads. Single-product symbols (CL/ES/MGC/…) pin no tradingClass,
+    so they match on IB symbol alone — byte-identical to the legacy
+    ``contract.symbol == symbol`` comparison.
+
+    Tolerant by design: an unknown `symbol` (not in the registry) falls back to
+    a plain IB-symbol comparison and never raises, preserving the legacy
+    "unheld symbol reads as flat" contract of cache-position reads.
+    """
+    try:
+        inst = get_instrument(symbol)
+    except ValueError:
+        return contract_symbol == symbol
+    if contract_symbol != inst.ib_search_symbol:
+        return False
+    if inst.ib_trading_class is not None and (
+        contract_trading_class != inst.ib_trading_class
+    ):
+        return False
+    return True
+
+
+def registry_symbol_for_contract(
+    contract_symbol: Optional[str],
+    contract_trading_class: Optional[str] = None,
+) -> Optional[str]:
+    """Reverse of ``ib_search_symbol``/``ib_trading_class``: map an IBKR
+    contract back to its registry (config) symbol.
+
+    A micro-silver fill arrives from IBKR as symbol "SI" + tradingClass "SIL"
+    and must be stamped back to "SIL" so it routes to the SIL live instance
+    (whose ``execution_symbol`` is "SIL"). Single-product contracts map to
+    themselves. An unknown contract passes through unchanged (never raises).
+    """
+    if contract_symbol is None:
+        return contract_symbol
+    for key, inst in INSTRUMENT_REGISTRY.items():
+        if inst.ib_search_symbol != contract_symbol:
+            continue
+        if inst.ib_trading_class is None or (
+            inst.ib_trading_class == contract_trading_class
+        ):
+            return key
+    return contract_symbol
 
 
 def dollars_per_point(symbol: str) -> float:

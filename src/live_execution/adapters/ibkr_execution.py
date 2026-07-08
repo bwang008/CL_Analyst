@@ -1,5 +1,9 @@
 from typing import Callable, Any, Optional
-from src.core.instrument_master import get_instrument
+from src.core.instrument_master import (
+    contract_matches,
+    get_instrument,
+    registry_symbol_for_contract,
+)
 from src.live_execution.interfaces.execution_interface import (
     ExecutionClient,
     StandardCommissionEvent,
@@ -73,7 +77,10 @@ class IBKRExecutionClient(ExecutionClient):
         event = StandardCommissionEvent(
             order_id=str(trade.order.orderId),
             exec_id=str(fill.execution.execId),
-            symbol=trade.contract.symbol,
+            symbol=registry_symbol_for_contract(
+                trade.contract.symbol,
+                getattr(trade.contract, "tradingClass", None),
+            ),
             commission=float(getattr(report, "commission", 0.0) or 0.0),
             realized_pnl=realized,
             currency=str(getattr(report, "currency", "") or ""),
@@ -91,7 +98,10 @@ class IBKRExecutionClient(ExecutionClient):
     def _on_order_status(self, trade: Any):
         event = StandardExecutionEvent(
             order_id=str(trade.order.orderId),
-            symbol=trade.contract.symbol,
+            symbol=registry_symbol_for_contract(
+                trade.contract.symbol,
+                getattr(trade.contract, "tradingClass", None),
+            ),
             status=trade.orderStatus.status,
             filled_qty=int(trade.orderStatus.filled),
             remaining_qty=int(trade.orderStatus.remaining),
@@ -119,7 +129,10 @@ class IBKRExecutionClient(ExecutionClient):
         total = 0.0
         for item in items:
             contract = getattr(item, "contract", None)
-            if getattr(contract, "symbol", None) != symbol:
+            if not contract_matches(
+                symbol, getattr(contract, "symbol", None),
+                getattr(contract, "tradingClass", None),
+            ):
                 continue
             total += float(getattr(item, "position", 0) or 0)
         return int(total)
@@ -138,9 +151,12 @@ class IBKRExecutionClient(ExecutionClient):
         local_sym, _ = self.manager.get_front_month_contract(symbol=symbol)
         # T2: exchange from the instrument registry (was hardcoded NYMEX —
         # behavior-identical for CL/MCL, enables non-NYMEX symbols).
+        # ib_search_symbol/tradingClass handle products that share an IB symbol
+        # (micro silver SIL → symbol "SI", tradingClass "SIL").
+        inst = get_instrument(symbol)
         contract = Future(
-            symbol=symbol, localSymbol=local_sym,
-            exchange=get_instrument(symbol).exchange,
+            symbol=inst.ib_search_symbol, localSymbol=local_sym,
+            exchange=inst.exchange, tradingClass=inst.ib_trading_class or "",
         )
         contract = self.manager.qualify_contract(contract)
         self._cached_contracts[symbol] = contract
@@ -357,11 +373,16 @@ class IBKRExecutionClient(ExecutionClient):
             order = getattr(trade, "order", None)
             if contract is None or order is None:
                 continue
-            if symbol is not None and getattr(contract, "symbol", None) != symbol:
+            if symbol is not None and not contract_matches(
+                symbol, getattr(contract, "symbol", None),
+                getattr(contract, "tradingClass", None),
+            ):
                 continue
             events.append(StandardExecutionEvent(
                 order_id=str(order.orderId),
-                symbol=contract.symbol,
+                symbol=registry_symbol_for_contract(
+                    contract.symbol, getattr(contract, "tradingClass", None),
+                ),
                 status=trade.orderStatus.status if trade.orderStatus else "Unknown",
                 filled_qty=int(trade.orderStatus.filled) if trade.orderStatus else 0,
                 remaining_qty=int(trade.orderStatus.remaining) if trade.orderStatus else 0,

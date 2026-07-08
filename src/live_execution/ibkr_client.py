@@ -14,7 +14,9 @@ from ib_insync import (
 
 # Pure stdlib leaf — no import cycle (instrument_master imports nothing
 # from live_execution).
-from src.core.instrument_master import get_instrument, round_to_tick
+from src.core.instrument_master import (
+    contract_matches, get_instrument, round_to_tick,
+)
 
 log = logging.getLogger(__name__)
 
@@ -58,18 +60,29 @@ def build_future_contract(
     if exchange is None:
         exchange = instrument.exchange
 
+    # IBKR search symbol + tradingClass (SIL → symbol "SI", tclass "SIL").
+    # For single-product symbols ib_search_symbol == symbol and trading_class
+    # == "" (ib_insync's default), so the emitted contract is byte-identical
+    # to the pre-tradingClass builder (CL/ES/… unaffected).
+    ib_symbol = instrument.ib_search_symbol
+    trading_class = instrument.ib_trading_class or ""
+
     if continuous:
         # C3: includeExpired=True on the ContFuture branch ONLY (legacy parity).
-        return ContFuture(symbol=symbol, exchange=exchange, currency=currency, includeExpired=True)
+        return ContFuture(
+            symbol=ib_symbol, exchange=exchange, currency=currency,
+            includeExpired=True, tradingClass=trading_class,
+        )
 
     if not contract_month:
         raise ValueError("contract_month is required when continuous=False (format: YYYYMM).")
 
     return Future(
-        symbol=symbol,
+        symbol=ib_symbol,
         lastTradeDateOrContractMonth=contract_month,
         exchange=exchange,
         currency=currency,
+        tradingClass=trading_class,
     )
 
 
@@ -617,7 +630,10 @@ class IBKRConnectionManager:
         self.ensure_connected()
         positions = self.ib.positions()
         for pos in positions:
-            if pos.contract.symbol == symbol:
+            if contract_matches(
+                symbol, getattr(pos.contract, "symbol", None),
+                getattr(pos.contract, "tradingClass", None),
+            ):
                 return int(pos.position)
         return 0
 
@@ -630,7 +646,10 @@ class IBKRConnectionManager:
             order = getattr(trade, "order", None)
             if contract is None or order is None:
                 continue
-            if getattr(contract, "symbol", None) != symbol:
+            if not contract_matches(
+                symbol, getattr(contract, "symbol", None),
+                getattr(contract, "tradingClass", None),
+            ):
                 continue
             try:
                 self.ib.cancelOrder(order)
@@ -643,15 +662,20 @@ class IBKRConnectionManager:
         """Close any open CL position using a market order."""
         self.ensure_connected()
         for pos in self.ib.positions():
-            if pos.contract.symbol != symbol:
+            if not contract_matches(
+                symbol, getattr(pos.contract, "symbol", None),
+                getattr(pos.contract, "tradingClass", None),
+            ):
                 continue
             if int(pos.position) == 0:
                 continue
 
-            # IBKR positions() returns contracts without exchange — inject
-            # the registry exchange for the position's OWN contract symbol
-            # (MCL≠CL-safe; unknown symbols raise, no order transmitted).
-            inst = get_instrument(pos.contract.symbol)
+            # IBKR positions() returns contracts without exchange — inject the
+            # registry exchange for the CONFIG symbol. Resolve by `symbol` (not
+            # pos.contract.symbol): micro silver's own contract reports IB
+            # symbol "SI", so get_instrument(contract.symbol) would return the
+            # full ×5000 instrument. MCL≠CL-safe; unknown symbols raise.
+            inst = get_instrument(symbol)
             pos.contract.exchange = inst.exchange
 
             action = "SELL" if pos.position > 0 else "BUY"
@@ -687,15 +711,20 @@ class IBKRConnectionManager:
         """
         self.ensure_connected()
         for pos in self.ib.positions():
-            if pos.contract.symbol != symbol:
+            if not contract_matches(
+                symbol, getattr(pos.contract, "symbol", None),
+                getattr(pos.contract, "tradingClass", None),
+            ):
                 continue
             if int(pos.position) == 0:
                 continue
 
-            # IBKR positions() returns contracts without exchange — inject
-            # the registry exchange for the position's OWN contract symbol
-            # (MCL≠CL-safe; unknown symbols raise, no order transmitted).
-            inst = get_instrument(pos.contract.symbol)
+            # IBKR positions() returns contracts without exchange — inject the
+            # registry exchange for the CONFIG symbol. Resolve by `symbol` (not
+            # pos.contract.symbol): micro silver's own contract reports IB
+            # symbol "SI", so get_instrument(contract.symbol) would return the
+            # full ×5000 instrument. MCL≠CL-safe; unknown symbols raise.
+            inst = get_instrument(symbol)
             pos.contract.exchange = inst.exchange
 
             action = "SELL" if pos.position > 0 else "BUY"
@@ -809,7 +838,10 @@ class IBKRConnectionManager:
         # CL-only portfolio items
         portfolio = self.ib.portfolio()
         for item in portfolio:
-            if item.contract.symbol == symbol:
+            if contract_matches(
+                symbol, getattr(item.contract, "symbol", None),
+                getattr(item.contract, "tradingClass", None),
+            ):
                 summary["cl_position"] = int(item.position)
                 summary["cl_unrealized_pnl"] = float(item.unrealizedPNL)
                 summary["cl_realized_pnl"] = float(item.realizedPNL)
@@ -843,9 +875,13 @@ class IBKRConnectionManager:
         """
         self.ensure_connected()
         instrument = get_instrument(symbol)
-        # Use a generic Future to search for available contracts
+        # Use a generic Future to search for available contracts. tradingClass
+        # disambiguates products that share an IB symbol (COMEX "SI" hosts both
+        # full SI ×5000 and micro SIL ×1000) — without it, IBKR returns both
+        # chains and _select_front_month could pick the wrong multiplier.
         search = Future(
-            symbol=symbol, exchange=instrument.exchange, currency="USD"
+            symbol=instrument.ib_search_symbol, exchange=instrument.exchange,
+            currency="USD", tradingClass=instrument.ib_trading_class or "",
         )
         details = self.ib.reqContractDetails(search)
 
@@ -875,7 +911,8 @@ class IBKRConnectionManager:
         self.ensure_connected()
         instrument = get_instrument(symbol)
         search = Future(
-            symbol=symbol, exchange=instrument.exchange, currency="USD"
+            symbol=instrument.ib_search_symbol, exchange=instrument.exchange,
+            currency="USD", tradingClass=instrument.ib_trading_class or "",
         )
         details = await self.ib.reqContractDetailsAsync(search)
 
