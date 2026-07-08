@@ -484,6 +484,14 @@ _HOURS_PER_TRADING_YEAR = 6000.0
 # TARGET_TRIPLE_<TP>x<SL>_<H>H_<DIR>  e.g. TARGET_TRIPLE_5x1_6H_SHORT
 _TRIPLE_RR_RE = re.compile(r"TRIPLE_(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)_")
 
+# --- Cost-awareness (ticket screen-cost-column_07072026_1744) ---
+# The screen ranks predictability (AUC) but is otherwise blind to per-symbol
+# transaction costs, so thin low-tick markets (ZC/ZS grains) score as high as
+# ES/NQ yet net ~0 after costs. These constants drive an APPROXIMATE cost model
+# (a mirage detector); the Stage-2 backtest remains authoritative.
+COMMISSION_RT_USD = 4.0   # documented flat round-trip commission estimate ($/RT).
+COST_FRAC_MAX = 0.06      # cost-mirage flag threshold: cost% above this => cost?.
+
 
 def _reward_risk_from_name(target_name: str) -> float:
     """Parse reward:risk (TP/SL) from a TARGET_TRIPLE_<TP>x<SL>_<H>H_<DIR> name.
@@ -497,6 +505,19 @@ def _reward_risk_from_name(target_name: str) -> float:
     if sl == 0:
         return float("nan")
     return tp / sl
+
+
+def _tp_mult_from_name(target_name: str) -> float:
+    """Parse the TP multiplier (the <TP> numerator of <TP>x<SL>) from a
+    TARGET_TRIPLE_<TP>x<SL>_<H>H_<DIR> name.
+
+    e.g. 2x1 -> 2.0, 6x2 -> 6.0, 8x2 -> 8.0. Returns nan on no-match. Used for
+    the gross-$ of a full TP winner (tp_mult x median holdout ATR x $/pt).
+    """
+    m = _TRIPLE_RR_RE.search(target_name or "")
+    if not m:
+        return float("nan")
+    return float(m.group(1))
 
 
 def _safe_auc(y_true: np.ndarray, scores: np.ndarray) -> float:
@@ -575,6 +596,20 @@ def _screen_one_target(
     # Minority-class support count (the reviewer's rarity trap detector).
     n_pos_holdout = int(y_holdout.sum())
 
+    # Median holdout ATR (raw exec-price ATR — cost is charged on RAW prices).
+    # Prefer EXEC_ATR_14; fall back to ATR_14; nan if neither present or empty.
+    # ticket screen-cost-column_07072026_1744.
+    if "EXEC_ATR_14" in df_vault.columns:
+        _atr_col = "EXEC_ATR_14"
+    elif "ATR_14" in df_vault.columns:
+        _atr_col = "ATR_14"
+    else:
+        _atr_col = None
+    if _atr_col is not None and len(df_vault) > 0:
+        atr_median_holdout = float(df_vault[_atr_col].median())
+    else:
+        atr_median_holdout = float("nan")
+
     pos_rate_holdout = float(y_holdout.mean()) if len(y_holdout) else float("nan")
 
     # PR-lift = PR-AUC / base rate ( >1 => better than a random classifier at
@@ -626,6 +661,7 @@ def _screen_one_target(
         "reward_risk": reward_risk,
         "pr_lift": pr_lift,
         "ev_floor_at_ref": ev_floor_at_ref,
+        "atr_median_holdout": atr_median_holdout,
     }
 
 
@@ -662,10 +698,15 @@ def _split_train_vault(
 
 def _screen_flag(row: dict) -> str:
     """Per-row carry/drop flag (ASCII only, evaluated in order):
-      1. n_pos_holdout < 75           -> RARE  (support too thin to trust)
-      2. else roc_auc_holdout >= 0.55 -> KEEP
-      3. else roc_auc_holdout >= 0.53 -> ~tune (may clear the gate post-Optuna)
-      4. else                         -> drop
+      1. n_pos_holdout < 75            -> RARE  (support too thin to trust)
+      2. roc_auc_holdout >= 0.53 (would be KEEP/~tune):
+           - finite cost_frac > COST_FRAC_MAX -> cost? (predictive cost-mirage)
+           - else roc >= 0.55               -> KEEP
+           - else                           -> ~tune (may clear post-Optuna)
+      3. else                          -> drop
+
+    A nan cost_frac must NOT override the ROC verdict (unknown economics fall
+    through to KEEP/~tune). ticket screen-cost-column_07072026_1744.
     """
     n_pos = row.get("n_pos_holdout")
     if n_pos is None or (isinstance(n_pos, float) and n_pos != n_pos) or n_pos < 75:
@@ -673,9 +714,19 @@ def _screen_flag(row: dict) -> str:
     roc = row.get("auc_holdout")
     if roc is None or (isinstance(roc, float) and roc != roc):
         return "drop"
-    if roc >= 0.55:
-        return "KEEP"
     if roc >= 0.53:
+        cost_frac = row.get("cost_frac")
+        # Cost gate: only a FINITE cost_frac above the threshold flags a mirage;
+        # nan (unknown economics) never overrides the predictive verdict.
+        if (
+            cost_frac is not None
+            and isinstance(cost_frac, (int, float))
+            and cost_frac == cost_frac  # not nan
+            and cost_frac > COST_FRAC_MAX
+        ):
+            return "cost?"
+        if roc >= 0.55:
+            return "KEEP"
         return "~tune"
     return "drop"
 
@@ -709,10 +760,16 @@ def write_auc_report(rows: list[dict], output_path: str, meta: dict) -> str:
             return "-"
         return str(int(v))
 
-    # Column headers, in blueprint order.
+    def _fmt_cost_pct(v) -> str:
+        """cost_frac -> 'XX.X' (percent, 1 dp); None/NaN -> '-'."""
+        if v is None or (isinstance(v, float) and v != v):
+            return "-"
+        return f"{v * 100.0:.1f}"
+
+    # Column headers, in blueprint order (cost columns after EV_flr, flag last).
     headers = [
         "target", "dir", "PR-AUC", "ROC-AUC", "PR-lift", "Brier",
-        "pos%", "n_pos", "prec@ref", "RR", "EV_flr", "flag",
+        "pos%", "n_pos", "prec@ref", "RR", "EV_flr", "$win", "cost%", "flag",
     ]
     # Left-align target/dir/flag; right-align everything numeric.
     left_cols = {"target", "dir", "flag"}
@@ -732,6 +789,8 @@ def write_auc_report(rows: list[dict], output_path: str, meta: dict) -> str:
             _fmt(r["precision_at_ref"], ".3f"),
             _fmt(r["reward_risk"], ".2f"),
             _fmt(r["ev_floor_at_ref"], ".2f"),
+            _fmt_int(r.get("gross_tp_usd")),          # $win: integer dollars, nan->'-'
+            _fmt_cost_pct(r.get("cost_frac")),        # cost%: cost_frac*100, 1dp, nan->'-'
             _screen_flag(r),
         ])
 
@@ -761,6 +820,22 @@ def write_auc_report(rows: list[dict], output_path: str, meta: dict) -> str:
             sep_cells.append("-" * (widths[i] - 1) + ":" if widths[i] >= 1 else "-")
     separator_line = "| " + " | ".join(sep_cells) + " |\n"
 
+    # Per-symbol economics for the meta header (wrapped: unknown symbol -> nan,
+    # never crashes report writing). ticket screen-cost-column_07072026_1744.
+    from src.core.instrument_master import dollars_per_point, default_slippage_points
+
+    _sym = meta.get("symbol")
+    try:
+        _dpp = float(dollars_per_point(_sym))
+        _dpp_str = f"{_dpp:g}"
+    except Exception:
+        _dpp_str = "-"
+    try:
+        _slip = float(default_slippage_points(_sym))
+        _slip_str = f"{_slip:g}"
+    except Exception:
+        _slip_str = "-"
+
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("# Target Screen — AUC Model Report\n\n")
@@ -769,6 +844,10 @@ def write_auc_report(rows: list[dict], output_path: str, meta: dict) -> str:
         f.write(f"- Train cutoff: {meta.get('train_cutoff_date')}\n")
         f.write(f"- Holdout cutoff: {meta.get('holdout_cutoff_date')}\n")
         f.write(f"- Random seed: {meta.get('random_seed')}\n")
+        f.write(
+            f"- Economics: $/pt={_dpp_str}, slippage/side={_slip_str}, "
+            f"commission est (${COMMISSION_RT_USD:g} RT)\n"
+        )
         f.write(f"- Fixed LGBM params: {meta.get('params')}\n\n")
         f.write(header_line)
         f.write(separator_line)
@@ -802,8 +881,21 @@ def write_auc_report(rows: list[dict], output_path: str, meta: dict) -> str:
             "estimate — true EV comes from the Stage-2 backtest.\n"
         )
         f.write(
+            "- `$win` = gross $ of a full TP winner = tp_mult x median holdout ATR "
+            "x $/pt (tp_mult is the <TP> numerator of the target's <TP>x<SL>).\n"
+        )
+        f.write(
+            "- `cost%` = round-trip slippage + est. commission as a % of `$win` "
+            "(uses the symbol's DEFAULT slippage/side + a flat "
+            f"${COMMISSION_RT_USD:g} RT commission). **Approximate** — the "
+            "Stage-2 backtest is authoritative.\n"
+        )
+        f.write(
             "- `flag`: `RARE` if n_pos<75 (support too thin — AUC on hyper-rare "
-            "targets is unreliable); else `KEEP` if ROC-AUC>=0.55; else `~tune` "
+            "targets is unreliable); else if ROC-AUC>=0.53 and `cost%`>"
+            f"{COST_FRAC_MAX * 100:g}% -> `cost?` (ROC says edge but it is likely "
+            "a cost mirage; ZC/ZS grains are the canonical case — high AUC, "
+            "untradeable after costs); else `KEEP` if ROC-AUC>=0.55; else `~tune` "
             "if ROC-AUC>=0.53 (borderline, may clear the gate after Optuna); "
             "else `drop`.\n"
         )
@@ -831,6 +923,20 @@ def run_screen(
 
     # Reproducibility: seed the process-level numpy RNG (matches run_pipeline).
     np.random.seed(random_seed)
+
+    # Per-symbol economics for the cost-awareness column. Wrapped so an unknown
+    # symbol degrades to nan (never crashes the screen). ticket
+    # screen-cost-column_07072026_1744.
+    from src.core.instrument_master import dollars_per_point, default_slippage_points
+
+    try:
+        _dpp = float(dollars_per_point(symbol))
+    except Exception:
+        _dpp = float("nan")
+    try:
+        _slip = float(default_slippage_points(symbol))
+    except Exception:
+        _slip = float("nan")
 
     print("=" * 70)
     print("[SCREEN] TARGET SCREEN (fixed-param, no-Optuna)")
@@ -889,6 +995,21 @@ def run_screen(
             row["ev_floor_at_ref"] = float(_p * _rr - (1.0 - _p) * 1.0)
         else:
             row["ev_floor_at_ref"] = float("nan")
+
+        # --- Cost-awareness (approximate; Stage-2 backtest authoritative) ---
+        # Computed from the DISPLAYED target name (like reward_risk). nan-guards
+        # propagate an unknown symbol / missing ATR / degenerate divisor to nan.
+        _tp_mult = _tp_mult_from_name(target_name)
+        _atr = row["atr_median_holdout"]
+        gross_tp_usd = float(_tp_mult * _atr * _dpp)
+        rt_cost_usd = float(2.0 * _slip * _dpp + COMMISSION_RT_USD)
+        if gross_tp_usd == gross_tp_usd and gross_tp_usd != 0.0 and rt_cost_usd == rt_cost_usd:
+            cost_frac = float(rt_cost_usd / gross_tp_usd)
+        else:
+            cost_frac = float("nan")
+        row["gross_tp_usd"] = gross_tp_usd
+        row["rt_cost_usd"] = rt_cost_usd
+        row["cost_frac"] = cost_frac
         rows.append(row)
         print(
             f"  AUC holdout={row['auc_holdout']:.4f}  "

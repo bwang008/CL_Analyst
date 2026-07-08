@@ -17,8 +17,11 @@ import pandas as pd
 import pytest
 
 from gcp.vm_e2e_pipeline import (
+    COMMISSION_RT_USD,
+    COST_FRAC_MAX,
     SCREEN_LGBM_PARAMS,
     _screen_one_target,
+    _tp_mult_from_name,
     run_screen,
     write_auc_report,
 )
@@ -54,6 +57,10 @@ def _make_synthetic_df(n_rows: int = 800, seed: int = 7) -> pd.DataFrame:
 
     X = rng.normal(size=(n_rows, len(FEATURE_COLS)))
     df = pd.DataFrame(X, columns=FEATURE_COLS, index=idx)
+
+    # Raw exec-price ATR (cost is charged on raw prices). Strictly positive so
+    # the holdout median is finite and > 0 (used by the cost-column metric).
+    df["EXEC_ATR_14"] = 0.30 + 0.10 * np.abs(rng.normal(size=n_rows))
 
     # Learnable signal: linear combo of two features + small noise, thresholded.
     signal = 1.5 * df["MOM_ret_24"] - 1.0 * df["RSI_14"] + 0.3 * rng.normal(size=n_rows)
@@ -264,6 +271,59 @@ class TestScreenOneTarget:
         )
         assert row["reward_risk"] == pytest.approx(2.0)
 
+    def test_atr_median_holdout_finite_and_positive(self, synthetic_screen_df):
+        # ticket screen-cost-column_07072026_1744: median holdout EXEC_ATR_14.
+        df_train, df_vault = self._split(synthetic_screen_df)
+        row = _screen_one_target(
+            df_train=df_train,
+            df_vault=df_vault,
+            feature_cols=FEATURE_COLS,
+            target_col=LEARNABLE_TARGET,
+            direction="long",
+            params=SCREEN_LGBM_PARAMS,
+            random_seed=42,
+        )
+        assert "atr_median_holdout" in row
+        atr = row["atr_median_holdout"]
+        assert atr == atr  # not nan
+        assert atr > 0.0
+        # Matches the fixture's holdout EXEC_ATR_14 median exactly.
+        expected = float(df_vault["EXEC_ATR_14"].median())
+        assert atr == pytest.approx(expected, rel=1e-9)
+
+    def test_atr_median_falls_back_to_atr_14(self, synthetic_screen_df):
+        # If EXEC_ATR_14 is absent, fall back to ATR_14.
+        df_train, df_vault = self._split(synthetic_screen_df)
+        df_train = df_train.drop(columns=["EXEC_ATR_14"]).copy()
+        df_vault = df_vault.drop(columns=["EXEC_ATR_14"]).copy()
+        df_train["ATR_14"] = 0.5
+        df_vault["ATR_14"] = 0.5
+        row = _screen_one_target(
+            df_train=df_train,
+            df_vault=df_vault,
+            feature_cols=FEATURE_COLS,
+            target_col=LEARNABLE_TARGET,
+            direction="long",
+            params=SCREEN_LGBM_PARAMS,
+            random_seed=42,
+        )
+        assert row["atr_median_holdout"] == pytest.approx(0.5, rel=1e-9)
+
+    def test_atr_median_nan_when_neither_column_present(self, synthetic_screen_df):
+        df_train, df_vault = self._split(synthetic_screen_df)
+        df_train = df_train.drop(columns=["EXEC_ATR_14"]).copy()
+        df_vault = df_vault.drop(columns=["EXEC_ATR_14"]).copy()
+        row = _screen_one_target(
+            df_train=df_train,
+            df_vault=df_vault,
+            feature_cols=FEATURE_COLS,
+            target_col=LEARNABLE_TARGET,
+            direction="long",
+            params=SCREEN_LGBM_PARAMS,
+            random_seed=42,
+        )
+        assert np.isnan(row["atr_median_holdout"])
+
     def test_auc_holdout_in_unit_interval(self, synthetic_screen_df):
         df_train, df_vault = self._split(synthetic_screen_df)
         row = _screen_one_target(
@@ -415,6 +475,67 @@ class TestRunScreen:
         dirs = {r["target"]: r["direction"] for r in rows}
         assert dirs[LEARNABLE_TARGET] == "long"
         assert dirs[NOISE_TARGET] == "short"
+
+
+# ---------------------------------------------------------------------------
+# 4b. Cost-awareness column (ticket screen-cost-column_07072026_1744)
+# ---------------------------------------------------------------------------
+
+class TestTpMultFromName:
+    def test_parses_tp_numerator(self):
+        assert _tp_mult_from_name("TARGET_TRIPLE_2x1_6H_LONG") == pytest.approx(2.0)
+        assert _tp_mult_from_name("TARGET_TRIPLE_6x2_8H_SHORT") == pytest.approx(6.0)
+        assert _tp_mult_from_name("TARGET_TRIPLE_8x2_12H_LONG") == pytest.approx(8.0)
+
+    def test_junk_returns_nan(self):
+        assert np.isnan(_tp_mult_from_name("NOT_A_TARGET"))
+        assert np.isnan(_tp_mult_from_name(""))
+        assert np.isnan(_tp_mult_from_name(None))
+
+
+class TestRunScreenCost:
+    def test_cost_frac_and_gross_tp_match_fixture_economics(self, synthetic_parquet, tmp_path):
+        # CL: dollars_per_point=1000, default_slippage_points=0.01, tp_mult=2.
+        rows = run_screen(
+            data_path=synthetic_parquet,
+            train_cutoff_date=TRAIN_CUTOFF,
+            targets=[LEARNABLE_TARGET, NOISE_TARGET],
+            symbol="CL",
+            output_dir=str(tmp_path / "cost"),
+            random_seed=42,
+        )
+        # Recompute the holdout median EXEC_ATR_14 independently from the fixture.
+        df = _make_synthetic_df()
+        cutoff = pd.Timestamp(TRAIN_CUTOFF)
+        df_vault = df[df.index >= cutoff]
+        atr_median = float(df_vault["EXEC_ATR_14"].median())
+
+        dpp = 1000.0
+        slip = 0.01
+        for r in rows:
+            tp_mult = 2.0  # both fixture targets are 2x1
+            gross = tp_mult * atr_median * dpp
+            rt_cost = 2.0 * slip * dpp + COMMISSION_RT_USD
+            cost_frac = rt_cost / gross
+
+            assert r["gross_tp_usd"] == pytest.approx(gross, rel=1e-9)
+            assert r["rt_cost_usd"] == pytest.approx(rt_cost, rel=1e-9)
+            assert r["cost_frac"] == r["cost_frac"]  # finite
+            assert r["cost_frac"] == pytest.approx(cost_frac, rel=1e-9)
+
+    def test_unknown_symbol_degrades_to_nan_not_crash(self, synthetic_parquet, tmp_path):
+        rows = run_screen(
+            data_path=synthetic_parquet,
+            train_cutoff_date=TRAIN_CUTOFF,
+            targets=[LEARNABLE_TARGET],
+            symbol="NOT_A_REAL_SYMBOL",
+            output_dir=str(tmp_path / "unk"),
+            random_seed=42,
+        )
+        # Unknown symbol economics -> nan cost fields, but the screen still runs.
+        assert len(rows) == 1
+        assert np.isnan(rows[0]["cost_frac"])
+        assert np.isnan(rows[0]["gross_tp_usd"])
 
 
 # ---------------------------------------------------------------------------
@@ -594,3 +715,103 @@ class TestWriteAucReport:
         assert "CL" in text
         assert "SYNTH" in text
         assert "42" in text  # seed
+
+    # --- Cost-awareness column (ticket screen-cost-column_07072026_1744) ---
+
+    def _cost_row(self, cost_frac, roc, n_pos=96):
+        """A single hand-built row with tunable cost_frac / ROC-AUC / support."""
+        return {
+            "target": "TARGET_TRIPLE_2x1_6H_LONG", "direction": "long",
+            "auc_train": 0.72, "auc_holdout": roc, "pr_auc_holdout": 0.40,
+            "pos_rate_train": 0.50, "pos_rate_holdout": 0.48,
+            "n_train": 500, "n_holdout": 200, "prob_spread": 0.12,
+            "precision_at_ref": 0.55,
+            "brier_holdout": 0.22, "n_pos_holdout": n_pos,
+            "reward_risk": 2.0, "pr_lift": 0.83, "ev_floor_at_ref": 0.10,
+            "atr_median_holdout": 0.30, "gross_tp_usd": 600.0,
+            "rt_cost_usd": 24.0, "cost_frac": cost_frac,
+        }
+
+    def _flag_of(self, text, target):
+        for ln in text.splitlines():
+            if target in ln and ln.strip().startswith("|"):
+                return ln.rsplit("|", 2)[1].strip()
+        raise AssertionError(f"{target} not found in table")
+
+    def test_win_and_cost_headers_present(self, tmp_path):
+        out = tmp_path / "AUC_Model_Report.md"
+        write_auc_report([self._cost_row(0.04, 0.64)], str(out), self._meta())
+        text = out.read_text(encoding="utf-8")
+        assert "$win" in text
+        assert "cost%" in text
+
+    def test_win_and_cost_columns_after_ev_flr_before_flag(self, tmp_path):
+        out = tmp_path / "AUC_Model_Report.md"
+        write_auc_report([self._cost_row(0.04, 0.64)], str(out), self._meta())
+        text = out.read_text(encoding="utf-8")
+        header = next(ln for ln in text.splitlines() if "$win" in ln)
+        cells = [c.strip() for c in header.split("|") if c.strip()]
+        # Column order: ... EV_flr | $win | cost% | flag
+        assert cells.index("EV_flr") < cells.index("$win")
+        assert cells.index("$win") < cells.index("cost%")
+        assert cells.index("cost%") < cells.index("flag")
+        assert cells[-1] == "flag"
+
+    def test_cost_mirage_flag_when_predictive_but_expensive(self, tmp_path):
+        # ROC 0.64 (KEEP-ish) but cost_frac 0.20 (>6%) -> cost?
+        out = tmp_path / "AUC_Model_Report.md"
+        write_auc_report([self._cost_row(0.20, 0.64)], str(out), self._meta())
+        text = out.read_text(encoding="utf-8")
+        assert self._flag_of(text, "TARGET_TRIPLE_2x1_6H_LONG") == "cost?"
+
+    def test_cheap_cost_keeps_the_keep_flag(self, tmp_path):
+        # Same row, cost_frac 0.01 (<6%) -> KEEP (cost does not override).
+        out = tmp_path / "AUC_Model_Report.md"
+        write_auc_report([self._cost_row(0.01, 0.64)], str(out), self._meta())
+        text = out.read_text(encoding="utf-8")
+        assert self._flag_of(text, "TARGET_TRIPLE_2x1_6H_LONG") == "KEEP"
+
+    def test_nan_cost_frac_does_not_override_verdict(self, tmp_path):
+        # cost_frac nan + ROC 0.64 -> KEEP (nan must NOT trigger cost?).
+        out = tmp_path / "AUC_Model_Report.md"
+        write_auc_report([self._cost_row(float("nan"), 0.64)], str(out), self._meta())
+        text = out.read_text(encoding="utf-8")
+        assert self._flag_of(text, "TARGET_TRIPLE_2x1_6H_LONG") == "KEEP"
+
+    def test_rare_wins_over_cost_gate(self, tmp_path):
+        # n_pos=40 (<75) with an expensive cost_frac -> still RARE, not cost?.
+        out = tmp_path / "AUC_Model_Report.md"
+        write_auc_report([self._cost_row(0.20, 0.64, n_pos=40)], str(out), self._meta())
+        text = out.read_text(encoding="utf-8")
+        assert self._flag_of(text, "TARGET_TRIPLE_2x1_6H_LONG") == "RARE"
+
+    def test_cost_cell_renders_dash_when_nan(self, tmp_path):
+        out = tmp_path / "AUC_Model_Report.md"
+        row = self._cost_row(float("nan"), 0.64)
+        row["gross_tp_usd"] = float("nan")
+        write_auc_report([row], str(out), self._meta())
+        text = out.read_text(encoding="utf-8")
+        for ln in text.splitlines():
+            if "TARGET_TRIPLE_2x1_6H_LONG" in ln and ln.strip().startswith("|"):
+                assert "nan" not in ln
+                break
+        else:
+            raise AssertionError("row not found")
+
+    def test_meta_header_has_economics(self, tmp_path):
+        out = tmp_path / "AUC_Model_Report.md"
+        write_auc_report([self._cost_row(0.04, 0.64)], str(out), self._meta())
+        text = out.read_text(encoding="utf-8").lower()
+        assert "$/pt" in text or "$/point" in text
+        assert "slippage" in text
+        assert "commission" in text
+
+    def test_legend_documents_cost_columns(self, tmp_path):
+        out = tmp_path / "AUC_Model_Report.md"
+        write_auc_report([self._cost_row(0.04, 0.64)], str(out), self._meta())
+        text = out.read_text(encoding="utf-8").lower()
+        assert "$win" in text
+        assert "cost%" in text
+        assert "cost?" in text
+        # Approximate cost model; Stage-2 backtest authoritative.
+        assert "stage-2" in text or "stage 2" in text
