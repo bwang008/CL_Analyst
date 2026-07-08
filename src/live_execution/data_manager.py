@@ -481,6 +481,22 @@ class DataManager:
                 )
                 row.index.name = "DateTime"
 
+        # Coerce OHLCV to numeric BEFORE the concat. The reconnect gap-backfill
+        # loop appends bars via ``row.to_frame().T`` over an ``iterrows()`` Series
+        # (a mixed Timestamp+float row is object-dtype), and the ``isinstance(row,
+        # pd.Series)`` branch above does the same for raw-Series callers. Concat-ing
+        # an object-dtype row upcasts the cache's float64 OHLCV columns to object,
+        # which later makes the shared feature engine's ``np.log(Close/…)`` raise a
+        # ufunc TypeError — the fleet then goes hourly-blind after every reconnect
+        # (ticket 1h-reconnect-object-dtype_07082026_0032). ``errors="raise"`` keeps
+        # a genuinely corrupt bar loud rather than silently NaN-ing it. Copy first so
+        # a DataFrame caller passing a view is never mutated in place (and no
+        # SettingWithCopyWarning); the row is a single bar, so the copy is cheap.
+        row = row.copy()
+        for col in ("Open", "High", "Low", "Close", "Volume"):
+            if col in row.columns:
+                row[col] = pd.to_numeric(row[col], errors="raise")
+
         self._df = pd.concat([self._df, row])
         self._dedup_and_sort()
 

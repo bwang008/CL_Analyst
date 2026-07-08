@@ -362,3 +362,86 @@ class TestAppendAndFlush:
         })
         with pytest.raises(RuntimeError, match="not initialized"):
             dm.append_bar(new_row)
+
+
+# ---------------------------------------------------------------------------
+# Tests: OHLCV dtype coercion on append (reconnect-backfill poisoning guard)
+# Ticket 1h-reconnect-object-dtype_07082026_0032
+# ---------------------------------------------------------------------------
+
+class TestAppendBarDtypeCoercion:
+    """The reconnect gap-backfill loop appends bars via
+    ``append_bar(row.to_frame().T)`` where ``row`` comes from ``iterrows()`` over
+    a mixed DateTime+float frame — i.e. an OBJECT-dtype Series. Without coercion,
+    ``pd.concat`` upcasts the cache's float64 OHLCV columns to object, and the
+    shared feature engine's ``np.log(Close / Close.shift(1))`` (alpha_factory.py)
+    then raises a ufunc TypeError. Result in production: the whole fleet goes
+    hourly-blind after every Gateway/TWS reconnect until a manual restart.
+    """
+
+    @staticmethod
+    def _reconnect_style_row(ts):
+        """A single bar shaped exactly like the reconnect-backfill append input:
+        an object-dtype 1-row frame produced by iterrows() -> to_frame().T,
+        mirroring ib_bars_to_dataframe output (DateTime column + float OHLCV)."""
+        df = pd.DataFrame(
+            [{
+                "DateTime": ts,
+                "Open": 71.0, "High": 71.5, "Low": 70.5,
+                "Close": 71.2, "Volume": 2000.0,
+            }]
+        )
+        df = df.set_index(pd.DatetimeIndex(df["DateTime"]), drop=False)
+        df.index.name = "DateTime"
+        _, series_row = next(df.iterrows())        # object-dtype Series
+        return series_row.to_frame().T             # all columns object dtype
+
+    def test_reconnect_style_append_keeps_ohlcv_float(self, mock_seed, cache_path):
+        dm = DataManager(
+            symbol="CL", seed_path=str(mock_seed),
+            cache_path=str(cache_path), data_client=None,
+        )
+        dm.initialize()
+        new_ts = dm.last_timestamp + timedelta(minutes=5)
+        object_row = self._reconnect_style_row(new_ts)
+        # Precondition: the incoming row really is the object-dtype input (the bug).
+        assert object_row["Close"].dtype == object
+        dm.append_bar(object_row)
+        # The cache column must stay float64 — not be upcast to object.
+        for col in ("Open", "High", "Low", "Close"):
+            assert dm.dataframe[col].dtype == np.float64, f"{col} upcast to object"
+
+    def test_feature_engine_runs_after_reconnect_style_append(self, mock_seed, cache_path):
+        """Full-pipeline guard: the shared AlphaFactory (np.log at :180) must not
+        raise on a ratio-adjusted frame built after a reconnect-style append."""
+        from src.features.alpha_factory import AlphaFactory
+
+        dm = DataManager(
+            symbol="CL", seed_path=str(mock_seed),
+            cache_path=str(cache_path), data_client=None,
+        )
+        dm.initialize()
+        new_ts = dm.last_timestamp + timedelta(minutes=5)
+        dm.append_bar(self._reconnect_style_row(new_ts))
+        adjusted = dm.get_ratio_adjusted_df()
+        AlphaFactory(adjusted)  # must not raise the ufunc TypeError
+
+    def test_non_numeric_bar_raises_loudly(self, mock_seed, cache_path):
+        """A genuinely corrupt (non-numeric) OHLCV value must fail LOUDLY at
+        ingestion — never silently NaN or survive to crash downstream."""
+        dm = DataManager(
+            symbol="CL", seed_path=str(mock_seed),
+            cache_path=str(cache_path), data_client=None,
+        )
+        dm.initialize()
+        new_ts = dm.last_timestamp + timedelta(minutes=5)
+        bad_row = pd.DataFrame(
+            [{
+                "DateTime": new_ts,
+                "Open": 71.0, "High": 71.5, "Low": 70.5,
+                "Close": "NOTANUM", "Volume": 2000.0,
+            }],
+            index=pd.DatetimeIndex([new_ts], name="DateTime"),
+        )
+        with pytest.raises((ValueError, TypeError)):
+            dm.append_bar(bad_row)
