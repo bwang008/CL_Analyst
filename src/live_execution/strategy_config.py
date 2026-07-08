@@ -22,7 +22,7 @@ Usage::
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +79,66 @@ class SideConfig:
 
 
 @dataclass(frozen=True)
+class WeekendFlattenConfig:
+    """Optional weekend-carry flatten overlay (default OFF).
+
+    When ``enabled``, a position that is still open and profitable by at least
+    ``profit_atr_mult`` × (ATR-at-entry) is flattened on the last bar before a
+    weekend/holiday market gap.  A "gap bar" is any bar whose distance to the
+    next bar in the data is >= ``min_gap_hours`` — this catches Friday→Sunday
+    weekends and holiday-extended weekends directly from the data's own bar
+    spacing (no calendar needed, no lookahead), and is symbol-agnostic.
+
+    Purely additive: when the ``weekend_flatten`` block is absent from a config
+    this object is ``None`` and the engine behaves byte-for-byte as before.
+    """
+
+    enabled: bool
+    profit_atr_mult: float
+    min_gap_hours: float
+
+
+# Structural default: a weekend gap is ~49h (Fri 17:00 → Sun 18:00 ET); a
+# single daily maintenance halt is ~1h and a lone mid-week holiday ~24h.  40h
+# cleanly isolates weekend / long-weekend gaps from those shorter gaps.
+_DEFAULT_WEEKEND_MIN_GAP_HOURS: float = 40.0
+
+
+def parse_weekend_flatten(cfg: dict) -> Optional[WeekendFlattenConfig]:
+    """Parse the optional ``weekend_flatten`` config block.
+
+    Returns ``None`` when the block is absent (feature OFF — unchanged
+    behavior).  When present and enabled, ``profit_atr_mult`` is REQUIRED and
+    raises if missing (no silent null defaults for an active feature).
+    """
+    block = cfg.get("weekend_flatten")
+    if block is None:
+        return None
+    if not isinstance(block, dict):
+        raise ValueError("weekend_flatten must be a JSON object")
+    enabled = bool(block.get("enabled", False))
+    if not enabled:
+        return WeekendFlattenConfig(
+            enabled=False,
+            profit_atr_mult=0.0,
+            min_gap_hours=_DEFAULT_WEEKEND_MIN_GAP_HOURS,
+        )
+    if "profit_atr_mult" not in block:
+        raise ValueError(
+            "weekend_flatten.enabled=true requires an explicit 'profit_atr_mult' "
+            "(the unrealized-profit threshold in ATR multiples required to "
+            "flatten a winner before a weekend gap)."
+        )
+    return WeekendFlattenConfig(
+        enabled=True,
+        profit_atr_mult=float(block["profit_atr_mult"]),
+        min_gap_hours=float(
+            block.get("min_gap_hours", _DEFAULT_WEEKEND_MIN_GAP_HOURS)
+        ),
+    )
+
+
+@dataclass(frozen=True)
 class StrategyConfig:
     """Centralized, strongly-typed strategy configuration.
 
@@ -104,6 +164,9 @@ class StrategyConfig:
 
     # --- Raw dict (for downstream consumers that still need it) -------------
     raw: dict
+
+    # --- Optional overlays (default None = feature off) ---------------------
+    weekend_flatten: Optional[WeekendFlattenConfig] = None
 
     # -----------------------------------------------------------------------
     # Factory
@@ -161,4 +224,5 @@ class StrategyConfig:
             long=_build_side("long"),
             short=_build_side("short"),
             raw=cfg,
+            weekend_flatten=parse_weekend_flatten(cfg),
         )

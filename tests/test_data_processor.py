@@ -1,4 +1,12 @@
 """
+TDD-TESTER AUTHORIZATION
+Target Implementation File: src/data_processor.py
+Target Class/Function: DataProcessor.process_hourset_15b
+Status: FINALIZED
+Strict-Lock: TRUE (Implementation agents may NOT modify this file)
+"""
+
+"""
 Tests for DataProcessor pipeline integration.
 
 This module tests the full data processing pipeline to ensure:
@@ -439,3 +447,99 @@ class TestVerifierIntegration:
         
         if not is_valid:
             pytest.fail(f"Processed data failed verification: {verifier.errors}")
+
+
+# =============================================================================
+# HOURSET 15B TESTS
+# =============================================================================
+
+class TestHourSet15B:
+    """Tests for the HourSet_15B dataset generation."""
+
+    def test_hourset_15b_defined_in_dataset_versions(self):
+        """HourSet_15B must be defined in DATASET_VERSIONS dictionary."""
+        from src.data_processor import DATASET_VERSIONS
+        assert 'HourSet_15B' in DATASET_VERSIONS, "HourSet_15B is not defined in DATASET_VERSIONS"
+
+    @pytest.fixture
+    def mock_dependencies(self):
+        """Mocks out heavy I/O and processing steps to keep tests fast."""
+        from unittest.mock import patch
+        with patch('src.data_processor.DataProcessor.load_data') as mock_load, \
+             patch('src.data_processor.DataProcessor.save') as mock_save, \
+             patch('src.data_processor.DataProcessor.cleanup') as mock_cleanup, \
+             patch('src.data_processor.AlphaFactory') as mock_alpha_factory:
+            
+            # Setup dummy dataframe
+            df = pd.DataFrame({
+                'Open': [100.0] * 100,
+                'High': [105.0] * 100,
+                'Low': [95.0] * 100,
+                'Close': [102.0] * 100,
+                'Volume': [1000] * 100
+            }, index=pd.date_range("2024-01-01", periods=100, freq="5min"))
+            
+            mock_load.return_value = df
+            mock_cleanup.return_value = df
+            mock_alpha_factory.return_value.add_all_features.return_value = df
+            
+            yield {
+                'load': mock_load,
+                'save': mock_save,
+                'cleanup': mock_cleanup,
+                'alpha_factory': mock_alpha_factory
+            }
+
+    def test_process_dispatches_to_hourset_15b(self, sample_raw_csv):
+        """process() should dispatch HourSet_15B to process_hourset_15b."""
+        from src.data_processor import DataProcessor
+        from unittest.mock import patch
+        
+        processor = DataProcessor(input_path=sample_raw_csv, dataset_version="HourSet_15B")
+        with patch.object(processor, 'process_hourset_15b') as mock_process_15b:
+            processor.process()
+            mock_process_15b.assert_called_once()
+
+    def test_process_hourset_15b_adds_new_short_horizon_targets(self, sample_raw_csv, mock_dependencies):
+        """process_hourset_15b must append the 3 new short-horizon targets."""
+        from src.data_processor import DataProcessor
+        from unittest.mock import patch
+        
+        processor = DataProcessor(input_path=sample_raw_csv, dataset_version="HourSet_15B")
+        processor.df = mock_dependencies['load'].return_value
+        
+        with patch.object(processor, 'add_triple_barrier_target', side_effect=lambda df, **kwargs: df) as mock_add_target, \
+             patch.object(processor, 'add_time_features_raw', return_value=processor.df), \
+             patch.object(processor, 'add_time_features', return_value=processor.df), \
+             patch.object(processor, 'normalize_features', return_value=processor.df):
+            
+            processor.process_hourset_15b()
+            
+            # Verify that the new targets were injected
+            calls = mock_add_target.call_args_list
+            target_prefixes = [call.kwargs.get('prefix') for call in calls]
+            
+            # 1. 1x0.5 ATR 1H
+            assert 'TARGET_TRIPLE_1x0p5_1H' in target_prefixes
+            call_1x0p5 = next(c for c in calls if c.kwargs.get('prefix') == 'TARGET_TRIPLE_1x0p5_1H')
+            assert call_1x0p5.kwargs.get('tp_atr_mult') == 1.0
+            assert call_1x0p5.kwargs.get('sl_atr_mult') == 0.5
+            assert call_1x0p5.kwargs.get('max_horizon') == 1  # 1H = 1 bar (1H resampled)
+            assert call_1x0p5.kwargs.get('atr_period') == 14
+
+            # 2. 2x1 2H
+            assert 'TARGET_TRIPLE_2x1_2H' in target_prefixes
+            call_2x1_2h = next(c for c in calls if c.kwargs.get('prefix') == 'TARGET_TRIPLE_2x1_2H')
+            assert call_2x1_2h.kwargs.get('tp_atr_mult') == 2.0
+            assert call_2x1_2h.kwargs.get('sl_atr_mult') == 1.0
+            assert call_2x1_2h.kwargs.get('max_horizon') == 2  # 2H = 2 bars (1H resampled)
+            assert call_2x1_2h.kwargs.get('atr_period') == 14
+
+            # 3. 2x1 1H
+            assert 'TARGET_TRIPLE_2x1_1H' in target_prefixes
+            call_2x1_1h = next(c for c in calls if c.kwargs.get('prefix') == 'TARGET_TRIPLE_2x1_1H')
+            assert call_2x1_1h.kwargs.get('tp_atr_mult') == 2.0
+            assert call_2x1_1h.kwargs.get('sl_atr_mult') == 1.0
+            assert call_2x1_1h.kwargs.get('max_horizon') == 1  # 1H = 1 bar (1H resampled)
+            assert call_2x1_1h.kwargs.get('atr_period') == 14
+

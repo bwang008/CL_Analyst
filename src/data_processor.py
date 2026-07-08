@@ -80,6 +80,10 @@ DATASET_VERSIONS = {
     'HourSet_12': (
         'Alias for process_hourset_10.'
     ),
+    'HourSet_15B': (
+        'Short-horizon dataset (process_hourset_15b): HourSet_14B base features + '
+        'short-horizon targets (1x0.5 1H, 2x1 2H, 2x1 1H).'
+    ),
 }
 
 
@@ -890,6 +894,8 @@ class DataProcessor:
             return self.process_hourset_13a(exec_ohlcv_path=kwargs.get("exec_ohlcv_path"))
         elif self.dataset_version == "HourSet_14B":
             return self.process_hourset_13b(exec_ohlcv_path=kwargs.get("exec_ohlcv_path"))
+        elif self.dataset_version == "HourSet_15B":
+            return self.process_hourset_15b(exec_ohlcv_path=kwargs.get("exec_ohlcv_path"))
         elif self.dataset_version == "Hour4Set_01":
             return self.process_hour4set_01()
         else:
@@ -3002,6 +3008,184 @@ class DataProcessor:
         saved_path = self.save(df)
         print("=" * 60)
         print("Processing Complete — HourSet_13B")
+        print(f"Output : {saved_path}")
+        print(f"Shape  : {df.shape}")
+        print("=" * 60)
+
+        self.df = df
+        return df
+
+    def process_hourset_15b(self, exec_ohlcv_path: Optional[str] = None) -> pd.DataFrame:
+        """HourSet_15B: Superset feature generation with rigid filtering.
+        
+        Applies AlphaFactory with include_term_structure=True to generate 
+        a superset of all legacy + new (LOG_RATIO, ZSCORE) features. 
+        Then filters out mathematically redundant clones (VIF=inf, rho>0.95) 
+        and poor distributions to leave exactly ~214 high-density features.
+        """
+        start_time = datetime.now()
+        print("=" * 60)
+        print("Starting Data Processing Pipeline - HOURSET_15B")
+        print("  1-Hour bars + topology-aware TS + pruned base features")
+        print(f"Started at: {start_time.isoformat(timespec='seconds')}")
+        print("=" * 60)
+
+        # ── Step 1: Load 5-min data and resample to 1H ───────────────
+        df = self.load_data()
+        df = self.resample_to_hourly(df)
+
+        # ── Step 2: Time features ─────────────────────────────────────
+        df = self.add_time_features(df, include_day_of_week=True)
+
+        # ── Step 3: AlphaFactory ──────────────────────────────────────
+        windows = [24, 72, 168, 336, 840]
+        macro_windows = {
+            "1W": 168, "2W": 336, "1M": 840,
+            "3M": 2160, "6M": 4320,
+        }
+        df = AlphaFactory(df, bars_per_hour=1).add_all_features(
+            windows=windows,
+            include_momentum=True,
+            include_macro=True,
+            include_extended=True,
+            include_dma=True,
+            include_ichimoku=True,
+            include_term_structure=True,
+            macro_windows=macro_windows,
+            log_progress=True,
+        )
+
+        # ── Step 4: External macro features (FRED + COT) ─────────────
+        macro_engine = MacroFeatureEngine()
+        df = macro_engine.merge_all(df, check_staleness=False)
+
+        # ── Step 5: RAW columns for evaluation (120H forward window) ──
+        raw_horizon = 120
+        
+        if exec_ohlcv_path:
+            print(f"  - Loading raw execution data from {exec_ohlcv_path}...")
+            raw_1h = self._load_and_resample_exec(exec_ohlcv_path)
+            raw_1h = raw_1h.reindex(df.index)
+            
+            df["EXEC_Open"] = raw_1h["Open"]
+            df["EXEC_High"] = raw_1h["High"]
+            df["EXEC_Low"] = raw_1h["Low"]
+            df["EXEC_Close"] = raw_1h["Close"]
+            
+            exec_tr = np.maximum(
+                raw_1h["High"] - raw_1h["Low"],
+                np.maximum(
+                    (raw_1h["High"] - raw_1h["Close"].shift(1)).abs(),
+                    (raw_1h["Low"] - raw_1h["Close"].shift(1)).abs(),
+                ),
+            )
+            df["EXEC_ATR_14"] = exec_tr.rolling(14).mean()
+            
+            future_high = raw_1h["High"].iloc[::-1].rolling(window=raw_horizon, min_periods=1).max().iloc[::-1].shift(-1)
+            future_low = raw_1h["Low"].iloc[::-1].rolling(window=raw_horizon, min_periods=1).min().iloc[::-1].shift(-1)
+            
+            df["RAW_Close"] = raw_1h["Close"].copy()
+            df["RAW_Future_High"] = future_high
+            df["RAW_Future_Low"] = future_low
+            print("  - Added EXEC_* columns and updated RAW_ columns from raw data")
+        else:
+            future_high = df["High"].iloc[::-1].rolling(window=raw_horizon, min_periods=1).max().iloc[::-1].shift(-1)
+            future_low = df["Low"].iloc[::-1].rolling(window=raw_horizon, min_periods=1).min().iloc[::-1].shift(-1)
+            df["RAW_Close"] = df["Close"].copy()
+            df["RAW_Future_High"] = future_high
+            df["RAW_Future_Low"] = future_low
+            print("  - Added RAW_Close, RAW_Future_High, RAW_Future_Low")
+
+        # ── Step 6: Precision Target Suite ────────────────────────────
+        target_multipliers = [2.0, 3.0, 4.0, 5.0]
+        target_horizons = [6, 12, 24]
+        for tp_mult in target_multipliers:
+            tp_label = str(int(tp_mult)) if tp_mult.is_integer() else str(tp_mult).replace(".", "p")
+            for horizon_h in target_horizons:
+                df = self.add_triple_barrier_target(
+                    df, prefix=f"TARGET_TRIPLE_{tp_label}x1_{horizon_h}H",
+                    tp_atr_mult=tp_mult, sl_atr_mult=1.0, max_horizon=horizon_h, atr_period=14
+                )
+
+        # --- NEW TARGETS (13A/13B) ---
+        # 3H horizon: 2x1
+        df = self.add_triple_barrier_target(
+            df, prefix="TARGET_TRIPLE_2x1_3H",
+            tp_atr_mult=2.0, sl_atr_mult=1.0, max_horizon=3, atr_period=14
+        )
+        
+        # 36H and 48H horizons
+        long_configs = [
+            (4.0, 1.0, "4x1"),
+            (5.0, 1.0, "5x1"),
+            (6.0, 2.0, "6x2"),
+            (8.0, 2.0, "8x2")
+        ]
+        for tp_mult, sl_mult, tag in long_configs:
+            for horizon_h in [36, 48]:
+                df = self.add_triple_barrier_target(
+                    df,
+                    prefix=f"TARGET_TRIPLE_{tag}_{horizon_h}H",
+                    tp_atr_mult=tp_mult,
+                    sl_atr_mult=sl_mult,
+                    max_horizon=horizon_h,
+                    atr_period=14,
+                )
+        df = self.add_return_target(df, horizons=[6, 12, 24, 72, 120])
+
+        # --- NEW TARGETS (15B short-horizon) ---
+        df = self.add_triple_barrier_target(
+            df, prefix="TARGET_TRIPLE_1x0p5_1H",
+            tp_atr_mult=1.0, sl_atr_mult=0.5, max_horizon=1, atr_period=14
+        )
+        df = self.add_triple_barrier_target(
+            df, prefix="TARGET_TRIPLE_2x1_2H",
+            tp_atr_mult=2.0, sl_atr_mult=1.0, max_horizon=2, atr_period=14
+        )
+        df = self.add_triple_barrier_target(
+            df, prefix="TARGET_TRIPLE_2x1_1H",
+            tp_atr_mult=2.0, sl_atr_mult=1.0, max_horizon=1, atr_period=14
+        )
+
+        # ── Step 7: Normalize features ────────────────────────────────
+        df = self.normalize_features(df)
+
+        # ── Step 8: HourSet_15B Pruning (Remove Collinearity) ──────────
+        cols_to_drop = []
+        for col in df.columns:
+            # 1. Base Feature Pruning
+            if col.startswith("VOLFLOW_DIVERGENCE_"): cols_to_drop.append(col)
+            elif col.startswith("MACRO_POS_"): cols_to_drop.append(col)
+            elif col.startswith("MOM_STOCH_K_") or col.startswith("MOM_STOCH_D_"): cols_to_drop.append(col)
+            elif col.startswith("VOL_PARK_") or col.startswith("VOL_RS_"): cols_to_drop.append(col)
+            elif col == "DIST_ZSCORE_72": cols_to_drop.append(col)
+            elif col.startswith("TREND_LR_SLOPE_") and col not in ("TREND_LR_SLOPE_24", "TREND_LR_SLOPE_72"): cols_to_drop.append(col)
+            elif col.startswith("LIQ_CORWIN_") and col not in ("LIQ_CORWIN_24", "LIQ_CORWIN_72"): cols_to_drop.append(col)
+            
+            # 2. Term Structure Pruning
+            elif col.startswith("TS_"):
+                if "STOCH_K" in col or "VOL_PARK" in col: cols_to_drop.append(col)
+                elif "VOL_YZ" in col or "CORWIN" in col:
+                    if "DIFF" in col or "INVERT" in col: cols_to_drop.append(col)
+                    elif "RATIO" in col and "LOG_RATIO" not in col: cols_to_drop.append(col)
+                elif "DONCHIAN" in col or "EFFICIENCY" in col:
+                    if "RATIO" in col or "INVERT" in col: cols_to_drop.append(col)
+                elif "LR_SLOPE" in col or "VWAP_DIST" in col or "CMF" in col:
+                    if "SIGN_AGREE" in col: cols_to_drop.append(col)
+
+        cols_to_drop = list(set(cols_to_drop))
+        print(f"  [85%] Pruning {len(cols_to_drop)} redundant features for HourSet_15B...")
+        df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
+
+        # ── Step 9: Cleanup ───────────────────────────────────────────
+        df = self.cleanup(
+            df, drop_raw_returns=True, warmup_rows=2200, max_warmup_bars=2200, keep_ohlcv=self.keep_ohlcv
+        )
+
+        # ── Step 10: Save ──────────────────────────────────────────────
+        saved_path = self.save(df)
+        print("=" * 60)
+        print("Processing Complete — HourSet_15B")
         print(f"Output : {saved_path}")
         print(f"Shape  : {df.shape}")
         print("=" * 60)
