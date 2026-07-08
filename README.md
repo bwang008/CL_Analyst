@@ -122,7 +122,7 @@ python agent/backtest_engine.py \
 
 **Auto-resolve**: When `--predictions` is omitted and `--config` is given, the backtest engine reads `predictions_path` from `models.long` and/or `models.short`. For dual-model configs with both long and short `predictions_path`, it auto-merges them (outer join, NaN→0.0).
 
-**Note:** The backtest engine does NOT load the model. It reads pre-computed predictions from the CSV and applies trade management rules (TP/SL/trailing/cooldown) from the strategy config.
+**Note:** The backtest engine does NOT load the model. It reads pre-computed predictions from the CSV and applies trade management rules (TP/SL/trailing/cooldown, plus the optional default-off exit-trigger overlays — see [Exit-Trigger Overlays](#exit-trigger-overlays-default-off-backtest-only)) from the strategy config.
 
 ### Phase 4: Archive & Deploy
 
@@ -337,6 +337,63 @@ When the blocked period ends:
 INFO [GUARD DEACTIVATED] new entries allowed
 ```
 Heartbeats, PnL updates, and position management continue normally. Telemetry records `action_taken="SKIP_EXECUTION_GUARD"` for audit.
+
+---
+
+## Exit-Trigger Overlays (default-off, backtest-only)
+
+The exit-side counterpart to the ExecutionGuard: three **config-gated, default-off** exit enhancements in `agent/backtest_engine.py`. When the config keys are absent, engine behavior is **byte-identical** to before they existed (pinned by tests). None of them are wired into the live trader — live parity is explicitly deferred and human-gated (ticket `exit-triggers-eod-oppsignal_07072026_1924`, blueprint + impact review in `.agents/collab/tickets/exit-triggers-eod-oppsignal_07072026_1924/`).
+
+### 1–2. Flatten triggers: `weekend_flatten` / `eod_flatten`
+
+Flatten a still-open **winner** on the last bar before a market gap. Detection is **data-driven from bar spacing** (no calendar, no lookahead, symbol-agnostic):
+
+| Trigger | Gap band (to next bar) | Catches | ExitReason |
+|---------|------------------------|---------|------------|
+| `eod_flatten` | `[min_gap_hours (2h), weekend threshold)` | Daily 17:00–18:00 ET halt, holiday early closes | `EOD_FLATTEN` |
+| `weekend_flatten` | `>= min_gap_hours (40h)` | Weekends + holiday-extended weekends (Thu pre-gap bars included automatically) | `WEEKEND_FLATTEN` |
+
+The two bands are **disjoint by construction**, so an EOD-only config does not flatten Fridays and attribution never overlaps.
+
+```json
+"weekend_flatten": { "enabled": true, "profit_atr_mult": 1.0 },
+"eod_flatten":     { "enabled": true, "profit_atr_mult": 0.0 }
+```
+
+- `profit_atr_mult` is **required when enabled** (loader raises if missing — no silent null defaults). `0.0` = flatten any non-losing position; `1.0` = only winners ≥ 1×ATR-at-entry.
+- Precedence: TP/SL (intrabar) and TIME_BARRIER are evaluated **first**; a flatten fires only if the position would otherwise survive the bar. Fill = bar open (TIME_BARRIER convention).
+- Applies in both single-position and concurrent modes.
+
+### 3. Opposite-signal profit-close (`conflict_resolution`)
+
+New `TieredEnsembleStrategy` conflict mode alongside `hold` / `close_existing_position` / `reverse_position`:
+
+```json
+"conflict_resolution": "close_existing_position_if_profit"
+```
+
+EXIT (as `SIGNAL_EXIT`) **iff** the opposite side's signal fires AND the current side's own signal has stopped confirming AND the position is green — judged **gross, on the EXEC (raw) price basis** via engine-fed `EngineState.entry_price` / `floating_pnl_points` (never by comparing the ratio-adjusted brain close against the raw entry fill). Both sides firing → HOLD; losing → HOLD. If a runtime does not feed `floating_pnl_points` (today's live path), the mode **raises loudly** instead of silently degrading to hold.
+
+### A/B harness
+
+```bash
+# trigger arms (none/eod/wkd/both) at profit gates, holdout-only decision framing
+python -m agent.ab_exit_triggers --arms eod,wkd,both --gates 0.0,1.0
+# phase-2 individual toggles incl. the conflict-mode arm
+python -m agent.ab_exit_triggers --arms eod,wkd,oppo
+```
+
+Runs baseline vs. each arm per fleet-manifest config on the holdout window and reports annualized-monthly Sharpe/Sortino, PnL, maxDD, and per-trigger exit attribution. 2026-07-07 holdout results: EOD strongly positive on ES/SI/NG, negative on GC, inert on CL; weekend negative in aggregate; `oppo` positive on NG. Full report: `.agents/collab/tickets/exit-triggers-eod-oppsignal_07072026_1924/ab_report.md`.
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `src/live_execution/strategy_config.py` | `WeekendFlattenConfig` + `parse_weekend_flatten` / `parse_eod_flatten` (crash-if-half-configured) |
+| `agent/backtest_engine.py` | Gap-band precompute, `_flatten_exit_reason()`, exec-basis `EngineState` feed |
+| `src/live_execution/strategies/execution_models.py` | `EngineState.entry_price` / `floating_pnl_points`; the new conflict mode |
+| `agent/ab_exit_triggers.py` | Fleet-wide A/B harness |
+| `tests/test_weekend_flatten.py`, `tests/test_opposite_signal_profit_close.py` | 51 tests: default-off byte-identity, band exclusivity, precedence, price-basis, loud-raise |
 
 ---
 

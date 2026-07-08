@@ -11,6 +11,21 @@ Capabilities:
 - Trailing stop to breakeven (+N×ATR in favor → SL moves to entry)
 - Post-stop-out cooldown period (configurable bars)
 - Gap-aware slippage (fills at Open when bar gaps past stop)
+- Exit-trigger overlays, DEFAULT-OFF / backtest-only (ticket
+  exit-triggers-eod-oppsignal_07072026_1924; see README "Exit-Trigger
+  Overlays"):
+    * ``weekend_flatten`` — flatten a winner on the last bar before a
+      weekend/holiday gap (data-driven: gap-to-next-bar >= 40h)
+    * ``eod_flatten`` — flatten a winner on the last bar before the daily
+      session halt (gap band [2h, weekend threshold), disjoint from weekend)
+    * both gate on unrealized >= profit_atr_mult × ATR-at-entry, fire AFTER
+      TP/SL and TIME_BARRIER, fill at bar open; ExitReasons
+      WEEKEND_FLATTEN / EOD_FLATTEN
+- Opposite-signal profit-close: conflict_resolution mode
+  "close_existing_position_if_profit" (TieredEnsembleStrategy) — EXIT when
+  the opposite signal fires, own side stops confirming, and the position is
+  green on the EXEC price basis (EngineState.floating_pnl_points, engine-fed)
+- A/B harness for the above: agent/ab_exit_triggers.py
 
 Usage:
     conda activate trader
