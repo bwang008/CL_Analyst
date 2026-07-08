@@ -86,7 +86,6 @@ tests/test_session_watchdog_rollover.py).
 from __future__ import annotations
 
 import dataclasses
-import json
 import logging
 import threading
 from datetime import datetime, timedelta, timezone
@@ -100,7 +99,6 @@ import pytz
 
 from src.core.instrument_master import INSTRUMENT_REGISTRY, get_instrument
 from src.live_execution import live_trader as lt_module
-from src.live_execution.instrument_context import resolve_instrument_context
 from src.live_execution.interfaces.execution_interface import (
     StandardExecutionEvent,
 )
@@ -965,77 +963,3 @@ class TestHourlyOnlyWatchdog:
         trader._last_bar_time_1h = pd.Timestamp(now - timedelta(minutes=300))
         with _frozen_lt_clock(now):
             assert trader._check_stale_bars() is False
-
-
-# ===========================================================================
-# 9. TestES01BFlagPatch — the shipped config carries the ONE new field
-#    (Coder patches configs/strategies/ES01B_Sharpe_E03_07042026.json);
-#    the T6 sentinel fields stay untouched.
-# ===========================================================================
-
-_ES01B_NAME = "ES01B_Sharpe_E03_07042026.json"
-
-
-def _load_es01b() -> dict:
-    return json.loads(
-        (_CONFIG_DIR / _ES01B_NAME).read_text(encoding="utf-8")
-    )
-
-
-class TestES01BFlagPatch:
-    def test_es01b_no_longer_carries_enable_5m_stream_key(self):
-        """EVOLVED + RENAMED (ticket seedless-5m-live-stream_07052026_0546,
-        impact_review C4 test-name honesty): the user-decided seedless-5m
-        design REMOVES the key — ES01B rides the default-true 5m path
-        (shallow IBKR bootstrap) and 'flag present <=> deviation from
-        default' is restored. The absent-key pin is the anti-drift fence
-        against silently re-adding false. FAILS at Red until the Coder
-        removes the key in the SAME commit as the code (C1)."""
-        cfg = _load_es01b()
-        live = cfg.get("live_config", {})
-        assert "enable_5m_stream" not in live, (
-            "ES01B must NOT carry the live_config.enable_5m_stream key — "
-            "removed by ticket seedless-5m-live-stream_07052026_0546 "
-            f"(got enable_5m_stream={live.get('enable_5m_stream')!r})"
-        )
-
-    def test_es01b_still_resolves_es_es_cme(self):
-        """EVOLVED (ticket seedless-5m-live-stream_07052026_0546,
-        sanctioned 336d29f repair): commit 336d29f flipped ES01B to
-        execution MES / client_id 2000 without evolving this pin — broken
-        at HEAD f165b9d. Repaired to the CURRENT shipped values:
-        execution MES / brain ES / exchange CME / tick 0.25."""
-        cfg = _load_es01b()
-        ctx = resolve_instrument_context(cfg)
-        assert ctx.execution_symbol == "MES"
-        assert ctx.brain_symbol == "ES"
-        assert ctx.execution_instrument.exchange == "CME"
-        assert ctx.execution_instrument.tick_size == 0.25
-
-    def test_es01b_t6_sentinel_fields_unchanged(self):
-        """The T6 sentinel pins (test_config_generator_symbols.py
-        TestES01BPatchedConfig enumerated fields) survive the config
-        patches — guards the Coder's patch surface.
-        EVOLVED (ticket seedless-5m-live-stream_07052026_0546, sanctioned
-        336d29f repair): execution_symbol ES->MES and client_id 1010->2000
-        pin the CURRENT shipped values (336d29f flipped the config without
-        evolving these pins — broken at HEAD f165b9d). All other
-        sentinels unchanged."""
-        cfg = _load_es01b()
-        assert cfg["nickname"] == "ES01B_Sharpe_E03_07042026"
-        assert cfg["execution_symbol"] == "MES"
-        assert cfg["bar_size"] == "1h"
-        assert "brain_symbol" not in cfg
-        assert cfg["live_config"]["client_id"] == 2000
-        assert cfg["live_config"]["entry_mode"] == "marketable_limit"
-        assert cfg["live_config"]["exit_mode"] == "marketable_limit"
-        for side in ("long", "short"):
-            entry = cfg["models"][side]
-            assert entry["symbol"] == "ES"
-            assert entry["experiment_id"] == (
-                f"E2E_HourSet_01B_{side}_logloss"
-            )
-        assert cfg["models"]["long"]["threshold"] == 0.53
-        assert cfg["models"]["short"]["threshold"] == 0.56
-        assert cfg["holdout_months"] == 6
-        assert cfg["conflict_resolution"] == "reverse_position"

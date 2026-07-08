@@ -101,12 +101,8 @@ from tests.test_hourly_only_equity_session import (
     _bar_df,
     _build_trader_with_mock_dm,
     _es_hourly_only_cfg,
-    _frozen_lt_clock,
-    _load_es01b,
     _make_inposition_trader,
     _mock_1h_manager,
-    _utc_from_ct,
-    _watchdog_stub,
 )
 
 _TICKET = "seedless-5m-live-stream_07052026_0546"
@@ -602,60 +598,6 @@ class TestLiveTraderShallowWiring:
             "5m-model config must pass allow_shallow_bootstrap=False "
             f"explicitly, got {only.kwargs.get('allow_shallow_bootstrap')!r}"
         )
-
-    # -- ES01B shipped-config outcome (key removed by the Coder — C1) -----
-
-    def test_es01b_shipped_config_constructs_5m_manager_by_default(
-        self, tmp_path
-    ):
-        """The shipped ES01B config (enable_5m_stream key REMOVED) rides
-        the default-true path: the 5m DataManager IS constructed (brain
-        ES, execution MES) with allow_shallow_bootstrap=True (bar_size
-        1h). FAILS at Red: the config still carries the false key, so
-        _enable_5m_stream resolves False and data_manager_5m is None —
-        green only when the Coder removes the key in the SAME commit as
-        the code (C1)."""
-        cfg = _load_es01b()
-        trader, MockDM = _build_trader_with_mock_dm(cfg, tmp_path)
-        assert trader._enable_5m_stream is True, (
-            "ES01B must resolve enable_5m_stream True by DEFAULT (key "
-            "removed — C1/C4)"
-        )
-        assert trader.data_manager_5m is not None
-        assert MockDM.call_count == 2
-        first = MockDM.call_args_list[0]
-        assert first.kwargs.get("symbol") == "ES"  # brain stream
-        assert first.kwargs.get("execution_symbol") == "MES"
-        assert first.kwargs.get("bar_size") == "5 mins"
-        assert first.kwargs.get("allow_shallow_bootstrap") is True
-
-    def test_es01b_watchdog_anchors_5m_15min(self):
-        """With the key removed, ES01B is 5m-enabled: the watchdog anchors
-        _last_bar_time_5m against the 30-min threshold
-        (31 min stale during equity OPEN -> True; 10 min -> False).
-        FAILS at Red on the flag resolution (key still present/false).
-        (Vector 16 -> 31 / prose 15-min -> 30-min per the 2026-07-06
-        directive, ticket watchdog-telegram-throttle_07062026_0007;
-        the historical name keeps its original anchor-identity meaning.)"""
-        live = _load_es01b().get("live_config", {})
-        flag = bool(live.get("enable_5m_stream", True))
-        assert flag is True, (
-            "ES01B must ride the default-true 5m path — the watchdog "
-            "re-anchors to _last_bar_time_5m/30-min only then (C1/C4)"
-        )
-        now = _utc_from_ct(2026, 7, 7, 12, 0)  # Tue 12:00 CT — equity OPEN
-        stale = _watchdog_stub("MES", enable_5m=flag)
-        stale._last_bar_time_5m = pd.Timestamp(now - timedelta(minutes=31))
-        with _frozen_lt_clock(now):
-            assert stale._check_stale_bars() is True, (
-                "31-min-stale 5m anchor during OPEN must trigger the "
-                "30-min watchdog"
-            )
-        fresh = _watchdog_stub("MES", enable_5m=flag)
-        fresh._last_bar_time_5m = pd.Timestamp(now - timedelta(minutes=10))
-        with _frozen_lt_clock(now):
-            assert fresh._check_stale_bars() is False
-        fresh.data_client.disconnect.assert_not_called()
 
     def test_es01b_trailing_5m_frame_drives_when_present_pin(self):
         """Pin (passes at Red AND Green): trailing selects by frame

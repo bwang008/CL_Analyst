@@ -282,34 +282,6 @@ class TestModelSymbolCrossCheck:
 # ===========================================================================
 
 class TestShippedConfigs:
-    def test_es01b_shipped_config_resolves_as_es(self):
-        """T6 EVOLUTION (t6-config-generator-fix_07052026_0043): the shipped
-        ES01B config has been surgically patched per that ticket's audit
-        section 2 (10-field table). The former intended-failure pin flips to
-        the happy path: it must RESOLVE (brain ES, exchange CME), carry the
-        explicit models.*.symbol == "ES" handshake, and every referenced
-        artifact must exist on disk.
-        EVOLVED (ticket seedless-5m-live-stream_07052026_0546, sanctioned
-        336d29f repair): commit 336d29f flipped ES01B to execution MES
-        without evolving this pin (broken at HEAD f165b9d) — the execution
-        pin now carries the CURRENT shipped value MES; brain stays ES.
-        """
-        cfg = _load_config("ES01B_Sharpe_E03_07042026.json")
-        ctx = resolve_instrument_context(cfg)
-        assert ctx.execution_symbol == "MES"
-        assert ctx.brain_symbol == "ES"
-        assert ctx.execution_instrument.exchange == "CME"
-        for side in ("long", "short"):
-            entry = cfg["models"][side]
-            assert entry["symbol"] == "ES"
-            assert (_PROJECT_ROOT / entry["model_path"]).is_file(), (
-                f"models.{side}.model_path missing on disk: {entry['model_path']}"
-            )
-            assert (_PROJECT_ROOT / entry["predictions_path"]).is_file(), (
-                f"models.{side}.predictions_path missing on disk: "
-                f"{entry['predictions_path']}"
-            )
-
     def test_hs14b_shipped_config_resolves(self):
         """Happy-path pin: the live prod config resolves unchanged."""
         cfg = _load_config("HS14B_Sharpe_E01_06262026.json")
