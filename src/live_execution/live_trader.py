@@ -1560,6 +1560,22 @@ class LiveTrader:
         current_position = self.exec_client.get_position(
             symbol=self._execution_symbol,
         )
+        if current_position == 0 and self._active_trade_id is not None:
+            # We think we hold a position but read flat. Right after a
+            # reconnect this can be a stale/empty ib_insync cache — CONFIRM
+            # with a settled snapshot before cancelling protective orders or
+            # booking an out-of-band close (reconnect-false-flat-oob).
+            settled = self._confirm_settled_position(self._execution_symbol)
+            if settled is None:
+                # Unconfirmed → fail closed: retain position + orders, defer.
+                log.error(
+                    "[TIME BARRIER] flat read for tracked trade %s could not "
+                    "be confirmed (settled snapshot failed) — retaining "
+                    "position + protective orders this cycle (fail-closed).",
+                    self._active_trade_id,
+                )
+                return False
+            current_position = settled
         if current_position == 0:
             # Detect out-of-band close (manual TWS close, external system, etc.)
             if self._active_trade_id is not None:
@@ -1778,6 +1794,47 @@ class LiveTrader:
             if len(seen) == 2:
                 break
 
+    def _confirm_settled_position(self, symbol) -> Optional[int]:
+        """Confirm net position from a freshly-SETTLED broker snapshot.
+
+        Guards the cancel/close-on-zero paths against a stale/empty ib_insync
+        position cache right after a (re)connect (the reconnect-false-flat OOB
+        bug): a single ``get_position()==0`` may be an unpopulated cache, not
+        a real flat. Returns the settled net position, or **None** if it
+        could NOT be confirmed (settle timeout/error) — on None the caller
+        MUST fail CLOSED (retain protective orders; never treat as flat).
+
+        Adapters without a settled read fall back to the plain read, which is
+        authoritative for them (e.g. the simulation).
+        """
+        try:
+            return self.exec_client.get_position_settled(symbol=symbol)
+        except NotImplementedError:
+            return self.exec_client.get_position(symbol=symbol)
+        except Exception as exc:
+            detail = (
+                f"settled position snapshot could not be confirmed for "
+                f"{symbol} ({type(exc).__name__}: {exc}) — retaining "
+                f"protection, deferring any out-of-band-close decision"
+            )
+            log.error("[POSITION] %s", detail, exc_info=True)
+            self._emit_health_event("position-flat-unconfirmed", detail)
+            try:
+                if getattr(self, "_telegram", None) is not None:
+                    self._telegram.send(
+                        f"*SETTLED POSITION UNCONFIRMED* — {symbol}\n\n"
+                        f"A flat broker read could not be confirmed by a "
+                        f"settled snapshot; retaining protective orders and "
+                        f"deferring the out-of-band-close decision "
+                        f"(fail-closed)."
+                    )
+            except Exception:
+                log.debug(
+                    "Telegram send failed (position-flat-unconfirmed)",
+                    exc_info=True,
+                )
+            return None
+
     def _recover_inherited_position(self) -> None:
         """Recover position state from the persistent ledger on startup.
 
@@ -1827,28 +1884,63 @@ class LiveTrader:
         trailing_atr_mult = ledger_pos.get("trailing_atr_mult")
         max_hold_bars = ledger_pos.get("max_hold_bars")
 
-        # 2. Verify IBKR position exists
+        # 2. Verify IBKR position exists. A single read of 0 right after a
+        #    (re)connect can be a STALE/empty ib_insync position cache (the
+        #    account-update stream has not arrived yet), NOT a real flat — so
+        #    NEVER cancel the protective legs / mark an out-of-band close on an
+        #    unconfirmed 0. Force a SETTLED snapshot and re-verify first
+        #    (reconnect-false-flat-oob: the SI child cancelled a live short's
+        #    SL/TP on exactly this false flat).
         if ibkr_pos == 0:
-            # Position was closed while we were offline (filled out-of-band)
-            log.info(
-                "[RECOVERY] Ledger trade %s shows OPEN but IBKR is flat "
-                "— resolving out-of-band close",
-                trade_id,
-            )
-            reason, _price = self._recover_oob_close(
-                trade_id=trade_id,
-                tp_order_id=tp_order_id,
-                sl_order_id=sl_order_id,
-            )
-            # Arm the re-entry cooldown from the recovered exit reason. The
-            # mid-session housekeeping path does this via _reset_position_state,
-            # but that no-ops here (_position_side==0 at startup), so seed
-            # on_exit DIRECTLY with the LEDGER side. The OOB close just happened
-            # → full sl_cooldown window, matching mid-session behavior.
-            self._seed_restart_cooldown(
-                1 if side == "LONG" else -1, reason, close_time=None,
-            )
-            return
+            settled = self._confirm_settled_position(self._execution_symbol)
+            if settled == 0:
+                # CONFIRMED flat — position was closed while offline (OOB).
+                log.info(
+                    "[RECOVERY] Ledger trade %s shows OPEN but IBKR is "
+                    "CONFIRMED flat — resolving out-of-band close",
+                    trade_id,
+                )
+                reason, _price = self._recover_oob_close(
+                    trade_id=trade_id,
+                    tp_order_id=tp_order_id,
+                    sl_order_id=sl_order_id,
+                )
+                # Arm the re-entry cooldown from the recovered exit reason. The
+                # mid-session housekeeping path does this via
+                # _reset_position_state, but that no-ops here (_position_side==0
+                # at startup), so seed on_exit DIRECTLY with the LEDGER side.
+                # The OOB close just happened → full sl_cooldown window,
+                # matching mid-session behavior.
+                self._seed_restart_cooldown(
+                    1 if side == "LONG" else -1, reason, close_time=None,
+                )
+                return
+            if settled is None:
+                # Could NOT confirm (settle timeout/error) → FAIL CLOSED: keep
+                # the position + its resting legs, restore in-memory tracking
+                # so the child keeps managing, and defer the OOB decision to
+                # the next sweep. Do NOT cancel, do NOT mark closed. (A loud
+                # position-flat-unconfirmed health event + Telegram already
+                # fired inside _confirm_settled_position.)
+                log.error(
+                    "[RECOVERY] Ledger trade %s shows OPEN and the first IBKR "
+                    "read was flat, but a settled snapshot could NOT confirm it "
+                    "— retaining position + protective legs (fail-closed), "
+                    "deferring out-of-band-close decision.",
+                    trade_id,
+                )
+            else:
+                # Settled snapshot shows the position is really still open —
+                # the initial flat read was a stale post-reconnect cache.
+                log.warning(
+                    "[RECOVERY] Initial IBKR read for trade %s was flat but a "
+                    "settled snapshot shows position=%d — restoring (stale "
+                    "post-reconnect cache, NOT an out-of-band close).",
+                    trade_id, settled,
+                )
+            # settled is None (fail-closed) or nonzero (stale cache): fall
+            # through to restore the position and verify/heal its legs
+            # (the heal is idempotent — both legs resting is a no-op).
 
         # 3. IBKR confirms position exists — restore in-memory state
         log.info(
@@ -2301,6 +2393,20 @@ class LiveTrader:
         ibkr_pos = self.exec_client.get_position(
             symbol=self._execution_symbol,
         )
+        if ibkr_pos == 0:
+            # About to treat any resting orders as orphans and cancel them. A
+            # stale post-reconnect cache could read flat while a real position
+            # (with legit protective orders) exists — CONFIRM settled before
+            # cancelling, and fail closed if it can't be confirmed
+            # (reconnect-false-flat-oob).
+            settled = self._confirm_settled_position(self._execution_symbol)
+            if settled is None:
+                log.error(
+                    "[STARTUP SWEEP] flat read could not be confirmed (settled "
+                    "snapshot failed) — NOT cancelling any orders (fail-closed)."
+                )
+                return
+            ibkr_pos = settled
         if ibkr_pos != 0:
             return  # IBKR has a position — don't cancel its protective orders
 

@@ -343,6 +343,10 @@ class IBKRConnectionManager:
     _CLIENT_ID_IN_USE_CODE = 326
     _MAX_CLIENT_ID = 31  # IB allows client IDs 0-31
 
+    # Bound (seconds) for a settled reqPositions round-trip in
+    # get_position_settled — on timeout the caller fails closed.
+    _POSITION_SETTLE_TIMEOUT = 5
+
     def connect(self) -> None:
         """Connect to IBKR, trying the primary port first then fallbacks.
 
@@ -624,12 +628,55 @@ class IBKRConnectionManager:
         """
         Query IBKR portfolio for the current CL position.
 
+        WARNING: ``self.ib.positions()`` reads ib_insync's in-memory cache,
+        which is EMPTY until the async account-update stream arrives after a
+        (re)connect — so right after reconnecting this can return 0 (flat)
+        for a position that is really still open. Do NOT trust a 0 from this
+        method to cancel protective orders / declare an out-of-band close;
+        confirm with ``get_position_settled`` first (see the
+        reconnect-false-flat OOB fix).
+
         Returns:
             int: Net position size (0 = flat, positive = long, negative = short).
         """
         self.ensure_connected()
         positions = self.ib.positions()
         for pos in positions:
+            if contract_matches(
+                symbol, getattr(pos.contract, "symbol", None),
+                getattr(pos.contract, "tradingClass", None),
+            ):
+                return int(pos.position)
+        return 0
+
+    def get_position_settled(self, symbol: str = "CL") -> int:
+        """Authoritative net position from a freshly-SETTLED broker snapshot.
+
+        Forces a fresh ``reqPositionsAsync()`` and waits for it to resolve on
+        ``positionEnd`` (deterministic), bounded by
+        ``_POSITION_SETTLE_TIMEOUT`` — then matches by symbol + tradingClass
+        exactly like ``get_cl_position``. This closes the reconnect-false-flat
+        window where the in-memory cache is still empty.
+
+        Uses ``asyncio.wait_for`` (NOT a blocking ``reqPositions()``, whose
+        ib_insync RequestTimeout defaults to 0 → could hang forever on a slow
+        gateway; and NOT an ``ib.sleep`` guess that could still read an empty
+        cache). On timeout/error it RAISES — the caller's fail-closed trigger.
+        Safe only on the main thread with the event loop idle (startup
+        recovery / 5-minute poll), matching the rollover-check contract.
+        """
+        import asyncio
+
+        self.ensure_connected()
+        # Deterministically wait for positionEnd; asyncio.TimeoutError on a
+        # slow/hung gateway propagates to the caller (fail closed) rather than
+        # returning a stale/empty cache read.
+        self.ib.run(
+            asyncio.wait_for(
+                self.ib.reqPositionsAsync(), self._POSITION_SETTLE_TIMEOUT,
+            )
+        )
+        for pos in self.ib.positions():
             if contract_matches(
                 symbol, getattr(pos.contract, "symbol", None),
                 getattr(pos.contract, "tradingClass", None),

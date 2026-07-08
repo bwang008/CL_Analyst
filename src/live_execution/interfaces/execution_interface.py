@@ -77,6 +77,30 @@ class ExecutionClient(ABC):
             f"{type(self).__name__} does not implement get_cached_position"
         )
 
+    def get_position_settled(self, symbol: str) -> int:
+        """Net position from an AUTHORITATIVE, freshly-settled broker snapshot.
+
+        Unlike ``get_position`` (which for the live adapter reads ib_insync's
+        in-memory position cache that is empty until the async account-update
+        stream arrives after a (re)connect), this MUST force a fresh request
+        and wait for it to settle before reading — so a stale/empty cache
+        right after reconnect can never masquerade as flat.
+
+        Contract: RAISE on timeout/error (do NOT return a fabricated flat).
+        Callers use a raised/None result as a FAIL-CLOSED trigger — they must
+        retain protective orders rather than treat an unconfirmed read as
+        flat. Safe to call only on the main thread with the event loop idle
+        (startup recovery / the 5-minute poll), like the rollover check.
+
+        No silent default: an adapter without a settled read must say so
+        loudly — a fabricated flat (0) would let the recovery/time-barrier
+        paths cancel protective orders on a live position (the exact
+        reconnect-false-flat OOB bug this primitive exists to prevent).
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement get_position_settled"
+        )
+
     @abstractmethod
     def get_account_summary(self, symbol: str) -> dict:
         pass

@@ -294,6 +294,9 @@ def _recovery_stub(executions, *, ledger_pos=None, cancel_by_ids=1):
     )
     lt.exec_client = MagicMock()
     lt.exec_client.get_position.return_value = 0  # IBKR flat -> OOB branch
+    # reconnect-false-flat-oob: recovery now CONFIRMS a flat read with a
+    # settled snapshot before resolving OOB — here the flat is genuine.
+    lt.exec_client.get_position_settled.return_value = 0
     lt.exec_client.cancel_orders_by_ids = MagicMock(return_value=cancel_by_ids)
     lt.exec_client.get_executions = MagicMock(return_value=executions)
     lt.exec_client.cancel_open_orders = MagicMock(return_value=0)
@@ -1014,6 +1017,7 @@ class TestStartupSweepFence:
         lt._pending_entry_order_id = None
         lt.exec_client = MagicMock()
         lt.exec_client.get_position.return_value = 0
+        lt.exec_client.get_position_settled.return_value = 0  # settled CONFIRMS flat
         lt.exec_client.cancel_open_orders.return_value = 1
         evt = SimpleNamespace(symbol="GC", order_id="55", status="Submitted")
         lt._open_orders = {"55": evt}

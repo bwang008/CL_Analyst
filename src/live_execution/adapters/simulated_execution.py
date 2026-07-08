@@ -181,6 +181,11 @@ class SimulatedExecution(ExecutionClient):
         """
         return int(self._position)
 
+    def get_position_settled(self, symbol: str) -> int:
+        """True sim net position — the sim has no async cache to settle, so
+        its state IS the authoritative snapshot (never a fabricated flat)."""
+        return int(self._position)
+
     def get_account_summary(self, symbol: str) -> dict:
         """Return mock account summary matching IBKRExecutionClient format."""
         unrealized = 0.0

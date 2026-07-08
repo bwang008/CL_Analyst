@@ -139,6 +139,16 @@ Judge each finding before opening any ticket — most have a fact-check step:
     and needing a human. UNTRACKED/ambiguous/unknown-order remain
     detect-only (no ledger prices to heal from / order-routing human
     gate): NEVER auto-place/cancel/close those yourself.
+  - `position-flat-unconfirmed` — (reconnect-false-flat-oob) a `get_position`
+    read of FLAT could not be confirmed by a settled `reqPositions` snapshot
+    (settle timeout/error), so the child FAILED CLOSED: it retained the
+    position + protective orders and deferred any out-of-band-close decision
+    rather than cancel legs on a possibly-stale post-reconnect cache. NOT
+    naked — the position stays protected. INFORMATIONAL per-occurrence
+    (verify via the next broker_audit that the legs still rest). RISING
+    `occurrences` = the gateway is repeatedly slow to settle positions on
+    reconnect (usually the same child-flap window) → investigate the
+    connectivity/flap, not the position.
   - `housekeeping-error` — the sweep itself failed or ran slow (>10s):
     a code bug in housekeeping, never a market event → normal ticket
     flow; trading is unaffected by construction (never-raises boundary).

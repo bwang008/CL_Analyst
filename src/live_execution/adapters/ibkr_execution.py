@@ -114,6 +114,12 @@ class IBKRExecutionClient(ExecutionClient):
     def get_position(self, symbol: str) -> int:
         return self.manager.get_cl_position(symbol=symbol)
 
+    def get_position_settled(self, symbol: str) -> int:
+        """Authoritative net position — forces a fresh reqPositions round-trip
+        and waits for it to settle before matching (see interface contract).
+        Raises on timeout/error; callers fail closed on a raised result."""
+        return self.manager.get_position_settled(symbol=symbol)
+
     def get_cached_position(self, symbol: str) -> int:
         """Net position from ib_insync's LOCAL portfolio/position cache.
 

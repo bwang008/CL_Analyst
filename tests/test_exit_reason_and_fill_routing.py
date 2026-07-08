@@ -183,6 +183,7 @@ class TestExitReasonVocabulary:
         telemetry already uses CLOSED_OOB) instead of the bare default."""
         t = _make_trader()
         t.exec_client.get_position.return_value = 0
+        t.exec_client.get_position_settled.return_value = 0  # settled CONFIRMS flat
         t.exec_client.cancel_open_orders.return_value = 4
         t._active_trade_id = "trade_1015"
         t._position_bars_held = 6
