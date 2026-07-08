@@ -1,6 +1,6 @@
 """Read-only IBKR broker audit for the hourly fleet monitor.
 
-Connects to IB Gateway with a dedicated master clientId in READ-ONLY mode and
+Connects to IB Gateway with a dedicated unused clientId in READ-ONLY mode and
 verifies that every open position has a resting protective STOP on its exact
 contract — BROKER TRUTH that the DB-only ``fleet_health`` cannot provide
 (``fleet_health`` only checks whether the ledger row *carries* an sl_order_id;
@@ -10,11 +10,19 @@ cancelled/rejected stop reads as "protected" — a false negative).
 Read-only by construction: only ``reqPositions`` / ``reqAllOpenOrders`` are
 issued; this module NEVER places or cancels an order, and connects with
 ``readonly=True`` so ib_insync itself refuses any order op. It uses a dedicated
-clientId (operator's Master API id, default 626) that no fleet child uses, so it
-cannot collide with / disconnect a live child. Always exits 0 (monitor contract:
-a broker outage must never break the hourly run).
+clientId (default 626) that no fleet child uses, so it cannot collide with /
+disconnect a live child. Always exits 0 (monitor contract: a broker outage must
+never break the hourly run).
 
-Operator setup (2026-07-08): IB Gateway :4002, Master API client ID = 626,
+The Master API Client ID setting is NOT required and MUST NOT be used:
+``reqAllOpenOrders`` + ``reqPositions`` return ALL clients' orders/positions
+regardless (verified 2026-07-08 from a plain non-master client — saw all fleet
+orders across 3001/4001/5001). Designating this id as master caused cross-client
+EXECUTION leakage into the fleet children's ``get_executions``, which the hourly
+ledger-repair then mis-matched by colliding order id (GC trade_27 got an MES
+exit price) — so the operator's Gateway must have NO Master API Client ID set.
+
+Operator setup (2026-07-08): IB Gateway :4002, NO Master API Client ID,
 127.0.0.1 in Trusted IPs. Run: ``conda run -n trader python -m
 src.live_execution.broker_audit``.
 """

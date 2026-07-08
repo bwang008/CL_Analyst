@@ -22,10 +22,14 @@ FOUR steps, all mandatory:
    telemetry DB, and checks bars are actually arriving. Prints `HEALTH_OK`
    or `HEALTH_EVENT: <kind> | <who> | <detail>` lines.
 3. **Broker audit** — `python -m src.live_execution.broker_audit`
-   (READ-ONLY broker truth; 2026-07-08): connects to IB Gateway with the
-   operator's Master API clientId (626, `readonly=True`, port 4002 — an id
-   no fleet child uses) and cross-checks every open position against the
-   ACTUAL resting stop orders on its exact contract. This closes the
+   (READ-ONLY broker truth; 2026-07-08): connects to IB Gateway with a
+   dedicated unused clientId (626, `readonly=True`, port 4002) and
+   cross-checks every open position against the ACTUAL resting stop orders on
+   its exact contract. NOTE: the Gateway must have NO Master API Client ID
+   set — `reqAllOpenOrders` already returns all clients' orders without it,
+   and designating a master leaks cross-client executions into the children's
+   `get_executions`, corrupting the hourly ledger-repair (2026-07-08 GC
+   trade_27 got an MES exit price via a colliding order id). This closes the
    `fleet_health` blind spot: the DB check only confirms the ledger *carries*
    an sl_order_id, never that the order is really resting, so a silently
    cancelled/rejected stop reads as protected. Prints `BROKER_OK` /
