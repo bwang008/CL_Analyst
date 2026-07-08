@@ -1296,17 +1296,30 @@ class BacktestEngine:
     # Strategy-aware loop methods
     # -------------------------------------------------------------------
 
-    def _update_engine_state(self) -> None:
-        """Sync the mutable EngineState with FSM state (single mode)."""
+    def _update_engine_state(self, exec_close: Optional[float] = None) -> None:
+        """Sync the mutable EngineState with FSM state (single mode).
+
+        ``exec_close`` (raw-basis bar close) feeds the exec-basis position
+        economics: entry_price (= entry fill) and floating_pnl_points
+        (= side * (exec_close - entry_fill), gross).  Both are None when flat
+        or when exec_close is not supplied.
+        """
         es = self._engine_state
         if self._state == TradeState.IN_POSITION:
             es.position = 1
             es.side = self._side
             es.bars_held = self._bars_held
+            es.entry_price = self._entry_fill
+            es.floating_pnl_points = (
+                self._side * (exec_close - self._entry_fill)
+                if exec_close is not None else None
+            )
         else:
             es.position = 0
             es.side = 0
             es.bars_held = 0
+            es.entry_price = None
+            es.floating_pnl_points = None
         es.open_positions = 1 if self._state == TradeState.IN_POSITION else 0
 
     def _run_single_strategy(
@@ -1331,8 +1344,9 @@ class BacktestEngine:
             if self._state == TradeState.IN_POSITION:
                 self._on_in_position(ts, row.exec_Open, row.exec_High, row.exec_Low)
 
-            # Update engine state for strategy
-            self._update_engine_state()
+            # Update engine state for strategy (exec close feeds the
+            # exec-basis floating-PnL fields)
+            self._update_engine_state(row.exec_Close)
 
             # Get probabilities for this bar
             pb = prob_buy_lookup.get(ts, 0.0)
@@ -1347,7 +1361,7 @@ class BacktestEngine:
             for order in orders:
                 if order.action == "EXIT" and self._state == TradeState.IN_POSITION:
                     self._close_trade(ts, row.exec_Close, ExitReason.SIGNAL_EXIT)
-                    self._update_engine_state()
+                    self._update_engine_state(row.exec_Close)
                     break
 
             # Dispatch orders to existing FSM entry point
@@ -1405,14 +1419,23 @@ class BacktestEngine:
                     surviving.append(pos)
             self._open_positions = surviving
 
-            # 2. Update engine state for strategy
+            # 2. Update engine state for strategy.  Exec-basis economics come
+            # from the FIRST open position (concurrent mode carries one
+            # side at a time in practice; single mode is the fleet default).
             self._engine_state.open_positions = len(self._open_positions)
             if self._open_positions:
                 self._engine_state.position = 1
                 self._engine_state.side = self._open_positions[0].side
+                _p0 = self._open_positions[0]
+                self._engine_state.entry_price = _p0.entry_fill
+                self._engine_state.floating_pnl_points = (
+                    _p0.side * (row.exec_Close - _p0.entry_fill)
+                )
             else:
                 self._engine_state.position = 0
                 self._engine_state.side = 0
+                self._engine_state.entry_price = None
+                self._engine_state.floating_pnl_points = None
 
             # 3. Ask strategy what to do
             pb = prob_buy_lookup.get(ts, 0.0)

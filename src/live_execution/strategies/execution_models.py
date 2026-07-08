@@ -48,6 +48,15 @@ class EngineState:
     open_positions: int = 0  # count of open positions (concurrent mode)
     last_exit_bars_ago_long: int = 9999
     last_exit_bars_ago_short: int = 9999
+    # Exec-basis position economics (None when flat, or when the runtime does
+    # not feed them — strategies that REQUIRE them must crash on None, never
+    # silently degrade).  entry_price is the exec-basis entry FILL;
+    # floating_pnl_points is sign-aware gross unrealized PnL in price points:
+    # side * (exec_close - entry_fill).  Computed by the ENGINE on the exec
+    # (raw) price basis — on_bar()'s own `close` arg is the BRAIN
+    # (ratio-adjusted) close and must never be compared against entry_price.
+    entry_price: Optional[float] = None
+    floating_pnl_points: Optional[float] = None
 
 
 @dataclass
@@ -496,7 +505,12 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
         - When in a position, behaviour depends on ``conflict_resolution``.
     """
 
-    VALID_CONFLICT_MODES = ("hold", "close_existing_position", "reverse_position")
+    VALID_CONFLICT_MODES = (
+        "hold",
+        "close_existing_position",
+        "reverse_position",
+        "close_existing_position_if_profit",
+    )
 
     def __init__(self, config: dict) -> None:
         super().__init__(config)
@@ -801,6 +815,39 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
                             opposite_tier, "BUY", 1, opposite_prob
                         )
                     return [exit_order, enter_order]
+                return HOLD
+
+            elif self.conflict_resolution == "close_existing_position_if_profit":
+                # EXIT iff the opposite side fires AND our own side has
+                # stopped confirming AND the position is green (gross, exec
+                # basis).  Both firing -> HOLD (ignore); losing -> HOLD (let
+                # brackets manage it).  Note: exit slippage/commission may
+                # flip a marginal winner — accepted for v1 (gross gate).
+                if current_side != 0 and opposite_ok:
+                    if state.floating_pnl_points is None:
+                        # Binding impact-review condition (ticket
+                        # exit-triggers-eod-oppsignal_07072026_1924): a
+                        # runtime that does not feed exec-basis floating PnL
+                        # (e.g. today's live path) must CRASH here, never
+                        # silently degrade to hold semantics.
+                        raise RuntimeError(
+                            "conflict_resolution="
+                            "'close_existing_position_if_profit' requires "
+                            "EngineState.floating_pnl_points, but it is None "
+                            "while in position. This runtime does not feed "
+                            "exec-basis floating PnL — refusing to silently "
+                            "degrade to 'hold'."
+                        )
+                    same_ok = (buy_ok if current_side == 1 else sell_ok)
+                    if (not same_ok) and state.floating_pnl_points > 0:
+                        return [Order(
+                            action="EXIT", side=current_side,
+                            reason=(
+                                f"TIERED_PROFIT_CLOSE opposite signal "
+                                f"({opposite_prob:.4f}), own side silent, "
+                                f"unrealized {state.floating_pnl_points:+.4f} pts"
+                            ),
+                        )]
                 return HOLD
 
             return HOLD
