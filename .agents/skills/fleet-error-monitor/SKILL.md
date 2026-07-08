@@ -8,7 +8,7 @@ description: Self-fixing loop for live-fleet crashes — consumes structured err
 You are the consumer side of the fleet error queue (protocol overview:
 `.agents/collab/error_queue/README.md`). The hourly run (cron `6 * * * *` —
 hourly at :06, after the hourly inference bar and first 5m bar complete) is
-THREE steps, all mandatory:
+FOUR steps, all mandatory:
 
 1. **Queue pump** — `powershell -File scripts/error_watcher.ps1`:
    auto-files known-infrastructure events, moves the rest to `processing/`.
@@ -21,8 +21,24 @@ THREE steps, all mandatory:
    `subs_lost=True` heartbeats, verifies positions/orders line up in the
    telemetry DB, and checks bars are actually arriving. Prints `HEALTH_OK`
    or `HEALTH_EVENT: <kind> | <who> | <detail>` lines.
-3. **Triage** — crash/health queue events per the per-event protocol
-   below; HEALTH_EVENT lines per the "Health-event triage" section.
+3. **Broker audit** — `python -m src.live_execution.broker_audit`
+   (READ-ONLY broker truth; 2026-07-08): connects to IB Gateway with the
+   operator's Master API clientId (626, `readonly=True`, port 4002 — an id
+   no fleet child uses) and cross-checks every open position against the
+   ACTUAL resting stop orders on its exact contract. This closes the
+   `fleet_health` blind spot: the DB check only confirms the ledger *carries*
+   an sl_order_id, never that the order is really resting, so a silently
+   cancelled/rejected stop reads as protected. Prints `BROKER_OK` /
+   `BROKER_EVENT: naked-position | <sym>/<expiry> | <detail>` /
+   `BROKER_SUMMARY`, or `BROKER_UNAVAILABLE:` if the Gateway is down (not a
+   fault — report and move on; the fleet may be intentionally stopped). NEVER
+   places/cancels (readonly by construction). A `BROKER_EVENT: naked-position`
+   is HIGHEST severity (like `unprotected-position`): verify it isn't a
+   momentary post-fill gap, then alert the operator NOW (Telegram) — do not
+   place orders yourself.
+4. **Triage** — crash/health queue events per the per-event protocol
+   below; HEALTH_EVENT + BROKER_EVENT lines per the "Health-event triage"
+   section.
 
 **2026-07-06 lesson (do not regress this):** crash-only capture is
 insufficient — four children sat alive-but-blind for 17 minutes with ERROR
