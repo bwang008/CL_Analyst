@@ -13,7 +13,7 @@
     "allow_concurrent": false,
     "max_concurrent": 1,
     "max_position_size": 1,
-    "execution_symbol": "SIL",
+    "execution_symbol": "SI",
     "bar_size": "1h",
     "live_config": {
         "client_id": 5000,
