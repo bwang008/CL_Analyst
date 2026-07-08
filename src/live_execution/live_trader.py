@@ -1666,6 +1666,100 @@ class LiveTrader:
         self._reset_position_state(reason="TIME_BARRIER")
         return True
 
+    def _seed_restart_cooldown(
+        self, side_int: int, reason: object, close_time: object,
+    ) -> None:
+        """Re-arm the strategy's post-exit re-entry cooldown after a restart.
+
+        The cooldown gate (ConfigurableStrategy) reads in-memory state that a
+        fresh process resets to "no recent exit", so ``sl_cooldown_bars`` is
+        silently dropped across restarts (ticket
+        cooldown-not-restored-on-restart_07082026_0230). This seeds it from a
+        real exit:
+
+        - ``close_time is None`` — the exit just happened (startup OOB
+          recovery) → full cooldown window, degenerating exactly to the
+          mid-session ``on_exit(-1)`` path.
+        - ``close_time=<ts>`` (ledger reconstruction) — measured from the
+          ACTUAL exit bar, so an exit that already aged past its window is
+          inert (no over-block). If no bar time is available to measure
+          against, we stay inert rather than risk over-blocking.
+
+        Parity: seeding ``_last_exit_bars_ago = bars_elapsed - 1`` reproduces
+        the counter a continuously-running bot would hold N bars after the
+        close (the gate's pre-increment then reads the honest bars_elapsed),
+        matching the BacktestEngine. TP_HIT_OOB is excluded from the SL
+        cooldown tuple upstream, so a recovered take-profit applies no SL
+        cooldown.
+        """
+        strat = getattr(self, "_strategy", None)
+        if strat is None or not hasattr(strat, "on_exit"):
+            return
+        if side_int not in (1, -1) or reason is None:
+            return
+
+        if close_time is None:
+            bars_elapsed = 0  # exit just happened → enforce the full window
+        else:
+            current_bar_time = None
+            if self.rolling_df_5m is not None and len(self.rolling_df_5m) > 0:
+                current_bar_time = self.rolling_df_5m.index[-1]
+            elif self.rolling_df_1h is not None and len(self.rolling_df_1h) > 0:
+                current_bar_time = self.rolling_df_1h.index[-1]
+            if current_bar_time is None:
+                return  # cannot measure staleness → stay inert
+            _bar_minutes = {"5m": 5, "1h": 60, "2h": 120, "4h": 240}
+            bar_dur = _bar_minutes.get(self._bar_size, 5)
+            try:
+                delta_min = (
+                    current_bar_time - pd.Timestamp(close_time)
+                ).total_seconds() / 60.0
+            except Exception:
+                return
+            bars_elapsed = max(0, int(delta_min / bar_dur))
+
+        strat.on_exit(side_int, reason, getattr(self, "_position_bars_held", 0))
+        # on_exit hard-sets bars_ago=-1 ("just exited"); for a historical exit
+        # overwrite to the honest elapsed count so the gate ages it correctly.
+        if bars_elapsed > 0:
+            if side_int == 1 and hasattr(strat, "_last_exit_bars_ago_long"):
+                strat._last_exit_bars_ago_long = bars_elapsed - 1
+            elif side_int == -1 and hasattr(strat, "_last_exit_bars_ago_short"):
+                strat._last_exit_bars_ago_short = bars_elapsed - 1
+
+    def _reconstruct_cooldown_from_ledger(self) -> None:
+        """On a flat restart, re-seed each side's re-entry cooldown from the
+        most recent CLOSED ledger row for THAT side, so ``sl_cooldown_bars``
+        survives a restart even when the stop happened before shutdown.
+
+        Per-side (a recent long exit and a recent short exit are both honored).
+        Best-effort: a ledger-query failure must never block startup recovery.
+        """
+        try:
+            closed = self.telemetry.get_recent_closed_positions()
+        except Exception:
+            log.warning(
+                "[RECOVERY] cooldown reconstruction skipped — ledger query "
+                "failed", exc_info=True,
+            )
+            return
+        if not closed:
+            return
+        seen: set = set()
+        for row in closed:  # close_time DESC → first per side is most recent
+            side = row.get("side")
+            side_int = 1 if side == "LONG" else (-1 if side == "SHORT" else 0)
+            if side_int == 0 or side_int in seen:
+                continue
+            seen.add(side_int)  # the most-recent CLOSED row for this side
+            reason = row.get("close_reason")
+            if reason is not None:
+                self._seed_restart_cooldown(
+                    side_int, reason, close_time=row.get("close_time"),
+                )
+            if len(seen) == 2:
+                break
+
     def _recover_inherited_position(self) -> None:
         """Recover position state from the persistent ledger on startup.
 
@@ -1683,6 +1777,10 @@ class LiveTrader:
 
         if ledger_pos is None and ibkr_pos == 0:
             log.info("[RECOVERY] No open position in ledger or IBKR — clean start")
+            # Re-seed the re-entry cooldown from the ledger so a stop-out that
+            # happened before this restart still blocks same-side re-entry
+            # (the in-memory gate would otherwise reset to "no recent exit").
+            self._reconstruct_cooldown_from_ledger()
             return
 
         if ledger_pos is None and ibkr_pos != 0:
@@ -1719,10 +1817,18 @@ class LiveTrader:
                 "— resolving out-of-band close",
                 trade_id,
             )
-            self._recover_oob_close(
+            reason, _price = self._recover_oob_close(
                 trade_id=trade_id,
                 tp_order_id=tp_order_id,
                 sl_order_id=sl_order_id,
+            )
+            # Arm the re-entry cooldown from the recovered exit reason. The
+            # mid-session housekeeping path does this via _reset_position_state,
+            # but that no-ops here (_position_side==0 at startup), so seed
+            # on_exit DIRECTLY with the LEDGER side. The OOB close just happened
+            # → full sl_cooldown window, matching mid-session behavior.
+            self._seed_restart_cooldown(
+                1 if side == "LONG" else -1, reason, close_time=None,
             )
             return
 

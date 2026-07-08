@@ -1491,6 +1491,9 @@ def _recovery_stub(executions, *, ledger_pos=None, cancel_by_ids=1):
     lt.rolling_df_5m = None
     lt.rolling_df_1h = None
     lt._bar_size = "5m"
+    lt._strategy = MagicMock()
+    lt._position_bars_held = 0
+    lt.telemetry.get_recent_closed_positions.return_value = []
     _attach_identity_seams(lt)
     return lt
 
@@ -1562,6 +1565,19 @@ class TestStartupRecovery:
         ]
         assert commissions and commissions[0].kwargs.get("event_id") == (
             f"COMMISSION_{_EXEC_ID_TP}"
+        )
+
+        # cooldown-not-restored-on-restart_07082026_0230: the startup OOB
+        # branch now ARMS the strategy re-entry cooldown with the truthful
+        # recovered reason and the LEDGER side (SHORT → -1). (The three fences
+        # above are unchanged; this is the added authorized behavior.)
+        assert lt._strategy.on_exit.called, (
+            "startup OOB recovery must arm the strategy cooldown"
+        )
+        args = lt._strategy.on_exit.call_args.args
+        assert args[0] == -1 and args[1] == "TP_HIT_OOB", (
+            f"cooldown must be armed with (ledger_side=-1, truthful reason), "
+            f"got {args!r}"
         )
 
     def test_startup_oob_unrecovered_null_price_fence(self):

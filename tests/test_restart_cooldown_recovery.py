@@ -1,0 +1,194 @@
+"""Ticket cooldown-not-restored-on-restart_07082026_0230.
+
+After a process restart the strategy's post-exit re-entry cooldown was silently
+dropped: the startup OOB-recovery branch never armed it, and a clean restart
+never reconstructed it from the ledger. Result: a model re-entered the SAME side
+it was just stopped out of on the next bar, ignoring `sl_cooldown_bars`.
+
+These tests pin the two LiveTrader seams that fix it — `_seed_restart_cooldown`
+(Part 1) and `_reconstruct_cooldown_from_ledger` (Part 2) — by asserting they set
+the ConfigurableStrategy gate state that the (already-tested) single-authority
+cooldown gate then acts on. `SL_HIT_OOB`/`SL_HIT`/`TIME_BARRIER` are SL-flavored;
+`TP_HIT`/`TP_HIT_OOB` are not.
+"""
+
+from unittest.mock import MagicMock
+
+import pandas as pd
+import pytest
+
+from src.live_execution.live_trader import LiveTrader
+from src.live_execution.strategies.configurable_strategy import ConfigurableStrategy
+
+_NOW = pd.Timestamp("2026-07-08 08:00:00")
+
+
+def _strategy() -> ConfigurableStrategy:
+    """Real ConfigurableStrategy with only the cooldown gate state (no disk/models)."""
+    s = object.__new__(ConfigurableStrategy)
+    s.config = {}
+    s._last_exit_bars_ago_long = 9999
+    s._last_exit_bars_ago_short = 9999
+    s._last_exit_reason_long = ""
+    s._last_exit_reason_short = ""
+    s._exec_strategy = MagicMock()  # on_exit forwards here; irrelevant to the gate
+    return s
+
+
+def _trader(strategy, *, bar_size="1h", last_bar_time=_NOW):
+    lt = object.__new__(LiveTrader)
+    lt._strategy = strategy
+    lt._bar_size = bar_size
+    lt._position_bars_held = 0
+    if last_bar_time is not None:
+        lt.rolling_df_5m = pd.DataFrame(
+            {"Close": [1.0]}, index=pd.DatetimeIndex([last_bar_time]),
+        )
+    else:
+        lt.rolling_df_5m = None
+    lt.rolling_df_1h = None
+    lt.telemetry = MagicMock()
+    return lt
+
+
+def _closed(side, reason, hours_ago):
+    return {
+        "side": side, "close_reason": reason,
+        "close_time": (_NOW - pd.Timedelta(hours=hours_ago)).isoformat(),
+    }
+
+
+# ── Part 1: startup OOB recovery arms the full window ─────────────────────────
+
+class TestSeedRestartCooldown:
+    def test_oob_close_now_arms_full_window_on_ledger_side(self):
+        s = _strategy()
+        lt = _trader(s)
+        # close_time=None → "just exited" → full window (bars_ago == -1).
+        lt._seed_restart_cooldown(-1, "SL_HIT_OOB", close_time=None)
+        assert s._last_exit_reason_short == "SL_HIT_OOB"
+        assert s._last_exit_bars_ago_short == -1
+        # the other side is untouched
+        assert s._last_exit_reason_long == ""
+        assert s._last_exit_bars_ago_long == 9999
+
+    def test_historical_exit_seeds_honest_bars_ago(self):
+        s = _strategy()
+        lt = _trader(s, bar_size="1h", last_bar_time=_NOW)
+        # exit 2 bars ago → bars_elapsed=2 → seed bars_ago = 1 (gate pre-inc → 2)
+        lt._seed_restart_cooldown(
+            1, "SL_HIT", close_time=(_NOW - pd.Timedelta(hours=2)).isoformat(),
+        )
+        assert s._last_exit_reason_long == "SL_HIT"
+        assert s._last_exit_bars_ago_long == 1
+
+    def test_no_bar_time_stays_inert(self):
+        # guard (a): both rolling frames None + a historical exit → cannot
+        # measure staleness → do NOT arm (never over-block).
+        s = _strategy()
+        lt = _trader(s, last_bar_time=None)
+        lt._seed_restart_cooldown(
+            1, "SL_HIT", close_time=(_NOW - pd.Timedelta(hours=2)).isoformat(),
+        )
+        assert s._last_exit_bars_ago_long == 9999
+        assert s._last_exit_reason_long == ""
+
+    def test_unknown_bar_size_does_not_raise(self):
+        # guard (b): _bar_minutes.get(size, 5) — unknown size must not KeyError.
+        s = _strategy()
+        lt = _trader(s, bar_size="7m", last_bar_time=_NOW)
+        lt._seed_restart_cooldown(
+            1, "SL_HIT", close_time=(_NOW - pd.Timedelta(minutes=30)).isoformat(),
+        )
+        # 30 min / 5 min default = 6 bars elapsed → seed 5
+        assert s._last_exit_bars_ago_long == 5
+
+    def test_missing_strategy_is_safe(self):
+        # guard (c): no _strategy attr / None → no-op, no AttributeError.
+        lt = object.__new__(LiveTrader)
+        lt._strategy = None
+        lt._bar_size = "1h"
+        lt.rolling_df_5m = None
+        lt.rolling_df_1h = None
+        lt._seed_restart_cooldown(-1, "SL_HIT_OOB", close_time=None)  # must not raise
+
+    def test_none_reason_not_armed(self):
+        s = _strategy()
+        lt = _trader(s)
+        lt._seed_restart_cooldown(1, None, close_time=None)
+        assert s._last_exit_bars_ago_long == 9999
+
+
+# ── Part 2: clean-restart ledger reconstruction ──────────────────────────────
+
+class TestReconstructCooldownFromLedger:
+    def test_recent_sl_row_reconstructed(self):
+        s = _strategy()
+        lt = _trader(s, bar_size="1h")
+        lt.telemetry.get_recent_closed_positions.return_value = [
+            _closed("LONG", "SL_HIT", hours_ago=2),
+        ]
+        lt._reconstruct_cooldown_from_ledger()
+        assert s._last_exit_reason_long == "SL_HIT"
+        assert s._last_exit_bars_ago_long == 1  # 2 bars elapsed - 1
+
+    def test_aged_out_row_is_inert(self):
+        s = _strategy()
+        lt = _trader(s, bar_size="1h")
+        lt.telemetry.get_recent_closed_positions.return_value = [
+            _closed("LONG", "SL_HIT", hours_ago=100),
+        ]
+        lt._reconstruct_cooldown_from_ledger()
+        # armed but far beyond any cooldown → gate stays inert (bars_ago >> 7)
+        assert s._last_exit_bars_ago_long == 99
+
+    def test_each_side_from_its_own_most_recent_row(self):
+        # guard (d): per-side, not rows[0]-only.
+        s = _strategy()
+        lt = _trader(s, bar_size="1h")
+        lt.telemetry.get_recent_closed_positions.return_value = [
+            _closed("LONG", "SL_HIT", hours_ago=1),      # most recent overall
+            _closed("SHORT", "TIME_BARRIER", hours_ago=3),
+        ]
+        lt._reconstruct_cooldown_from_ledger()
+        assert s._last_exit_reason_long == "SL_HIT"
+        assert s._last_exit_bars_ago_long == 0            # 1 - 1
+        assert s._last_exit_reason_short == "TIME_BARRIER"
+        assert s._last_exit_bars_ago_short == 2           # 3 - 1
+
+    def test_only_most_recent_per_side_used(self):
+        s = _strategy()
+        lt = _trader(s, bar_size="1h")
+        lt.telemetry.get_recent_closed_positions.return_value = [
+            _closed("LONG", "SL_HIT", hours_ago=1),   # most recent LONG → used
+            _closed("LONG", "TP_HIT", hours_ago=5),   # older LONG → ignored
+        ]
+        lt._reconstruct_cooldown_from_ledger()
+        assert s._last_exit_reason_long == "SL_HIT"
+        assert s._last_exit_bars_ago_long == 0
+
+    def test_most_recent_side_reason_none_not_backfilled_from_older(self):
+        s = _strategy()
+        lt = _trader(s, bar_size="1h")
+        lt.telemetry.get_recent_closed_positions.return_value = [
+            _closed("LONG", None, hours_ago=1),       # most recent LONG, malformed
+            _closed("LONG", "SL_HIT", hours_ago=3),   # older → must NOT be used
+        ]
+        lt._reconstruct_cooldown_from_ledger()
+        assert s._last_exit_reason_long == ""
+        assert s._last_exit_bars_ago_long == 9999
+
+    def test_empty_ledger_is_noop(self):
+        s = _strategy()
+        lt = _trader(s, bar_size="1h")
+        lt.telemetry.get_recent_closed_positions.return_value = []
+        lt._reconstruct_cooldown_from_ledger()
+        assert s._last_exit_bars_ago_long == 9999
+        assert s._last_exit_bars_ago_short == 9999
+
+    def test_ledger_query_failure_never_blocks_startup(self):
+        s = _strategy()
+        lt = _trader(s, bar_size="1h")
+        lt.telemetry.get_recent_closed_positions.side_effect = RuntimeError("db locked")
+        lt._reconstruct_cooldown_from_ledger()  # must not raise
+        assert s._last_exit_bars_ago_long == 9999
