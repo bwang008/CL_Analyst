@@ -109,7 +109,35 @@ of the EOD effect — the Friday flatten is dominated by "flatten every day."
 
 **Recommendation:** run (1) immediately; gate everything else on it.
 
-## 6. Artifact map
+## 6. Second-window validation results (run 2026-07-07, same day)
+
+Step (1) of §5 executed: `python -m agent.ab_exit_triggers --arms eod,wkd,oppo --gates 0.0,1.0
+--window optimizer` — the ~4-year pre-holdout window (2022-01 → 2025-12), non-overlapping with
+the decision window. Caveat: baseline params were fit on this window (in-sample for baseline),
+but both arms share it, so the DELTA remains the right comparison.
+
+| Arm | Holdout ΔSharpe Σ | 2nd-window ΔSharpe Σ | Verdict |
+|-----|-------------------|----------------------|---------|
+| eod@0.0 | +3.72 | **−0.33** | Holdout blowout (ES +3.31) did NOT replicate (ES −0.09) — one-window artifact |
+| eod@1.0 | +0.19 | −0.18 (but +$28k PnL, 4/5 improved) | Mixed; survives per-symbol (below) |
+| wkd@0.0/1.0 | −0.35 / −0.00 | **−1.05 / −1.03** | DEAD both windows — incl. GC's holdout "win" (+0.59 → −0.60) |
+| oppo | +1.02 | **−1.64** | NG standout (+1.22) flipped to −0.50/−$52k — regime luck; GC −1.18 |
+
+**Survivors (positive on BOTH windows):**
+- **SI + eod@1.0** — holdout +1.06 Sharpe/+$128k; 2nd window +0.27/+$32k, maxDD better both.
+  The only robust candidate.
+- ES + eod@1.0 — weakly positive both (+0.17/+$0.8k; +0.03/+$3.5k). Marginal.
+- CL + eod — tiny positive both windows; immaterial.
+
+**Killed:** weekend flatten (everywhere), oppo (everywhere), eod@0.0 as a fleet default,
+GC anything, NG anything.
+
+**Revised recommendation:** the only promotion candidate is `eod_flatten` gate 1.0 on SI
+(ES optional/marginal). If execution-style search is added to Optuna (§5 discussion), this
+two-window protocol — holdout gate + `--window optimizer` replication — should be the mandatory
+promotion check, precisely because the single-holdout numbers above were misleading.
+
+## 7. Artifact map
 
 - Code: `agent/backtest_engine.py`, `src/live_execution/strategy_config.py`,
   `src/live_execution/strategies/execution_models.py`

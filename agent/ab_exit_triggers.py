@@ -255,11 +255,23 @@ def _run_engine(run_cfg: dict, preds: pd.DataFrame, ohlcv, ohlcv_exec,
     return engine.run(preds, ohlcv, ohlcv_exec_df=ohlcv_exec)
 
 
-def _holdout_slice(preds: pd.DataFrame, holdout_months: int) -> pd.DataFrame:
-    if not holdout_months:
+def _window_slice(preds: pd.DataFrame, holdout_months: int,
+                  window: str) -> pd.DataFrame:
+    """Slice predictions to the evaluation window.
+
+    - "holdout":   last ``holdout_months`` (the decision window)
+    - "optimizer": everything BEFORE the holdout cutoff — a second,
+      non-overlapping window for regime-robustness validation
+    - "full":      no slicing
+    """
+    if window == "full" or not holdout_months:
         return preds
     cutoff = preds.index.max() - pd.DateOffset(months=holdout_months)
-    return preds[preds.index >= cutoff]
+    if window == "holdout":
+        return preds[preds.index >= cutoff]
+    if window == "optimizer":
+        return preds[preds.index < cutoff]
+    raise ValueError(f"unknown window {window!r}")
 
 
 def _fmt(x: float, nd: int = 2) -> str:
@@ -302,6 +314,10 @@ def main() -> None:
                     help="comma-separated profit gates (ATR multiples) for trigger arms")
     ap.add_argument("--full", action="store_true",
                     help="also print full-period rows (default: holdout only)")
+    ap.add_argument("--window", default="holdout",
+                    choices=["holdout", "optimizer", "full"],
+                    help="evaluation window: holdout (decision window), "
+                         "optimizer (pre-holdout second window), full")
     args = ap.parse_args()
 
     arm_names = [a.strip() for a in args.arms.split(",") if a.strip()]
@@ -326,11 +342,12 @@ def main() -> None:
         ohlcv, ohlcv_exec = load_ohlcv_dual(data_path)
         preds = _load_predictions_for_config(cfg_path, cfg)
         holdout_months = cfg.get("holdout_months", 0) or 0
-        ho_preds = _holdout_slice(preds, holdout_months)
+        ho_preds = _window_slice(preds, holdout_months, args.window)
 
         print(f"\n### {name}  ({symbol})  conflict={cfg.get('conflict_resolution')}  "
-              f"data={os.path.basename(data_path)}  holdout={holdout_months}mo "
-              f"({len(ho_preds):,} rows)")
+              f"data={os.path.basename(data_path)}  window={args.window} "
+              f"({len(ho_preds):,} rows, "
+              f"{ho_preds.index.min().date()} -> {ho_preds.index.max().date()})")
 
         base = Metrics.of(_run_engine(_apply_arm(cfg, {}), ho_preds, ohlcv,
                                       ohlcv_exec, cm, slip))
@@ -339,7 +356,7 @@ def main() -> None:
             m = Metrics.of(_run_engine(_apply_arm(cfg, arm), ho_preds, ohlcv,
                                        ohlcv_exec, cm, slip))
             arm_metrics.append((label, m))
-        _print_block(f"HOLDOUT ({holdout_months}mo)", symbol, base, arm_metrics)
+        _print_block(f"{args.window.upper()} window", symbol, base, arm_metrics)
         rows.append((f"{symbol} {name}", base, arm_metrics))
 
         if args.full:
@@ -351,7 +368,7 @@ def main() -> None:
             _print_block("FULL PERIOD", symbol, base_f, arm_f)
 
     # ---- aggregate verdict (holdout) ----
-    print(f"\n\n{'#'*100}\n  AGGREGATE (HOLDOUT) - per arm, summed across configs\n{'#'*100}")
+    print(f"\n\n{'#'*100}\n  AGGREGATE ({args.window.upper()}) - per arm, summed across configs\n{'#'*100}")
     print(f"  {'arm':<10} | {'dSharpe(sum)':>13} | {'dPnL(sum)':>13} | "
           f"{'dMaxDD(sum)':>13} | {'#improved':>10} | {'wkd':>5} | {'eod':>5}")
     for i, (label, _) in enumerate(arms_spec):
