@@ -1,17 +1,28 @@
-"""A/B test: weekend-carry flatten overlay vs baseline, across the fleet.
+"""A/B test: exit-trigger overlays vs baseline, across the fleet.
 
-For every config in the fleet manifest, this runs the BASELINE (overlay off) and
-one or more TREATMENT arms (overlay on, at given profit-ATR thresholds) on the
-HOLDOUT window only, using the same data, predictions, seed, and economics.  It
-reports the deltas on the project's own annualized-monthly Sharpe/Sortino, plus
-drawdown, PnL, trade count, and weekend-flatten attribution.
+Ticket: exit-triggers-eod-oppsignal_07072026_1924
 
-Backtester-only.  Reads production configs + predictions; writes nothing to prod.
+For every config in the fleet manifest, runs the BASELINE (all overlays off)
+and one arm per exit enhancement on the HOLDOUT window only, using the same
+data, predictions, seed, and economics.  Arms:
+
+  - ``wkd@G``    weekend_flatten enabled at profit gate G (ATR multiples)
+  - ``eod@G``    eod_flatten enabled at gate G
+  - ``both@G``   weekend + EOD together at gate G
+  - ``oppo``     conflict_resolution overridden to
+                 ``close_existing_position_if_profit`` (Phase 2; requires the
+                 mode to exist — skipped gracefully if not yet implemented)
+
+Reports deltas on the project's own annualized-monthly Sharpe/Sortino, plus
+drawdown, PnL, trade count, and per-trigger exit attribution.
+
+Backtester-only.  Reads production configs + predictions; writes nothing.
 
 Usage:
-    python -m agent.ab_weekend_flatten
-    python -m agent.ab_weekend_flatten --profit-atr-mult 0.0,0.5,1.0,1.5
-    python -m agent.ab_weekend_flatten --full        # also show full-period rows
+    python -m agent.ab_exit_triggers                       # 4-arm trigger A/B
+    python -m agent.ab_exit_triggers --gates 0.0,1.0       # profit gates
+    python -m agent.ab_exit_triggers --arms wkd,eod,both   # trigger arms
+    python -m agent.ab_exit_triggers --arms wkd,eod,oppo   # phase-2 individual toggles
 """
 
 from __future__ import annotations
@@ -40,7 +51,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Production configs backtest against the per-symbol HourSet parquet that
 # produced their predictions (embeds EXEC_ raw-fill columns).  Explicit and
-# auditable; override per-config with a "backtest_data_path" key if ever needed.
+# auditable; override per-config with a "backtest_data_path" key if needed.
 SYMBOL_DATA = {
     "CL": "data/processed/CL_HourSet_14B.parquet",
     "ES": "data/processed/ES_HourSet_01B.parquet",
@@ -62,8 +73,6 @@ def _resolve_predictions_path(raw_path: str) -> str:
     p = resolve_cli_path(raw_path)
     if os.path.exists(p):
         return p
-    # Fallback: production configs record a canonical batch-dir name that may
-    # differ from the local suffixed dir — search by basename under reports/.
     matches = glob.glob(
         os.path.join(REPO_ROOT, "reports", "batch_runs", "**",
                      os.path.basename(raw_path)),
@@ -162,13 +171,18 @@ class Metrics:
     max_dd: float
     win_rate: float
     monthly_std: float
-    n_flat: int
-    pnl_flat: float
+    n_wkd: int
+    pnl_wkd: float
+    n_eod: int
+    pnl_eod: float
+    n_sig: int
 
     @classmethod
     def of(cls, result) -> "Metrics":
         monthly = _monthly_pnl(result)
-        flat = [t for t in result.trades if t.exit_reason.value == "WEEKEND_FLATTEN"]
+        wkd = [t for t in result.trades if t.exit_reason.value == "WEEKEND_FLATTEN"]
+        eod = [t for t in result.trades if t.exit_reason.value == "EOD_FLATTEN"]
+        sig = [t for t in result.trades if t.exit_reason.value == "SIGNAL_EXIT"]
         return cls(
             trades=result.trade_count,
             pnl=result.total_pnl,
@@ -177,9 +191,54 @@ class Metrics:
             max_dd=result.max_drawdown,
             win_rate=result.win_rate,
             monthly_std=float(np.std(monthly)) if len(monthly) else float("nan"),
-            n_flat=len(flat),
-            pnl_flat=float(sum(t.net_pnl_dollars for t in flat)),
+            n_wkd=len(wkd),
+            pnl_wkd=float(sum(t.net_pnl_dollars for t in wkd)),
+            n_eod=len(eod),
+            pnl_eod=float(sum(t.net_pnl_dollars for t in eod)),
+            n_sig=len(sig),
         )
+
+
+# ---------------------------------------------------------------------------
+# arms
+# ---------------------------------------------------------------------------
+
+
+def _apply_arm(cfg: dict, arm: dict) -> dict:
+    """Return a deep-copied config with the arm's overlays applied.
+
+    arm keys: weekend_mult / eod_mult (Optional[float]),
+              conflict_override (Optional[str]).
+    """
+    run_cfg = copy.deepcopy(cfg)
+    run_cfg.pop("weekend_flatten", None)
+    run_cfg.pop("eod_flatten", None)
+    if arm.get("weekend_mult") is not None:
+        run_cfg["weekend_flatten"] = {
+            "enabled": True, "profit_atr_mult": arm["weekend_mult"],
+        }
+    if arm.get("eod_mult") is not None:
+        run_cfg["eod_flatten"] = {
+            "enabled": True, "profit_atr_mult": arm["eod_mult"],
+        }
+    if arm.get("conflict_override"):
+        run_cfg["conflict_resolution"] = arm["conflict_override"]
+    return run_cfg
+
+
+def _build_arms(arm_names: list[str], gates: list[float]) -> list[tuple[str, dict]]:
+    arms: list[tuple[str, dict]] = []
+    for g in gates:
+        tag = format(g, ".1f")
+        if "eod" in arm_names:
+            arms.append((f"eod@{tag}", {"eod_mult": g}))
+        if "wkd" in arm_names:
+            arms.append((f"wkd@{tag}", {"weekend_mult": g}))
+        if "both" in arm_names:
+            arms.append((f"both@{tag}", {"weekend_mult": g, "eod_mult": g}))
+    if "oppo" in arm_names:
+        arms.append(("oppo", {"conflict_override": "close_existing_position_if_profit"}))
+    return arms
 
 
 # ---------------------------------------------------------------------------
@@ -187,16 +246,8 @@ class Metrics:
 # ---------------------------------------------------------------------------
 
 
-def _run_engine(cfg: dict, preds: pd.DataFrame, ohlcv, ohlcv_exec,
-                mult: float, cm: float, slip: float, min_gap: float):
-    """Build an engine (overlay off if mult is None) and run it on `preds`."""
-    run_cfg = copy.deepcopy(cfg)
-    if mult is None:
-        run_cfg.pop("weekend_flatten", None)
-    else:
-        run_cfg["weekend_flatten"] = {
-            "enabled": True, "profit_atr_mult": mult, "min_gap_hours": min_gap,
-        }
+def _run_engine(run_cfg: dict, preds: pd.DataFrame, ohlcv, ohlcv_exec,
+                cm: float, slip: float):
     engine = BacktestEngine.from_config(
         run_cfg, commission_per_side=2.50, slippage_per_side=slip,
         contract_multiplier=cm,
@@ -212,50 +263,58 @@ def _holdout_slice(preds: pd.DataFrame, holdout_months: int) -> pd.DataFrame:
 
 
 def _fmt(x: float, nd: int = 2) -> str:
-    if x != x:  # NaN
+    if x != x:
         return "   n/a"
     if x == float("inf"):
         return "   inf"
     return f"{x:>{4+nd}.{nd}f}"
 
 
-def _print_block(name: str, symbol: str, base: Metrics, arms: list[tuple[float, Metrics]]):
-    print(f"\n{'='*100}")
-    print(f"  {name}   [{symbol}]")
-    print(f"{'-'*100}")
-    hdr = (f"  {'arm':<16} | {'trades':>6} | {'net PnL':>12} | {'Sharpe':>7} | "
-           f"{'Sortino':>7} | {'maxDD':>11} | {'moStd':>9} | {'flat#':>5} | {'flatPnL':>10}")
-    print(hdr)
-    print(f"  {'-'*96}")
-    print(f"  {'baseline':<16} | {base.trades:>6} | {base.pnl:>12,.0f} | "
+def _print_block(title: str, symbol: str, base: Metrics,
+                 arms: list[tuple[str, Metrics]]):
+    w = 118
+    print(f"\n{'='*w}")
+    print(f"  {title}   [{symbol}]")
+    print(f"{'-'*w}")
+    print(f"  {'arm':<10} | {'trades':>6} | {'net PnL':>12} | {'Sharpe':>7} | "
+          f"{'Sortino':>7} | {'maxDD':>11} | {'wkd#':>4} | {'wkdPnL':>9} | "
+          f"{'eod#':>4} | {'eodPnL':>9} | {'sig#':>4} | delta")
+    print(f"  {'-'*(w-4)}")
+    print(f"  {'baseline':<10} | {base.trades:>6} | {base.pnl:>12,.0f} | "
           f"{_fmt(base.sharpe)} | {_fmt(base.sortino)} | {base.max_dd:>11,.0f} | "
-          f"{base.monthly_std:>9,.0f} | {'-':>5} | {'-':>10}")
-    for mult, m in arms:
+          f"{'-':>4} | {'-':>9} | {'-':>4} | {'-':>9} | {base.n_sig:>4} |")
+    for label, m in arms:
         dS = m.sharpe - base.sharpe
-        print(f"  {'flat@'+format(mult,'.2f')+'ATR':<16} | {m.trades:>6} | {m.pnl:>12,.0f} | "
+        print(f"  {label:<10} | {m.trades:>6} | {m.pnl:>12,.0f} | "
               f"{_fmt(m.sharpe)} | {_fmt(m.sortino)} | {m.max_dd:>11,.0f} | "
-              f"{m.monthly_std:>9,.0f} | {m.n_flat:>5} | {m.pnl_flat:>10,.0f}"
-              f"   (dSharpe {dS:+.2f}, dPnL {m.pnl-base.pnl:+,.0f}, dDD {m.max_dd-base.max_dd:+,.0f})")
+              f"{m.n_wkd:>4} | {m.pnl_wkd:>9,.0f} | {m.n_eod:>4} | "
+              f"{m.pnl_eod:>9,.0f} | {m.n_sig:>4} | "
+              f"dSharpe {dS:+.2f}, dPnL {m.pnl-base.pnl:+,.0f}, "
+              f"dDD {m.max_dd-base.max_dd:+,.0f}")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--manifest", default="configs/fleet/fleet_manifest.json")
-    ap.add_argument("--profit-atr-mult", default="0.0,0.5,1.0,1.5",
-                    help="comma-separated ATR thresholds to test as treatment arms")
-    ap.add_argument("--min-gap-hours", type=float, default=40.0)
+    ap.add_argument("--arms", default="eod,wkd,both",
+                    help="comma list from {eod,wkd,both,oppo}")
+    ap.add_argument("--gates", default="0.0,1.0",
+                    help="comma-separated profit gates (ATR multiples) for trigger arms")
     ap.add_argument("--full", action="store_true",
                     help="also print full-period rows (default: holdout only)")
     args = ap.parse_args()
 
-    mults = [float(x) for x in args.profit_atr_mult.split(",") if x.strip() != ""]
+    arm_names = [a.strip() for a in args.arms.split(",") if a.strip()]
+    gates = [float(x) for x in args.gates.split(",") if x.strip() != ""]
+    arms_spec = _build_arms(arm_names, gates)
+
     manifest = json.load(open(resolve_cli_path(args.manifest)))
     instances = [i for i in manifest["instances"] if i.get("enabled", True)]
 
-    print(f"Weekend-flatten A/B  |  {len(instances)} configs  |  arms: "
-          f"{', '.join(f'{m:.2f}ATR' for m in mults)}  |  min_gap={args.min_gap_hours}h")
+    print(f"Exit-trigger A/B  |  {len(instances)} configs  |  arms: "
+          f"{', '.join(l for l, _ in arms_spec)}")
 
-    holdout_rows: list[tuple[str, Metrics, list[tuple[float, Metrics]]]] = []
+    rows: list[tuple[str, Metrics, list[tuple[str, Metrics]]]] = []
 
     for inst in instances:
         cfg_path = resolve_cli_path(inst["config"])
@@ -269,36 +328,42 @@ def main() -> None:
         holdout_months = cfg.get("holdout_months", 0) or 0
         ho_preds = _holdout_slice(preds, holdout_months)
 
-        print(f"\n### {name}  ({symbol})  data={os.path.basename(data_path)}  "
-              f"preds={len(preds):,} rows  holdout={holdout_months}mo "
+        print(f"\n### {name}  ({symbol})  conflict={cfg.get('conflict_resolution')}  "
+              f"data={os.path.basename(data_path)}  holdout={holdout_months}mo "
               f"({len(ho_preds):,} rows)")
 
-        # HOLDOUT (the decision window)
-        base_ho = Metrics.of(_run_engine(cfg, ho_preds, ohlcv, ohlcv_exec, None, cm, slip, args.min_gap_hours))
-        arms_ho = [(m, Metrics.of(_run_engine(cfg, ho_preds, ohlcv, ohlcv_exec, m, cm, slip, args.min_gap_hours)))
-                   for m in mults]
-        _print_block(f"HOLDOUT ({holdout_months}mo)", symbol, base_ho, arms_ho)
-        holdout_rows.append((f"{symbol} {name}", base_ho, arms_ho))
+        base = Metrics.of(_run_engine(_apply_arm(cfg, {}), ho_preds, ohlcv,
+                                      ohlcv_exec, cm, slip))
+        arm_metrics = []
+        for label, arm in arms_spec:
+            m = Metrics.of(_run_engine(_apply_arm(cfg, arm), ho_preds, ohlcv,
+                                       ohlcv_exec, cm, slip))
+            arm_metrics.append((label, m))
+        _print_block(f"HOLDOUT ({holdout_months}mo)", symbol, base, arm_metrics)
+        rows.append((f"{symbol} {name}", base, arm_metrics))
 
         if args.full:
-            base_f = Metrics.of(_run_engine(cfg, preds, ohlcv, ohlcv_exec, None, cm, slip, args.min_gap_hours))
-            arms_f = [(m, Metrics.of(_run_engine(cfg, preds, ohlcv, ohlcv_exec, m, cm, slip, args.min_gap_hours)))
-                      for m in mults]
-            _print_block("FULL PERIOD", symbol, base_f, arms_f)
+            base_f = Metrics.of(_run_engine(_apply_arm(cfg, {}), preds, ohlcv,
+                                            ohlcv_exec, cm, slip))
+            arm_f = [(l, Metrics.of(_run_engine(_apply_arm(cfg, a), preds, ohlcv,
+                                                ohlcv_exec, cm, slip)))
+                     for l, a in arms_spec]
+            _print_block("FULL PERIOD", symbol, base_f, arm_f)
 
     # ---- aggregate verdict (holdout) ----
     print(f"\n\n{'#'*100}\n  AGGREGATE (HOLDOUT) - per arm, summed across configs\n{'#'*100}")
-    print(f"  {'arm':<12} | {'dSharpe(sum)':>13} | {'dPnL(sum)':>13} | "
-          f"{'dMaxDD(sum)':>13} | {'#improved':>10} | {'flats':>6}")
-    for i, mult in enumerate(mults):
-        dS = sum(arms[i][1].sharpe - base.sharpe for _, base, arms in holdout_rows
+    print(f"  {'arm':<10} | {'dSharpe(sum)':>13} | {'dPnL(sum)':>13} | "
+          f"{'dMaxDD(sum)':>13} | {'#improved':>10} | {'wkd':>5} | {'eod':>5}")
+    for i, (label, _) in enumerate(arms_spec):
+        dS = sum(arms[i][1].sharpe - base.sharpe for _, base, arms in rows
                  if arms[i][1].sharpe == arms[i][1].sharpe and base.sharpe == base.sharpe)
-        dP = sum(arms[i][1].pnl - base.pnl for _, base, arms in holdout_rows)
-        dDD = sum(arms[i][1].max_dd - base.max_dd for _, base, arms in holdout_rows)
-        improved = sum(1 for _, base, arms in holdout_rows if arms[i][1].pnl > base.pnl)
-        flats = sum(arms[i][1].n_flat for _, base, arms in holdout_rows)
-        print(f"  {format(mult,'.2f')+'ATR':<12} | {dS:>13.2f} | {dP:>13,.0f} | "
-              f"{dDD:>13,.0f} | {improved:>3}/{len(holdout_rows):<6} | {flats:>6}")
+        dP = sum(arms[i][1].pnl - base.pnl for _, base, arms in rows)
+        dDD = sum(arms[i][1].max_dd - base.max_dd for _, base, arms in rows)
+        improved = sum(1 for _, base, arms in rows if arms[i][1].pnl > base.pnl)
+        n_w = sum(arms[i][1].n_wkd for _, _, arms in rows)
+        n_e = sum(arms[i][1].n_eod for _, _, arms in rows)
+        print(f"  {label:<10} | {dS:>13.2f} | {dP:>13,.0f} | {dDD:>13,.0f} | "
+              f"{improved:>3}/{len(rows):<6} | {n_w:>5} | {n_e:>5}")
     print()
 
 

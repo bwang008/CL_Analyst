@@ -96,6 +96,7 @@ class ExitReason(Enum):
     TIME_BARRIER = "TIME_BARRIER"  # 288 bars elapsed
     SIGNAL_EXIT = "SIGNAL_EXIT"  # Strategy requested exit (conflict resolution)
     WEEKEND_FLATTEN = "WEEKEND_FLATTEN"  # Optional overlay: profitable winner flattened before a weekend gap
+    EOD_FLATTEN = "EOD_FLATTEN"  # Optional overlay: profitable winner flattened before the daily session halt
 
 
 @dataclass
@@ -319,6 +320,7 @@ class BacktestEngine:
         consecutive_signal_threshold: int = 0,
         execution_guard: Optional[ExecutionGuard] = None,
         weekend_flatten: Optional["WeekendFlattenConfig"] = None,
+        eod_flatten: Optional["WeekendFlattenConfig"] = None,
     ) -> None:
         self.tp_atr_mult = tp_atr_mult
         self.sl_atr_mult = sl_atr_mult
@@ -345,10 +347,14 @@ class BacktestEngine:
         # Global execution guard (blocks new entries during toxic periods)
         self._execution_guard = execution_guard
 
-        # Optional weekend-carry flatten overlay (None = off; unchanged behavior).
-        # ``_flatten_bars`` is (re)computed per run() from the OHLCV bar spacing.
+        # Optional flatten-trigger overlays (None = off; unchanged behavior).
+        # ``_flatten_bars`` (weekend) and ``_eod_flatten_bars`` (daily halt)
+        # are (re)computed per run() from the OHLCV bar spacing; the two gap
+        # bands are disjoint by construction.
         self._weekend_flatten = weekend_flatten
+        self._eod_flatten = eod_flatten
         self._flatten_bars: set[pd.Timestamp] = set()
+        self._eod_flatten_bars: set[pd.Timestamp] = set()
 
         # Mutable engine state (allocated once, reused across bars)
         self._engine_state = EngineState()
@@ -417,6 +423,7 @@ class BacktestEngine:
             "execution_strategy": strategy,
             "execution_guard": guard,
             "weekend_flatten": sc.weekend_flatten,
+            "eod_flatten": sc.eod_flatten,
         }
         kwargs.update(overrides)
         return cls(**kwargs)
@@ -680,30 +687,39 @@ class BacktestEngine:
 
         self._original_sl_price = self._sl_price
 
-    def _weekend_flatten_triggered(
+    def _flatten_exit_reason(
         self,
         dt: pd.Timestamp,
         side: int,
         entry_fill: float,
         ref_price: float,
         atr_at_entry: float,
-    ) -> bool:
-        """True if the weekend-flatten overlay should close this position now.
+    ) -> Optional[ExitReason]:
+        """Which flatten-trigger overlay (if any) should close this position.
 
-        Fires only when the overlay is enabled, ``dt`` is the last bar before a
-        weekend/holiday gap, and unrealized PnL (evaluated at ``ref_price``) is
-        at least ``profit_atr_mult`` × ATR-at-entry in favor.  Returns False for
-        every bar when the overlay is off, so callers are a no-op by default.
+        Checks the weekend trigger first, then EOD (their bar-sets are
+        disjoint by construction, so order only affects documentation).  A
+        trigger fires only when its overlay is enabled, ``dt`` is in its
+        precomputed bar-set, and unrealized PnL (evaluated at ``ref_price``)
+        is at least its ``profit_atr_mult`` × ATR-at-entry in favor.  Returns
+        None on every bar when both overlays are off, so callers are a no-op
+        by default.
         """
-        wf = self._weekend_flatten
-        if wf is None or not wf.enabled:
-            return False
-        if dt not in self._flatten_bars:
-            return False
         if atr_at_entry is None or atr_at_entry <= 0:
-            return False
-        unrealized_atr = side * (ref_price - entry_fill) / atr_at_entry
-        return unrealized_atr >= wf.profit_atr_mult
+            return None
+        unrealized_atr: Optional[float] = None  # lazy — only if a set matches
+        wf = self._weekend_flatten
+        if wf is not None and wf.enabled and dt in self._flatten_bars:
+            unrealized_atr = side * (ref_price - entry_fill) / atr_at_entry
+            if unrealized_atr >= wf.profit_atr_mult:
+                return ExitReason.WEEKEND_FLATTEN
+        ef = self._eod_flatten
+        if ef is not None and ef.enabled and dt in self._eod_flatten_bars:
+            if unrealized_atr is None:
+                unrealized_atr = side * (ref_price - entry_fill) / atr_at_entry
+            if unrealized_atr >= ef.profit_atr_mult:
+                return ExitReason.EOD_FLATTEN
+        return None
 
     def _on_in_position(self, dt: pd.Timestamp, bar_open: float,
                         bar_high: float, bar_low: float) -> None:
@@ -762,14 +778,15 @@ class BacktestEngine:
             self._close_trade(dt, bar_open, ExitReason.TIME_BARRIER)
             return
 
-        # 2b. Weekend-carry flatten (optional overlay; no-op when disabled).
-        #     Reached only if the position survived TP/SL and the time barrier
-        #     this bar, so it genuinely alters the trade. Fill mirrors
-        #     TIME_BARRIER (bar open).
-        if self._weekend_flatten_triggered(
+        # 2b. Flatten triggers — weekend / EOD (optional overlays; no-op when
+        #     disabled). Reached only if the position survived TP/SL and the
+        #     time barrier this bar, so it genuinely alters the trade. Fill
+        #     mirrors TIME_BARRIER (bar open).
+        _flat_reason = self._flatten_exit_reason(
             dt, self._side, self._entry_fill, bar_open, self._atr_at_entry
-        ):
-            self._close_trade(dt, bar_open, ExitReason.WEEKEND_FLATTEN)
+        )
+        if _flat_reason is not None:
+            self._close_trade(dt, bar_open, _flat_reason)
             return
 
         # 3. Trailing stop upgrade: move SL after +N×ATR in favor
@@ -919,13 +936,16 @@ class BacktestEngine:
                 exit_price = bar_open
                 exit_reason = ExitReason.TIME_BARRIER
 
-        # 2b. Weekend-carry flatten (optional overlay; no-op when disabled).
-        #     Only if still open after TP/SL and the time barrier this bar.
-        if exit_reason is None and self._weekend_flatten_triggered(
-            dt, pos.side, pos.entry_fill, bar_open, pos.atr_at_entry
-        ):
-            exit_price = bar_open
-            exit_reason = ExitReason.WEEKEND_FLATTEN
+        # 2b. Flatten triggers — weekend / EOD (optional overlays; no-op when
+        #     disabled). Only if still open after TP/SL and the time barrier
+        #     this bar.
+        if exit_reason is None:
+            _flat_reason = self._flatten_exit_reason(
+                dt, pos.side, pos.entry_fill, bar_open, pos.atr_at_entry
+            )
+            if _flat_reason is not None:
+                exit_price = bar_open
+                exit_reason = _flat_reason
 
         # 3. Trailing stop upgrade (use per-position overrides if set)
         eff_trailing = pos.pos_trailing_atr_mult if pos.pos_trailing_atr_mult is not None else self.trailing_atr_mult
@@ -1057,21 +1077,51 @@ class BacktestEngine:
             ohlcv["exec_atr_long_"]  = ohlcv["atr_long_"].values
             ohlcv["exec_atr_short_"] = ohlcv["atr_short_"].values
 
-        # Precompute weekend-flatten bars (optional overlay; empty = feature off).
-        # A "flatten bar" is the last bar before a market gap of >= min_gap_hours
-        # to the next bar — i.e. the last bar of the trading week before a
-        # weekend/holiday gap. Derived purely from the data's own bar spacing:
-        # no calendar, no lookahead, symbol-agnostic.
+        # Precompute flatten-trigger bars (optional overlays; empty = off).
+        # Derived purely from the data's own bar spacing: no calendar, no
+        # lookahead, symbol-agnostic.
+        #   - weekend bar: last bar before a gap >= weekend.min_gap_hours
+        #     (~49h Fri->Mon; catches holiday-extended weekends too).
+        #   - EOD bar: last bar before a gap in [eod.min_gap_hours,
+        #     weekend threshold) — the daily session halt (2h on CME hourly
+        #     bars) and holiday early-closes.  Disjoint from the weekend band
+        #     by construction so WEEKEND/EOD attribution never overlaps.
         self._flatten_bars = set()
+        self._eod_flatten_bars = set()
         wf = self._weekend_flatten
-        if wf is not None and wf.enabled:
+        ef = self._eod_flatten
+        weekend_on = wf is not None and wf.enabled
+        eod_on = ef is not None and ef.enabled
+        if weekend_on or eod_on:
+            from src.live_execution.strategy_config import (
+                _DEFAULT_WEEKEND_MIN_GAP_HOURS,
+            )
+            weekend_threshold = (
+                wf.min_gap_hours if wf is not None
+                else _DEFAULT_WEEKEND_MIN_GAP_HOURS
+            )
+            if eod_on and ef.min_gap_hours >= weekend_threshold:
+                raise ValueError(
+                    f"eod_flatten.min_gap_hours ({ef.min_gap_hours}) must be "
+                    f"< the weekend gap threshold ({weekend_threshold}); the "
+                    f"EOD band would be empty or swallow weekend gaps."
+                )
             idx = ohlcv.index
             if len(idx) >= 2:
                 deltas = idx[1:] - idx[:-1]  # gap from bar i to bar i+1
-                gap_mask = deltas >= pd.Timedelta(hours=wf.min_gap_hours)
-                self._flatten_bars = {
-                    pd.Timestamp(t) for t in idx[:-1][gap_mask]
-                }
+                if weekend_on:
+                    wkd_mask = deltas >= pd.Timedelta(hours=wf.min_gap_hours)
+                    self._flatten_bars = {
+                        pd.Timestamp(t) for t in idx[:-1][wkd_mask]
+                    }
+                if eod_on:
+                    eod_mask = (
+                        (deltas >= pd.Timedelta(hours=ef.min_gap_hours))
+                        & (deltas < pd.Timedelta(hours=weekend_threshold))
+                    )
+                    self._eod_flatten_bars = {
+                        pd.Timestamp(t) for t in idx[:-1][eod_mask]
+                    }
 
         # Build signal lookup — which bars have a trade signal
         #
@@ -1588,7 +1638,7 @@ def format_report(
     long_trades = [t for t in result.trades if t.side == 1]
     short_trades = [t for t in result.trades if t.side == -1]
 
-    for reason in ["TP", "SL", "TRAILING_BE", "TIME_BARRIER", "SIGNAL_EXIT", "WEEKEND_FLATTEN"]:
+    for reason in ["TP", "SL", "TRAILING_BE", "TIME_BARRIER", "SIGNAL_EXIT", "WEEKEND_FLATTEN", "EOD_FLATTEN"]:
         long_count = sum(
             1 for t in long_trades if t.exit_reason.value == reason
         )
@@ -1749,7 +1799,7 @@ def compare_runs(
 
     dist_a = result_a.exit_distribution
     dist_b = result_b.exit_distribution
-    for reason in ["TP", "SL", "TRAILING_BE", "TIME_BARRIER", "SIGNAL_EXIT", "WEEKEND_FLATTEN"]:
+    for reason in ["TP", "SL", "TRAILING_BE", "TIME_BARRIER", "SIGNAL_EXIT", "WEEKEND_FLATTEN", "EOD_FLATTEN"]:
         da = dist_a.get(reason, {"count": 0, "pct": 0.0})
         db = dist_b.get(reason, {"count": 0, "pct": 0.0})
         val_a_str = f"{int(da['count'])} ({da['pct']:.1f}%)"

@@ -80,17 +80,25 @@ class SideConfig:
 
 @dataclass(frozen=True)
 class WeekendFlattenConfig:
-    """Optional weekend-carry flatten overlay (default OFF).
+    """Optional flatten-trigger overlay block (default OFF).
 
-    When ``enabled``, a position that is still open and profitable by at least
-    ``profit_atr_mult`` × (ATR-at-entry) is flattened on the last bar before a
-    weekend/holiday market gap.  A "gap bar" is any bar whose distance to the
-    next bar in the data is >= ``min_gap_hours`` — this catches Friday→Sunday
-    weekends and holiday-extended weekends directly from the data's own bar
-    spacing (no calendar needed, no lookahead), and is symbol-agnostic.
+    Used by two independent config blocks with identical shape:
 
-    Purely additive: when the ``weekend_flatten`` block is absent from a config
-    this object is ``None`` and the engine behaves byte-for-byte as before.
+    - ``weekend_flatten``: flatten a profitable position on the last bar
+      before a weekend/holiday market gap (gap-to-next-bar >=
+      ``min_gap_hours``, default 40h).
+    - ``eod_flatten``: flatten a profitable position on the last bar before
+      the daily session halt — a gap-to-next-bar in
+      ``[min_gap_hours, weekend threshold)``, default lower bound 2h (the
+      CME 17:00–18:00 ET maintenance halt shows as a 2h gap on hourly bars).
+
+    "Profitable" means unrealized PnL >= ``profit_atr_mult`` × ATR-at-entry.
+    Detection is purely data-driven from the bar spacing (no calendar, no
+    lookahead, symbol-agnostic); the two gap bands are disjoint by
+    construction so WEEKEND/EOD attribution never overlaps.
+
+    Purely additive: when a block is absent from a config its object is
+    ``None`` and the engine behaves byte-for-byte as before.
     """
 
     enabled: bool
@@ -103,39 +111,58 @@ class WeekendFlattenConfig:
 # cleanly isolates weekend / long-weekend gaps from those shorter gaps.
 _DEFAULT_WEEKEND_MIN_GAP_HOURS: float = 40.0
 
+# Structural default: the daily maintenance halt (17:00–18:00 ET on CME) shows
+# as a 2h gap between consecutive hourly bars; plain intra-session spacing is
+# 1h.  Empirically verified across CL/ES/GC/NG/SI HourSet datasets 2026-07-07.
+_DEFAULT_EOD_MIN_GAP_HOURS: float = 2.0
 
-def parse_weekend_flatten(cfg: dict) -> Optional[WeekendFlattenConfig]:
-    """Parse the optional ``weekend_flatten`` config block.
+
+def _parse_flatten_block(
+    cfg: dict, key: str, default_min_gap_hours: float
+) -> Optional[WeekendFlattenConfig]:
+    """Shared parser for the ``weekend_flatten`` / ``eod_flatten`` blocks.
 
     Returns ``None`` when the block is absent (feature OFF — unchanged
     behavior).  When present and enabled, ``profit_atr_mult`` is REQUIRED and
     raises if missing (no silent null defaults for an active feature).
     """
-    block = cfg.get("weekend_flatten")
+    block = cfg.get(key)
     if block is None:
         return None
     if not isinstance(block, dict):
-        raise ValueError("weekend_flatten must be a JSON object")
+        raise ValueError(f"{key} must be a JSON object")
     enabled = bool(block.get("enabled", False))
     if not enabled:
         return WeekendFlattenConfig(
             enabled=False,
             profit_atr_mult=0.0,
-            min_gap_hours=_DEFAULT_WEEKEND_MIN_GAP_HOURS,
+            min_gap_hours=default_min_gap_hours,
         )
     if "profit_atr_mult" not in block:
         raise ValueError(
-            "weekend_flatten.enabled=true requires an explicit 'profit_atr_mult' "
-            "(the unrealized-profit threshold in ATR multiples required to "
-            "flatten a winner before a weekend gap)."
+            f"{key}.enabled=true requires an explicit 'profit_atr_mult' "
+            f"(the unrealized-profit threshold in ATR multiples required to "
+            f"flatten a winner on this trigger's bars)."
         )
     return WeekendFlattenConfig(
         enabled=True,
         profit_atr_mult=float(block["profit_atr_mult"]),
         min_gap_hours=float(
-            block.get("min_gap_hours", _DEFAULT_WEEKEND_MIN_GAP_HOURS)
+            block.get("min_gap_hours", default_min_gap_hours)
         ),
     )
+
+
+def parse_weekend_flatten(cfg: dict) -> Optional[WeekendFlattenConfig]:
+    """Parse the optional ``weekend_flatten`` config block."""
+    return _parse_flatten_block(
+        cfg, "weekend_flatten", _DEFAULT_WEEKEND_MIN_GAP_HOURS
+    )
+
+
+def parse_eod_flatten(cfg: dict) -> Optional[WeekendFlattenConfig]:
+    """Parse the optional ``eod_flatten`` config block."""
+    return _parse_flatten_block(cfg, "eod_flatten", _DEFAULT_EOD_MIN_GAP_HOURS)
 
 
 @dataclass(frozen=True)
@@ -167,6 +194,7 @@ class StrategyConfig:
 
     # --- Optional overlays (default None = feature off) ---------------------
     weekend_flatten: Optional[WeekendFlattenConfig] = None
+    eod_flatten: Optional[WeekendFlattenConfig] = None
 
     # -----------------------------------------------------------------------
     # Factory
@@ -225,4 +253,5 @@ class StrategyConfig:
             short=_build_side("short"),
             raw=cfg,
             weekend_flatten=parse_weekend_flatten(cfg),
+            eod_flatten=parse_eod_flatten(cfg),
         )
