@@ -482,7 +482,9 @@ _HOURS_PER_TRADING_YEAR = 6000.0
 
 
 # TARGET_TRIPLE_<TP>x<SL>_<H>H_<DIR>  e.g. TARGET_TRIPLE_5x1_6H_SHORT
-_TRIPLE_RR_RE = re.compile(r"TRIPLE_(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)_")
+# <TP> and <SL> may be integers (2x1) or decimals written with '.' or the
+# HourSet_15B 'p' convention (1x0p5 == 1 x 0.5). Normalise 'p'->'.' before float().
+_TRIPLE_RR_RE = re.compile(r"TRIPLE_(\d+(?:[p.]\d+)?)x(\d+(?:[p.]\d+)?)_")
 
 # --- Cost-awareness (ticket screen-cost-column_07072026_1744) ---
 # The screen ranks predictability (AUC) but is otherwise blind to per-symbol
@@ -501,7 +503,7 @@ def _reward_risk_from_name(target_name: str) -> float:
     m = _TRIPLE_RR_RE.search(target_name or "")
     if not m:
         return float("nan")
-    tp, sl = float(m.group(1)), float(m.group(2))
+    tp, sl = float(m.group(1).replace("p", ".")), float(m.group(2).replace("p", "."))
     if sl == 0:
         return float("nan")
     return tp / sl
@@ -517,7 +519,7 @@ def _tp_mult_from_name(target_name: str) -> float:
     m = _TRIPLE_RR_RE.search(target_name or "")
     if not m:
         return float("nan")
-    return float(m.group(1))
+    return float(m.group(1).replace("p", "."))
 
 
 def _safe_auc(y_true: np.ndarray, scores: np.ndarray) -> float:

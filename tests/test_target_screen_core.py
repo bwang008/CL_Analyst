@@ -20,6 +20,7 @@ from gcp.vm_e2e_pipeline import (
     COMMISSION_RT_USD,
     COST_FRAC_MAX,
     SCREEN_LGBM_PARAMS,
+    _reward_risk_from_name,
     _screen_one_target,
     _tp_mult_from_name,
     run_screen,
@@ -491,6 +492,12 @@ class TestTpMultFromName:
         assert np.isnan(_tp_mult_from_name("NOT_A_TARGET"))
         assert np.isnan(_tp_mult_from_name(""))
         assert np.isnan(_tp_mult_from_name(None))
+
+    def test_parses_p_decimal_notation(self):
+        # HourSet_15B encodes a decimal SL as "0p5" (= 0.5), e.g. 1x0p5.
+        assert _tp_mult_from_name("TARGET_TRIPLE_1x0p5_1H_LONG") == pytest.approx(1.0)
+        assert _reward_risk_from_name("TARGET_TRIPLE_1x0p5_1H_SHORT") == pytest.approx(2.0)
+        assert _tp_mult_from_name("TARGET_TRIPLE_1p5x0p5_2H_LONG") == pytest.approx(1.5)
 
 
 class TestRunScreenCost:
