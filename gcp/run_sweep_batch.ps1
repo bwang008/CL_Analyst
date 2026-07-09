@@ -986,16 +986,16 @@ if ($batchState.completed -gt 0) {
     $optActualZone = $optZoneList[0]  # fallback default
 
     # Dynamically size the optimizer VM based on total concurrent task count
-    # Each experiment: 2 metrics × 2 sides = 4 tasks/objective
-    # Both sharpe+sortino run concurrently = ×2 → completed * 8 total
-    $optTaskCount = $batchState.completed * 8
+    # Each experiment: 2 metrics × 2 sides × 1 objective (sharpe-only since
+    # 2026-07-04, ticket drop-sortino-objective_07042026_2301) = 4 tasks
+    $optTaskCount = $batchState.completed * 4
     $optMachineType = if ($optTaskCount -le 8) { "n2-standard-8" }
                       elseif ($optTaskCount -le 16) { "n2-standard-16" }
                       elseif ($optTaskCount -le 32) { "n2-standard-32" }
                       else { "n2-standard-48" }
     # Let Python auto-size workers (1 per task, memory-capped)
     $optWorkerCount = 0
-    Write-Host "  Optimizer sizing: $($batchState.completed) experiments × 8 (2 metrics × 2 sides × 2 objectives) = $optTaskCount tasks → $optMachineType (workers=auto)" -ForegroundColor Cyan
+    Write-Host "  Optimizer sizing: $($batchState.completed) experiments × 4 (2 metrics × 2 sides × 1 objective [sharpe]) = $optTaskCount tasks → $optMachineType (workers=auto)" -ForegroundColor Cyan
 
     $manifestRaw = Get-Content $ManifestPath -Raw | ConvertFrom-Json
     $optExecData = if ($manifestRaw.baseline.execution_workflow.execution_data_path) { $manifestRaw.baseline.execution_workflow.execution_data_path } else { "" }

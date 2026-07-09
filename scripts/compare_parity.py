@@ -16,7 +16,10 @@ sweep models differ run-to-run). It verifies:
      are ABSENT.
   2. The ensemble report selected the same NUMBER of ensembles (Top 4).
   3. The ensemble backtest report contains NO tracebacks/FileNotFound crashes.
-  4. Slippage matches the reference (0.01).
+  4. The reported slippage matches the run's OWN frozen manifest
+     (baseline.execution_workflow.slippage_per_side) — symbol-specific
+     (CL=0.01, ES=0.25, ...), so it is read from the manifest, not hardcoded.
+     This still guards the -$2.5M class (config-vs-actual slippage divergence).
   5. Headline economics are sane (no -$2.5M class blowups).
 
 Usage:
@@ -31,15 +34,27 @@ import re
 import sys
 
 # Files the individual-mode (parity) chain MUST produce.
+# NOTE: the Sortino objective was dropped from the post-optimizer chain on
+# 2026-07-04 (ticket drop-sortino-objective_07042026_2301) — new runs are
+# sharpe-only. Sortino artifacts are therefore OPTIONAL-LEGACY: absent on new
+# runs (not a failure), but still fully content-checked when present on
+# historical (pre-2026-07-04) run folders.
 REQUIRED_INDIVIDUAL = [
     "batch_summary_optimized_sharpe.md",
-    "batch_summary_optimized_sortino.md",
     "optimization_results_sharpe.json",
-    "optimization_results_sortino.json",
     "batch_summary_optimized_ensembles_sharpe.md",
-    "batch_summary_optimized_ensembles_sortino.md",
+    "optimization_results_ensembles_sharpe.json",
     "top_pairs.json",
     "sharpe_ensemble_backtests.md",
+]
+
+# Sortino artifacts from the pre-2026-07-04 both-objectives chain. Optional:
+# their absence is expected on sharpe-only runs and is NOT a parity failure.
+OPTIONAL_LEGACY_SORTINO = [
+    "batch_summary_optimized_sortino.md",
+    "optimization_results_sortino.json",
+    "batch_summary_optimized_ensembles_sortino.md",
+    "optimization_results_ensembles_sortino.json",
     "sortino_ensemble_backtests.md",
 ]
 
@@ -55,9 +70,44 @@ def _read(path):
         return f.read()
 
 
+def _expected_slippage(run_dir):
+    """Per-side slippage this run SHOULD have used, from its frozen manifest.
+
+    Slippage is symbol-specific (CL=0.01, ES=0.25, ...) so it must come from the
+    run's own manifest, never a hardcode. Returns (value, error): on any missing
+    manifest/field it returns (None, msg) and the caller hard-fails — we do NOT
+    silently assume a default (per the no-silent-null-defaults doctrine).
+    """
+    mpath = os.path.join(run_dir, "manifest.json")
+    if not os.path.isfile(mpath):
+        return None, "manifest.json missing from run dir — cannot verify slippage"
+    try:
+        m = json.load(open(mpath))
+    except (ValueError, OSError) as e:
+        return None, f"manifest.json unreadable — cannot verify slippage ({e})"
+    # v2 schema first, then the retired legacy `defaults` schema (CANARY_V1-era
+    # frozen manifests). Both read the run's ACTUAL configured value, not a default.
+    for getter in (
+        lambda d: d["baseline"]["execution_workflow"]["slippage_per_side"],
+        lambda d: d["defaults"]["slippage_per_side"],
+    ):
+        try:
+            return float(getter(m)), None
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None, (
+        "manifest.json has no numeric slippage_per_side "
+        "(checked baseline.execution_workflow and legacy defaults) — cannot verify slippage"
+    )
+
+
 def check(run_dir, ref_dir):
     failures = []
     warnings = []
+
+    exp_slippage, slip_err = _expected_slippage(run_dir)
+    if slip_err:
+        failures.append(slip_err)
 
     # 1. Artifact set --------------------------------------------------------
     for fn in REQUIRED_INDIVIDUAL:
@@ -69,6 +119,18 @@ def check(run_dir, ref_dir):
                 f"PRESENT divergent ensemble-mode artifact: {fn} "
                 f"(run used opt_mode=ensemble, not individual)"
             )
+    # Sortino artifacts are optional-legacy: absent on new sharpe-only runs
+    # (expected, not a failure); when present on historical runs they are noted
+    # and still content-checked below.
+    legacy_present = [
+        fn for fn in OPTIONAL_LEGACY_SORTINO
+        if os.path.isfile(os.path.join(run_dir, fn))
+    ]
+    if legacy_present:
+        warnings.append(
+            f"legacy sortino artifacts present ({len(legacy_present)}) - "
+            f"pre-2026-07-04 both-objectives run; content-checked, not required"
+        )
 
     # 2. Top-N ensembles -----------------------------------------------------
     tp = os.path.join(run_dir, "top_pairs.json")
@@ -113,10 +175,12 @@ def check(run_dir, ref_dir):
             )
         elif run_tb:
             warnings.append(f"{fn} has {run_tb} traceback(s) (matches/under reference {ref_tb})")
-        # 4. Slippage
+        # 4. Slippage — must match the run's own manifest (symbol-specific)
         slip = re.search(r"Slippage[:\s]+([0-9.]+)", txt)
-        if slip and abs(float(slip.group(1)) - 0.01) > 1e-9:
-            failures.append(f"{fn} slippage={slip.group(1)} (expected 0.01)")
+        if slip and exp_slippage is not None and abs(float(slip.group(1)) - exp_slippage) > 1e-9:
+            failures.append(
+                f"{fn} slippage={slip.group(1)} (manifest expects {exp_slippage})"
+            )
 
     # 5. Sane economics ------------------------------------------------------
     ores = os.path.join(run_dir, "optimization_results_ensembles_sharpe.json")

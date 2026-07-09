@@ -30,6 +30,12 @@
 
 Everything else (model training, Optuna optimization, report generation) is identical.
 
+> [!IMPORTANT]
+> **Sharpe-only (inherited).** This vector chain shares `gcp/gcp_deploy_optimizer.ps1` and
+> `gcp/vm_post_optimize.sh` with `/run-cloud-batch`, so it **inherits the sharpe-only default**
+> adopted 2026-07-04 (ticket `drop-sortino-objective_07042026_2301`): no `*_sortino.*` artifacts
+> are produced. Roll back per run with `-Objective both`.
+
 ## Quick Reference
 
 ### Three Batch Tiers
@@ -101,7 +107,6 @@ reports/batch_runs/batch_<timestamp>/
 ├── batch_ensemble_pre_opt.md        ← frictionless sweep results (SNR term structure)
 ├── top_8_ensembles.json             ← selected by Peak SNR
 ├── batch_summary_optimized_sharpe.md    ← MAIN DELIVERABLE (post-Optuna)
-├── batch_summary_optimized_sortino.md   ← MAIN DELIVERABLE (post-Optuna)
 ├── wall_clock_summary.md            ← auto-generated timing report
 ├── optimization_results_*.json      ← raw optimization data
 └── manifest.json                    ← frozen config

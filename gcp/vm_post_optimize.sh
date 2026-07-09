@@ -169,7 +169,10 @@ N_TRIALS=500
 HOLDOUT_MONTHS=""
 WORKERS=0
 SHUTDOWN=false
-OBJECTIVE="both"
+# Sortino dropped 2026-07-04 (ticket drop-sortino-objective_07042026_2301):
+# default is sharpe-only (defense-in-depth for manual VM invocations; the managed
+# path always passes --objective= explicitly). Pass --objective=both to roll back.
+OBJECTIVE="sharpe"
 SWEEP_MODE="backtest"
 OPT_MODE="individual"
 BUCKET="gs://cltrainer-optuna-results"

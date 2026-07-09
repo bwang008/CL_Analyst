@@ -27,7 +27,10 @@ param(
     [switch]$NoShutdown,
     [switch]$NoMonitor,
     [switch]$DisableTelegram,
-    [string]$Objective = "both",
+    # Sortino objective dropped 2026-07-04 (ticket drop-sortino-objective_07042026_2301):
+    # default is sharpe-only. Values sharpe|sortino|both all still work — pass
+    # -Objective both for the zero-code operational rollback.
+    [string]$Objective = "sharpe",
     [string]$SweepMode = "backtest",
     [string]$OptMode = "individual",
     [string]$ExecData = "",

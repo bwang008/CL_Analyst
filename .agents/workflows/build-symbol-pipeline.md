@@ -164,9 +164,10 @@ Run it in the background and monitor. This provisions sweep VMs → post-optimiz
 
 **SUCCESS is defined by a fully generated & populated artifact folder** at `reports\batch_runs\batch_<ID>\`. It MUST contain, non-empty:
 - `manifest.json`, `batch_progress.json`, `batch_summary.md`, `wall_clock_summary.md`, `top_pairs.json`
-- `batch_summary_optimized_sharpe.md` **and** `..._sortino.md` (+ the two `..._ensembles_*.md`)
-- `optimization_results_sharpe.json` **and** `..._sortino.json` (+ the two `..._ensembles_*.json`)
-- `sharpe_ensemble_backtests.md` **and** `sortino_ensemble_backtests.md`
+- `batch_summary_optimized_sharpe.md` (+ `batch_summary_optimized_ensembles_sharpe.md`)
+- `optimization_results_sharpe.json` (+ `optimization_results_ensembles_sharpe.json`)
+- `sharpe_ensemble_backtests.md`
+- (Sortino artifacts dropped 2026-07-04, ticket `drop-sortino-objective_07042026_2301`; only present on `-Objective both` rollback runs.)
 - `configs/` populated with per-experiment `<SYM>...E0N_*.json`
 - `predictions/` populated with per-experiment `<SYM>...E0N_predictions.csv`
 

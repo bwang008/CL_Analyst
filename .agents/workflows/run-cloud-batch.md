@@ -54,8 +54,15 @@ VM teardown is driven by **local** PowerShell monitor processes. If that process
 
 | `opt_mode` | Passes | Selection | Produces | Notes |
 |------------|--------|-----------|----------|-------|
-| **`individual`** (default) | 2 (individual → ensemble) | `unified_pair_optimizer.py` → **Top 4** (`top_pairs.json`) | per-side `batch_summary_optimized_<obj>.md` **and** `batch_summary_optimized_ensembles_<obj>.md` + `<obj>_ensemble_backtests.md` | Reproduces CANARY_V1. Pass 1 optimizes each side; top individuals are paired; pass 2 re-optimizes the pairs — all in one optimizer-VM call. |
+| **`individual`** (default) | 2 (individual → ensemble) | `unified_pair_optimizer.py` → **Top 4** (`top_pairs.json`) | per-side `batch_summary_optimized_sharpe.md` **and** `batch_summary_optimized_ensembles_sharpe.md` + `sharpe_ensemble_backtests.md` | Reproduces CANARY_V1. Pass 1 optimizes each side; top individuals are paired; pass 2 re-optimizes the pairs — all in one optimizer-VM call. |
 | **`ensemble`** | 1 (brute force) | `select_top_ensembles.py` → Top 8 (`top_8_ensembles.json`) | `batch_ensemble_pre_opt.md` + ensemble reports only | Sweeps all long/short combos; skips per-side optimization. Diverges from CANARY_V1. |
+
+> **Objective = Sharpe only (since 2026-07-04, ticket `drop-sortino-objective_07042026_2301`).** The
+> post-optimizer chain no longer runs the Sortino pass, so `*_sortino.*` artifacts are **not** produced.
+> This is a deploy-chain default (`gcp/gcp_deploy_optimizer.ps1` → `gcp/vm_post_optimize.sh`), not a
+> manifest field — old manifests run unchanged. **Rollback (per run):** pass `-Objective both` to
+> `gcp_deploy_optimizer.ps1` (or `--objective=both` to `vm_post_optimize.sh`); all Sortino code is intact.
+> Run folders produced **before 2026-07-04** contain Sortino artifacts (historical; still parity-checkable).
 
 ## Date controls — train_cutoff vs holdout_cutoff vs holdout_months
 
@@ -132,12 +139,12 @@ this gate passes.
 reports/batch_runs/batch_<timestamp>/
 ├── batch_progress.json                          ← live progress tracker
 ├── batch_summary.md                             ← unoptimized results
-├── batch_summary_optimized_{sharpe,sortino}.md            ← per-side individual optimization (MAIN)
-├── optimization_results_{sharpe,sortino}.json
+├── batch_summary_optimized_sharpe.md            ← per-side individual optimization (MAIN)
+├── optimization_results_sharpe.json
 ├── top_pairs.json                               ← Top 4 ensemble pairs
-├── batch_summary_optimized_ensembles_{sharpe,sortino}.md  ← Top-4 ensemble optimization
-├── optimization_results_ensembles_{sharpe,sortino}.json
-├── {sharpe,sortino}_ensemble_backtests.md       ← full backtest dumps per ensemble
+├── batch_summary_optimized_ensembles_sharpe.md  ← Top-4 ensemble optimization
+├── optimization_results_ensembles_sharpe.json
+├── sharpe_ensemble_backtests.md                 ← full backtest dumps per ensemble
 ├── wall_clock_summary.md
 ├── configs/                                     ← config JSONs per ensemble — subject to the config validation gate (step 5) before use
 ├── predictions/                                 ← merged prediction CSVs per ensemble
@@ -149,8 +156,9 @@ reports/batch_runs/batch_<timestamp>/
 - **Trade-floor penalty** (`agent/strategy_optimizer.py`): `TRADES_PER_YEAR_FLOOR=100` (ensemble) /
   `50` (single-side); smooth sigmoid weight multiplies positive scores so hyper-selective low-trade
   configs are penalized.
-- **`OBJECTIVE_SCORE_CAP = 5.0`**: ceiling on the Sharpe/Sortino *objective* (not the displayed metric).
+- **`OBJECTIVE_SCORE_CAP = 5.0`**: ceiling on the Sharpe *objective* (not the displayed metric).
   Caps the exploding ratio of low-downside (low-trade) configs so the trade-floor penalty stays dominant.
+  (The cap/floor mechanics are objective-agnostic and still apply to Sortino under `-Objective both`.)
 
 ## Infrastructure
 - **Sweep machine**: `c2-standard-16` (16 vCPUs, ~64 GB). Threads auto-detected via `nproc`.

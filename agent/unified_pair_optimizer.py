@@ -178,7 +178,7 @@ def main():
     print(f"\nPairs saved to {out_json}")
     
     print("\nTo run the execution pipeline, execute the following command:")
-    print(f"python agent/batch_post_optimizer.py --batch-dir {batch_dir} --target-pairs-json {out_json} --objective both")
+    print(f"python agent/batch_post_optimizer.py --batch-dir {batch_dir} --target-pairs-json {out_json} --objective sharpe")
 
 if __name__ == "__main__":
     main()
