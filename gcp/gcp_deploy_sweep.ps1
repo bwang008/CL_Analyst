@@ -262,7 +262,19 @@ Write-Host "  Line endings fixed." -ForegroundColor Green
 Write-Host "`n[4/6] Downloading data from GCS to VM..."
 Write-Host "  Source: $GcsDataPath"
 $downloadCmd = "gsutil cp '$GcsDataPath' '$RemoteHome/data/$DataFileName'"
-try { gcloud compute ssh $VmName --zone=$Zone --command=$downloadCmd --quiet } catch { Write-Host "  Ignoring ssh stderr..." -ForegroundColor Gray }
+# Capture output + exit code (mirrors the [5/6] pattern below). A missing GCS object makes the
+# remote `gsutil cp` fail with "No URLs matched" -- this is NON-RETRYABLE (the object is absent
+# in every zone), so fail loudly here instead of marching on and letting it resurface two stages
+# later at [6/6] mis-classified as a generic STARTUP_TIMEOUT.
+$downloadOutput = gcloud compute ssh $VmName --zone=$Zone --command=$downloadCmd --quiet 2>&1
+$downloadExit   = $LASTEXITCODE
+$downloadText   = ($downloadOutput | Out-String)
+if ($downloadExit -ne 0 -or $downloadText -match "No URLs matched|CommandException") {
+    Write-Host "  FATAL: DATA_MISSING -- GCS data download failed for $GcsDataPath" -ForegroundColor Red
+    Write-Host "  The object is absent in the bucket; it will be missing in every zone (non-retryable)." -ForegroundColor Red
+    Write-Host "  Output: $downloadText" -ForegroundColor DarkGray
+    exit 1
+}
 Write-Host "  Data ready on VM!" -ForegroundColor Green
 
 # --- [5/6] Launch sweep run ---

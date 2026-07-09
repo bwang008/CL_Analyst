@@ -35,7 +35,18 @@ param(
     [switch]$DisableTelegram,
     [int]$MaxConcurrentVcpus    = 0,   # 0 = read from manifest defaults
     [string]$SweepMode          = "backtest",  # 'frictionless' for Workflow C, 'backtest' for legacy
-    [string]$OptMode            = "individual"  # DEPRECATED/IGNORED: opt_mode is read authoritatively from the manifest (baseline.execution_workflow.opt_mode). This CLI value is overridden.
+    [string]$OptMode            = "individual",  # DEPRECATED/IGNORED: opt_mode is read authoritatively from the manifest (baseline.execution_workflow.opt_mode). This CLI value is overridden.
+    # Post-optimizer objective arm list (ticket block-sharpe-objective-ab_07092026_1031).
+    # Comma-separated: sharpe|sortino|block_min|block_median|block_mean_std ('both' =
+    # sharpe,sortino). Default "sharpe" = today's behavior. Forwarded verbatim to
+    # gcp_deploy_optimizer.ps1 -> vm_post_optimize.sh (which validates each element).
+    [string]$Objective          = "sharpe",
+    # Block-wise Sharpe objective params (inert for sharpe/sortino-only runs).
+    [int]$NBlocks               = 3,
+    [double]$LambdaDispersion   = 1.0,
+    [int]$MinBlockMonths        = 10,
+    # Optimizer-VM control-plane TTL (minutes). Multi-arm A/B runs should pass 720.
+    [int]$OptimizerMaxRunDurationMinutes = 360
 )
 
 $ErrorActionPreference = "Continue"
@@ -482,6 +493,55 @@ if ($DryRun) {
     if ($pfExit -eq 2) {
         Write-Host "    FAIL: OOS/holdout window collapse -- aborting dry run." -ForegroundColor Red; exit 1
     }
+
+    # 6b. Block-layout gate (ticket block-sharpe-objective-ab_07092026_1031). When any
+    #     block metric (block_min/block_median/block_mean_std) is in -Objective, the
+    #     post-holdout in-sample window must fit n_blocks x min_block_months; the check
+    #     prints the computed calendar block layout so the dry run documents the split.
+    #     Inert (skipped) for sharpe/sortino-only runs.
+    $blockMetricsRequested = @($Objective.Split(',') | ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -in @('block_min', 'block_median', 'block_mean_std') })
+    if ($blockMetricsRequested.Count -gt 0) {
+        $pfBlockOut = & $preflightPy scripts/preflight_holdout_check.py --manifest $manifestFull `
+            --objectives $Objective --n-blocks $NBlocks --min-block-months $MinBlockMonths 2>&1
+        $pfBlockExit = $LASTEXITCODE
+        $pfBlockOut | ForEach-Object { Write-Host $_ }
+        if ($pfBlockExit -ne 0) {
+            Write-Host "    FAIL: block-layout gate failed (exit $pfBlockExit) -- (window - holdout) must be >= n_blocks x min_block_months. Aborting dry run." -ForegroundColor Red; exit 1
+        }
+    }
+
+    # 7. GCS dataset existence -- verify the referenced cloud inputs actually exist in the
+    #    bucket BEFORE any VM is created. Catches a locally-built-but-never-uploaded parquet
+    #    (or a missing execution_data_path) in seconds -- zero VMs, zero credits -- instead of
+    #    letting it surface as a mis-classified STARTUP_TIMEOUT after minutes of zone retries.
+    #    Derives the sweep-dataset object name exactly as gcp_deploy_sweep.ps1 does.
+    $gateSymbol = [string]$mf.baseline.symbol
+    $gateDsVer  = [string]$mf.baseline.data_workflow.dataset_version
+    if ([string]::IsNullOrWhiteSpace($gateSymbol) -or [string]::IsNullOrWhiteSpace($gateDsVer)) {
+        Write-Host "    FAIL: baseline.symbol / data_workflow.dataset_version missing -- cannot derive GCS dataset path." -ForegroundColor Red; exit 1
+    }
+    if ($gateDsVer.ToUpper().StartsWith($gateSymbol.ToUpper())) {
+        $gateDsName = "${gateDsVer}.parquet"
+    } else {
+        $gateDsName = "${gateSymbol}_${gateDsVer}.parquet"
+    }
+    $gateExecUrl = [string]$mf.baseline.execution_workflow.execution_data_path
+    if ([string]::IsNullOrWhiteSpace($gateExecUrl)) {
+        Write-Host "    FAIL: execution_workflow.execution_data_path is not defined." -ForegroundColor Red; exit 1
+    }
+    $gateUrls = @("gs://cltrainer-optuna-results/data/$gateDsName", $gateExecUrl)
+    foreach ($gu in $gateUrls) {
+        # Local gsutil is broken here (python3.13 not found); use `gcloud storage`.
+        # `ls` exits non-zero when the object is absent.
+        $null = gcloud storage ls $gu 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "    FAIL: required input not found in GCS: $gu" -ForegroundColor Red
+            Write-Host "          Upload it before launching (e.g. gcloud storage cp <local-parquet> $gu)." -ForegroundColor DarkGray
+            exit 1
+        }
+        Write-Host "    [OK] GCS input present: $gu" -ForegroundColor Green
+    }
     Write-Host ""
 
     $idx = 0
@@ -638,7 +698,8 @@ try {
                     # Classify the error for structured diagnostics
                     $zoneErrText = ($deployOutput | Out-String)
                     $errorCategory = "UNKNOWN"
-                    if ($zoneErrText -match "Quota.*exceeded|quota.*limit") { $errorCategory = "QUOTA_EXCEEDED" }
+                    if ($zoneErrText -match "DATA_MISSING|No URLs matched|CommandException") { $errorCategory = "DATA_MISSING" }
+                    elseif ($zoneErrText -match "Quota.*exceeded|quota.*limit") { $errorCategory = "QUOTA_EXCEEDED" }
                     elseif ($zoneErrText -match "ConnectionError|RemoteDisconnected|gcloud crashed") { $errorCategory = "GCP_API_ERROR" }
                     elseif ($zoneErrText -match "ZONE_RESOURCE_POOL_EXHAUSTED|stockout|does not have enough resources") { $errorCategory = "RESOURCE_EXHAUSTED" }
                     elseif ($zoneErrText -match "already exists") { $errorCategory = "VM_ALREADY_EXISTS" }
@@ -659,6 +720,13 @@ try {
                     # Clean up zombie VM - it may have been created before the deploy step failed
                     Write-Host "  Cleaning up zombie VM in zone $z ..." -ForegroundColor Yellow
                     gcloud compute instances delete $exp.VmName --zone=$z --quiet 2>$null
+
+                    # DATA_MISSING is non-retryable: the GCS input is absent, so it will be absent
+                    # in every zone. Stop cycling zones immediately (no point burning 6 more).
+                    if ($errorCategory -eq "DATA_MISSING") {
+                        Write-Host "  DATA_MISSING is non-retryable -- skipping remaining zones." -ForegroundColor Red
+                        break
+                    }
                 }
             }
 
@@ -720,6 +788,23 @@ try {
                 $batchState.failed++
                 $batchState.experiments += $exp
                 Save-Progress $batchState
+
+                # Fail-fast on a non-retryable, batch-wide input error. A missing shared dataset
+                # (DATA_MISSING) dooms EVERY experiment, so abort the whole batch rather than
+                # burning the rest on the same absent file. Mirrors the pipeline-failure fail-fast
+                # below; teardown of any active VMs runs here + in the outer `finally`.
+                if ($dominantError -eq "DATA_MISSING") {
+                    Write-Host "  [FATAL] DATA_MISSING is non-retryable and shared by every experiment. Fail-Fast: aborting batch." -ForegroundColor Red
+                    foreach ($active in $activeSlots) {
+                        Write-Host "  [CLEANUP] Stopping active VM: $($active.VmName)" -ForegroundColor Yellow
+                        Stop-Job $active.Job -ErrorAction SilentlyContinue
+                        Remove-ExperimentVm -VmName $active.VmName -VmZone $active.ActualZone
+                    }
+                    $batchState["completed_at"] = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                    Save-Progress $batchState
+                    Send-BatchTelegram "[BATCH_ABORTED] DATA_MISSING: $($exp.Label) -- required GCS input absent in bucket. Every experiment shares this dataset; aborting. Upload it and re-run."
+                    throw "Batch aborted: DATA_MISSING for $($exp.Label). Required GCS input absent in bucket -- upload it and re-run."
+                }
                 continue
             }
 
@@ -986,16 +1071,24 @@ if ($batchState.completed -gt 0) {
     $optActualZone = $optZoneList[0]  # fallback default
 
     # Dynamically size the optimizer VM based on total concurrent task count
-    # Each experiment: 2 metrics × 2 sides × 1 objective (sharpe-only since
-    # 2026-07-04, ticket drop-sortino-objective_07042026_2301) = 4 tasks
-    $optTaskCount = $batchState.completed * 4
+    # Each experiment: 2 metrics × 2 sides = 4 tasks PER OBJECTIVE ARM (sharpe-only
+    # default since 2026-07-04, ticket drop-sortino-objective_07042026_2301;
+    # generalized to N arms by ticket block-sharpe-objective-ab_07092026_1031).
+    $optArmCount = 0
+    foreach ($armName in $Objective.Split(',')) {
+        $armName = $armName.Trim()
+        if (-not $armName) { continue }
+        if ($armName -eq 'both') { $optArmCount += 2 } else { $optArmCount += 1 }
+    }
+    if ($optArmCount -lt 1) { $optArmCount = 1 }
+    $optTaskCount = $batchState.completed * 4 * $optArmCount
     $optMachineType = if ($optTaskCount -le 8) { "n2-standard-8" }
                       elseif ($optTaskCount -le 16) { "n2-standard-16" }
                       elseif ($optTaskCount -le 32) { "n2-standard-32" }
                       else { "n2-standard-48" }
     # Let Python auto-size workers (1 per task, memory-capped)
     $optWorkerCount = 0
-    Write-Host "  Optimizer sizing: $($batchState.completed) experiments × 4 (2 metrics × 2 sides × 1 objective [sharpe]) = $optTaskCount tasks → $optMachineType (workers=auto)" -ForegroundColor Cyan
+    Write-Host "  Optimizer sizing: $($batchState.completed) experiments × 4 (2 metrics × 2 sides) × $optArmCount objective arm(s) [$Objective] = $optTaskCount tasks → $optMachineType (workers=auto)" -ForegroundColor Cyan
 
     $manifestRaw = Get-Content $ManifestPath -Raw | ConvertFrom-Json
     $optExecData = if ($manifestRaw.baseline.execution_workflow.execution_data_path) { $manifestRaw.baseline.execution_workflow.execution_data_path } else { "" }
@@ -1017,7 +1110,12 @@ if ($batchState.completed -gt 0) {
             "-Workers", $optWorkerCount,
             "-Zone", $oz,
             "-SweepMode", $SweepMode,
-            "-OptMode", $OptMode)
+            "-OptMode", $OptMode,
+            "-Objective", $Objective,
+            "-NBlocks", $NBlocks,
+            "-LambdaDispersion", $LambdaDispersion,
+            "-MinBlockMonths", $MinBlockMonths,
+            "-MaxRunDurationMinutes", $OptimizerMaxRunDurationMinutes)
         if ($optExecData)       { $optArgs += @("-ExecData", $optExecData) }
         if ($optSlippage -gt 0) { $optArgs += @("-SlippagePerSide", $optSlippage) }
         if ($DisableTelegram) { $optArgs += "-DisableTelegram" }
@@ -1043,7 +1141,10 @@ if ($batchState.completed -gt 0) {
         # Wait for optimizer VM to finish (self-shutdown)
         Write-Host ""
         Write-Host "Waiting for optimizer VM to complete (zone: $optActualZone)..." -ForegroundColor Cyan
-        $optTimeoutMins = [int]([math]::Round($timeoutMins * 1.5))
+        # Local wait cap: never below the VM's control-plane TTL, or a long
+        # multi-arm run (-OptimizerMaxRunDurationMinutes 720) would be force-
+        # killed here at timeoutMins*1.5 while the VM is still healthy.
+        $optTimeoutMins = [int][math]::Max([math]::Round($timeoutMins * 1.5), $OptimizerMaxRunDurationMinutes)
         $optElapsed = 0
 
         while ($true) {
@@ -1135,6 +1236,41 @@ Write-WallClockSummary -BatchState $batchState -BatchDir $BatchDir `
     -OptMachineType $optMachineType -OptElapsedMin $optElapsedTotal `
     -OptTrials $postOptTrials -OptWorkers $optWorkerCount `
     -TotalScriptDurationMin $TotalScriptDurationMin
+
+# --- Auto-stamp the batch folder: batch_<timestamp>_<SYMBOL>_<TIER>[_OBJAB] ---
+# Replaces the manual rename step from the run-cloud-batch workflow doc.
+# SYMBOL = manifest baseline.symbol; TIER = first (canary|scout|prod) match in
+# the manifest FILENAME (uppercased, fallback RUN); _OBJAB appended when the
+# objective list has >1 arm. NEVER fails the batch: any error logs a warning
+# and leaves the plain batch_<timestamp> folder in place.
+try {
+    if (Test-Path $BatchDir) {
+        $stampSymbol = $null
+        try {
+            $stampManifest = Get-Content $savedManifestPath -Raw | ConvertFrom-Json
+            $stampSymbol = [string]$stampManifest.baseline.symbol
+        } catch {}
+        if (-not [string]::IsNullOrWhiteSpace($stampSymbol)) {
+            $stampTier = "RUN"
+            $manifestLeaf = Split-Path -Leaf $ManifestPath
+            if ($manifestLeaf -match '(canary|scout|prod)') { $stampTier = $Matches[1].ToUpper() }
+            $stampArmCount = 0
+            foreach ($armName in $Objective.Split(',')) {
+                $armName = $armName.Trim()
+                if (-not $armName) { continue }
+                if ($armName -eq 'both') { $stampArmCount += 2 } else { $stampArmCount += 1 }
+            }
+            $stampSuffix = if ($stampArmCount -gt 1) { "_OBJAB" } else { "" }
+            $stampName = "${BatchId}_$($stampSymbol.Trim().ToUpper())_${stampTier}${stampSuffix}"
+            Rename-Item -Path $BatchDir -NewName $stampName -ErrorAction Stop
+            Write-Host "  Batch folder auto-stamped: reports\batch_runs\$stampName" -ForegroundColor Green
+        } else {
+            Write-Host "  WARNING: baseline.symbol unreadable from saved manifest -- batch folder left unstamped: $BatchDir" -ForegroundColor Yellow
+        }
+    }
+} catch {
+    Write-Host "  WARNING: batch folder auto-stamp failed ($_) -- folder remains: $BatchDir" -ForegroundColor Yellow
+}
 
 Write-Host ""
 

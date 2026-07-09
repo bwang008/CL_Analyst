@@ -29,6 +29,9 @@ VM teardown is driven by **local** PowerShell monitor processes. If that process
    `--instance-termination-action=DELETE` for STANDARD / `STOP` for SPOT). GCP kills the VM
    at the deadline even if this machine is off. Do not remove these flags; if an experiment
    legitimately needs longer, raise the TTL alongside `timeout_minutes`, keeping TTL > timeout.
+   The optimizer TTL is parameterized (`gcp_deploy_optimizer.ps1 -MaxRunDurationMinutes`,
+   forwarded from `run_sweep_batch.ps1 -OptimizerMaxRunDurationMinutes`): **multi-arm objective
+   A/B runs should pass `-OptimizerMaxRunDurationMinutes 720`** (sharpe-only default stays 360m).
 2. **Agents MUST NEVER broad-kill processes** (`Stop-Process powershell`, `taskkill /im
    powershell.exe`, etc.) — each running orchestrator is some batch's only local teardown path.
    Kill a specific PID only when you launched it and know its batch is finished.
@@ -63,6 +66,36 @@ VM teardown is driven by **local** PowerShell monitor processes. If that process
 > manifest field — old manifests run unchanged. **Rollback (per run):** pass `-Objective both` to
 > `gcp_deploy_optimizer.ps1` (or `--objective=both` to `vm_post_optimize.sh`); all Sortino code is intact.
 > Run folders produced **before 2026-07-04** contain Sortino artifacts (historical; still parity-checkable).
+>
+> **Block-wise Sharpe objectives (since 2026-07-09, ticket `block-sharpe-objective-ab_07092026_1031`).**
+> `-Objective` accepts a comma-separated ARM LIST; besides `sharpe`/`sortino` there are three block
+> metrics that partition the in-sample monthly PnL into contiguous calendar blocks and aggregate the
+> per-block Sharpes:
+>
+> | Metric | Aggregation |
+> |--------|-------------|
+> | `block_min` | min of per-block Sharpes (punishes any dead block) |
+> | `block_median` | median of per-block Sharpes |
+> | `block_mean_std` | mean − λ·std of per-block Sharpes (dispersion-penalized) |
+>
+> A/B invocation through the deploy chain (all arms score the SAME sweep models in one batch;
+> per-arm Optuna studies, seed offsets 2/3/4):
+> ```powershell
+> & .\gcp\run_sweep_batch.ps1 -ManifestPath <manifest> `
+>     -Objective "sharpe,block_min,block_median,block_mean_std" `
+>     -OptimizerMaxRunDurationMinutes 720
+> ```
+> Block params (defaults): `-NBlocks 3`, `-LambdaDispersion 1.0`, `-MinBlockMonths 10` — threaded to
+> both post-optimizer passes and echoed in every report header (self-describing runs). **Per-arm
+> artifacts are suffixed with the metric name** exactly like the sharpe/sortino era:
+> `batch_summary_optimized_block_min.md`, `optimization_results_block_min.json`,
+> `top_pairs_block_min.json` (sharpe keeps plain `top_pairs.json` — parity-compatible),
+> `batch_summary_optimized_ensembles_block_min.md`, `block_min_ensemble_backtests.md`, …
+> Pass-1 → pair selection → pass-2 is **per-arm end-to-end** (no cross-arm pooling). After the run,
+> `scripts/compare_objective_arms.py --batch-dir <dir>` writes `objective_ab_summary.md` — read the
+> verdict on **holdout PnL** (block arms' opt PnL is lower than baseline's by construction).
+> **TTL:** multi-arm runs take ~1 pool wave per arm — pass `-OptimizerMaxRunDurationMinutes 720`
+> (default 360 is sized for sharpe-only), keeping TTL above the local monitor timeout.
 
 ## Date controls — train_cutoff vs holdout_cutoff vs holdout_months
 
@@ -78,6 +111,14 @@ The dry run now **fails** on collapse (see below).
 > **Collapse rule:** if the backtest window (Vault in 3-way, OOS in 2-way) ≤ `post_optimizer_holdout_months`,
 > the post-opt carve swallows the whole window → "pre" = 0 trades. **Default to 2-way (`null`)** unless you
 > deliberately need a separate vault; the dry-run guard verifies the window against the real dataset dates.
+>
+> **`post_optimizer_holdout_months: 12` is the 15B-scout setting** (was 6; changed by ticket
+> `block-sharpe-objective-ab_07092026_1031`): 12 monthly holdout observations instead of 6, and on
+> the 2022-01 → 2026-06 CL window the remaining in-sample ≈ 41 months splits into 3 calendar blocks
+> of ~14 months each. **Preflight block gate:** when any block metric is in `-Objective`, the dry
+> run additionally requires `(window − holdout) ≥ n_blocks × min_block_months` (via
+> `scripts/preflight_holdout_check.py --objectives ... --n-blocks ... --min-block-months ...`) and
+> prints the computed calendar block layout; violation fails the dry run.
 
 ## 1. Verify no VMs are running
 ```powershell
@@ -100,6 +141,7 @@ The dry run aborts before any deploy if any gate fails:
 4. `slippage_per_side ∈ [0, 0.5]` (absolute price units; guards the −$2.5M class)
 5. `opt_mode ∈ {individual, ensemble}`
 6. **holdout/OOS collapse** — `scripts/preflight_holdout_check.py` loads the dataset's real date range and fails if the post-opt holdout would swallow the whole backtest window
+7. **GCS dataset existence** — verifies the referenced cloud inputs actually exist in the bucket **before any VM is created**: the sweep dataset `gs://cltrainer-optuna-results/data/<SYMBOL>_<dataset_version>.parquet` (derived exactly as `gcp_deploy_sweep.ps1` does — `<SYMBOL>_` prefix unless `dataset_version` already starts with the symbol) **and** `baseline.execution_workflow.execution_data_path`. A missing object fails the dry run in seconds with `FAIL: required input not found in GCS: <url>` — zero VMs, zero credits. Closes the gap that let a locally-built-but-never-uploaded parquet reach deploy, where `[4/6]` fails with `No URLs matched` and (pre-fix) burned ~22 min of pointless zone retries mis-classified as `STARTUP_TIMEOUT`. Uses `gcloud storage` (local `gsutil` is broken — python3.13).
 
 ## 3. Launch
 ```powershell
@@ -111,10 +153,24 @@ The orchestrator then: deploys sweep VMs across fallback zones (quota-aware), mo
 jobs, runs an artifact-verification gate before deleting each VM, captures crash diagnostics on failure,
 deploys the post-optimizer VM (reads `opt_mode`), downloads results, and writes the consolidated reports.
 
-**Folder Renaming Convention:**
-Once the batch completes successfully, manually rename the generated output directory to append the symbol and experiment type to the batch ID. This prevents ambiguity across multiple runs.
-Format: `batch_<timestamp>_<SYMBOL>_<TIER>`
-Example: `Rename-Item -Path "reports\batch_runs\batch_20260706_143139" -NewName "batch_20260706_143139_ES_01B_SCOUT"`
+> **Supervision (do not fire-and-forget).** After launch, the agent MUST watch the run to completion —
+> tail the orchestrator's foreground output, or poll `reports\batch_runs\<batch_id>\batch_progress.json`
+> (the machine-readable failure signal; Telegram alerts go to the human, not the agent). A `DEPLOY_FAILED`
+> on the FIRST experiment means a systemic problem (missing shared dataset, quota, bad config) that will
+> doom every remaining experiment. **`DATA_MISSING` (missing GCS input) is non-retryable** — the object is
+> absent in every zone; the orchestrator now classifies it, skips the remaining zones, and **aborts the
+> whole batch** (rather than the old behavior of cycling 7 zones × every experiment ≈ 2 h of wasted VMs).
+> If you ever see a batch grind on past a first-experiment deploy failure, abort it and reconcile VMs.
+
+**Folder Naming Convention (AUTO-STAMPED since ticket `block-sharpe-objective-ab_07092026_1031`):**
+`run_sweep_batch.ps1` now renames the output directory itself after the batch completes and results
+are downloaded — no manual rename step. This prevents ambiguity across multiple runs.
+Format: `batch_<timestamp>_<SYMBOL>_<TIER>[_OBJAB]` — SYMBOL from the manifest `baseline.symbol`,
+TIER = first match of (canary|scout|prod) in the manifest filename (uppercased; fallback `RUN`),
+and `_OBJAB` appended when the objective list has more than one arm.
+Example: `batch_20260706_143139` → `batch_20260706_143139_CL_SCOUT_OBJAB`.
+A failed rename only logs a warning (never fails the batch) — if you see the warning, the folder
+keeps its plain `batch_<timestamp>` name and may be renamed manually to the same format.
 
 ## 4. Validate parity (canary/parity runs)
 ```powershell
@@ -175,6 +231,7 @@ reports/batch_runs/batch_<timestamp>/
 | `gcp/gcp_deploy_optimizer.ps1` | Post-optimizer VM deploy (code-integrity hash gate) |
 | `gcp/vm_sweep_run.sh` / `gcp/vm_e2e_pipeline.py` | VM-side sweep |
 | `gcp/vm_post_optimize.sh` | VM-side post-optimizer (parses manifest, runs opt_mode chain) |
-| `scripts/preflight_holdout_check.py` | Dry-run holdout/OOS collapse guard |
+| `scripts/preflight_holdout_check.py` | Dry-run holdout/OOS collapse guard + block-layout gate (`--objectives/--n-blocks/--min-block-months`) |
 | `scripts/compare_parity.py` | Structural parity check vs a reference run |
+| `scripts/compare_objective_arms.py` | Cross-arm objective A/B readout → `objective_ab_summary.md` (holdout PnL is the verdict) |
 | `scripts/generate_v2_manifest.py` | Generate a v2 manifest |
