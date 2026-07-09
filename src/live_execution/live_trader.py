@@ -1700,6 +1700,50 @@ class LiveTrader:
         self._reset_position_state(reason="TIME_BARRIER")
         return True
 
+    def _bars_since(self, ts: object) -> Optional[int]:
+        """Count brain-stream bars strictly AFTER ``ts`` (gap-immune).
+
+        Restart-recovery replacement for the old wall-clock estimate
+        (``int(delta_minutes / bar_dur)``), which counted weekend (~49h) and
+        daily-halt gaps as phantom bars and fired spurious TIME_BARRIER exits
+        after a weekend restart (ticket
+        recovery-barsheld-wallclock_07092026_1239).
+
+        Counts rows in the rolling frame matching ``self._bar_size`` with a
+        strictly-greater comparison, matching the steady-state counter's
+        semantics exactly (the entry/close bar itself reads 0; +1 per later
+        bar). If ``ts`` predates the seeded window the count is a lower
+        bound — errs toward HOLDING, never toward a spurious close.
+
+        Returns None when it cannot count honestly (reviewer C1/C2):
+        unsupported bar size (2h/4h brains are RESAMPLED from 1h rows — raw
+        row counting would over-count 2-4x), missing/empty frame, or a
+        malformed ``ts``. Callers keep their conservative default; this
+        helper never raises (recovery must never crash startup).
+        """
+        try:
+            if self._bar_size == "1h":
+                df = self.rolling_df_1h
+            elif self._bar_size == "5m":
+                df = self.rolling_df_5m
+            else:
+                log.warning(
+                    "[RECOVERY] _bars_since: unsupported bar_size %r (2h/4h "
+                    "brains are resampled from 1h rows) — cannot count bars "
+                    "honestly, caller keeps its conservative default",
+                    self._bar_size,
+                )
+                return None
+            if df is None or len(df) == 0:
+                return None
+            ts_parsed = pd.Timestamp(ts)
+            if pd.isna(ts_parsed):  # None/NaT parse silently → refuse
+                return None
+            return int((df.index > ts_parsed).sum())
+        except Exception:
+            log.debug("[RECOVERY] _bars_since failed for ts=%r", ts, exc_info=True)
+            return None
+
     def _seed_restart_cooldown(
         self, side_int: int, reason: object, close_time: object,
     ) -> None:
@@ -1735,22 +1779,13 @@ class LiveTrader:
         if close_time is None:
             bars_elapsed = 0  # exit just happened → enforce the full window
         else:
-            current_bar_time = None
-            if self.rolling_df_5m is not None and len(self.rolling_df_5m) > 0:
-                current_bar_time = self.rolling_df_5m.index[-1]
-            elif self.rolling_df_1h is not None and len(self.rolling_df_1h) > 0:
-                current_bar_time = self.rolling_df_1h.index[-1]
-            if current_bar_time is None:
-                return  # cannot measure staleness → stay inert
-            _bar_minutes = {"5m": 5, "1h": 60, "2h": 120, "4h": 240}
-            bar_dur = _bar_minutes.get(self._bar_size, 5)
-            try:
-                delta_min = (
-                    current_bar_time - pd.Timestamp(close_time)
-                ).total_seconds() / 60.0
-            except Exception:
-                return
-            bars_elapsed = max(0, int(delta_min / bar_dur))
+            # Count ACTUAL brain bars since the exit bar (gap-immune): the
+            # old wall-clock division over-aged cooldowns across weekend and
+            # halt gaps (ticket recovery-barsheld-wallclock_07092026_1239).
+            _bars = self._bars_since(close_time)
+            if _bars is None:
+                return  # cannot measure staleness honestly → stay inert
+            bars_elapsed = _bars
 
         strat.on_exit(side_int, reason, getattr(self, "_position_bars_held", 0))
         # on_exit hard-sets bars_ago=-1 ("just exited"); for a historical exit
@@ -1957,31 +1992,23 @@ class LiveTrader:
             int(max_hold_bars) if max_hold_bars is not None else None
         )
 
-        # Restore entry bar time and estimate bars held
+        # Restore entry bar time and COUNT bars held from received brain
+        # bars (gap-immune _bars_since): the old wall-clock division counted
+        # weekend (~49h) / daily-halt gaps as phantom bars and fired spurious
+        # TIME_BARRIER exits right after a weekend restart (ticket
+        # recovery-barsheld-wallclock_07092026_1239).
         if entry_bar_time_str:
             try:
                 self._position_entry_bar_time = pd.Timestamp(entry_bar_time_str)
-                # Estimate bars held from entry time to now
-                if self.rolling_df_5m is not None and len(self.rolling_df_5m) > 0:
-                    last_bar = self.rolling_df_5m.index[-1]
-                    delta_minutes = (
-                        last_bar - self._position_entry_bar_time
-                    ).total_seconds() / 60.0
-                    # Use bar_size to compute correct bar duration
-                    _bar_minutes = {
-                        "5m": 5, "1h": 60, "2h": 120, "4h": 240,
-                    }
-                    bar_dur = _bar_minutes.get(self._bar_size, 5)
-                    self._position_bars_held = max(
-                        0, int(delta_minutes / bar_dur)
-                    )
+                _bars = self._bars_since(self._position_entry_bar_time)
+                if _bars is not None:
+                    self._position_bars_held = _bars
                     log.info(
-                        "[RECOVERY] Estimated %d bars held since entry at %s "
-                        "(bar_size=%s, delta=%.0f min)",
+                        "[RECOVERY] Counted %d bars held since entry at %s "
+                        "(bar_size=%s, gap-immune)",
                         self._position_bars_held,
                         self._position_entry_bar_time,
                         self._bar_size,
-                        delta_minutes,
                     )
             except Exception:
                 log.debug("Failed to parse entry_bar_time", exc_info=True)
@@ -5191,9 +5218,15 @@ class LiveTrader:
         # Market hours check (CL: Sun 18:00 ET → Fri 17:00 ET)
         market_status = self._get_market_status(now)
 
-        # Position and PNL lookup
+        # Position and PNL lookup — two realized figures shown side by side:
+        #   ib_real_pnl  : IBKR's raw PortfolioItem.realizedPNL (daily,
+        #                  per-contract; drops to $0 when the position leaves
+        #                  the portfolio feed — shown raw, uncached).
+        #   loc_real_pnl : our restart-surviving cumulative, summed from the
+        #                  per-fill CommissionReport.realizedPNL we persist in
+        #                  the tradebook DB (scoped to this bot's client_id).
         try:
-            unr_pnl, real_pnl = 0.0, 0.0
+            unr_pnl, ib_real_pnl = 0.0, 0.0
             pos = 0
             if (self.data_client.is_connected() and self.exec_client.is_connected()):
                 acct = self.exec_client.get_account_summary(
@@ -5201,16 +5234,20 @@ class LiveTrader:
                 )
                 pos = acct["cl_position"]
                 unr_pnl = acct["cl_unrealized_pnl"]
-                real_pnl = acct["cl_realized_pnl"]
+                ib_real_pnl = acct["cl_realized_pnl"]
 
-                # Cache Realized PnL to prevent it from resetting to 0.0 when IBKR drops the position from the feed
-                if pos != 0 or real_pnl != 0.0:
-                    self._session_realized_pnl = real_pnl
-                else:
-                    real_pnl = getattr(self, "_session_realized_pnl", 0.0)
+            # DB read, independent of the broker connection — never zeroes out.
+            try:
+                loc_real_pnl = self.telemetry.realized_pnl_total()
+            except Exception:
+                loc_real_pnl = 0.0
 
             pos_str = f"{pos:g} contracts" if pos != 0 else "FLAT"
-            pnl_str = f" | unr_pnl=${unr_pnl:,.2f} | real_pnl=${real_pnl:,.2f}"
+            pnl_str = (
+                f" | unr_pnl=${unr_pnl:,.2f}"
+                f" | ib_real_pnl=${ib_real_pnl:,.2f}"
+                f" | loc_real_pnl=${loc_real_pnl:,.2f}"
+            )
         except Exception:
             pos_str = "unknown"
             pnl_str = ""

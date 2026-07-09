@@ -41,12 +41,15 @@ def _trader(strategy, *, bar_size="1h", last_bar_time=_NOW):
     lt._bar_size = bar_size
     lt._position_bars_held = 0
     if last_bar_time is not None:
-        lt.rolling_df_5m = pd.DataFrame(
-            {"Close": [1.0]}, index=pd.DatetimeIndex([last_bar_time]),
-        )
+        # Contiguous hourly brain frame ending at last_bar_time (168 bars):
+        # bars_elapsed is now COUNTED from this frame (gap-immune _bars_since,
+        # ticket recovery-barsheld-wallclock_07092026_1239), no longer derived
+        # from wall-clock division.
+        idx = pd.date_range(end=last_bar_time, periods=168, freq="h")
+        lt.rolling_df_1h = pd.DataFrame({"Close": [1.0] * len(idx)}, index=idx)
     else:
-        lt.rolling_df_5m = None
-    lt.rolling_df_1h = None
+        lt.rolling_df_1h = None
+    lt.rolling_df_5m = None
     lt.telemetry = MagicMock()
     return lt
 
@@ -93,15 +96,18 @@ class TestSeedRestartCooldown:
         assert s._last_exit_bars_ago_long == 9999
         assert s._last_exit_reason_long == ""
 
-    def test_unknown_bar_size_does_not_raise(self):
-        # guard (b): _bar_minutes.get(size, 5) — unknown size must not KeyError.
+    def test_unknown_bar_size_stays_inert_does_not_raise(self):
+        # guard (b), re-pinned per reviewer C1 (recovery-barsheld-wallclock
+        # _07092026_1239): an unsupported bar size cannot be counted honestly
+        # (2h/4h brains are resampled from 1h rows) → stay INERT, never guess
+        # via a wall-clock fallback, never raise.
         s = _strategy()
         lt = _trader(s, bar_size="7m", last_bar_time=_NOW)
         lt._seed_restart_cooldown(
             1, "SL_HIT", close_time=(_NOW - pd.Timedelta(minutes=30)).isoformat(),
         )
-        # 30 min / 5 min default = 6 bars elapsed → seed 5
-        assert s._last_exit_bars_ago_long == 5
+        assert s._last_exit_bars_ago_long == 9999
+        assert s._last_exit_reason_long == ""
 
     def test_missing_strategy_is_safe(self):
         # guard (c): no _strategy attr / None → no-op, no AttributeError.

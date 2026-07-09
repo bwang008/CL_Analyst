@@ -2,7 +2,10 @@
 Test Execution Parity — LiveTrader recovery and schema integrity.
 
 Validates:
-  1. Recovery bars_held estimation uses bar_size (not hardcoded /5)
+  1. Recovery bars_held is COUNTED from received brain bars (gap-immune
+     _bars_since), not derived from wall-clock division (ticket
+     recovery-barsheld-wallclock_07092026_1239 — the old wall-clock math
+     counted weekend/halt gaps as phantom bars)
   2. initial_sl_price column exists and is set on bracket placement
   3. initial_sl_price is NOT overwritten by trailing stop modifications
   4. export_trade_ledger correctly reads initial_sl_price with fallback
@@ -13,6 +16,7 @@ import sqlite3
 import sys
 import tempfile
 
+import pandas as pd
 import pytest
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -20,75 +24,73 @@ sys.path.insert(0, PROJECT_ROOT)
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Tests: Recovery bars_held counting (real LiveTrader._bars_since)
 # ---------------------------------------------------------------------------
 
 
-def _bar_minutes_map():
-    """The bar duration lookup that must match live_trader.py recovery code."""
-    return {"5m": 5, "1h": 60, "2h": 120, "4h": 240}
+def _bars_since_trader(bar_size: str, df_1h=None, df_5m=None):
+    from src.live_execution.live_trader import LiveTrader
+
+    lt = object.__new__(LiveTrader)
+    lt._bar_size = bar_size
+    lt.rolling_df_1h = df_1h
+    lt.rolling_df_5m = df_5m
+    return lt
 
 
-def _estimate_bars_held(delta_minutes: float, bar_size: str) -> int:
-    """Replicate the recovery bars_held logic from live_trader.py."""
-    bar_dur = _bar_minutes_map().get(bar_size, 5)
-    return max(0, int(delta_minutes / bar_dur))
-
-
-# ---------------------------------------------------------------------------
-# Tests: Recovery bars_held estimation
-# ---------------------------------------------------------------------------
+def _frame(idx) -> pd.DataFrame:
+    return pd.DataFrame({"Close": [1.0] * len(idx)}, index=idx)
 
 
 class TestRecoveryBarsHeld:
-    """Verify recovery bars_held uses bar_size, not hardcoded /5."""
+    """Recovery bars_held counts actual bars via LiveTrader._bars_since.
 
-    def test_5m_bars_held_same_as_before(self):
-        """5m bar_size should match the old /5 logic."""
-        delta = 1500.0  # 25 hours
-        assert _estimate_bars_held(delta, "5m") == 300
+    Replaces the retired wall-clock replica (_estimate_bars_held): that
+    helper self-replicated the delta_minutes/bar_dur math this ticket
+    removed, so it pinned the bug instead of the behavior.
+    """
 
-    def test_1h_bars_held_correct(self):
-        """1h bar_size: 25 hours = 25 bars, NOT 300."""
-        delta = 1500.0  # 25 hours
-        result = _estimate_bars_held(delta, "1h")
-        assert result == 25, f"Expected 25 bars for 1h, got {result}"
-        # Verify this is under max_hold_bars=240
-        assert result < 240
+    def test_1h_contiguous_25h_is_25_bars(self):
+        idx = pd.date_range("2026-07-06 00:00", periods=26, freq="h")
+        lt = _bars_since_trader("1h", df_1h=_frame(idx))
+        assert lt._bars_since(idx[0]) == 25
+        assert lt._bars_since(idx[0]) < 240  # under max_hold_bars=240
 
-    def test_1h_bars_held_not_triggering_time_barrier(self):
-        """The bug: 25h hold on 1h bars should NOT exceed max_hold_bars=240.
-        Before fix: delta_minutes/5 = 300 > 240 → premature TIME_BARRIER.
-        After fix:  delta_minutes/60 = 25 < 240 → no TIME_BARRIER."""
-        max_hold = 240
-        delta = 25 * 60.0  # 25 hours in minutes
-        old_logic = int(delta / 5)  # 300 — WRONG
-        new_logic = _estimate_bars_held(delta, "1h")  # 25 — CORRECT
-        assert old_logic > max_hold, "Old logic should exceed barrier"
-        assert new_logic < max_hold, "New logic should be under barrier"
+    def test_1h_weekend_gap_counts_no_phantom_bars(self):
+        """Friday entry recovered after the weekend: only bars actually
+        received count — the ~49h gap contributes ZERO bars, so a 24-bar
+        max hold is NOT spuriously exceeded at Sunday open."""
+        fri = pd.date_range("2026-07-03 10:00", "2026-07-03 16:00", freq="h")
+        sun = pd.date_range("2026-07-05 18:00", "2026-07-05 20:00", freq="h")
+        lt = _bars_since_trader("1h", df_1h=_frame(fri.append(sun)))
+        entry = pd.Timestamp("2026-07-03 14:00:00")
+        bars = lt._bars_since(entry)
+        assert bars == 5  # Fri 15,16 + Sun 18,19,20
+        assert bars <= 24  # wall-clock math said ~54 → spurious TIME_BARRIER
 
-    def test_2h_bars_held_correct(self):
-        """2h bar_size: 10 hours = 5 bars."""
-        delta = 600.0  # 10 hours
-        assert _estimate_bars_held(delta, "2h") == 5
+    def test_5m_uses_5m_frame(self):
+        idx = pd.date_range("2026-07-06 10:00", periods=301, freq="5min")
+        lt = _bars_since_trader("5m", df_5m=_frame(idx))
+        assert lt._bars_since(idx[0]) == 300
 
-    def test_4h_bars_held_correct(self):
-        """4h bar_size: 24 hours = 6 bars."""
-        delta = 1440.0  # 24 hours
-        assert _estimate_bars_held(delta, "4h") == 6
+    def test_resampled_bar_sizes_refuse_to_count(self):
+        """2h/4h brains are resampled from 1h rows — raw counting would
+        over-count 2-4x, so the helper must return None (reviewer C1)."""
+        idx = pd.date_range("2026-07-06 00:00", periods=10, freq="h")
+        for size in ("2h", "4h", "unknown"):
+            lt = _bars_since_trader(size, df_1h=_frame(idx))
+            assert lt._bars_since(idx[0]) is None, size
 
-    def test_unknown_bar_size_falls_back_to_5m(self):
-        """Unknown bar sizes should conservatively use 5-min fallback."""
-        delta = 100.0
-        assert _estimate_bars_held(delta, "unknown") == 20
+    def test_entry_at_latest_bar_is_zero(self):
+        idx = pd.date_range("2026-07-06 00:00", periods=5, freq="h")
+        lt = _bars_since_trader("1h", df_1h=_frame(idx))
+        assert lt._bars_since(idx[-1]) == 0
 
-    def test_zero_delta(self):
-        """Zero elapsed time should produce 0 bars."""
-        assert _estimate_bars_held(0.0, "1h") == 0
-
-    def test_negative_delta(self):
-        """Negative delta (clock skew) should clamp to 0."""
-        assert _estimate_bars_held(-100.0, "1h") == 0
+    def test_future_entry_clamps_to_zero(self):
+        """Clock skew (entry after last bar) yields 0, never negative."""
+        idx = pd.date_range("2026-07-06 00:00", periods=5, freq="h")
+        lt = _bars_since_trader("1h", df_1h=_frame(idx))
+        assert lt._bars_since(idx[-1] + pd.Timedelta(hours=3)) == 0
 
 
 # ---------------------------------------------------------------------------
