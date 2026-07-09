@@ -1,0 +1,88 @@
+{
+  "symbol": "GC",
+  "data_workflow": {
+    "dataset_version": "HourSet_02B",
+    "resolution": "1h",
+    "targets": {
+      "raw_horizon": 120,
+      "atr_period": 14,
+      "definitions": [
+        {
+          "type": "triple_barrier_grid",
+          "tp_multipliers": [
+            2.0,
+            3.0,
+            4.0
+          ],
+          "sl_multiplier": 1.0,
+          "horizons": [
+            3,
+            6,
+            24,
+            36
+          ]
+        }
+      ]
+    }
+  },
+  "training_workflow": {
+    "mode": "screen",
+    "train_cutoff_date": "2022-01-01",
+    "holdout_cutoff_date": null,
+    "random_seed": 42,
+    "gcs_base_dir": "gs://cltrainer-optuna-results/screens/gc_02b",
+    "target_columns": [
+      "TARGET_TRIPLE_2x1_6H_LONG",
+      "TARGET_TRIPLE_2x1_6H_SHORT",
+      "TARGET_TRIPLE_2x1_12H_LONG",
+      "TARGET_TRIPLE_2x1_12H_SHORT",
+      "TARGET_TRIPLE_2x1_24H_LONG",
+      "TARGET_TRIPLE_2x1_24H_SHORT",
+      "TARGET_TRIPLE_3x1_6H_LONG",
+      "TARGET_TRIPLE_3x1_6H_SHORT",
+      "TARGET_TRIPLE_3x1_12H_LONG",
+      "TARGET_TRIPLE_3x1_12H_SHORT",
+      "TARGET_TRIPLE_3x1_24H_LONG",
+      "TARGET_TRIPLE_3x1_24H_SHORT",
+      "TARGET_TRIPLE_4x1_6H_LONG",
+      "TARGET_TRIPLE_4x1_6H_SHORT",
+      "TARGET_TRIPLE_4x1_12H_LONG",
+      "TARGET_TRIPLE_4x1_12H_SHORT",
+      "TARGET_TRIPLE_4x1_24H_LONG",
+      "TARGET_TRIPLE_4x1_24H_SHORT",
+      "TARGET_TRIPLE_5x1_6H_LONG",
+      "TARGET_TRIPLE_5x1_6H_SHORT",
+      "TARGET_TRIPLE_5x1_12H_LONG",
+      "TARGET_TRIPLE_5x1_12H_SHORT",
+      "TARGET_TRIPLE_5x1_24H_LONG",
+      "TARGET_TRIPLE_5x1_24H_SHORT",
+      "TARGET_TRIPLE_2x1_3H_LONG",
+      "TARGET_TRIPLE_2x1_3H_SHORT",
+      "TARGET_TRIPLE_4x1_36H_LONG",
+      "TARGET_TRIPLE_4x1_36H_SHORT",
+      "TARGET_TRIPLE_5x1_36H_LONG",
+      "TARGET_TRIPLE_5x1_36H_SHORT",
+      "TARGET_TRIPLE_6x2_36H_LONG",
+      "TARGET_TRIPLE_6x2_36H_SHORT",
+      "TARGET_TRIPLE_8x2_36H_LONG",
+      "TARGET_TRIPLE_8x2_36H_SHORT",
+      "TARGET_TRIPLE_4x1_48H_LONG",
+      "TARGET_TRIPLE_4x1_48H_SHORT",
+      "TARGET_TRIPLE_5x1_48H_LONG",
+      "TARGET_TRIPLE_5x1_48H_SHORT",
+      "TARGET_TRIPLE_6x2_48H_LONG",
+      "TARGET_TRIPLE_6x2_48H_SHORT",
+      "TARGET_TRIPLE_8x2_48H_LONG",
+      "TARGET_TRIPLE_8x2_48H_SHORT",
+      "TARGET_TRIPLE_2x1_1H_LONG",
+      "TARGET_TRIPLE_2x1_1H_SHORT",
+      "TARGET_TRIPLE_2x1_2H_LONG",
+      "TARGET_TRIPLE_2x1_2H_SHORT",
+      "TARGET_TRIPLE_1x0p5_1H_LONG",
+      "TARGET_TRIPLE_1x0p5_1H_SHORT"
+    ],
+    "optuna": {
+      "post_optimizer_holdout_months": 6
+    }
+  }
+}

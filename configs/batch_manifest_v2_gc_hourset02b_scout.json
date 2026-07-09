@@ -1,0 +1,175 @@
+{
+  "_comment": "GC HourSet_02B SCOUT \u2014 top-6 target families from the Stage-1 AUC screen (reports/screens/gc_02b/AUC_Model_Report.md), sourced from the new short-horizon dataset (2x1_1H/2x1_2H/1x0p5_1H added on top of the 01B target suite). Mirrors batch_manifest_v2_gc_hourset01b_scout.json (same infra/execution_workflow/optuna box); only dataset_version and experiments differ. Any 1x0p5_1H family flagged 'cost?' in the screen (round-trip cost >6% of a TP winner) was excluded in favor of the next-best clean family.",
+  "infrastructure": {
+    "machine_type": "c2-standard-16",
+    "provisioning_model": "STANDARD",
+    "timeout_minutes": 360,
+    "max_concurrent_vcpus": 288,
+    "vcpus_per_vm": 16,
+    "max_concurrent_vms": 12
+  },
+  "baseline": {
+    "symbol": "GC",
+    "data_workflow": {
+      "dataset_version": "HourSet_02B",
+      "resolution": "1h",
+      "output_dir": "data/processed",
+      "features": {
+        "windows": [
+          24,
+          72,
+          168
+        ],
+        "macro_windows": {
+          "1W": 168
+        }
+      },
+      "targets": {
+        "raw_horizon": 120,
+        "atr_period": 14,
+        "definitions": [
+          {
+            "type": "triple_barrier",
+            "tp_multiplier": 2.0,
+            "sl_multiplier": 1.0,
+            "horizon": 6
+          },
+          {
+            "type": "triple_barrier",
+            "tp_multiplier": 3.0,
+            "sl_multiplier": 1.0,
+            "horizon": 6
+          },
+          {
+            "type": "triple_barrier",
+            "tp_multiplier": 2.0,
+            "sl_multiplier": 1.0,
+            "horizon": 3
+          },
+          {
+            "type": "triple_barrier",
+            "tp_multiplier": 4.0,
+            "sl_multiplier": 1.0,
+            "horizon": 36
+          }
+        ]
+      }
+    },
+    "training_workflow": {
+      "train_cutoff_date": "2022-01-01",
+      "holdout_cutoff_date": null,
+      "target_columns": [],
+      "gcs_base_dir": "gs://cltrainer-optuna-results/scout",
+      "random_seed": 42,
+      "optuna": {
+        "_comment_lgbm_ranges": "Restored to legacy scout batch_20260626_0017_HS14B_SCOUT_FIX (wide LGBM box) to A/B the model-search-space gap. Was narrow: depth_max 6 / leaves_max 31 / est 500 / lr 0.005-0.02 / folds 3 / es 15 / min_child 150-400 / n_trials 200.",
+        "n_trials": 100,
+        "metrics": [
+          "logloss",
+          "average_precision"
+        ],
+        "max_depth_min": 3,
+        "max_depth_max": 8,
+        "num_leaves_min": 15,
+        "num_leaves_max": 64,
+        "max_n_estimators": 1500,
+        "early_stopping_rounds": 30,
+        "max_folds": 5,
+        "learning_rate_min": 0.001,
+        "learning_rate_max": 0.05,
+        "min_child_samples_min": 100,
+        "min_child_samples_max": 500,
+        "feature_fraction_min": 0.4,
+        "feature_fraction_max": 0.8,
+        "post_optimizer_trials": 200,
+        "post_optimizer_holdout_months": 6
+      }
+    },
+    "execution_workflow": {
+      "slippage_per_side": 0.1,
+      "opt_mode": "individual",
+      "execution_data_path": "gs://cltrainer-optuna-results/data/GC_raw.parquet",
+      "strategy_config_path": "configs/strategies/hourly_ensemble_010.json"
+    }
+  },
+  "experiments": [
+    {
+      "label": "GC HS02B 2x1 1H",
+      "gcs_prefix": "sweep_gc_hs02b_2x1_1h_scout",
+      "overrides": {
+        "symbol": "GC",
+        "training_workflow": {
+          "target_columns": [
+            "TARGET_TRIPLE_2x1_1H_LONG",
+            "TARGET_TRIPLE_2x1_1H_SHORT"
+          ]
+        }
+      }
+    },
+    {
+      "label": "GC HS02B 5x1 6H",
+      "gcs_prefix": "sweep_gc_hs02b_5x1_6h_scout",
+      "overrides": {
+        "symbol": "GC",
+        "training_workflow": {
+          "target_columns": [
+            "TARGET_TRIPLE_5x1_6H_LONG",
+            "TARGET_TRIPLE_5x1_6H_SHORT"
+          ]
+        }
+      }
+    },
+    {
+      "label": "GC HS02B 2x1 2H",
+      "gcs_prefix": "sweep_gc_hs02b_2x1_2h_scout",
+      "overrides": {
+        "symbol": "GC",
+        "training_workflow": {
+          "target_columns": [
+            "TARGET_TRIPLE_2x1_2H_LONG",
+            "TARGET_TRIPLE_2x1_2H_SHORT"
+          ]
+        }
+      }
+    },
+    {
+      "label": "GC HS02B 1x0.5 1H",
+      "gcs_prefix": "sweep_gc_hs02b_1x0p5_1h_scout",
+      "overrides": {
+        "symbol": "GC",
+        "training_workflow": {
+          "target_columns": [
+            "TARGET_TRIPLE_1x0p5_1H_LONG",
+            "TARGET_TRIPLE_1x0p5_1H_SHORT"
+          ]
+        }
+      }
+    },
+    {
+      "label": "GC HS02B 4x1 6H",
+      "gcs_prefix": "sweep_gc_hs02b_4x1_6h_scout",
+      "overrides": {
+        "symbol": "GC",
+        "training_workflow": {
+          "target_columns": [
+            "TARGET_TRIPLE_4x1_6H_LONG",
+            "TARGET_TRIPLE_4x1_6H_SHORT"
+          ]
+        }
+      }
+    },
+    {
+      "label": "GC HS02B 2x1 3H",
+      "gcs_prefix": "sweep_gc_hs02b_2x1_3h_scout",
+      "overrides": {
+        "symbol": "GC",
+        "training_workflow": {
+          "target_columns": [
+            "TARGET_TRIPLE_2x1_3H_LONG",
+            "TARGET_TRIPLE_2x1_3H_SHORT"
+          ]
+        }
+      }
+    }
+  ]
+}
