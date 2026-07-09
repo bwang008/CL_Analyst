@@ -663,6 +663,25 @@ class TelemetryDB:
         )
         return cur.fetchone()[0]
 
+    def realized_pnl_total(self) -> float:
+        """Cumulative realized PnL summed from persisted per-fill rows.
+
+        Aggregates the tradebook's ``realized_pnl`` column — populated from
+        each ``CommissionReport.realizedPNL`` (event_id-deduped via INSERT OR
+        IGNORE, so no double-count) — scoped to this bot's client_id. Unlike
+        IBKR's ``PortfolioItem.realizedPNL`` (a daily figure that resets and
+        drops to $0 when the position leaves the portfolio feed), this is a
+        restart-surviving lifetime total: it lives in the DB, spans every
+        session, and never blinks to zero when flat. NULL realized values
+        (opening fills) are ignored by SUM.
+        """
+        scope_sql, scope_vals = self._client_scope(prefix=" WHERE ")
+        cur = self._get_conn().execute(
+            f"SELECT COALESCE(SUM(realized_pnl), 0.0) FROM tradebook_events{scope_sql}",
+            scope_vals,
+        )
+        return float(cur.fetchone()[0] or 0.0)
+
     def trade_summary(self) -> dict:
         """Return aggregate trade history summary for startup report.
 
