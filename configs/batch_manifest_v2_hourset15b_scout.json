@@ -82,7 +82,7 @@
         "feature_fraction_min": 0.4,
         "feature_fraction_max": 0.8,
         "post_optimizer_trials": 200,
-        "post_optimizer_holdout_months": 6
+        "post_optimizer_holdout_months": 12
       }
     },
     "execution_workflow": {

@@ -172,7 +172,15 @@ SHUTDOWN=false
 # Sortino dropped 2026-07-04 (ticket drop-sortino-objective_07042026_2301):
 # default is sharpe-only (defense-in-depth for manual VM invocations; the managed
 # path always passes --objective= explicitly). Pass --objective=both to roll back.
+# Since ticket block-sharpe-objective-ab_07092026_1031, OBJECTIVE accepts a
+# comma-separated arm list (e.g. sharpe,block_min,block_median,block_mean_std);
+# each arm gets its own pass-1 report, pair selection, and pass-2 optimization.
 OBJECTIVE="sharpe"
+# Block-wise Sharpe objective parameters (only consumed by block_* arms;
+# inert for sharpe/sortino). Threaded to BOTH batch_post_optimizer passes.
+N_BLOCKS=3
+LAMBDA_DISPERSION=1.0
+MIN_BLOCK_MONTHS=10
 SWEEP_MODE="backtest"
 OPT_MODE="individual"
 BUCKET="gs://cltrainer-optuna-results"
@@ -188,6 +196,9 @@ for arg in "$@"; do
         --holdout-months=*) : ;;
         --workers=*) WORKERS="${arg#*=}" ;;
         --objective=*) OBJECTIVE="${arg#*=}" ;;
+        --n-blocks=*) N_BLOCKS="${arg#*=}" ;;
+        --lambda-dispersion=*) LAMBDA_DISPERSION="${arg#*=}" ;;
+        --min-block-months=*) MIN_BLOCK_MONTHS="${arg#*=}" ;;
         --sweep-mode=*) SWEEP_MODE="${arg#*=}" ;;
         --opt-mode=*) OPT_MODE="${arg#*=}" ;;
         --shutdown) SHUTDOWN=true ;;
@@ -198,6 +209,48 @@ if [ -z "$BATCH_ID" ]; then
     echo "ERROR: --batch-id is required" | tee -a "$LOG"
     exit 1
 fi
+
+# --- Validate the objective arm list ---------------------------------------
+# OBJECTIVE is a comma-separated list; every element must be one of
+# sharpe|sortino|block_min|block_median|block_mean_std (legacy alias 'both'
+# expands to sharpe,sortino). Fails loudly on any unknown arm — no silent
+# fallback. The validated OBJECTIVE_ARMS array drives the per-arm [4b]/[4c]
+# loop; OBJECTIVE_CSV is the normalized list passed to the Python tools.
+OBJECTIVE_ARMS=()
+IFS=',' read -ra _OBJ_RAW <<< "$OBJECTIVE"
+for _arm in "${_OBJ_RAW[@]}"; do
+    _arm="$(echo "$_arm" | tr -d '[:space:]')"
+    if [ -z "$_arm" ]; then
+        echo "FATAL: empty element in --objective='$OBJECTIVE'" | tee -a "$LOG"
+        exit 1
+    fi
+    if [ "$_arm" = "both" ]; then
+        _expanded="sharpe sortino"
+    else
+        _expanded="$_arm"
+    fi
+    for _obj in $_expanded; do
+        case "$_obj" in
+            sharpe|sortino|block_min|block_median|block_mean_std) ;;
+            *)
+                echo "FATAL: unknown objective '$_obj' in --objective='$OBJECTIVE' (valid: sharpe, sortino, block_min, block_median, block_mean_std, or 'both')" | tee -a "$LOG"
+                exit 1
+                ;;
+        esac
+        _dup=false
+        for _seen in "${OBJECTIVE_ARMS[@]}"; do
+            if [ "$_seen" = "$_obj" ]; then _dup=true; fi
+        done
+        if [ "$_dup" = false ]; then
+            OBJECTIVE_ARMS+=("$_obj")
+        fi
+    done
+done
+if [ "${#OBJECTIVE_ARMS[@]}" -eq 0 ]; then
+    echo "FATAL: --objective='$OBJECTIVE' yields no objective arms" | tee -a "$LOG"
+    exit 1
+fi
+OBJECTIVE_CSV=$(IFS=,; echo "${OBJECTIVE_ARMS[*]}")
 
 GCS_OPT_PREFIX="batch_optimizer/$BATCH_ID"
 START_TIME=$(date +%s)
@@ -210,7 +263,10 @@ echo "  Batch ID:      $BATCH_ID" | tee -a "$LOG"
 echo "  N Trials:      $N_TRIALS" | tee -a "$LOG"
 echo "  Holdout:       (read from manifest below)" | tee -a "$LOG"
 echo "  Workers:       $WORKERS" | tee -a "$LOG"
-echo "  Objective:     $OBJECTIVE" | tee -a "$LOG"
+echo "  Objective:     $OBJECTIVE_CSV (${#OBJECTIVE_ARMS[@]} arm(s))" | tee -a "$LOG"
+echo "  N Blocks:      $N_BLOCKS" | tee -a "$LOG"
+echo "  Lambda Disp:   $LAMBDA_DISPERSION" | tee -a "$LOG"
+echo "  Min Blk Mos:   $MIN_BLOCK_MONTHS" | tee -a "$LOG"
 echo "  Sweep Mode:    $SWEEP_MODE" | tee -a "$LOG"
 echo "  Opt Mode:      $OPT_MODE" | tee -a "$LOG"
 echo "  Bucket:        $BUCKET" | tee -a "$LOG"
@@ -479,7 +535,7 @@ if [ "$OPT_MODE" = "ensemble" ]; then
     # --- [4/5] Run batch_post_optimizer (ensemble mode) ---
     echo "" | tee -a "$LOG"
     echo "[4/5] Running batch post-optimizer on Top 8 (ensemble mode)..." | tee -a "$LOG"
-    echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --target-pairs-json $BATCH_DIR/top_8_ensembles.json --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter $OPT_ARGS" | tee -a "$LOG"
+    echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --target-pairs-json $BATCH_DIR/top_8_ensembles.json --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE_CSV --n-blocks $N_BLOCKS --lambda-dispersion $LAMBDA_DISPERSION --min-block-months $MIN_BLOCK_MONTHS --no-filter $OPT_ARGS" | tee -a "$LOG"
 
     python agent/batch_post_optimizer.py \
         --batch-dir "$BATCH_DIR" \
@@ -487,7 +543,10 @@ if [ "$OPT_MODE" = "ensemble" ]; then
         --n-trials "$N_TRIALS" \
         --holdout-months "$HOLDOUT_MONTHS" \
         --workers "$WORKERS" \
-        --objective "$OBJECTIVE" \
+        --objective "$OBJECTIVE_CSV" \
+        --n-blocks "$N_BLOCKS" \
+        --lambda-dispersion "$LAMBDA_DISPERSION" \
+        --min-block-months "$MIN_BLOCK_MONTHS" \
         --no-filter \
         $OPT_ARGS \
         2>&1 | tee -a "$LOG"
@@ -497,7 +556,7 @@ if [ "$OPT_MODE" = "ensemble" ]; then
     # manifest.json, registry/{production_output|canary_output}/) are all produced above.
     echo "" | tee -a "$LOG"
     echo "  Generating ensemble backtest artifacts..." | tee -a "$LOG"
-    ENS_ART_ARGS="--batch-dir $BATCH_DIR --data data/processed/$OHLCV_BASENAME"
+    ENS_ART_ARGS="--batch-dir $BATCH_DIR --data data/processed/$OHLCV_BASENAME --objectives $OBJECTIVE_CSV"
     if [ -n "$EXEC_DATA_PATH" ]; then
         ENS_ART_ARGS="$ENS_ART_ARGS --exec-data $EXEC_DATA_PATH"
     fi
@@ -512,47 +571,67 @@ else
     echo "[3b/5] Skipped — individual mode (no ensemble sweep/selection)" | tee -a "$LOG"
 
     # --- [4/5] Run batch_post_optimizer (individual mode — per-side Long/Short) ---
+    # Pass 1 takes the FULL arm list: batch_post_optimizer runs all arms
+    # concurrently in one pool with per-arm reports/JSONs.
     echo "" | tee -a "$LOG"
     echo "[4/5] Running batch post-optimizer (individual mode — per-side Long/Short)..." | tee -a "$LOG"
-    echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE --no-filter $OPT_ARGS" | tee -a "$LOG"
+    echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE_CSV --n-blocks $N_BLOCKS --lambda-dispersion $LAMBDA_DISPERSION --min-block-months $MIN_BLOCK_MONTHS --no-filter $OPT_ARGS" | tee -a "$LOG"
 
     python agent/batch_post_optimizer.py \
         --batch-dir "$BATCH_DIR" \
         --n-trials "$N_TRIALS" \
         --holdout-months "$HOLDOUT_MONTHS" \
         --workers "$WORKERS" \
-        --objective "$OBJECTIVE" \
+        --objective "$OBJECTIVE_CSV" \
+        --n-blocks "$N_BLOCKS" \
+        --lambda-dispersion "$LAMBDA_DISPERSION" \
+        --min-block-months "$MIN_BLOCK_MONTHS" \
         --no-filter \
         $OPT_ARGS \
         2>&1 | tee -a "$LOG"
 
-    # --- [4b/5] Unified Selection & Pairing Engine ---
-    echo "" | tee -a "$LOG"
-    echo "[4b/5] Running Unified Selection & Pairing Engine..." | tee -a "$LOG"
-    python agent/unified_pair_optimizer.py --batch-dir "$BATCH_DIR" 2>&1 | tee -a "$LOG"
+    # --- [4b/5]+[4c/5] PER-ARM: pair selection -> pass-2 ensemble optimization ---
+    # Isolation requirement (ticket block-sharpe-objective-ab_07092026_1031):
+    # each arm selects its own top pairs from its OWN pass-1 report and
+    # re-optimizes them under its OWN objective. Never pooled across arms —
+    # pooling would cross-contaminate the pass-2 A/B.
+    EXEC_ENS_ARGS=""
+    if [ -n "$EXEC_DATA_PATH" ]; then
+        EXEC_ENS_ARGS="--exec-data $EXEC_DATA_PATH"
+    fi
+    if (( $(echo "$SLIPPAGE_PER_SIDE > 0" | bc -l) )); then
+        EXEC_ENS_ARGS="$EXEC_ENS_ARGS --slippage-per-side $SLIPPAGE_PER_SIDE"
+    fi
+    EXEC_ENS_ARGS="$EXEC_ENS_ARGS --random-seed $RANDOM_SEED"
 
-    # --- [4c/5] Run ensemble optimization on VM ---
-    # Runs on the same VM that just completed individual optimization.
-    # 4 pairs is lightweight (~5-10 min on the warm VM).
-    TOP_PAIRS="$BATCH_DIR/top_pairs.json"
-    if [ -f "$TOP_PAIRS" ]; then
+    for ARM in "${OBJECTIVE_ARMS[@]}"; do
+        # --- [4b/5] Unified Selection & Pairing Engine (per arm) ---
+        echo "" | tee -a "$LOG"
+        echo "[4b/5] Running Unified Selection & Pairing Engine (arm: $ARM)..." | tee -a "$LOG"
+        python agent/unified_pair_optimizer.py --batch-dir "$BATCH_DIR" --objectives "$ARM" 2>&1 | tee -a "$LOG"
+
+        # Resolve this arm's pairs file (top_pairs.json for sharpe is
+        # parity-compatible; other arms get top_pairs_<arm>.json).
+        if [ "$ARM" = "sharpe" ]; then
+            TOP_PAIRS="$BATCH_DIR/top_pairs.json"
+        else
+            TOP_PAIRS="$BATCH_DIR/top_pairs_${ARM}.json"
+        fi
+        if [ ! -f "$TOP_PAIRS" ]; then
+            echo "  FATAL ERROR: $TOP_PAIRS not found after pair selection (arm: $ARM). Aborting to prevent silent arm loss." | tee -a "$LOG"
+            exit 1
+        fi
         PAIR_COUNT=$(python3 -c "import json; print(len(json.load(open('$TOP_PAIRS'))))")
         if [ "$PAIR_COUNT" -eq 0 ]; then
-            echo "  FATAL ERROR: unified_pair_optimizer.py produced 0 pairs! This indicates a failure in parsing or individual optimization. Aborting." | tee -a "$LOG"
+            echo "  FATAL ERROR: unified_pair_optimizer.py produced 0 pairs (arm: $ARM)! This indicates a failure in parsing or individual optimization. Aborting." | tee -a "$LOG"
             exit 1
         fi
 
+        # --- [4c/5] Run ensemble optimization on VM (per arm) ---
+        # Runs on the same VM that just completed individual optimization.
+        # 4 pairs per arm is lightweight (~5-10 min each on the warm VM).
         echo "" | tee -a "$LOG"
-        echo "[4c/5] Running ensemble optimization on VM (top pairs)..." | tee -a "$LOG"
-
-        EXEC_ENS_ARGS=""
-        if [ -n "$EXEC_DATA_PATH" ]; then
-            EXEC_ENS_ARGS="--exec-data $EXEC_DATA_PATH"
-        fi
-        if (( $(echo "$SLIPPAGE_PER_SIDE > 0" | bc -l) )); then
-            EXEC_ENS_ARGS="$EXEC_ENS_ARGS --slippage-per-side $SLIPPAGE_PER_SIDE"
-        fi
-        EXEC_ENS_ARGS="$EXEC_ENS_ARGS --random-seed $RANDOM_SEED"
+        echo "[4c/5] Running ensemble optimization on VM (arm: $ARM, $PAIR_COUNT pairs)..." | tee -a "$LOG"
 
         python agent/batch_post_optimizer.py \
             --batch-dir "$BATCH_DIR" \
@@ -560,38 +639,45 @@ else
             --n-trials "$N_TRIALS" \
             --holdout-months "$HOLDOUT_MONTHS" \
             --workers "$WORKERS" \
-            --objective "$OBJECTIVE" \
+            --objective "$ARM" \
+            --n-blocks "$N_BLOCKS" \
+            --lambda-dispersion "$LAMBDA_DISPERSION" \
+            --min-block-months "$MIN_BLOCK_MONTHS" \
             --no-filter \
             $EXEC_ENS_ARGS \
             2>&1 | tee -a "$LOG"
+    done
 
-        # Generate ensemble backtest artifacts (markdown reports)
-        echo "  Generating ensemble backtest artifacts..." | tee -a "$LOG"
-        ENS_ART_ARGS="--batch-dir $BATCH_DIR --data data/processed/$OHLCV_BASENAME"
-        if [ -n "$EXEC_DATA_PATH" ]; then
-            ENS_ART_ARGS="$ENS_ART_ARGS --exec-data $EXEC_DATA_PATH"
-        fi
-        if (( $(echo "$SLIPPAGE_PER_SIDE > 0" | bc -l) )); then
-            ENS_ART_ARGS="$ENS_ART_ARGS --slippage-per-side $SLIPPAGE_PER_SIDE"
-        fi
-        python agent/generate_ensemble_artifacts.py $ENS_ART_ARGS 2>&1 | tee -a "$LOG"
-        echo "  Ensemble optimization complete." | tee -a "$LOG"
-    else
-        echo "  No top_pairs.json — skipping ensemble optimization." | tee -a "$LOG"
+    # Generate ensemble backtest artifacts (markdown reports) — one call, all
+    # arms: generate_ensemble_artifacts skips arms without pass-2 results.
+    echo "  Generating ensemble backtest artifacts..." | tee -a "$LOG"
+    ENS_ART_ARGS="--batch-dir $BATCH_DIR --data data/processed/$OHLCV_BASENAME --objectives $OBJECTIVE_CSV"
+    if [ -n "$EXEC_DATA_PATH" ]; then
+        ENS_ART_ARGS="$ENS_ART_ARGS --exec-data $EXEC_DATA_PATH"
     fi
+    if (( $(echo "$SLIPPAGE_PER_SIDE > 0" | bc -l) )); then
+        ENS_ART_ARGS="$ENS_ART_ARGS --slippage-per-side $SLIPPAGE_PER_SIDE"
+    fi
+    python agent/generate_ensemble_artifacts.py $ENS_ART_ARGS 2>&1 | tee -a "$LOG"
+    echo "  Ensemble optimization complete." | tee -a "$LOG"
 fi
 
 OPT_EXIT=$?
 
 # --- [4b/6] Generate correctly-formatted strategy configs ---
+# generate_batch_configs.py takes ONE objective per invocation (it resolves
+# optimization_results_<obj>.json), so loop the validated arm list.
 echo "" | tee -a "$LOG"
 echo "[4b/6] Generating strategy configs from optimization results..." | tee -a "$LOG"
 
-python agent/generate_batch_configs.py \
-    --batch-dir "$BATCH_DIR" \
-    --min-trades 10 \
-    --objective "$OBJECTIVE" \
-    2>&1 | tee -a "$LOG" || echo "  WARNING: Config generation failed (non-fatal)" | tee -a "$LOG"
+for ARM in "${OBJECTIVE_ARMS[@]}"; do
+    echo "  Generating configs for arm: $ARM" | tee -a "$LOG"
+    python agent/generate_batch_configs.py \
+        --batch-dir "$BATCH_DIR" \
+        --min-trades 10 \
+        --objective "$ARM" \
+        2>&1 | tee -a "$LOG" || echo "  WARNING: Config generation failed for arm $ARM (non-fatal)" | tee -a "$LOG"
+done
 
 # --- [5/6] Upload results to GCS ---
 echo "" | tee -a "$LOG"
@@ -606,7 +692,10 @@ for f in "$BATCH_DIR"/optimization_results_*.json; do
 done
 [ -f "$BATCH_DIR/batch_ensemble_pre_opt.md" ] && gsutil cp "$BATCH_DIR/batch_ensemble_pre_opt.md" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
 [ -f "$BATCH_DIR/top_8_ensembles.json" ] && gsutil cp "$BATCH_DIR/top_8_ensembles.json" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
-[ -f "$BATCH_DIR/top_pairs.json" ] && gsutil cp "$BATCH_DIR/top_pairs.json" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+# top_pairs.json (sharpe) + per-arm top_pairs_<arm>.json (block/sortino arms)
+for f in "$BATCH_DIR"/top_pairs*.json; do
+    [ -f "$f" ] && gsutil cp "$f" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+done
 
 # Legacy fallback uploads
 [ -f "$BATCH_DIR/batch_summary_optimized.md" ] && gsutil cp "$BATCH_DIR/batch_summary_optimized.md" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true

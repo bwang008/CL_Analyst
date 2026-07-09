@@ -30,7 +30,20 @@ param(
     # Sortino objective dropped 2026-07-04 (ticket drop-sortino-objective_07042026_2301):
     # default is sharpe-only. Values sharpe|sortino|both all still work — pass
     # -Objective both for the zero-code operational rollback.
+    # Since ticket block-sharpe-objective-ab_07092026_1031 this accepts a
+    # comma-separated arm list (e.g. "sharpe,block_min,block_median,block_mean_std"),
+    # forwarded verbatim to vm_post_optimize.sh which validates every element.
     [string]$Objective = "sharpe",
+    # Block-wise Sharpe objective params (consumed only by block_* arms; inert
+    # for sharpe/sortino). Forwarded to vm_post_optimize.sh -> both
+    # batch_post_optimizer passes.
+    [int]$NBlocks = 3,
+    [double]$LambdaDispersion = 1.0,
+    [int]$MinBlockMonths = 10,
+    # Control-plane TTL for the optimizer VM (--max-run-duration). Multi-arm
+    # A/B runs need more headroom: pass 720 for a 4-arm run and keep TTL >
+    # the local monitor timeout (orphan-prevention rule: raise both together).
+    [int]$MaxRunDurationMinutes = 360,
     [string]$SweepMode = "backtest",
     [string]$OptMode = "individual",
     [string]$ExecData = "",
@@ -92,6 +105,9 @@ Write-Host "  Pricing:       $ProvisioningModel"
 Write-Host "  N Trials:      $NTrials"
 Write-Host "  Holdout:       $HoldoutMonths months"
 Write-Host "  Workers:       $Workers"
+Write-Host "  Objective:     $Objective"
+Write-Host "  Block params:  n_blocks=$NBlocks lambda_dispersion=$LambdaDispersion min_block_months=$MinBlockMonths"
+Write-Host "  VM TTL:        ${MaxRunDurationMinutes}m (--max-run-duration)"
 Write-Host "  Auto-Shutdown: $(-not $NoShutdown)"
 Write-Host "=====================================================" -ForegroundColor Magenta
 
@@ -138,7 +154,8 @@ if ($existingStatus) {
     $startupScript = Join-Path $ScriptDir "vm_startup.sh"
     
     # ORPHAN BACKSTOP: control-plane-enforced TTL so a dead local monitor can
-    # never orphan this VM (post-opt runs ~1-2h; 360m is a generous ceiling).
+    # never orphan this VM (post-opt runs ~1-2h; default 360m is a generous
+    # ceiling for sharpe-only; multi-arm A/B runs pass -MaxRunDurationMinutes 720).
     $createArgs = @(
         "compute", "instances", "create", $VmName,
         "--project=$Project",
@@ -150,7 +167,7 @@ if ($existingStatus) {
         "--boot-disk-type=pd-ssd",
         "--metadata-from-file=startup-script=$startupScript",
         "--scopes=compute-rw,storage-full",
-        "--max-run-duration=360m",
+        "--max-run-duration=${MaxRunDurationMinutes}m",
         "--instance-termination-action=DELETE",
         "--quiet"
     )
@@ -302,7 +319,7 @@ Write-Host "`n[5/7] Launching post-optimizer in tmux..."
 $shutdownFlag = if ($NoShutdown) { "" } else { "--shutdown" }
 $execDataFlag = if ($ExecData) { " --exec-data=$ExecData" } else { "" }
 $slippageFlag = if ($SlippagePerSide -gt 0) { " --slippage-per-side=$SlippagePerSide" } else { "" }
-$launchCmd = "tmux kill-session -t optimizer 2>/dev/null; tmux new-session -d -s optimizer 'bash $RemoteProject/gcp/vm_post_optimize.sh --batch-id=$BatchId --n-trials=$NTrials --holdout-months=$HoldoutMonths --workers=$Workers --objective=$Objective --sweep-mode=$SweepMode --opt-mode=$OptMode$execDataFlag$slippageFlag $shutdownFlag'"
+$launchCmd = "tmux kill-session -t optimizer 2>/dev/null; tmux new-session -d -s optimizer 'bash $RemoteProject/gcp/vm_post_optimize.sh --batch-id=$BatchId --n-trials=$NTrials --holdout-months=$HoldoutMonths --workers=$Workers --objective=$Objective --n-blocks=$NBlocks --lambda-dispersion=$LambdaDispersion --min-block-months=$MinBlockMonths --sweep-mode=$SweepMode --opt-mode=$OptMode$execDataFlag$slippageFlag $shutdownFlag'"
 gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd --quiet 2>$null
 
 Write-Host "  Optimizer launched!" -ForegroundColor Green
