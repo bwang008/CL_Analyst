@@ -71,7 +71,13 @@ except ImportError:
 # Per-objective seed offsets — ensures different objectives explore different
 # parameter spaces even when the base random_seed is identical.
 # ---------------------------------------------------------------------------
-_OBJECTIVE_SEED_OFFSETS = {"sharpe": 0, "sortino": 1}
+_OBJECTIVE_SEED_OFFSETS = {
+    "sharpe": 0,
+    "sortino": 1,
+    "block_min": 2,
+    "block_median": 3,
+    "block_mean_std": 4,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +243,148 @@ def _apply_trade_floor_penalty(raw_score: float, trade_count: int, trade_floor: 
         weight = _trade_floor_weight(trade_count, trade_floor)
         return raw_score * weight
     return raw_score
+
+
+# ---------------------------------------------------------------------------
+# Block-wise Sharpe objective — partition the in-sample monthly PnL series
+# into contiguous calendar blocks and aggregate per-block Sharpes. Rewards
+# consistency across regimes instead of one lucky stretch.
+# ---------------------------------------------------------------------------
+
+BLOCK_OBJECTIVE_METRICS = {"block_min", "block_median", "block_mean_std"}
+
+
+def _monthly_pnl_series(result: "BacktestResult") -> pd.Series:
+    """Monthly PnL series from a backtest result (``resample('M').sum()``)."""
+    if not getattr(result, "trades", None):
+        return pd.Series(dtype=float)
+    trades_df = pd.DataFrame(
+        [{"exit_dt": t.exit_dt, "pnl": t.net_pnl_dollars} for t in result.trades]
+    )
+    trades_df["exit_dt"] = pd.to_datetime(trades_df["exit_dt"])
+    trades_df = trades_df.set_index("exit_dt").sort_index()
+    return trades_df["pnl"].resample("M").sum().dropna()
+
+
+def _block_sharpe_details(
+    monthly_pnls: pd.Series,
+    window_start,
+    window_end,
+    n_blocks: int,
+) -> dict:
+    """Per-block annualized monthly Sharpes over a fixed calendar partition.
+
+    The partition covers the FULL calendar month range of
+    [window_start, window_end] (the month containing window_end included),
+    NOT the trade span — a config that only trades part of the window must
+    not get its blocks squeezed into its active period. Months without
+    trades count as 0 PnL. Remainder months go to the EARLIEST blocks
+    (42 -> 14/14/14, 41 -> 14/14/13, 43 -> 15/14/14).
+
+    Returns {"block_sharpes": [...], "block_bounds": [(start, end), ...]}
+    where each block Sharpe is clipped to +/-OBJECTIVE_SCORE_CAP and a
+    degenerate block (no trades, all-zero, or std < 1e-9) scores 0.0.
+    """
+    start_p = pd.Timestamp(window_start).to_period("M")
+    end_p = pd.Timestamp(window_end).to_period("M")
+    full_range = pd.period_range(start_p, end_p, freq="M")
+    n_months = len(full_range)
+    if n_months < n_blocks:
+        raise ValueError(
+            f"Cannot partition {n_months} calendar month(s) "
+            f"({start_p} .. {end_p}) into {n_blocks} blocks."
+        )
+
+    if len(monthly_pnls) > 0:
+        vals = pd.Series(
+            np.asarray(monthly_pnls.values, dtype=float),
+            index=pd.DatetimeIndex(monthly_pnls.index).to_period("M"),
+        )
+        vals = vals.reindex(full_range, fill_value=0.0)
+    else:
+        vals = pd.Series(0.0, index=full_range)
+
+    base, rem = divmod(n_months, n_blocks)
+    sizes = [base + 1 if i < rem else base for i in range(n_blocks)]
+
+    block_sharpes: list[float] = []
+    block_bounds: list[tuple[str, str]] = []
+    pos = 0
+    for size in sizes:
+        block_periods = full_range[pos:pos + size]
+        block_vals = vals.iloc[pos:pos + size].to_numpy(dtype=float)
+        pos += size
+        std = float(np.std(block_vals))
+        if std < 1e-9:
+            sharpe = 0.0  # empty / all-zero / constant block — never the cap
+        else:
+            sharpe = float((np.mean(block_vals) / std) * np.sqrt(12))
+            sharpe = float(np.clip(sharpe, -OBJECTIVE_SCORE_CAP, OBJECTIVE_SCORE_CAP))
+        block_sharpes.append(sharpe)
+        block_bounds.append((
+            block_periods[0].start_time.strftime("%Y-%m-%d"),
+            block_periods[-1].end_time.strftime("%Y-%m-%d"),
+        ))
+
+    return {"block_sharpes": block_sharpes, "block_bounds": block_bounds}
+
+
+def _block_sharpe_score(
+    monthly_pnls: pd.Series,
+    window_start,
+    window_end,
+    n_blocks: int,
+    metric: str,
+    lambda_dispersion: float,
+) -> float:
+    """Aggregate the per-block Sharpes into a single objective value.
+
+    block_min      -> min(block Sharpes)
+    block_median   -> median(block Sharpes)
+    block_mean_std -> mean - lambda_dispersion * population std
+    Signed values everywhere — no harmonic/geometric means.
+    """
+    if metric not in BLOCK_OBJECTIVE_METRICS:
+        raise ValueError(
+            f"Unknown block metric {metric!r}; valid: {sorted(BLOCK_OBJECTIVE_METRICS)}"
+        )
+    details = _block_sharpe_details(
+        monthly_pnls=monthly_pnls,
+        window_start=window_start,
+        window_end=window_end,
+        n_blocks=n_blocks,
+    )
+    sharpes = np.asarray(details["block_sharpes"], dtype=float)
+    if metric == "block_min":
+        return float(sharpes.min())
+    if metric == "block_median":
+        return float(np.median(sharpes))
+    return float(sharpes.mean() - lambda_dispersion * sharpes.std())
+
+
+def _check_block_window(
+    objective_metric: str,
+    window_start,
+    window_end,
+    insample_months: int,
+    n_blocks: int,
+    min_block_months: int,
+) -> None:
+    """Hard-raise when the post-holdout in-sample window is too small for a
+    block metric (no silent fallback to sharpe — house rule)."""
+    required_months = n_blocks * min_block_months
+    if insample_months >= required_months:
+        return
+    base, rem = divmod(max(insample_months, 0), n_blocks)
+    layout = "/".join(str(base + 1 if i < rem else base) for i in range(n_blocks))
+    raise ValueError(
+        f"Block objective '{objective_metric}' needs >= {required_months} in-sample "
+        f"months (n_blocks={n_blocks} x min_block_months={min_block_months}), but the "
+        f"post-holdout window {pd.Timestamp(window_start).date()} -> "
+        f"{pd.Timestamp(window_end).date()} has only {insample_months} "
+        f"(block layout would be {layout}). No fallback to sharpe — widen the "
+        f"window or lower the holdout."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -974,11 +1122,17 @@ def _compute_objective_score(
     result: BacktestResult,
     objective_metric: str,
     trade_floor: float,
+    window_start=None,
+    window_end=None,
+    n_blocks: int = 3,
+    lambda_dispersion: float = 1.0,
 ) -> float:
-    """Compute the same Sharpe/Sortino score used by the Optuna objective.
+    """Compute the same Sharpe/Sortino/block score used by the Optuna objective.
 
     This mirrors the scoring logic in make_objective() so that baseline and
-    optimized results are comparable on the same scale.
+    optimized results are comparable on the same scale. Block metrics
+    additionally need the fixed in-sample window bounds (the SLICED
+    predictions window, not the trade span) and the block params.
     """
     if result.trade_count == 0 or not result.trades:
         return -9999.0
@@ -996,7 +1150,22 @@ def _compute_objective_score(
     if len(monthly_pnl_vals) == 0:
         return -9999.0
 
-    if objective_metric == "sortino":
+    if objective_metric in BLOCK_OBJECTIVE_METRICS:
+        if window_start is None or window_end is None:
+            raise ValueError(
+                f"objective_metric={objective_metric!r} requires window_start/"
+                f"window_end (the sliced in-sample window bounds) — no silent fallback."
+            )
+        agg = _block_sharpe_score(
+            monthly_pnls=monthly_pnls,
+            window_start=window_start,
+            window_end=window_end,
+            n_blocks=n_blocks,
+            metric=objective_metric,
+            lambda_dispersion=lambda_dispersion,
+        )
+        raw_score = min(agg, OBJECTIVE_SCORE_CAP)
+    elif objective_metric == "sortino":
         downside_sq = np.minimum(0, monthly_pnl_vals) ** 2
         downside_dev = float(np.sqrt(np.mean(downside_sq)))
         if downside_dev < 1e-9:
@@ -1061,6 +1230,10 @@ def make_objective(
     f_min: float = FIRING_FRAC_MIN,
     f_max: float = FIRING_FRAC_MAX,
     entry_thr_bounds: dict | None = None,
+    n_blocks: int = 3,
+    lambda_dispersion: float = 1.0,
+    window_start=None,
+    window_end=None,
 ):
     """Create a closure that Optuna can call with trial params.
 
@@ -1091,6 +1264,10 @@ def make_objective(
             are computed here from ``predictions_df`` (prob_Buy / prob_Sell).
             run_optimization precomputes and passes these so the warm-start
             extraction snaps to the SAME grid the sampler uses.
+        n_blocks, lambda_dispersion: Block-metric params (BLOCK_OBJECTIVE_METRICS).
+        window_start, window_end: Fixed in-sample window bounds for the block
+            partition — identical for every trial. Default to the bounds of the
+            (already holdout-sliced) ``predictions_df``, never a trial's trade span.
     """
     # Pre-create a strategy instance for parameter routing
     strategy = create_execution_strategy(base_cfg)
@@ -1137,6 +1314,13 @@ def make_objective(
     _floor_rate = TRADES_PER_YEAR_FLOOR_SINGLE if optimize_side else TRADES_PER_YEAR_FLOOR
     _backtest_years = (predictions_df.index.max() - predictions_df.index.min()).days / 365.25
     _trade_floor = max(1.0, _floor_rate * _backtest_years)
+
+    # Block-partition window bounds (once, not per trial): the sliced in-sample
+    # predictions window — fixed and identical for every trial.
+    if window_start is None:
+        window_start = predictions_df.index.min()
+    if window_end is None:
+        window_end = predictions_df.index.max()
 
     def _suggest_side_params(trial: optuna.Trial, suffix: str) -> dict:
         """Suggest params for one side with the given suffix."""
@@ -1231,7 +1415,18 @@ def make_objective(
         if len(monthly_pnl_vals) == 0:
             return -9999.0
 
-        if objective_metric == "sortino":
+        if objective_metric in BLOCK_OBJECTIVE_METRICS:
+            # --- Block-wise Annualized Monthly Sharpe ---
+            agg = _block_sharpe_score(
+                monthly_pnls=monthly_pnls,
+                window_start=window_start,
+                window_end=window_end,
+                n_blocks=n_blocks,
+                metric=objective_metric,
+                lambda_dispersion=lambda_dispersion,
+            )
+            annualized_score = min(agg, OBJECTIVE_SCORE_CAP)
+        elif objective_metric == "sortino":
             # --- Annualized Monthly Sortino (Target Downside Deviation) ---
             downside_sq = np.minimum(0, monthly_pnl_vals) ** 2
             downside_dev = float(np.sqrt(np.mean(downside_sq)))
@@ -1299,6 +1494,9 @@ def run_optimization(
     symbol: str | None = None,
     firing_frac_min: float = FIRING_FRAC_MIN,
     firing_frac_max: float = FIRING_FRAC_MAX,
+    n_blocks: int = 3,
+    lambda_dispersion: float = 1.0,
+    min_block_months: int = 10,
 ) -> tuple[dict, BacktestResult]:
     """Run strategy parameter optimization.
 
@@ -1306,7 +1504,8 @@ def run_optimization(
         holdout_months: If set, reserve the last N months of predictions
             as an unseen holdout.  Optuna only sees data before the cutoff.
             Falls back to config key ``holdout_months`` when *None*.
-        objective_metric: "sharpe" or "sortino".
+        objective_metric: "sharpe", "sortino", or a block metric
+            (BLOCK_OBJECTIVE_METRICS: block_min / block_median / block_mean_std).
         optimize_side: "long", "short", or None (both sides / ensemble).
         symbol: Instrument symbol for economics resolution (contract
             multiplier + default 1-tick slippage). None = legacy CL-econ
@@ -1315,6 +1514,10 @@ def run_optimization(
             per-side dynamic entry_threshold search bounds (defaults: module
             constants FIRING_FRAC_MIN / FIRING_FRAC_MAX). Threaded from the CLI;
             a fast-follow ticket wires them from the v2 manifest.
+        n_blocks, lambda_dispersion, min_block_months: Block-metric params.
+            A block metric HARD-RAISES ValueError when the post-holdout
+            in-sample window has fewer calendar months than
+            n_blocks * min_block_months — no silent fallback to sharpe.
 
     Returns:
         Tuple of (best_config, best_result).  Holdout metrics (if any)
@@ -1346,7 +1549,13 @@ def run_optimization(
     else:
         mode_str = "SINGLE CONFIG"
 
-    obj_str = "Annualized Monthly Sortino" if objective_metric == "sortino" else "Annualized Monthly Sharpe"
+    if objective_metric == "sortino":
+        obj_str = "Annualized Monthly Sortino"
+    elif objective_metric in BLOCK_OBJECTIVE_METRICS:
+        obj_str = (f"Block-wise Annualized Monthly Sharpe ({objective_metric}, "
+                   f"n_blocks={n_blocks}, lambda={lambda_dispersion})")
+    else:
+        obj_str = "Annualized Monthly Sharpe"
 
     contract_multiplier, slippage_per_side = _resolve_symbol_economics(symbol, slippage_per_side)
 
@@ -1410,6 +1619,14 @@ def run_optimization(
               f"{predictions_df.index.min().date()} -> {predictions_df.index.max().date()} "
               f"({len(predictions_df):,} bars)")
 
+    # ── In-sample window bounds (post-holdout, fixed for every trial) ──
+    _win_start = predictions_df.index.min()
+    _win_end = predictions_df.index.max()
+    _insample_months = (_win_end.to_period("M") - _win_start.to_period("M")).n + 1
+    if objective_metric in BLOCK_OBJECTIVE_METRICS:
+        _check_block_window(objective_metric, _win_start, _win_end,
+                            _insample_months, n_blocks, min_block_months)
+
     # Run baseline (with side-appropriate config for fair comparison)
     print("\n--- BASELINE ---")
     baseline_cfg = copy.deepcopy(base_cfg)
@@ -1451,6 +1668,8 @@ def run_optimization(
         objective_metric=objective_metric, optimize_side=optimize_side, slippage_per_side=slippage_per_side,
         contract_multiplier=contract_multiplier,
         f_min=firing_frac_min, f_max=firing_frac_max, entry_thr_bounds=entry_thr_bounds,
+        n_blocks=n_blocks, lambda_dispersion=lambda_dispersion,
+        window_start=_win_start, window_end=_win_end,
     )
 
     # PID in the hash: two batches post-optimizing concurrently on one machine
@@ -1488,8 +1707,12 @@ def run_optimization(
     _floor_rate = TRADES_PER_YEAR_FLOOR_SINGLE if optimize_side else TRADES_PER_YEAR_FLOOR
     _backtest_years = (predictions_df.index.max() - predictions_df.index.min()).days / 365.25
     _trade_floor = max(1.0, _floor_rate * _backtest_years)
-    
-    baseline_obj_score = _compute_objective_score(baseline_result, objective_metric, _trade_floor)
+
+    baseline_obj_score = _compute_objective_score(
+        baseline_result, objective_metric, _trade_floor,
+        window_start=_win_start, window_end=_win_end,
+        n_blocks=n_blocks, lambda_dispersion=lambda_dispersion,
+    )
     print(f"  Baseline {objective_metric}: {baseline_obj_score:.4f}")
 
     score_label = objective_metric.capitalize()
@@ -1601,7 +1824,11 @@ def run_optimization(
           f"DD=${baseline_metrics['max_drawdown']:,.2f}")
 
     # ── Regression guard ──────────────────────────────────────────────
-    best_obj_score = _compute_objective_score(best_result, objective_metric, _trade_floor)
+    best_obj_score = _compute_objective_score(
+        best_result, objective_metric, _trade_floor,
+        window_start=_win_start, window_end=_win_end,
+        n_blocks=n_blocks, lambda_dispersion=lambda_dispersion,
+    )
     _regression_triggered = False
     if best_obj_score <= baseline_obj_score:
         _regression_triggered = True
@@ -1621,6 +1848,21 @@ def run_optimization(
         print(f"\n  [OK] Optimizer improved over baseline: "
               f"{best_obj_score:.4f} > {baseline_obj_score:.4f}")
 
+    # ── Per-block diagnostics (all arms, incl. sharpe) ────────────────
+    # Shows WHERE the score comes from: which block binds under block_min,
+    # dispersion under block_mean_std; lets block-min filter a sharpe arm.
+    _block_details = None
+    if _insample_months >= n_blocks:
+        _block_details = _block_sharpe_details(
+            monthly_pnls=_monthly_pnl_series(best_result),
+            window_start=_win_start, window_end=_win_end, n_blocks=n_blocks,
+        )
+        print(f"  Block Sharpes ({n_blocks} blocks): "
+              + "/".join(f"{s:.2f}" for s in _block_details["block_sharpes"]))
+    else:
+        print(f"  [WARN] in-sample window has {_insample_months} months < "
+              f"n_blocks={n_blocks} — block diagnostics skipped.")
+
     # Build optuna_info
     # Build optuna_info — shared base fields
     _optuna_base = {
@@ -1636,6 +1878,8 @@ def run_optimization(
         "regression_guard_triggered": _regression_triggered,
         "warm_start_injected": _warm_start_ok,
         "wall_time_seconds": round(elapsed, 1),
+        "block_sharpes": _block_details["block_sharpes"] if _block_details else None,
+        "block_bounds": _block_details["block_bounds"] if _block_details else None,
     }
 
     if is_tiered and optimize_side:
@@ -1723,6 +1967,9 @@ def run_hybrid_optimization(
     symbol: str | None = None,
     firing_frac_min: float = FIRING_FRAC_MIN,
     firing_frac_max: float = FIRING_FRAC_MAX,
+    n_blocks: int = 3,
+    lambda_dispersion: float = 1.0,
+    min_block_months: int = 10,
 ) -> tuple[dict, BacktestResult]:
     """Two-Stage Hybrid optimizer: vectorbt pre-screen → Optuna warm-start.
 
@@ -1775,7 +2022,13 @@ def run_hybrid_optimization(
     else:
         mode_str = "HYBRID SINGLE CONFIG"
 
-    obj_str = "Annualized Monthly Sortino" if objective_metric == "sortino" else "Annualized Monthly Sharpe"
+    if objective_metric == "sortino":
+        obj_str = "Annualized Monthly Sortino"
+    elif objective_metric in BLOCK_OBJECTIVE_METRICS:
+        obj_str = (f"Block-wise Annualized Monthly Sharpe ({objective_metric}, "
+                   f"n_blocks={n_blocks}, lambda={lambda_dispersion})")
+    else:
+        obj_str = "Annualized Monthly Sharpe"
 
     print("=" * 70)
     print(f"HYBRID STRATEGY OPTIMIZATION: {model_name}")
@@ -1833,6 +2086,14 @@ def run_hybrid_optimization(
               f"{predictions_df.index.min().date()} -> {predictions_df.index.max().date()} "
               f"({len(predictions_df):,} bars)")
 
+    # ── In-sample window bounds (post-holdout, fixed for every trial) ────────
+    _win_start = predictions_df.index.min()
+    _win_end = predictions_df.index.max()
+    _insample_months = (_win_end.to_period("M") - _win_start.to_period("M")).n + 1
+    if objective_metric in BLOCK_OBJECTIVE_METRICS:
+        _check_block_window(objective_metric, _win_start, _win_end,
+                            _insample_months, n_blocks, min_block_months)
+
     # ── Baseline ─────────────────────────────────────────────────────────────
     print("\n--- BASELINE ---")
     baseline_cfg = copy.deepcopy(base_cfg)
@@ -1863,11 +2124,14 @@ def run_hybrid_optimization(
     # ── Stage 1: vectorbt coarse grid sweep ──────────────────────────────────
     if optimize_side in ("long", "short") and _VBT_AVAILABLE:
         print("\n--- STAGE 1: vectorbt coarse grid sweep ---")
+        # Block metrics prescreen on plain sharpe: seeds are starting points,
+        # not selection — the study itself scores block-wise.
+        _vbt_metric = "sharpe" if objective_metric in BLOCK_OBJECTIVE_METRICS else objective_metric
         stage1_configs = run_vbt_prescreener(
             predictions_df=predictions_df,
             ohlcv_df=ohlcv_df,
             optimize_side=optimize_side,
-            objective_metric=objective_metric,
+            objective_metric=_vbt_metric,
             top_n=vbt_top_n,
             contract_multiplier=contract_multiplier if contract_multiplier is not None else 1000.0,
         )
@@ -1897,6 +2161,8 @@ def run_hybrid_optimization(
         optimize_side=optimize_side, slippage_per_side=slippage_per_side,
         contract_multiplier=contract_multiplier,
         f_min=firing_frac_min, f_max=firing_frac_max, entry_thr_bounds=entry_thr_bounds,
+        n_blocks=n_blocks, lambda_dispersion=lambda_dispersion,
+        window_start=_win_start, window_end=_win_end,
     )
 
     db_hash = hashlib.md5(f"hybrid_opt_{model_name}_{objective_metric}_{os.getpid()}".encode()).hexdigest()[:8]
@@ -1940,7 +2206,11 @@ def run_hybrid_optimization(
     _backtest_years = (predictions_df.index.max() - predictions_df.index.min()).days / 365.25
     _trade_floor = max(1.0, _floor_rate * _backtest_years)
 
-    baseline_obj_score = _compute_objective_score(baseline_result, objective_metric, _trade_floor)
+    baseline_obj_score = _compute_objective_score(
+        baseline_result, objective_metric, _trade_floor,
+        window_start=_win_start, window_end=_win_end,
+        n_blocks=n_blocks, lambda_dispersion=lambda_dispersion,
+    )
     print(f"  Baseline {objective_metric}: {baseline_obj_score:.4f}")
 
     def trial_callback(study_: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
@@ -2047,7 +2317,11 @@ def run_hybrid_optimization(
           f"DD=${baseline_metrics['max_drawdown']:,.2f}")
 
     # ── Regression guard ──────────────────────────────────────────────
-    best_obj_score = _compute_objective_score(best_result, objective_metric, _trade_floor)
+    best_obj_score = _compute_objective_score(
+        best_result, objective_metric, _trade_floor,
+        window_start=_win_start, window_end=_win_end,
+        n_blocks=n_blocks, lambda_dispersion=lambda_dispersion,
+    )
     _regression_triggered = False
     if best_obj_score <= baseline_obj_score:
         _regression_triggered = True
@@ -2067,6 +2341,19 @@ def run_hybrid_optimization(
         print(f"\n  [OK] Optimizer improved over baseline: "
               f"{best_obj_score:.4f} > {baseline_obj_score:.4f}")
 
+    # ── Per-block diagnostics (all arms, incl. sharpe) ───────────────────────
+    _block_details = None
+    if _insample_months >= n_blocks:
+        _block_details = _block_sharpe_details(
+            monthly_pnls=_monthly_pnl_series(best_result),
+            window_start=_win_start, window_end=_win_end, n_blocks=n_blocks,
+        )
+        print(f"  Block Sharpes ({n_blocks} blocks): "
+              + "/".join(f"{s:.2f}" for s in _block_details["block_sharpes"]))
+    else:
+        print(f"  [WARN] in-sample window has {_insample_months} months < "
+              f"n_blocks={n_blocks} — block diagnostics skipped.")
+
     # ── Build optuna_info (tagged as "hybrid") ───────────────────────────────
     _optuna_info_base = {
         "trial_number": best_trial.number,
@@ -2083,6 +2370,8 @@ def run_hybrid_optimization(
         "regression_guard_triggered": _regression_triggered,
         "warm_start_injected": _warm_start_ok,
         "wall_time_seconds": round(elapsed, 1),
+        "block_sharpes": _block_details["block_sharpes"] if _block_details else None,
+        "block_bounds": _block_details["block_bounds"] if _block_details else None,
     }
     if is_tiered and optimize_side:
         best_cfg["optuna_info"] = {
@@ -2185,8 +2474,11 @@ def main() -> None:
         help="Number of parallel Optuna trial evaluations (default: 1)"
     )
     parser.add_argument(
-        "--objective", choices=["sharpe", "sortino"], default="sharpe",
-        help="Objective function: sharpe (default) or sortino"
+        "--objective",
+        choices=["sharpe", "sortino", "block_min", "block_median", "block_mean_std"],
+        default="sharpe",
+        help="Objective function: sharpe (default), sortino, or a block-wise "
+             "Sharpe aggregate (block_min / block_median / block_mean_std)"
     )
     parser.add_argument(
         "--side", choices=["long", "short", "both"], default="both",

@@ -357,6 +357,9 @@ def run_single_optimization(
     symbol: str | None = None,
     firing_frac_min: float = FIRING_FRAC_MIN,
     firing_frac_max: float = FIRING_FRAC_MAX,
+    n_blocks: int = 3,
+    lambda_dispersion: float = 1.0,
+    min_block_months: int = 10,
 ) -> dict:
     """Run strategy_optimizer on a single config and return results."""
     # Suppress per-worker Telegram notifications — the batch orchestrator
@@ -387,6 +390,9 @@ def run_single_optimization(
             symbol=symbol,
             firing_frac_min=firing_frac_min,
             firing_frac_max=firing_frac_max,
+            n_blocks=n_blocks,
+            lambda_dispersion=lambda_dispersion,
+            min_block_months=min_block_months,
         )
         best_metrics = extract_metrics(best_result)
         return {
@@ -429,6 +435,14 @@ def align_markdown_table(lines: list[str]) -> str:
     return "\n".join(aligned_lines)
 
 
+def _format_block_sharpes(opt_info: dict) -> str:
+    """Render optuna_info.block_sharpes as '1.8/0.4/2.1' ('-' when absent)."""
+    block_sharpes = (opt_info or {}).get("block_sharpes")
+    if not block_sharpes:
+        return "-"
+    return "/".join(f"{s:.1f}" for s in block_sharpes)
+
+
 def generate_optimized_report(
     batch_dir: str,
     progress: dict,
@@ -440,6 +454,10 @@ def generate_optimized_report(
     objective_metric: str = "sharpe",
     task_experiment_labels: dict | None = None,
     base_cfg: dict | None = None,
+    n_blocks: int | None = None,
+    lambda_dispersion: float | None = None,
+    min_block_months: int | None = None,
+    holdout_months: int | None = None,
 ) -> str:
     """Generate batch_summary_optimized_{objective}.md with pre/post comparison."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -450,6 +468,11 @@ def generate_optimized_report(
     lines.append(f"Manifest: {progress.get('manifest', 'unknown')}")
     lines.append(f"Baseline Report: batch_summary.md")
     lines.append(f"Objective: {obj_title}")
+    lines.append(f"objective_metric: {objective_metric}")
+    lines.append(f"n_blocks: {n_blocks}")
+    lines.append(f"lambda_dispersion: {lambda_dispersion}")
+    lines.append(f"min_block_months: {min_block_months}")
+    lines.append(f"holdout_months: {holdout_months}")
     lines.append(f"Total Wall Time: {wall_time_seconds:.0f}s ({wall_time_seconds/60:.1f} min)")
     lines.append(f"Trials per target: {n_trials} | Workers: {n_workers}")
     lines.append("")
@@ -462,8 +485,8 @@ def generate_optimized_report(
     if has_ensembles:
         lines.append(f"### Ensembles (Top {len(all_results)})")
         lines.append("")
-        lines.append("| # | Experiment | Long Model | Short Model | Trades (pre) T/L/S | Trades (opt) T/L/S | Trades (ho) T/L/S | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (holdout) | Opt Thr | Best Trial |")
-        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+        lines.append("| # | Experiment | Long Model | Short Model | Trades (pre) T/L/S | Trades (opt) T/L/S | Trades (ho) T/L/S | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (holdout) | Opt Thr | Block Sharpes | Best Trial |")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         sorted_ensembles = _canonical_pair_order(all_results, batch_dir)
         for idx, (key, opt) in enumerate(sorted_ensembles, 1):
             # Derive experiment + model display names
@@ -530,11 +553,11 @@ def generate_optimized_report(
                 lines.append(
                     f"| {idx} | {experiment_col} | {long_model} | {short_model} | {base_trades} | {opt_trades} | {ho_trades} | "
                     f"{base_pf} | {opt_pf} | {base_pnl} | {opt_pnl} | {ho_pnl} | {opt_thr} | "
-                    f"{format_best_trial(opt_info)} |"
+                    f"{_format_block_sharpes(opt_info)} | {format_best_trial(opt_info)} |"
                 )
             elif opt.get("status") == "FAILED":
                 lines.append(
-                    f"| {idx} | {experiment_col} | {long_model} | {short_model} | - | FAILED | - | - | - | - | - | - | - | - |"
+                    f"| {idx} | {experiment_col} | {long_model} | {short_model} | - | FAILED | - | - | - | - | - | - | - | - | - |"
                 )
         lines.append("")
     else:
@@ -546,8 +569,8 @@ def generate_optimized_report(
             for metric in ["logloss", "average_precision"]:
                 lines.append(f"### {section_name} ({metric.replace('_', ' ').title()})")
                 lines.append("")
-                lines.append("| Experiment | Trades (pre) T/L/S | Trades (opt) T/L/S | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (holdout) | Opt Thr | Opt TP | Opt SL | Opt TrgF | Opt DstF | Opt Cool | Opt Hold | Opt Consec | Best Trial |")
-                lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+                lines.append("| Experiment | Trades (pre) T/L/S | Trades (opt) T/L/S | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (holdout) | Opt Thr | Opt TP | Opt SL | Opt TrgF | Opt DstF | Opt Cool | Opt Hold | Opt Consec | Block Sharpes | Best Trial |")
+                lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 
                 # Sort experiments naturally by label for readability
                 def natural_sort_key(s):
@@ -615,7 +638,8 @@ def generate_optimized_report(
                             f"{base_pf:.2f} | {opt_pf:.2f} | "
                             f"${base_pnl:,.0f} | ${opt_pnl:,.0f} | "
                             f"{ho_pnl} | "
-                            f"{opt_thr} | {opt_tp} | {opt_sl} | {opt_trgf} | {opt_dstf} | {opt_cool} | {opt_hold} | {opt_consec} | {best_trial_str} |"
+                            f"{opt_thr} | {opt_tp} | {opt_sl} | {opt_trgf} | {opt_dstf} | {opt_cool} | {opt_hold} | {opt_consec} | "
+                            f"{_format_block_sharpes(opt_info)} | {best_trial_str} |"
                         )
                     else:
                         # Fallback to pipeline_summary.json if optimization didn't complete
@@ -641,7 +665,7 @@ def generate_optimized_report(
                         lines.append(
                             f"| {label} | {base_trades} | - | "
                             f"{base_pf:.2f} | - | "
-                            f"${base_pnl:,.0f} | - | - | - | - | - | - | - | - | - | - | - |"
+                            f"${base_pnl:,.0f} | - | - | - | - | - | - | - | - | - | - | - | - |"
                         )
                 lines.append("")
 
@@ -814,6 +838,10 @@ def _finalize_objective_results(
         objective_metric=objective_metric,
         task_experiment_labels=task_experiment_labels,
         base_cfg=base_cfg,
+        n_blocks=args.n_blocks,
+        lambda_dispersion=args.lambda_dispersion,
+        min_block_months=args.min_block_months,
+        holdout_months=args.holdout_months,
     )
     report_path = os.path.join(batch_dir, report_name)
     with open(report_path, "w", encoding="utf-8") as f:
@@ -937,6 +965,9 @@ def _run_all_objectives_concurrent(
                     symbol=args.resolved_symbol,
                     firing_frac_min=args.firing_frac_min,
                     firing_frac_max=args.firing_frac_max,
+                    n_blocks=args.n_blocks,
+                    lambda_dispersion=args.lambda_dispersion,
+                    min_block_months=args.min_block_months,
                 )
                 futures[future] = (task_key, merged_path, label, metric, side, obj_metric)
 
@@ -974,6 +1005,9 @@ def _run_all_objectives_concurrent(
                 symbol=args.resolved_symbol,
                 firing_frac_min=args.firing_frac_min,
                 firing_frac_max=args.firing_frac_max,
+                n_blocks=args.n_blocks,
+                lambda_dispersion=args.lambda_dispersion,
+                min_block_months=args.min_block_months,
             )
             results_by_objective[obj_metric][task_key] = result
             _completed_count += 1
@@ -1002,7 +1036,36 @@ def _run_all_objectives_concurrent(
     return obj_elapsed
 
 
-def main():
+VALID_OBJECTIVES = ("sharpe", "sortino", "block_min", "block_median", "block_mean_std")
+
+
+def parse_objectives(value: str) -> list[str]:
+    """Parse a comma-separated --objective list into a validated arm list.
+
+    'both' expands to sharpe,sortino; surrounding whitespace is tolerated;
+    unknown metrics and empty input are rejected loudly (no silent defaults).
+    """
+    parts = [p.strip() for p in str(value or "").split(",")]
+    objectives: list[str] = []
+    for part in parts:
+        if not part:
+            raise argparse.ArgumentTypeError(
+                f"--objective got an empty element in {value!r}; expected a "
+                f"comma-separated list from {VALID_OBJECTIVES} (or 'both')"
+            )
+        expanded = ["sharpe", "sortino"] if part == "both" else [part]
+        for obj in expanded:
+            if obj not in VALID_OBJECTIVES:
+                raise argparse.ArgumentTypeError(
+                    f"Unknown objective {part!r}; valid: "
+                    f"{', '.join(VALID_OBJECTIVES)} (or 'both')"
+                )
+            if obj not in objectives:
+                objectives.append(obj)
+    return objectives
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Batch Post-Optimizer")
     parser.add_argument("--batch-dir", required=True, help="Path to batch directory")
     parser.add_argument("--target-pairs-json", type=str, default=None, help="JSON file with top N pairs to optimize")
@@ -1043,10 +1106,31 @@ def main():
         help="Estimated memory per worker in GB for auto-capping (default: 1.5)"
     )
     parser.add_argument(
-        "--objective", choices=["sharpe", "sortino", "both"], default="sharpe",
-        help="Objective function: sharpe (default), sortino, or both (runs sequentially)"
+        "--objective", type=parse_objectives, default="sharpe",
+        help=f"Comma-separated objective arms from {VALID_OBJECTIVES}; "
+             "'both' = sharpe,sortino. All arms run concurrently in one pool "
+             "with per-arm reports/JSONs (default: sharpe)"
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--n-blocks", type=int, default=3,
+        help="Number of contiguous calendar blocks for the block-wise Sharpe "
+             "objectives (default: 3)"
+    )
+    parser.add_argument(
+        "--lambda-dispersion", type=float, default=1.0,
+        help="Dispersion penalty weight for block_mean_std: "
+             "mean - lambda * std of per-block Sharpes (default: 1.0)"
+    )
+    parser.add_argument(
+        "--min-block-months", type=int, default=10,
+        help="Minimum calendar months per block; a block objective hard-fails "
+             "when in-sample months < n_blocks * min_block_months (default: 10)"
+    )
+    return parser
+
+
+def main():
+    args = build_arg_parser().parse_args()
 
     batch_dir = args.batch_dir
     progress_path = os.path.join(batch_dir, "batch_progress.json")
@@ -1283,8 +1367,9 @@ def main():
         print("WARNING: No optimization tasks generated! This usually indicates 0 trades in backtest or missing artifacts. Proceeding anyway.")
         # sys.exit(1)
 
-    # Determine which objectives to run
-    objectives = ["sharpe", "sortino"] if args.objective == "both" else [args.objective]
+    # Determine which objectives to run — --objective is parsed into a list
+    # by parse_objectives (argparse also applies it to the string default).
+    objectives = args.objective if isinstance(args.objective, list) else parse_objectives(args.objective)
 
     # Total tasks = per-objective tasks × number of objectives (all run concurrently)
     total_tasks = len(opt_tasks) * len(objectives)

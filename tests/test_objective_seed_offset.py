@@ -6,6 +6,10 @@ Status: DRAFT
 Strict-Lock: TRUE (Implementation agents may NOT modify this file)
 
 Ticket: telegram-spam-tests_07042026_0247
+Extended-By-Ticket: block-sharpe-objective-ab_07092026_1031
+    (Test 7 section: block_min=2 / block_median=3 / block_mean_std=4 offsets;
+    harness gained optional stub_preds/extra_run_kwargs — existing assertions
+    untouched, including the .get("unknown_metric", 0) == 0 contract.)
 
 Tests for per-objective seed offset in run_optimization().
 
@@ -113,11 +117,21 @@ _MINIMAL_CONFIG = {
 }
 
 
-def _run_optimization_capturing_seeds(objective_metric: str, random_seed: int = 42):
+def _run_optimization_capturing_seeds(
+    objective_metric: str,
+    random_seed: int = 42,
+    stub_preds=None,
+    extra_run_kwargs: dict | None = None,
+):
     """Call run_optimization with heavy I/O mocked out.
 
     Returns (np_seed_arg, tpe_seed_arg) — the actual values passed to
     ``np.random.seed()`` and ``TPESampler(seed=...)``.
+
+    stub_preds: optional predictions DataFrame override (block-metric tests
+        need a multi-year window to clear the block-size guard).
+    extra_run_kwargs: extra kwargs forwarded to run_optimization (e.g. the
+        block params n_blocks / lambda_dispersion / min_block_months).
     """
     import agent.strategy_optimizer as mod
 
@@ -152,7 +166,8 @@ def _run_optimization_capturing_seeds(objective_metric: str, random_seed: int = 
     mock_engine_cls = MagicMock()
     mock_engine_cls.from_config.return_value = mock_engine
 
-    stub_preds = _make_stub_predictions()
+    if stub_preds is None:
+        stub_preds = _make_stub_predictions()
     stub_ohlcv = _make_stub_ohlcv()
 
     patches = [
@@ -204,6 +219,7 @@ def _run_optimization_capturing_seeds(objective_metric: str, random_seed: int = 
                 objective_metric=objective_metric,
                 random_seed=random_seed,
                 quiet=True,
+                **(extra_run_kwargs or {}),
             )
         except _EarlyExit:
             pass  # expected — we only need the seed captures
@@ -367,4 +383,92 @@ class TestMultipleBaseSeeds:
         _, tpe_seed = _run_optimization_capturing_seeds("sharpe", random_seed=base_seed)
         assert tpe_seed == base_seed, (
             f"Expected TPE seed {base_seed} for sharpe with base {base_seed}, got {tpe_seed}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 7: Block-metric seed offsets (ticket block-sharpe-objective-ab_07092026_1031)
+# ---------------------------------------------------------------------------
+# The block-Sharpe A/B adds three objective arms; each must seed its study
+# deterministically and DIFFERENTLY: block_min=2, block_median=3,
+# block_mean_std=4.  sharpe=0 and sortino=1 stay untouched (asserted above;
+# re-pinned here alongside the full mapping).
+
+_BLOCK_METRIC_OFFSETS = {"block_min": 2, "block_median": 3, "block_mean_std": 4}
+
+
+def _make_block_stub_predictions():
+    """42-month hourly predictions window (2022-01 .. 2025-06) — wide enough
+    to clear the n_blocks*min_block_months=30 guard with no holdout carve."""
+    idx = pd.date_range("2022-01-01", "2025-06-30", freq="h")
+    return pd.DataFrame({"pred_long": 0.6, "pred_short": 0.4}, index=idx)
+
+
+_BLOCK_RUN_KWARGS = {"n_blocks": 3, "lambda_dispersion": 1.0, "min_block_months": 10}
+
+
+class TestBlockMetricOffsetMapping:
+    """The _OBJECTIVE_SEED_OFFSETS mapping gains the three block metrics."""
+
+    def test_block_min_offset_is_two(self):
+        from agent.strategy_optimizer import _OBJECTIVE_SEED_OFFSETS
+        assert _OBJECTIVE_SEED_OFFSETS["block_min"] == 2
+
+    def test_block_median_offset_is_three(self):
+        from agent.strategy_optimizer import _OBJECTIVE_SEED_OFFSETS
+        assert _OBJECTIVE_SEED_OFFSETS["block_median"] == 3
+
+    def test_block_mean_std_offset_is_four(self):
+        from agent.strategy_optimizer import _OBJECTIVE_SEED_OFFSETS
+        assert _OBJECTIVE_SEED_OFFSETS["block_mean_std"] == 4
+
+    def test_legacy_offsets_unchanged(self):
+        """sharpe=0 / sortino=1 must survive the extension byte-identically."""
+        from agent.strategy_optimizer import _OBJECTIVE_SEED_OFFSETS
+        assert _OBJECTIVE_SEED_OFFSETS["sharpe"] == 0
+        assert _OBJECTIVE_SEED_OFFSETS["sortino"] == 1
+
+    def test_all_five_offsets_unique(self):
+        """Every arm explores a different sampler stream from one base seed."""
+        from agent.strategy_optimizer import _OBJECTIVE_SEED_OFFSETS
+        offsets = [
+            _OBJECTIVE_SEED_OFFSETS[m]
+            for m in ("sharpe", "sortino", "block_min", "block_median", "block_mean_std")
+        ]
+        assert len(set(offsets)) == 5, f"offsets must be distinct, got {offsets}"
+
+
+class TestBlockMetricSeedThreading:
+    """run_optimization threads base_seed + offset into np.random.seed and
+    TPESampler for the block metrics, exactly like sharpe/sortino."""
+
+    @pytest.mark.parametrize("metric,offset", sorted(_BLOCK_METRIC_OFFSETS.items()))
+    def test_block_metric_np_and_tpe_seed(self, metric, offset):
+        np_seed, tpe_seed = _run_optimization_capturing_seeds(
+            metric,
+            random_seed=42,
+            stub_preds=_make_block_stub_predictions(),
+            extra_run_kwargs=dict(_BLOCK_RUN_KWARGS),
+        )
+        assert np_seed == 42 + offset, (
+            f"{metric} np.random.seed should be {42 + offset}, got {np_seed}"
+        )
+        assert tpe_seed == 42 + offset, (
+            f"{metric} TPESampler seed should be {42 + offset}, got {tpe_seed}"
+        )
+
+    def test_block_metrics_diverge_from_sharpe_and_each_other(self):
+        """Same base seed, four arms -> four distinct TPE seeds."""
+        seeds = {}
+        _, seeds["sharpe"] = _run_optimization_capturing_seeds("sharpe", random_seed=42)
+        for metric in _BLOCK_METRIC_OFFSETS:
+            _, seeds[metric] = _run_optimization_capturing_seeds(
+                metric,
+                random_seed=42,
+                stub_preds=_make_block_stub_predictions(),
+                extra_run_kwargs=dict(_BLOCK_RUN_KWARGS),
+            )
+        values = list(seeds.values())
+        assert len(set(values)) == len(values), (
+            f"TPE seeds must all differ across arms, got {seeds}"
         )
