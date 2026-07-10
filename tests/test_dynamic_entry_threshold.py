@@ -24,7 +24,7 @@ Strict-Lock: TRUE (Implementation agents may NOT modify this file)
 #   firing fraction at threshold t:  f(t) = P(prob >= t) = 1 - CDF(t)
 #   low  = quantile(1 - f_max)   (most-permissive threshold, fires ~f_max)
 #   high = quantile(1 - f_min)   (most-selective threshold, fires ~f_min)
-#   step = max((high - low) / 10, 1e-3)
+#   step = max((high - low) / 5, 1e-3)   # aggressive tier 2026-07-10 (was /10)
 #
 # These tests are written FIRST (TDD): they must be RED against the pre-fix
 # module (missing ``_entry_threshold_bounds`` / new kwargs) and GREEN after
@@ -147,7 +147,8 @@ class TestKnownDistributionBounds:
 
         assert low == pytest.approx(series.quantile(1 - f_max), abs=1e-9)
         assert high == pytest.approx(series.quantile(1 - f_min), abs=1e-9)
-        assert step == pytest.approx(max((high - low) / 10, 1e-3), abs=1e-12)
+        # AGGRESSIVE tier (2026-07-10): 6-point grid, step = span/5 (was /10).
+        assert step == pytest.approx(max((high - low) / 5, 1e-3), abs=1e-12)
 
     def test_uniform_firing_fractions(self):
         # Firing fraction at low ~ f_max, at high ~ f_min.
