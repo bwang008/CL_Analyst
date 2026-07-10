@@ -405,7 +405,22 @@ def main():
             cfg["execution_symbol"] = baseline_symbol
             cfg["nickname"] = nickname
             cfg["description"] = f"{objective.capitalize()} Ensemble #{ensemble_idx}: {long_desc} + {short_desc}"
-            cfg["holdout_months"] = manifest.get("defaults", {}).get("post_optimizer_holdout_months", 6)
+            # Holdout is manifest-authoritative (same precedence as vm_post_optimize.sh):
+            # v2 keeps it under baseline.training_workflow.optuna; only legacy/non-CL
+            # manifests carry a defaults block. No silent fallback — a wrong value here
+            # mislabels the opt/holdout split in every *_ensemble_backtests.md.
+            _holdout = (
+                manifest.get("baseline", {}).get("training_workflow", {}).get("optuna", {}).get("post_optimizer_holdout_months")
+                if manifest.get("baseline") is not None else None
+            )
+            if _holdout is None:
+                _holdout = manifest.get("defaults", {}).get("post_optimizer_holdout_months")
+            if _holdout is None:
+                raise ValueError(
+                    "post_optimizer_holdout_months not found in manifest "
+                    "(baseline.training_workflow.optuna or defaults) — refusing to default."
+                )
+            cfg["holdout_months"] = _holdout
             
             regression_triggered = opt_info.get("regression_guard_triggered", False)
             if regression_triggered:
