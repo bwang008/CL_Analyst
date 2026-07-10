@@ -1264,6 +1264,26 @@ try {
             $stampName = "${BatchId}_$($stampSymbol.Trim().ToUpper())_${stampTier}${stampSuffix}"
             Rename-Item -Path $BatchDir -NewName $stampName -ErrorAction Stop
             Write-Host "  Batch folder auto-stamped: reports\batch_runs\$stampName" -ForegroundColor Green
+            # The VM writes configs with the PLAIN batch-id path (it cannot know
+            # the stamped name), so the rename would strand every embedded
+            # predictions_path/model_path and fail the config validation gate.
+            # Rewrite the self-referencing dir segment inside the renamed
+            # configs to keep them loadable in place.
+            $stampedCfgDir = Join-Path (Split-Path $BatchDir -Parent) "$stampName\configs"
+            if (Test-Path $stampedCfgDir) {
+                $cfgPatched = 0
+                foreach ($cfgFile in Get-ChildItem "$stampedCfgDir\*.json" -ErrorAction SilentlyContinue) {
+                    $cfgRaw = Get-Content $cfgFile.FullName -Raw
+                    $cfgNew = $cfgRaw.Replace("batch_runs/$BatchId/", "batch_runs/$stampName/")
+                    if ($cfgNew -ne $cfgRaw) {
+                        Set-Content -Path $cfgFile.FullName -Value $cfgNew -Encoding utf8
+                        $cfgPatched++
+                    }
+                }
+                if ($cfgPatched -gt 0) {
+                    Write-Host "  Rewrote embedded batch-dir paths in $cfgPatched config(s) to the stamped name." -ForegroundColor Green
+                }
+            }
         } else {
             Write-Host "  WARNING: baseline.symbol unreadable from saved manifest -- batch folder left unstamped: $BatchDir" -ForegroundColor Yellow
         }
