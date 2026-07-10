@@ -116,34 +116,46 @@ def _ensemble_sort_key(item):
             long_metric, short_metric)
 
 
-def _canonical_pair_order(opt_data, batch_dir):
-    """Return (pair_key, pair_val) items in the canonical top_pairs.json order.
+def _canonical_pair_order(opt_data, batch_dir, objective="sharpe"):
+    """Return (pair_key, pair_val) items in the arm's canonical top-pairs order.
 
     E-slot labels (E01..E04) are assigned by enumeration position, so the order
-    MUST match top_pairs.json — the single source of truth for which pair is
-    ensemble N. Driving the order off ``sorted(opt_data.items(), ...)`` let the
-    non-deterministic as_completed() insertion order leak into the E labels
+    MUST match the arm's pairs file — the single source of truth for which pair
+    is ensemble N. Driving the order off ``sorted(opt_data.items(), ...)`` let
+    the non-deterministic as_completed() insertion order leak into the E labels
     whenever the sort key tied (single-sweep canary), mislabeling the emitted
     predictions/configs/backtests run-to-run.
 
+    Per-arm selection (unified_pair_optimizer --objectives) writes
+    ``top_pairs.json`` for sharpe and ``top_pairs_<arm>.json`` for other arms,
+    so each arm's file is tried first, then ``top_pairs.json`` (covers legacy
+    both-objective runs, where sortino shared sharpe's selection).
+
     Falls back to the deterministic, metric-aware ``_ensemble_sort_key`` when
-    top_pairs.json is missing/unreadable. Any opt_data pair not declared in
-    top_pairs.json is appended (never dropped) in deterministic order; any
-    declared pair missing from opt_data is reported loudly.
+    no pairs file is readable. Any opt_data pair not declared in the pairs file
+    is appended (never dropped) in deterministic order; any declared pair
+    missing from opt_data is reported loudly.
     """
-    tp_path = os.path.join(batch_dir, "top_pairs.json")
+    candidates = ["top_pairs.json"] if objective == "sharpe" else [
+        f"top_pairs_{objective}.json", "top_pairs.json",
+    ]
     top_pairs = None
-    if os.path.isfile(tp_path):
+    tp_name = None
+    for name in candidates:
+        path = os.path.join(batch_dir, name)
+        if not os.path.isfile(path):
+            continue
         try:
-            with open(tp_path, "r", encoding="utf-8-sig") as f:
+            with open(path, "r", encoding="utf-8-sig") as f:
                 top_pairs = json.load(f)
+            tp_name = name
+            break
         except Exception as e:
-            print(f"  [WARN] top_pairs.json unreadable ({e}); using deterministic sort fallback for E-order")
-            top_pairs = None
+            print(f"  [WARN] {name} unreadable ({e}); trying next pairs source")
 
     if not top_pairs:
-        if not os.path.isfile(tp_path):
-            print("  [WARN] top_pairs.json missing; using deterministic sort fallback for E-order")
+        print(f"  [WARN] no readable pairs file for objective '{objective}' "
+              f"(tried: {', '.join(candidates)}); using deterministic sort fallback for E-order")
         return sorted(opt_data.items(), key=_ensemble_sort_key)
 
     ordered = []
@@ -161,9 +173,9 @@ def _canonical_pair_order(opt_data, batch_dir):
         key=_ensemble_sort_key,
     )
     if missing:
-        print(f"  [WARN] {len(missing)} top_pairs.json pair(s) not found in opt_data (cannot emit): {missing}")
+        print(f"  [WARN] {len(missing)} {tp_name} pair(s) not found in opt_data (cannot emit): {missing}")
     if leftover:
-        print(f"  [WARN] {len(leftover)} opt_data pair(s) not declared in top_pairs.json; appending in deterministic order after declared pairs")
+        print(f"  [WARN] {len(leftover)} opt_data pair(s) not declared in {tp_name}; appending in deterministic order after declared pairs")
     return ordered + leftover
 
 
@@ -363,9 +375,9 @@ def main():
         markdown_lines.append("")
         markdown_lines.append("---")
         markdown_lines.append("")
-        # E-slot order MUST follow top_pairs.json (the canonical selection), not
-        # the non-deterministic opt_data insertion order. See _canonical_pair_order.
-        sorted_opt_data = _canonical_pair_order(opt_data, batch_dir)
+        # E-slot order MUST follow the arm's own pairs file (the canonical
+        # selection), not the non-deterministic opt_data insertion order.
+        sorted_opt_data = _canonical_pair_order(opt_data, batch_dir, objective)
 
         # Derive e2e_dataset_tag via the SAME shared helper vm_e2e_pipeline
         # uses (src.core.dataset_tag) — alignment is true by construction (T6).
