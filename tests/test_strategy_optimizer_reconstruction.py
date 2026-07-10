@@ -100,7 +100,11 @@ def _fake_best_params(conflict_resolution="reverse_position"):
 def _reconstruct_ensemble_cfg(base_cfg, best_params):
     """Mirror the ``elif is_tiered:`` ensemble reconstruction block that lives
     inside run_optimization / run_hybrid_optimization, exercising the shared
-    helper the fix introduces."""
+    helper the fix introduces.
+
+    AGGRESSIVE tier (2026-07-10): the live block additionally injects the tied
+    ``atr_period_shared`` into both sides, applies _FROZEN_PARAMS, and pins
+    ``conflict_resolution`` to the frozen constant — mirrored here."""
     from src.live_execution.strategies.execution_models import create_execution_strategy
 
     best_cfg = copy.deepcopy(base_cfg)
@@ -108,6 +112,12 @@ def _reconstruct_ensemble_cfg(base_cfg, best_params):
 
     long_params = {k.replace("_long", ""): v for k, v in best_params.items() if k.endswith("_long")}
     short_params = {k.replace("_short", ""): v for k, v in best_params.items() if k.endswith("_short")}
+    _shared_atr = best_params.get("atr_period_shared")
+    if _shared_atr is not None:
+        long_params["atr_period"] = _shared_atr
+        short_params["atr_period"] = _shared_atr
+    long_params.update(so._FROZEN_PARAMS)
+    short_params.update(so._FROZEN_PARAMS)
     long_params = so._derive_trailing_params(long_params)
     short_params = so._derive_trailing_params(short_params)
     strategy.apply_trial_params(best_cfg, long_params, side="long")
@@ -115,6 +125,7 @@ def _reconstruct_ensemble_cfg(base_cfg, best_params):
 
     # The fix: re-apply any strategy-level (non-suffixed) trial param.
     so._reapply_strategy_level_params(best_cfg, best_params)
+    best_cfg["conflict_resolution"] = so._FROZEN_CONFLICT_RESOLUTION
     return best_cfg
 
 
@@ -139,11 +150,16 @@ class TestConflictResolutionSurvivesReconstruction:
     @pytest.mark.parametrize(
         "mode", ["hold", "close_existing_position", "reverse_position"]
     )
-    def test_ensemble_reconstruction_keeps_conflict_resolution(self, mode):
-        base_cfg = _make_tiered_cfg(conflict_resolution="hold")
+    def test_ensemble_reconstruction_pins_frozen_conflict_resolution(self, mode):
+        """AGGRESSIVE tier: conflict_resolution is frozen — the objective pins
+        every trial cfg to the frozen constant, so reconstruction must pin the
+        same constant no matter what the base cfg (or a legacy trial params
+        dict) carries. This supersedes the pre-tier contract where the trial's
+        own suggested mode had to survive."""
+        base_cfg = _make_tiered_cfg(conflict_resolution=mode)
         params = _fake_best_params(conflict_resolution=mode)
         best_cfg = _reconstruct_ensemble_cfg(base_cfg, params)
-        assert best_cfg["conflict_resolution"] == params["conflict_resolution"] == mode
+        assert best_cfg["conflict_resolution"] == so._FROZEN_CONFLICT_RESOLUTION
 
 
 # ---------------------------------------------------------------------------
@@ -155,9 +171,13 @@ class TestReconstructionMatchesObjectiveConfig:
     def test_reconstructed_cfg_matches_objective_built_cfg(self):
         """The objective stores (via TopKTracker) the exact cfg it backtested.
         The reconstructed best_cfg must carry the same conflict_resolution, so
-        the re-backtest cannot diverge from the trial's consistency score."""
-        base_cfg = _make_tiered_cfg(conflict_resolution="hold")
-        non_default_mode = "reverse_position"
+        the re-backtest cannot diverge from the trial's consistency score.
+
+        AGGRESSIVE tier: conflict_resolution is frozen, so 'the same value' is
+        the frozen constant on both sides of the comparison — the invariant
+        (objective cfg == reconstructed cfg) is unchanged. The trial is
+        SAMPLED (not enqueued): pre-tier param dicts are off-space now."""
+        base_cfg = _make_tiered_cfg(conflict_resolution="reverse_position")
 
         tracker = so.TopKTracker(k=1, save_dir=os.path.join(
             os.environ.get("TEMP", "/tmp"), "recon_test_topk"))
@@ -208,8 +228,10 @@ class TestReconstructionMatchesObjectiveConfig:
             def run(self, *a, **k):
                 return _FakeResult()
 
-        # Build a trial that pins conflict_resolution to the non-default mode.
-        study = optuna.create_study(direction="maximize")
+        # Sample one in-space trial; the objective pins the frozen conflict.
+        study = optuna.create_study(
+            direction="maximize", sampler=optuna.samplers.TPESampler(seed=42)
+        )
 
         import unittest.mock as mock
         with mock.patch.object(so, "BacktestEngine", _FakeEngine):
@@ -217,15 +239,10 @@ class TestReconstructionMatchesObjectiveConfig:
                 base_cfg, preds, ohlcv, tracker=tracker,
                 objective_metric="sharpe", optimize_side=None,
             )
-            study.enqueue_trial({
-                **{k: v for k, v in _fake_best_params(non_default_mode).items()
-                   if not k.endswith("_long") and not k.endswith("_short")},
-                **_fake_best_params(non_default_mode),
-            })
             study.optimize(objective, n_trials=1)
 
         objective_cfg = captured["cfg"]
-        assert objective_cfg["conflict_resolution"] == non_default_mode
+        assert objective_cfg["conflict_resolution"] == so._FROZEN_CONFLICT_RESOLUTION
 
         # Now reconstruct from the trial params and confirm no divergence.
         best_trial = study.best_trial

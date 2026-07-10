@@ -836,21 +836,47 @@ def _load_ensemble_predictions(base_cfg: dict) -> pd.DataFrame:
 
 # Parameter search ranges — single source of truth for _suggest_side_params
 # and _extract_warm_start_params.  Each entry: (low, high, step, type).
+#
+# ── AGGRESSIVE search-space tier (2026-07-10) ──────────────────────────────
+# Shrunk from the 9-dim/side baseline per the dimensionality audit
+# (reports/analysis/optimizer_dim_audit_07102026.md): across 112 pooled
+# winners every dimension's winning values spanned 80-100% of its allowed
+# range (the 200-trial argmax fits selection noise on every dim), so weak /
+# inert dims are FROZEN at the winner-consensus medians (_FROZEN_PARAMS) and
+# the surviving dims are narrowed/coarsened to resolutions at or above
+# execution noise.  Baseline rollback = git revert of this commit.
+#   baseline:   9 dims/side, ~1.5e8 configs/side (log10 8.17)
+#   aggressive: 5 dims/side, ~3.0e3 configs/side (log10 3.48)
+SEARCH_SPACE_TIER = "aggressive"
 _PARAM_RANGES = {
-    "tp_atr_mult":                    (2.0,   8.0, 0.5,  "float"),
-    "sl_atr_mult":                    (0.5,   3.0, 0.5,  "float"),
-    "trigger_frac":                   (0.1,   0.8, 0.1,  "float"),
-    "distance_frac":                  (0.0,   0.8, 0.1,  "float"),
-    "cooldown_bars":                  (1,    15,   2,    "int"),
-    "max_hold_bars":                  (6,    36,   6,    "int"),
-    "consecutive_signal_threshold":   (0,     4,   1,    "int"),
+    "tp_atr_mult":                    (4.0,   8.0, 1.0,  "float"),
+    "sl_atr_mult":                    (1.0,   3.0, 0.5,  "float"),
+    "cooldown_bars":                  (1,    13,   4,    "int"),
     # NOTE: entry_threshold's static tuple is the FALLBACK only (used when a
     # side's prob series is empty/missing). The live search bounds are derived
     # per-model / per-side from the prediction distribution — see
     # _entry_threshold_bounds() and FIRING_FRAC_MIN/MAX below.
-    "entry_threshold":                (0.30,  0.70, 0.04, "float"),
-    "atr_period":                     (4,    40,   4,    "int"),
+    "entry_threshold":                (0.30,  0.70, 0.08, "float"),
+    "atr_period":                     (4,    36,   8,    "int"),
 }
+
+# Frozen (formerly searched) dims — deliberately constant for EVERY trial and
+# re-applied to the reconstructed best config, so trial cfg == best cfg.
+# Values are the winner-consensus medians from the audit (not config
+# fallbacks — the no-silent-default rule does not apply to deliberate
+# experiment constants).  max_hold_bars is frozen GLOBALLY at the pooled
+# median (audit P11 proposed per-target-family values; deferred — needs
+# manifest plumbing).
+_FROZEN_PARAMS = {
+    "trigger_frac": 0.4,              # trailing trigger at 40% of TP distance
+    "distance_frac": 0.5,             # trailing SL offset at 50% of trigger
+    "max_hold_bars": 30,              # pooled winner median
+    "consecutive_signal_threshold": 2,
+}
+# conflict_resolution: provably inert in single-side mode (the opposite side
+# is disabled, and reconstruction dropped it) and modal-at-"hold" in ensemble
+# winners — frozen, no longer suggested (audit P1+P2).
+_FROZEN_CONFLICT_RESOLUTION = "hold"
 
 # ── Dynamic entry-threshold search band (firing-fraction based) ────────────
 # Different models emit probabilities on completely different scales, so a
@@ -888,7 +914,7 @@ def _entry_threshold_bounds(
 
         low  = quantile(1 - f_max)   # most-permissive threshold, fires ~f_max
         high = quantile(1 - f_min)   # most-selective threshold, fires ~f_min
-        step = max((high - low) / 10, 1e-3)
+        step = max((high - low) / 5, 1e-3)   # 6-point grid (aggressive tier; was /10 = 11 points)
 
     NaNs are dropped before quantiling. Degenerate / compressed distributions
     (``high - low`` below a small epsilon) are widened symmetrically to a
@@ -923,7 +949,7 @@ def _entry_threshold_bounds(
         high = min(1.0, low + _ENTRY_THR_MIN_SPAN)
         low = max(0.0, high - _ENTRY_THR_MIN_SPAN)
 
-    step = max((high - low) / 10.0, _ENTRY_THR_MIN_STEP)
+    step = max((high - low) / 5.0, _ENTRY_THR_MIN_STEP)
     return low, high, step
 
 
@@ -992,8 +1018,14 @@ def _reapply_strategy_level_params(best_cfg: dict, trial_params: dict) -> dict:
     suffix is written straight onto the top-level config.
 
     Mutates ``best_cfg`` in place and returns it for chaining.
+
+    ``atr_period_shared`` (the tied cross-side ATR of the aggressive tier) is
+    per-side data, not a strategy-level key — it is injected into both side
+    dicts by the reconstruction blocks and must NOT be written top-level.
     """
     for k, v in trial_params.items():
+        if k == "atr_period_shared":
+            continue
         if not (k.endswith("_long") or k.endswith("_short")):
             best_cfg[k] = v
     return best_cfg
@@ -1039,8 +1071,16 @@ def _extract_warm_start_params(
 
     Returns None if extraction fails (e.g. missing config keys).
     """
-    def _extract_side(cfg: dict, side: str, suffix: str) -> dict:
-        """Extract params for one side from its config block."""
+    def _extract_side(cfg: dict, side: str, suffix: str, include_atr: bool = True) -> dict:
+        """Extract params for one side from its config block.
+
+        Emits ONLY keys the objective will actually suggest for this mode
+        (the _PARAM_RANGES survivors) — frozen dims (_FROZEN_PARAMS) and the
+        derived trailing latents are deliberately absent, and ``include_atr``
+        is False in ensemble mode where the tied ``atr_period_shared`` is
+        emitted separately by the caller.  Extra keys in enqueue_trial would
+        desynchronize the warm-start trial from the search space.
+        """
         side_cfg = cfg.get(side, {})
         params = {}
 
@@ -1056,21 +1096,15 @@ def _extract_warm_start_params(
                 "threshold", cfg.get("entry_threshold", 0.55)
             )
 
-        raw_tp = side_cfg.get("tp_atr_mult", cfg.get("tp_atr_mult", 3.0))
-        raw_trail = side_cfg.get("trailing_atr_mult", cfg.get("trailing_atr_mult", 2.0))
-        raw_offset = side_cfg.get("trailing_sl_atr_offset", cfg.get("trailing_sl_atr_offset", 2.0))
-
         raw_values = {
             "entry_threshold": raw_thr,
-            "tp_atr_mult": raw_tp,
+            "tp_atr_mult": side_cfg.get("tp_atr_mult", cfg.get("tp_atr_mult", 3.0)),
             "sl_atr_mult": side_cfg.get("sl_atr_mult", cfg.get("sl_atr_mult", 1.5)),
-            "trigger_frac": raw_trail / raw_tp if raw_tp > 0 else 0.5,
-            "distance_frac": 1.0 - (raw_offset / raw_trail) if raw_trail > 0 else 0.0,
             "cooldown_bars": side_cfg.get("cooldown_bars", cfg.get("cooldown_bars", 7)),
-            "max_hold_bars": side_cfg.get("max_hold_bars", cfg.get("max_hold_bars", 24)),
-            "consecutive_signal_threshold": side_cfg.get("consecutive_signal_threshold", cfg.get("consecutive_signal_threshold", 0)),
             "atr_period": side_cfg.get("atr_period", cfg.get("atr_period", 14)),
         }
+        if not include_atr:
+            raw_values.pop("atr_period")
 
         for key, raw_val in raw_values.items():
             if key == "entry_threshold":
@@ -1091,10 +1125,16 @@ def _extract_warm_start_params(
             # Single-side mode
             warm = _extract_side(base_cfg, optimize_side, optimize_side)
         elif is_tiered:
-            # Simultaneous ensemble — both sides
-            warm.update(_extract_side(base_cfg, "long", "long"))
-            warm.update(_extract_side(base_cfg, "short", "short"))
-            warm["conflict_resolution"] = base_cfg.get("conflict_resolution", "hold")
+            # Simultaneous ensemble — both sides. atr_period is TIED across
+            # sides (audit P4): one shared key, snapped from the long side.
+            # conflict_resolution is frozen — not part of the search space.
+            warm.update(_extract_side(base_cfg, "long", "long", include_atr=False))
+            warm.update(_extract_side(base_cfg, "short", "short", include_atr=False))
+            a_low, a_high, a_step, a_dtype = _PARAM_RANGES["atr_period"]
+            raw_atr = base_cfg.get("long", {}).get(
+                "atr_period", base_cfg.get("atr_period", 14)
+            )
+            warm["atr_period_shared"] = _snap_to_grid(raw_atr, a_low, a_high, a_step, a_dtype)
         else:
             # Non-tiered — no suffix. Single-model configs are long-side.
             side_cfg = base_cfg
@@ -1322,11 +1362,20 @@ def make_objective(
     if window_end is None:
         window_end = predictions_df.index.max()
 
-    def _suggest_side_params(trial: optuna.Trial, suffix: str) -> dict:
-        """Suggest params for one side with the given suffix."""
+    def _suggest_side_params(trial: optuna.Trial, suffix: str,
+                             shared_atr: int | None = None) -> dict:
+        """Suggest params for one side with the given suffix.
+
+        ``shared_atr`` (ensemble mode) injects the tied cross-side ATR period
+        (audit P4) instead of a per-side suggestion.  Frozen dims
+        (_FROZEN_PARAMS) are appended verbatim so the derived trailing params
+        and the applied config stay fully specified.
+        """
         params = {}
         for key, (low, high, step, dtype) in _PARAM_RANGES.items():
-            if key == "entry_threshold":
+            if key == "atr_period" and shared_atr is not None:
+                params[key] = shared_atr
+            elif key == "entry_threshold":
                 # Dynamic per-side bounds instead of the static tuple.
                 d_low, d_high, d_step = _entry_thr_range(suffix)
                 params[key] = trial.suggest_float(
@@ -1336,6 +1385,7 @@ def make_objective(
                 params[key] = trial.suggest_float(f"{key}_{suffix}", low, high, step=step)
             elif dtype == "int":
                 params[key] = trial.suggest_int(f"{key}_{suffix}", int(low), int(high), step=int(step))
+        params.update(_FROZEN_PARAMS)
         return _derive_trailing_params(params)
 
     def _disable_side(cfg: dict, side_to_disable: str) -> None:
@@ -1348,12 +1398,10 @@ def make_objective(
         cfg = copy.deepcopy(base_cfg)
 
         if is_tiered:
-            # Conflict resolution: strategy-level param (not per-side)
-            conflict_mode = trial.suggest_categorical(
-                "conflict_resolution",
-                ["hold", "close_existing_position", "reverse_position"],
-            )
-            cfg["conflict_resolution"] = conflict_mode
+            # conflict_resolution FROZEN (audit P1+P2): it was provably inert
+            # in single-side mode (opposite side disabled + dropped at
+            # reconstruction) and modal-at-"hold" in ensemble winners.
+            cfg["conflict_resolution"] = _FROZEN_CONFLICT_RESOLUTION
 
             if optimize_side == "long":
                 # Single-side: only suggest long params, disable short
@@ -1366,9 +1414,15 @@ def make_objective(
                 strategy.apply_trial_params(cfg, side_params, side="short")
                 _disable_side(cfg, "long")
             else:
-                # Simultaneous: suggest asymmetric params for both sides
-                long_params = _suggest_side_params(trial, "long")
-                short_params = _suggest_side_params(trial, "short")
+                # Simultaneous: asymmetric params for both sides, but ONE
+                # shared ATR clock (audit P4 — long/short winner medians were
+                # identical at 22/22 across 112 winners).
+                a_low, a_high, a_step, _a_dtype = _PARAM_RANGES["atr_period"]
+                shared_atr = trial.suggest_int(
+                    "atr_period_shared", int(a_low), int(a_high), step=int(a_step)
+                )
+                long_params = _suggest_side_params(trial, "long", shared_atr=shared_atr)
+                short_params = _suggest_side_params(trial, "short", shared_atr=shared_atr)
                 strategy.apply_trial_params(cfg, long_params, side="long")
                 strategy.apply_trial_params(cfg, short_params, side="short")
         else:
@@ -1384,6 +1438,7 @@ def make_objective(
                     params[key] = trial.suggest_float(key, low, high, step=step)
                 elif dtype == "int":
                     params[key] = trial.suggest_int(key, int(low), int(high), step=int(step))
+            params.update(_FROZEN_PARAMS)
             params = _derive_trailing_params(params)
             if base_cfg.get("execution_class") == "BreakoutStraddleStrategy":
                 params["breakout_window"] = trial.suggest_int("breakout_window", 2, 24, step=2)
@@ -1784,8 +1839,11 @@ def run_optimization(
             for k, v in best_trial.params.items()
             if k.endswith(f"_{optimize_side}")
         }
+        # Frozen dims: the same constants every trial's cfg was built with.
+        side_params.update(_FROZEN_PARAMS)
         side_params = _derive_trailing_params(side_params)
         strategy.apply_trial_params(best_cfg, side_params, side=optimize_side)
+        best_cfg["conflict_resolution"] = _FROZEN_CONFLICT_RESOLUTION
         # Disable the other side
         other_side = "short" if optimize_side == "long" else "long"
         if other_side in best_cfg and "tiers" in best_cfg[other_side]:
@@ -1795,6 +1853,13 @@ def run_optimization(
         # Split suffixed params back into per-side dicts
         long_params = {k.replace("_long", ""): v for k, v in best_trial.params.items() if k.endswith("_long")}
         short_params = {k.replace("_short", ""): v for k, v in best_trial.params.items() if k.endswith("_short")}
+        # Tied ATR (audit P4): one shared suggestion, injected into both sides.
+        _shared_atr = best_trial.params.get("atr_period_shared")
+        if _shared_atr is not None:
+            long_params["atr_period"] = _shared_atr
+            short_params["atr_period"] = _shared_atr
+        long_params.update(_FROZEN_PARAMS)
+        short_params.update(_FROZEN_PARAMS)
         long_params = _derive_trailing_params(long_params)
         short_params = _derive_trailing_params(short_params)
         strategy.apply_trial_params(best_cfg, long_params, side="long")
@@ -1802,8 +1867,11 @@ def run_optimization(
         # Re-apply strategy-level params (e.g. conflict_resolution) dropped by
         # the _long/_short suffix filter above, matching the objective's cfg.
         _reapply_strategy_level_params(best_cfg, dict(best_trial.params))
+        best_cfg["conflict_resolution"] = _FROZEN_CONFLICT_RESOLUTION
     else:
-        params = _derive_trailing_params(dict(best_trial.params))
+        params = dict(best_trial.params)
+        params.update(_FROZEN_PARAMS)
+        params = _derive_trailing_params(params)
         strategy.apply_trial_params(best_cfg, params)
 
     # Final backtest with best params
@@ -2193,6 +2261,15 @@ def run_hybrid_optimization(
         print("  [WARN] NO WARM-START: Optimizer will cold-start from random sampling!")
 
     # Inject Stage 1 VBT warm-start configs (after baseline)
+    # AGGRESSIVE tier: the vbt grids (_VBT_*) emit params outside the shrunk
+    # search space (max_hold_bars frozen, tp/sl coarsened/narrowed), so
+    # enqueueing them would desynchronize the study. Injection is disabled
+    # until the vbt grids are re-aligned (follow-up); the baseline warm-start
+    # above still applies.
+    if stage1_configs and SEARCH_SPACE_TIER == "aggressive":
+        print(f"  [AGGRESSIVE-TIER] Skipping {len(stage1_configs)} Stage 1 vbt "
+              f"warm-starts (vbt grids not aligned to the shrunk space)")
+        stage1_configs = []
     for params in stage1_configs:
         try:
             study.enqueue_trial(params)
@@ -2279,8 +2356,10 @@ def run_hybrid_optimization(
             for k, v in best_trial.params.items()
             if k.endswith(f"_{optimize_side}")
         }
+        side_params.update(_FROZEN_PARAMS)
         side_params = _derive_trailing_params(side_params)
         strategy.apply_trial_params(best_cfg, side_params, side=optimize_side)
+        best_cfg["conflict_resolution"] = _FROZEN_CONFLICT_RESOLUTION
         other_side = "short" if optimize_side == "long" else "long"
         if other_side in best_cfg and "tiers" in best_cfg[other_side]:
             for tier in best_cfg[other_side]["tiers"]:
@@ -2288,6 +2367,12 @@ def run_hybrid_optimization(
     elif is_tiered:
         long_params = {k.replace("_long", ""): v for k, v in best_trial.params.items() if k.endswith("_long")}
         short_params = {k.replace("_short", ""): v for k, v in best_trial.params.items() if k.endswith("_short")}
+        _shared_atr = best_trial.params.get("atr_period_shared")
+        if _shared_atr is not None:
+            long_params["atr_period"] = _shared_atr
+            short_params["atr_period"] = _shared_atr
+        long_params.update(_FROZEN_PARAMS)
+        short_params.update(_FROZEN_PARAMS)
         long_params = _derive_trailing_params(long_params)
         short_params = _derive_trailing_params(short_params)
         strategy.apply_trial_params(best_cfg, long_params, side="long")
@@ -2295,8 +2380,11 @@ def run_hybrid_optimization(
         # Re-apply strategy-level params (e.g. conflict_resolution) dropped by
         # the _long/_short suffix filter above, matching the objective's cfg.
         _reapply_strategy_level_params(best_cfg, dict(best_trial.params))
+        best_cfg["conflict_resolution"] = _FROZEN_CONFLICT_RESOLUTION
     else:
-        params = _derive_trailing_params(dict(best_trial.params))
+        params = dict(best_trial.params)
+        params.update(_FROZEN_PARAMS)
+        params = _derive_trailing_params(params)
         strategy.apply_trial_params(best_cfg, params)
 
     # ── Final backtest ───────────────────────────────────────────────────────
