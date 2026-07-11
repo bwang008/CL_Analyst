@@ -1,4 +1,4 @@
-﻿{
+{
   "_comment": "NG HourSet_02B SCOUT \u2014 top-6 target families from the Stage-1 AUC screen (reports/screens/ng_02b/AUC_Model_Report.md), sourced from the new short-horizon dataset (2x1_1H/2x1_2H/1x0p5_1H added on top of the 01B target suite). Mirrors batch_manifest_v2_ng_hourset01b_scout.json (same infra/execution_workflow/optuna box); only dataset_version and experiments differ. Any 1x0p5_1H family flagged 'cost?' in the screen (round-trip cost >6% of a TP winner) was excluded in favor of the next-best clean family.",
   "infrastructure": {
     "machine_type": "c2-standard-16",
@@ -81,7 +81,7 @@
         "min_child_samples_max": 500,
         "feature_fraction_min": 0.4,
         "feature_fraction_max": 0.8,
-        "post_optimizer_trials": 200,
+        "post_optimizer_trials": 125,
         "post_optimizer_holdout_months": 12
       }
     },
