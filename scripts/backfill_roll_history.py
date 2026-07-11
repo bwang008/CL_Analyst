@@ -29,7 +29,7 @@ Pure, unit-tested core (tests/test_backfill_roll_history.py):
 Operator CLI (``main``): per-symbol resolution of the deployed child's
 HourSet from the live strategy config, Databento post-HourSet seam
 derivation with a basis-identity gate, the documented one-time CL
-``--cl-june-ratio`` estimate, ``--dry-run``, and the feature-level
+``--extra-seam`` declarations, ``--dry-run``, and the feature-level
 spot-check gate.
 
 ACTIVATION IS OPERATOR-GATED: ratios only restore at ``initialize()``.
@@ -45,6 +45,7 @@ import copy
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -101,6 +102,11 @@ _REPLAY_REL_TOL_CEILING = 1e-6
 # post-HourSet coverage comes from the seam SOURCES (Databento / the CL
 # IBKR estimate), not from this net. Operator-overridable via the CLI.
 TAIL_SEAM_REL_THRESHOLD = 0.01
+
+# Max fraction of the cache∩HourSet overlap an operator trim (--reference-end
+# --extra-seam context) may exclude — trims exist to drop provably vendor-mixed or
+# mixed-basis EDGE bars, never to hide seams mid-window.
+_MAX_REFERENCE_TRIM_FRAC = 0.05
 
 # Feature-level spot-check gate defaults (blueprint 5c).
 DEFAULT_SPOTCHECK_FEATURES = ("TS_VOL_YZ_ZSCORE_72v840",)
@@ -536,6 +542,135 @@ def _validate_extra_entries(extra_entries: Optional[Iterable[dict]]) -> list:
     return validated
 
 
+def _split_specs(specs: Optional[Iterable[str]]) -> list:
+    """Flatten repeatable/comma-separated CLI spec lists."""
+    return [s.strip() for item in (specs or [])
+            for s in str(item).split(",") if s.strip()]
+
+
+def parse_reference_ends(specs: Optional[Iterable[str]]) -> dict:
+    """Parse --reference-end specs: ``SYM=ISO_TIMESTAMP`` (repeatable or
+    comma-separated) -> {SYM: pd.Timestamp}. Duplicate symbols raise."""
+    out: dict = {}
+    for spec in _split_specs(specs):
+        if "=" not in spec:
+            raise BackfillValidationError(
+                f"--reference-end '{spec}' must be SYM=ISO_TIMESTAMP."
+            )
+        sym, ts_str = spec.split("=", 1)
+        sym = sym.strip().upper()
+        if sym in out:
+            raise BackfillValidationError(
+                f"--reference-end given twice for {sym} — ambiguous."
+            )
+        try:
+            out[sym] = pd.Timestamp(ts_str)
+        except ValueError as exc:
+            raise BackfillValidationError(
+                f"--reference-end '{spec}': unparseable timestamp ({exc})."
+            ) from exc
+    return out
+
+
+def parse_extra_seams(specs: Optional[Iterable[str]]) -> dict:
+    """Parse --extra-seam specs: ``SYM=CUTOFF:RATIO`` (repeatable or
+    comma-separated) -> {SYM: [(pd.Timestamp cutoff, float ratio), ...]},
+    cutoff-sorted per symbol.
+
+    CUTOFF is an ISO timestamp (contains colons), so the ratio splits off
+    at the LAST colon. Ratios must be positive finite floats != 1.0 (a
+    declared no-op seam is always an operator error).
+    """
+    out: dict = {}
+    for spec in _split_specs(specs):
+        if "=" not in spec:
+            raise BackfillValidationError(
+                f"--extra-seam '{spec}' must be SYM=CUTOFF:RATIO."
+            )
+        sym, rest = spec.split("=", 1)
+        if ":" not in rest:
+            raise BackfillValidationError(
+                f"--extra-seam '{spec}' is missing the :RATIO suffix."
+            )
+        cutoff_str, ratio_str = rest.rsplit(":", 1)
+        try:
+            cutoff = pd.Timestamp(cutoff_str)
+        except ValueError as exc:
+            raise BackfillValidationError(
+                f"--extra-seam '{spec}': unparseable cutoff ({exc})."
+            ) from exc
+        try:
+            ratio = float(ratio_str)
+        except ValueError as exc:
+            raise BackfillValidationError(
+                f"--extra-seam '{spec}': unparseable ratio ({exc})."
+            ) from exc
+        if not np.isfinite(ratio) or ratio <= 0.0 or ratio == 1.0:
+            raise BackfillValidationError(
+                f"--extra-seam '{spec}': ratio {ratio!r} must be a positive "
+                "finite float != 1.0."
+            )
+        out.setdefault(sym.strip().upper(), []).append((cutoff, ratio))
+    for sym in out:
+        out[sym].sort(key=lambda cr: cr[0])
+    return out
+
+
+def _check_declared_seam_vs_overlap(
+    overlap_q: pd.Series,
+    cutoff: pd.Timestamp,
+    ratio: float,
+    symbol: str,
+    window: int = 240,
+) -> None:
+    """Independent value+direction proof for a DECLARED seam.
+
+    The replay-equality gate CANNOT arbitrate a declared post-reference
+    ratio — the same number enters both the adjustment and expected_scale,
+    so it cancels out of the quotient (verified empirically this ticket).
+    This check is the independent proof: on the FULL (untrimmed)
+    cache∩HourSet quotient, local medians around the cutoff imply
+    ``ratio = median(before) / median(after)`` — valid both when the
+    HourSet itself witnessed the seam (ES: quotient steps down to ~1) and
+    when only the CACHE flipped basis (CL: quotient steps up to ~1/ratio).
+    Medians are vendor-print robust.
+
+    Limitation: before/after windows are capped at ``window`` bars and
+    assume no OTHER seam inside them.
+
+    Skips LOUDLY (warning) when the cutoff lies beyond the HourSet overlap
+    (nothing to compare against — the declaring source is then the only
+    authority). Raises on contradiction.
+    """
+    before = overlap_q.loc[overlap_q.index < cutoff]
+    after = overlap_q.loc[overlap_q.index >= cutoff]
+    if len(before) < 3 or len(after) < 3:
+        log.warning(
+            "%s: declared seam at %s is not checkable against the HourSet "
+            "overlap (before=%d/after=%d bars) — value rests on the "
+            "declaring source only.",
+            symbol, cutoff, len(before), len(after),
+        )
+        return
+    m_before = float(np.median(before.iloc[-window:].to_numpy()))
+    m_after = float(np.median(after.iloc[:window].to_numpy()))
+    implied = m_before / m_after
+    gap = abs(1.0 - ratio)
+    if abs(implied - ratio) > 0.5 * gap:
+        raise BackfillValidationError(
+            f"Declared seam for {symbol} at {cutoff} FAILS the data "
+            f"consistency proof: declared ratio {ratio!r} but the overlap "
+            f"quotient implies {implied!r} (before-median {m_before!r}, "
+            f"after-median {m_after!r}). Wrong cutoff, wrong direction, or "
+            "wrong value."
+        )
+    log.info(
+        "%s declared-seam consistency OK at %s: declared %.16g vs "
+        "in-data implied %.16g.",
+        symbol, cutoff, ratio, implied,
+    )
+
+
 def _check_uncovered_windows(
     raw_close: pd.Series,
     reference: pd.Series,
@@ -580,8 +715,9 @@ def _check_uncovered_windows(
             f"Uncovered roll seam(s) AFTER the reference end ({ref_end}) for "
             f"{symbol} at {[str(t) for t in uncovered]} — partial coverage "
             "is a silent basis break mid-window. Supply the post-reference "
-            "seam source (Databento ratio/raw derivation, or --cl-june-ratio "
-            "for CL) so every seam between seed start and NOW is covered."
+            "seam source (Databento ratio/raw derivation, or an explicit "
+            "--extra-seam declaration) so every seam between seed start "
+            "and NOW is covered."
         )
 
 
@@ -726,7 +862,17 @@ def migrate_symbol(
         for e in all_new
         if pd.Timestamp(e["timestamp_cutoff"]) > ref_end
     ]
-    expected_scale = float(np.prod(post_ref_ratios)) if post_ref_ratios else 1.0
+    # Replay quotient for a bar in reference segment j:
+    #   adjusted/reference = (f_j/f_J * P) / f_j = P / f_J
+    # where P = product of post-reference ratios and f_J = the TERMINAL
+    # reference-segment factor. f_J is exactly 1.0 when the reference ends
+    # on the newest basis (the unit-test contract), but a reference trimmed
+    # before its own final seam ends on an older basis (f_J != 1) and the
+    # declared post-reference entry brings the adjustment back onto it.
+    terminal_factor = float(segments[-1]["factor"])
+    expected_scale = (
+        float(np.prod(post_ref_ratios)) if post_ref_ratios else 1.0
+    ) / terminal_factor
 
     # ---- MANDATORY validation against SCRATCH copies (abort-before-write) --
     with tempfile.TemporaryDirectory(prefix="backfill_roll_scratch_") as td:
@@ -830,52 +976,80 @@ def migrate_symbol(
 # activation is operator-gated and must never run unattended)
 # ===========================================================================
 
-def _resolve_dataset_path_from_strategy_config(strategy_cfg: dict,
-                                               cfg_path: Path) -> Path:
-    """Resolve the deployed child's training HourSet from its model registry.
+# Deployed experiment_id shapes (verified against the live fleet configs):
+#   E2E_<SYM>_HourSet_<NN><X>_*  (CL: E2E_CL_HourSet_14B_long_average_precision)
+#   E2E_HourSet_<NN><X>_*        (ES/NG/GC/SI generator prefix quirk:
+#                                 E2E_HourSet_01B_long_logloss — no symbol tag)
+_HOURSET_SET_ID_RE = re.compile(r"^\d{2}[A-Za-z]?$")
 
-    Follows each model leg's ``model_path`` to its registry folder and reads
-    the dataset reference from ``experiment_config.json`` (``data_path``) or
-    ``config.json`` (``dataset_path``) — never a hardcoded filename. All legs
-    must agree on ONE dataset.
+
+def _derive_dataset_path_from_experiment_ids(
+    strategy_cfg: dict, cfg_path: Path, brain_symbol: str
+) -> Path:
+    """Resolve the deployed child's training HourSet from its experiment_ids.
+
+    ``E2E_<SYM>_HourSet_<NN><X>_*`` names the symbol explicitly;
+    ``E2E_HourSet_<NN><X>_*`` (the known symbol-less generator prefix) gets
+    the resolved brain symbol prepended. Either way the dataset stem is
+    ``<SYM>_HourSet_<NN><X>`` under ``<data root>/processed`` — never a
+    hardcoded filename. Hard-fails on unrecognized id shapes, on legs that
+    genuinely disagree, on a symbol tag contradicting the brain symbol, and
+    on a missing parquet.
     """
+    from src.data_paths import get_data_root
+    from src.live_execution.instrument_context import derive_model_symbol
+
     models = strategy_cfg.get("models")
     if not isinstance(models, dict) or not models:
         raise BackfillValidationError(
             f"Strategy config {cfg_path} has no 'models' block — cannot "
             "resolve the training dataset."
         )
-    resolved: set = set()
+    stems: set = set()
     for leg, leg_cfg in models.items():
-        model_path = leg_cfg.get("model_path")
-        if not model_path:
+        exp_id = leg_cfg.get("experiment_id")
+        if not isinstance(exp_id, str) or not exp_id:
             raise BackfillValidationError(
-                f"Strategy config {cfg_path} leg '{leg}' has no model_path."
+                f"Strategy config {cfg_path} leg '{leg}' has no "
+                "experiment_id — cannot derive its HourSet."
             )
-        registry_dir = (_REPO_ROOT / model_path).parent
-        dataset: Optional[str] = None
-        exp_cfg = registry_dir / "experiment_config.json"
-        if exp_cfg.exists():
-            with open(exp_cfg, "r", encoding="utf-8") as f:
-                dataset = json.load(f).get("data_path")
-        if dataset is None:
-            model_cfg = registry_dir / "config.json"
-            if model_cfg.exists():
-                with open(model_cfg, "r", encoding="utf-8") as f:
-                    dataset = json.load(f).get("dataset_path")
-        if dataset is None:
+        parts = exp_id.split("_")
+        if len(parts) >= 3 and parts[0] == "E2E" and parts[1] == "HourSet":
+            # Symbol-less generator shape -> brain symbol owns the dataset.
+            sym, set_id = brain_symbol, parts[2]
+        elif len(parts) >= 4 and parts[0] == "E2E" and parts[2] == "HourSet":
+            sym = derive_model_symbol(exp_id)  # registry-validated tag
+            if sym is None:
+                raise BackfillValidationError(
+                    f"experiment_id '{exp_id}' ({cfg_path} leg '{leg}') "
+                    f"carries token '{parts[1]}' where a registry symbol "
+                    "was expected — cannot derive its HourSet."
+                )
+            set_id = parts[3]
+        else:
             raise BackfillValidationError(
-                f"No dataset reference (experiment_config.json:data_path or "
-                f"config.json:dataset_path) beside model {registry_dir} — "
-                "cannot resolve the training HourSet (no hardcoded fallback)."
+                f"experiment_id '{exp_id}' ({cfg_path} leg '{leg}') does "
+                "not match E2E_[<SYM>_]HourSet_<NN><X>_* — cannot derive "
+                "its HourSet (no guessing)."
             )
-        resolved.add(str(Path(dataset)))
-    if len(resolved) != 1:
+        if not _HOURSET_SET_ID_RE.fullmatch(set_id):
+            raise BackfillValidationError(
+                f"experiment_id '{exp_id}' ({cfg_path} leg '{leg}'): "
+                f"HourSet id token '{set_id}' is not <NN><X>-shaped."
+            )
+        if sym != brain_symbol:
+            raise BackfillValidationError(
+                f"experiment_id '{exp_id}' ({cfg_path} leg '{leg}') is "
+                f"tagged '{sym}' but the config's brain symbol is "
+                f"'{brain_symbol}' — REAL contradiction, refusing."
+            )
+        stems.add(f"{sym}_HourSet_{set_id.upper()}")
+    if len(stems) != 1:
         raise BackfillValidationError(
-            f"Model legs in {cfg_path} reference DIFFERENT datasets: "
-            f"{sorted(resolved)} — refusing to pick one."
+            f"Model legs in {cfg_path} derive DIFFERENT datasets: "
+            f"{sorted(stems)} — refusing to pick one."
         )
-    dataset_path = Path(next(iter(resolved)))
+    dataset_path = get_data_root() / "processed" / f"{stems.pop()}.parquet"
     if not dataset_path.exists():
         raise BackfillValidationError(
             f"Resolved dataset path {dataset_path} does not exist. Verify "
@@ -903,7 +1077,13 @@ def _load_hourset(dataset_path: Path) -> pd.DataFrame:
 
 
 def _load_databento_close(csv_path: Path) -> pd.Series:
-    """Load a Databento hourly CSV (semicolon, MM/DD/YYYY;HH:MM, no header)."""
+    """Load a Databento hourly CSV (semicolon, DD/MM/YYYY;HH:MM, no header).
+
+    Day-first format PROVEN by the data: the files contain rows like
+    '13/06/2010 22:00' which reject %m/%d/%Y. errors='raise' keeps a format
+    drift loud — a silent NaT would fake an empty overlap downstream
+    (pandas 1.5.3: no format='mixed').
+    """
     if not csv_path.exists():
         raise BackfillValidationError(
             f"Databento file not found at {csv_path} — post-HourSet seam "
@@ -915,10 +1095,8 @@ def _load_databento_close(csv_path: Path) -> pd.Series:
         header=None,
         names=["Date", "Time", "Open", "High", "Low", "Close", "Volume"],
     )
-    # pandas 1.5.3 (trader env): explicit format, errors='raise' — a silent
-    # NaT here would fake an empty overlap downstream.
     idx = pd.to_datetime(
-        df["Date"] + " " + df["Time"], format="%m/%d/%Y %H:%M", errors="raise"
+        df["Date"] + " " + df["Time"], format="%d/%m/%Y %H:%M", errors="raise"
     )
     close = pd.Series(
         df["Close"].to_numpy(dtype=np.float64), index=pd.DatetimeIndex(idx),
@@ -968,10 +1146,35 @@ def _derive_post_reference_entries_databento(
                                     to_contract_label)
 
 
+def _spotcheck_warmup_bars(feature_cols: list) -> int:
+    """Warmup rows the requested features need before values are defined.
+
+    Window suffixes encode the lookbacks (e.g. TS_VOL_YZ_ZSCORE_72v840 =
+    short/long vol pair 72v840, z-scored). Empirically (NG probe, this
+    ticket) live-vs-stored deviation collapses to float32 noise only from
+    cache bar ~1680 = 840 (long vol window) + 840 (z window) — the SHORT
+    window alone underestimates the true warmup. Use v1 + 2*v2 (covers
+    long-window + z-window stacking) plus a 72-bar margin. Unparseable
+    names fall back to REQUIRED_1H_BARS (4320, the deepest 1h lookback) —
+    the conservative floor, never a shortcut.
+    """
+    from src.live_execution.data_manager import REQUIRED_1H_BARS
+
+    worst = 0
+    for col in feature_cols:
+        m = re.search(r"_(\d+)v(\d+)(?:$|_)", col)
+        if m:
+            worst = max(worst, int(m.group(1)) + 2 * int(m.group(2)))
+        else:
+            worst = max(worst, REQUIRED_1H_BARS)
+    return worst + 72  # ~3-day margin for ffill/session edges
+
+
 def _make_feature_check(
     hourset_df: pd.DataFrame,
     feature_cols: list,
     symbol: str,
+    domain_end: Optional[pd.Timestamp] = None,
     bar_size_short: str = "1h",
 ) -> Callable[[pd.DataFrame], None]:
     """Blueprint gate 5c: adjusted-frame features must reproduce the HourSet.
@@ -979,18 +1182,35 @@ def _make_feature_check(
     ``build_live_features`` on the ratio-adjusted frame must match the
     HourSet's STORED feature columns on overlap timestamps within float32
     tolerance — at minimum TS_VOL_YZ_ZSCORE_72v840 for NG.
+
+    ``domain_end`` bounds the comparison to the same proof domain as the
+    replay gate: rows after an operator trim (--reference-end)
+    embed vendor-mixed or mixed-basis bars in their rolling windows and are
+    excluded for the same documented reason, never silently.
     """
 
     def _check(adjusted_df: pd.DataFrame) -> None:
         from src.core.instrument_master import get_instrument
         from src.live_execution.feature_pipeline import build_live_features
 
+        # Request only post-warmup rows: build_live_features' HARD NaN
+        # GUARD (correctly) rejects a request whose OLDEST returned row
+        # still sits inside the requested features' rolling lookback.
+        warmup = _spotcheck_warmup_bars(list(feature_cols))
+        n_rows = len(adjusted_df) - warmup
+        if n_rows < _SPOTCHECK_MIN_ROWS:
+            raise BackfillValidationError(
+                f"Feature spot-check for {symbol}: cache has "
+                f"{len(adjusted_df)} bars — fewer than the requested "
+                f"features' warmup ({warmup}) + {_SPOTCHECK_MIN_ROWS} "
+                "comparable rows; gate 5c cannot run on this cache."
+            )
         feats = build_live_features(
             adjusted_df,
             feature_names=list(feature_cols),
             lean=False,
             bar_size=bar_size_short,
-            return_last_n=len(adjusted_df),
+            return_last_n=n_rows,
             instrument=get_instrument(symbol),
         )
         if feats is None:
@@ -999,6 +1219,8 @@ def _make_feature_check(
                 "returned None (insufficient bars?) — gate 5c cannot pass."
             )
         overlap = feats.index.intersection(hourset_df.index)
+        if domain_end is not None:
+            overlap = overlap[overlap <= domain_end]
         for col in feature_cols:
             if col not in feats.columns:
                 raise BackfillValidationError(
@@ -1034,31 +1256,46 @@ def _make_feature_check(
 
 
 def _resolve_symbol_strategy_configs(fleet_manifest_path: Path) -> dict:
-    """Map brain symbol -> strategy config path from the fleet manifest."""
+    """Map brain symbol -> (config path, config dict) from the fleet manifest.
+
+    Brain-symbol resolution goes through the codebase authority
+    ``resolve_instrument_context`` (the same call fleet_runner's preflight
+    makes): execution_symbol/brain_symbol keys plus the opportunistic
+    experiment_id cross-check — it raises ValueError only on a REAL
+    contradiction (missing execution_symbol, unknown symbol, model tag
+    mismatch), never on the known symbol-less experiment_id shapes.
+    """
+    from src.live_execution.instrument_context import resolve_instrument_context
+
     if not fleet_manifest_path.exists():
         raise BackfillValidationError(
             f"Fleet manifest not found at {fleet_manifest_path}."
         )
-    with open(fleet_manifest_path, "r", encoding="utf-8") as f:
+    # utf-8-sig: PowerShell-authored configs carry a UTF-8 BOM (observed on
+    # GC02B_Sharpe_E04_07102026.json); utf-8-sig reads both BOM'd and clean
+    # files identically, plain utf-8 crashes json.load on the BOM.
+    with open(fleet_manifest_path, "r", encoding="utf-8-sig") as f:
         manifest = json.load(f)
     mapping: dict = {}
     for inst in manifest.get("instances", []):
         if not inst.get("enabled", False):
             continue
         cfg_path = _REPO_ROOT / inst["config"]
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        symbols = {
-            leg.get("symbol")
-            for leg in (cfg.get("models") or {}).values()
-            if leg.get("symbol")
-        }
-        if len(symbols) != 1:
+        if not cfg_path.exists():
             raise BackfillValidationError(
-                f"Strategy config {cfg_path} model legs disagree on the "
-                f"brain symbol: {sorted(symbols)}."
+                f"Enabled fleet instance config not found: {cfg_path} — "
+                "the manifest references a missing file."
             )
-        mapping[next(iter(symbols))] = cfg_path
+        with open(cfg_path, "r", encoding="utf-8-sig") as f:
+            cfg = json.load(f)
+        brain = resolve_instrument_context(cfg).brain_symbol
+        if brain in mapping:
+            raise BackfillValidationError(
+                f"Two enabled fleet instances resolve to brain symbol "
+                f"'{brain}' ({mapping[brain][0].name} and {cfg_path.name}) "
+                "— ambiguous HourSet ownership, refusing."
+            )
+        mapping[brain] = (cfg_path, cfg)
     return mapping
 
 
@@ -1094,18 +1331,31 @@ def main(argv: Optional[list] = None) -> int:
         help="Run every gate (coverage, replay, features) but write nothing.",
     )
     parser.add_argument(
-        "--cl-june-ratio", type=float, default=None,
-        help="CL ONLY, NO DEFAULT (no-silent-null-defaults): the one-time "
-             "IBKR expired-pair estimate for the ~2026-06 CL roll — "
-             "median same-timestamp Close ratio CLQ6/CLN6 (NEW contract / "
-             "OLD contract, includeExpired=True, ~2026-06-15..19). Required "
-             "iff a post-reference seam exists in the CL cache; the run "
-             "hard-fails without it.",
+        "--reference-end", action="append", default=[],
+        metavar="SYM=ISO_TIMESTAMP",
+        help="Repeatable or comma-separated, NO DEFAULT: per-symbol "
+             "INCLUSIVE end of the replay-comparison domain, e.g. "
+             "ES=2026-06-16T23:59:59. Use ONLY to exclude provably "
+             "vendor-mixed or mixed-basis EDGE bars; the trim is capped at "
+             f"{_MAX_REFERENCE_TRIM_FRAC:.0%} of the overlap and loudly "
+             "logged — it cannot hide mid-window seams. A seam excluded by "
+             "the trim MUST be re-declared via --extra-seam.",
     )
-    parser.add_argument("--cl-from", default="CLN6",
-                        help="Label for the CL post-reference entry 'from'.")
-    parser.add_argument("--cl-to", default="CLQ6",
-                        help="Label for the CL post-reference 'to_contract'.")
+    parser.add_argument(
+        "--extra-seam", action="append", default=[],
+        metavar="SYM=CUTOFF:RATIO",
+        help="Repeatable or comma-separated, NO DEFAULT: an AUTHORITATIVE "
+             "operator-declared roll seam the derivation cannot reach — "
+             "CUTOFF is the FIRST new-basis cache bar (must be an exact bar "
+             "timestamp), RATIO multiplies bars BEFORE the cutoff (replay "
+             "convention, f_pre/f_post at full float precision). The tail "
+             "scan ignores declared cutoffs; declared values are proven "
+             "against the cache∩HourSet quotient medians where the overlap "
+             "reaches them (hard fail on contradiction) — NOTE the replay "
+             "gate alone cannot arbitrate a declared ratio (it cancels out "
+             "of the quotient). Replaces the former --cl-june-ratio/"
+             "--cl-cutoff pair (dropped; CL uses this generic flag).",
+    )
     parser.add_argument(
         "--replay-tol", type=float, default=REPLAY_REL_TOL,
         help=f"Replay-equality gate tolerance (default {REPLAY_REL_TOL}; "
@@ -1143,6 +1393,13 @@ def main(argv: Optional[list] = None) -> int:
 
     cfg_by_symbol = _resolve_symbol_strategy_configs(Path(args.fleet_manifest))
     seam_match_tol = pd.Timedelta(hours=args.seam_match_hours)
+
+    try:
+        reference_ends = parse_reference_ends(args.reference_end)
+        extra_seams = parse_extra_seams(args.extra_seam)
+    except BackfillValidationError as exc:
+        parser.error(str(exc))
+
     failures: dict = {}
 
     for symbol in args.symbols:
@@ -1154,15 +1411,13 @@ def main(argv: Optional[list] = None) -> int:
                     f"No enabled fleet instance found for {symbol} in "
                     f"{args.fleet_manifest} — cannot resolve its HourSet."
                 )
-            cfg_path = cfg_by_symbol[symbol]
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                strategy_cfg = json.load(f)
-            dataset_path = _resolve_dataset_path_from_strategy_config(
-                strategy_cfg, cfg_path
+            cfg_path, strategy_cfg = cfg_by_symbol[symbol]
+            dataset_path = _derive_dataset_path_from_experiment_ids(
+                strategy_cfg, cfg_path, symbol
             )
             log.info("%s HourSet: %s", symbol, dataset_path)
             hourset = _load_hourset(dataset_path)
-            reference = _check_close_series(
+            reference_full = _check_close_series(
                 hourset["Close"].astype(np.float64),
                 f"{symbol} HourSet Close",
             )
@@ -1170,56 +1425,144 @@ def main(argv: Optional[list] = None) -> int:
             paths = derive_data_paths(symbol)
             cache_path = paths.cache_1h
             metadata_path = paths.roll_metadata
-
-            meta_now = _load_metadata_strict(metadata_path)
             raw_close = _load_cache_close(cache_path)
 
-            # Labels: to_contract from the metadata's stored front month
-            # (same resolution migrate_symbol applies); from is "unknown"
-            # for the pre-history seams (data_manager.py:882-883 precedent).
-            extra: list = []
-            hs_end = reference.index.max()
-            if symbol == "CL":
-                tail = raw_close.loc[raw_close.index >= hs_end]
-                seams = _detect_seams_in_window(
-                    tail, args.tail_seam_threshold
+            # The replay gate's comparison domain is the cache∩HourSet
+            # OVERLAP (blueprint 5a: "constant across ALL overlap
+            # timestamps") — the HourSet's pre-cache decade of history is
+            # not replayable and must not be demanded from a ~10-month
+            # cache. Structural sanity stays loud: if the cache is missing
+            # >1% of the HourSet bars WITHIN the overlap window, something
+            # is wrong with the cache itself — hard fail, no quiet skip.
+            overlap_idx = reference_full.index.intersection(raw_close.index)
+            if len(overlap_idx) == 0:
+                raise BackfillValidationError(
+                    f"{symbol}: cache and HourSet share no timestamps — "
+                    "check bar alignment/timezone."
                 )
-                if seams and args.cl_june_ratio is None:
+            window_bars = reference_full.index[
+                (reference_full.index >= overlap_idx.min())
+                & (reference_full.index <= overlap_idx.max())
+            ]
+            n_missing = len(window_bars.difference(raw_close.index))
+            if n_missing > max(1, int(0.01 * len(window_bars))):
+                raise BackfillValidationError(
+                    f"{symbol}: cache is missing {n_missing} of "
+                    f"{len(window_bars)} HourSet bars inside the overlap "
+                    "window — the cache looks structurally incomplete; "
+                    "refusing to validate on a thinned domain."
+                )
+            if n_missing:
+                log.warning(
+                    "%s: %d of %d HourSet bars inside the overlap window "
+                    "are absent from the cache — validating on the "
+                    "intersection.", symbol, n_missing, len(window_bars),
+                )
+            reference = reference_full.loc[overlap_idx]
+            log.info(
+                "%s overlap: %d bars, %s -> %s.",
+                symbol, len(reference), overlap_idx.min(), overlap_idx.max(),
+            )
+            # FULL (untrimmed) overlap quotient — the independent proof
+            # domain for operator-declared seams. Computed BEFORE any trim
+            # so a declared seam inside a trimmed edge stays checkable.
+            overlap_q = pd.Series(
+                reference.to_numpy(dtype=np.float64)
+                / raw_close.loc[overlap_idx].to_numpy(dtype=np.float64),
+                index=overlap_idx,
+            )
+
+            if symbol in reference_ends:
+                ref_end_ts = reference_ends[symbol]
+                kept = reference.loc[reference.index <= ref_end_ts]
+                n_cut = len(reference) - len(kept)
+                if len(kept) < len(reference) * (
+                    1.0 - _MAX_REFERENCE_TRIM_FRAC
+                ):
                     raise BackfillValidationError(
-                        f"CL has {len(seams)} post-reference seam(s) at "
-                        f"{[str(t) for t in seams]} and --cl-june-ratio was "
-                        "not provided — the CL post-HourSet seam has no "
-                        "Databento source; supply the documented IBKR "
-                        "expired-pair estimate (CLQ6/CLN6 median "
-                        "same-timestamp Close ratio). NO default."
+                        f"--reference-end {symbol}={ref_end_ts} would "
+                        f"exclude {n_cut} of {len(reference)} overlap bars "
+                        f"(> {_MAX_REFERENCE_TRIM_FRAC:.0%}) — the trim is "
+                        "for vendor-mixed EDGE bars only."
                     )
-                if len(seams) > 1:
+                if n_cut == 0:
                     raise BackfillValidationError(
-                        f"CL has {len(seams)} post-reference seams but only "
-                        "one --cl-june-ratio is supported — cover the extra "
-                        "seams manually before re-running."
+                        f"--reference-end {symbol}={ref_end_ts} excludes "
+                        "nothing — remove the flag or fix the timestamp "
+                        "(no dead operator inputs)."
                     )
-                if not seams and args.cl_june_ratio is not None:
-                    raise BackfillValidationError(
-                        "--cl-june-ratio was provided but NO post-reference "
-                        "seam was detected in the CL cache — refusing to "
-                        "write an unanchored entry."
-                    )
-                if seams:
-                    extra = [{
-                        "from": args.cl_from,
-                        "to_contract": args.cl_to,
-                        "ratio": float(args.cl_june_ratio),
-                        "timestamp": datetime.now().isoformat(),
-                        "timestamp_cutoff": seams[0].isoformat(),
-                        "origin": ORIGIN_STAMP,
-                    }]
-            else:
-                extra = _derive_post_reference_entries_databento(
-                    symbol, reference,
+                reference = kept
+                log.warning(
+                    "%s: replay domain trimmed to <= %s by --reference-end "
+                    "(%d vendor-mixed edge bars excluded from the PROOF "
+                    "domain; they remain in the cache and are still "
+                    "adjusted at replay).",
+                    symbol, ref_end_ts, n_cut,
+                )
+
+            extra: list = []
+
+            # Databento post-HourSet seam source (blueprint step 3) —
+            # basis-identity gate runs against the FULL HourSet (max
+            # overlap with the Databento history, the strongest test);
+            # only the post-HourSet tail yields entries. CL has no
+            # Databento folder: its post-reference seams must be declared
+            # via --extra-seam.
+            if symbol != "CL":
+                extra.extend(_derive_post_reference_entries_databento(
+                    symbol, reference_full,
                     from_label="unknown",
                     to_contract_label=f"{symbol}_databento_seam",
+                ))
+            else:
+                log.info(
+                    "CL: no Databento source — any post-reference seam "
+                    "must be operator-declared via --extra-seam."
                 )
+
+            # Operator-declared AUTHORITATIVE seams (--extra-seam). The
+            # tail scan ignores their cutoffs (its job is UNDECLARED seams
+            # only — a sub-threshold declared seam like ES's 0.9% must not
+            # need a scan hit). Each declared value is independently proven
+            # against the untrimmed overlap-quotient medians where the
+            # HourSet reaches the cutoff; the replay gate alone cannot
+            # arbitrate it (the declared ratio cancels out of the
+            # quotient). Labels: from="unknown" (data_manager.py:882-883
+            # precedent) and to_contract=stored front month when resolvable.
+            declared = extra_seams.get(symbol, [])
+            if declared:
+                meta_labels = _load_metadata_strict(metadata_path)
+                by_sym = meta_labels.get("last_front_month_by_symbol") or {}
+                to_label = by_sym.get(symbol)
+                if not isinstance(to_label, str):
+                    legacy = meta_labels.get("last_front_month")
+                    to_label = (
+                        legacy
+                        if isinstance(legacy, str)
+                        and legacy.startswith(symbol)
+                        else "unknown"
+                    )
+                for cutoff, ratio in declared:
+                    if cutoff not in raw_close.index:
+                        after = raw_close.index[raw_close.index >= cutoff]
+                        raise BackfillValidationError(
+                            f"--extra-seam {symbol}={cutoff}:{ratio} — the "
+                            "cutoff is not an exact bar in the cache; it "
+                            "must be the FIRST new-basis bar. Nearest bar "
+                            "at/after: "
+                            f"{after[0] if len(after) else '(none)'}."
+                        )
+                    _check_declared_seam_vs_overlap(
+                        overlap_q, cutoff, ratio, symbol
+                    )
+                    extra.append({
+                        "from": "unknown",
+                        "to_contract": to_label,
+                        "ratio": float(ratio),
+                        "timestamp": datetime.now().isoformat(),
+                        "timestamp_cutoff": cutoff.isoformat(),
+                        "origin": ORIGIN_STAMP,
+                    })
 
             feature_check = None
             if not args.skip_feature_check:
@@ -1238,7 +1581,15 @@ def main(argv: Optional[list] = None) -> int:
                         f"{symbol} HourSet — pass columns that exist, or "
                         "--skip-feature-check to opt out LOUDLY."
                     )
-                feature_check = _make_feature_check(hourset, present, symbol)
+                # Bound the feature comparison to the SAME proof domain as
+                # the replay gate (post --reference-end trim):
+                # rows beyond it carry vendor-mixed / mixed-basis bars in
+                # their rolling windows (ES observed 2.7e-3 z-score drift
+                # from 4 IBKR bars inside a Databento-seeded cache).
+                feature_check = _make_feature_check(
+                    hourset, present, symbol,
+                    domain_end=reference.index.max(),
+                )
             else:
                 log.warning(
                     "%s: feature spot-check gate 5c SKIPPED by operator "
@@ -1257,7 +1608,6 @@ def main(argv: Optional[list] = None) -> int:
                 seam_match_tolerance=seam_match_tol,
                 feature_check=feature_check,
             )
-            _ = meta_now  # loaded above purely to fail early on bad files
         except ValueError as exc:
             log.error("HARD FAIL for %s: %s", symbol, exc)
             failures[symbol] = str(exc)
