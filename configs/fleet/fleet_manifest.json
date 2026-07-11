@@ -6,7 +6,7 @@
       "extra_args": []
     },
     {
-      "config": "configs/strategies/ES01B_Sortino_E01_07062026.json",
+      "config": "configs/strategies/ES02B_Sharpe_E01_07112026.json",
       "enabled": true,
       "extra_args": []
     },
