@@ -1284,7 +1284,11 @@ try {
                 }
                 if ($cfgPatched -gt 0) {
                     Write-Host "  Rewrote embedded batch-dir paths in $cfgPatched config(s) to the stamped name." -ForegroundColor Green
+                } else {
+                    Write-Host "  WARNING: 0 config(s) matched -- no 'batch_runs/$BatchId/' segment was found in any config, so ZERO config paths were rewritten in $stampedCfgDir. The embedded predictions_path values may be stale and the Phase-6 config-validation gate may fail." -ForegroundColor Yellow
                 }
+            } else {
+                Write-Host "  WARNING: stamped configs dir NOT found: $stampedCfgDir -- the embedded predictions_path values were NOT rewritten, so the Phase-6 config-validation gate will fail." -ForegroundColor Yellow
             }
         } else {
             Write-Host "  WARNING: baseline.symbol unreadable from saved manifest -- batch folder left unstamped: $BatchDir" -ForegroundColor Yellow

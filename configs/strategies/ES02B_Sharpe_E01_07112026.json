@@ -1,4 +1,4 @@
-﻿{
+{
     "nickname": "ES_Sharpe_E01_07112026",
     "description": "Sharpe Ensemble #1: LL_LONG + LL_SHORT",
     "execution_class": "TieredEnsembleStrategy",

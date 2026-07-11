@@ -80,7 +80,7 @@
         "min_child_samples_min": 100,
         "min_child_samples_max": 500,
         "feature_fraction_min": 0.4,
-        "feature_fraction_max": 0.8,
+        "feature_fraction_max": 0.9,
         "post_optimizer_trials": 125,
         "post_optimizer_holdout_months": 12
       }
