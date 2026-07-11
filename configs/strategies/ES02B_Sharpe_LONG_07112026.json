@@ -29,7 +29,7 @@
             "symbol": "ES"
         },
         "short": {
-            "threshold": 0.5344051543608281,
+            "threshold": 1.0,
             "experiment_id": "E2E_HourSet_02B_short_logloss",
             "model_path": "reports/sweep_es_hs02b_2x1_2h_scout_20260711-042257/registry/production_output/registry/E2E_HourSet_02B_short_logloss/final_model.pkl",
             "predictions_path": "reports/batch_runs/batch_20260711_042257_ES_SCOUT/predictions/ES_Sharpe_E01_predictions.csv",
