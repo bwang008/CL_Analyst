@@ -1,0 +1,93 @@
+{
+    "nickname": "ES02B_Sharpe_LONG_07112026",
+    "description": "Long-only: pass-1 standalone winner ES HS02B 2x1 1H (LL) \u2014 holdout(12mo) +$52,708 / 207 tr / PF 1.29. Short side disabled.",
+    "execution_class": "TieredEnsembleStrategy",
+    "override_global_filters": true,
+    "exit_mode": "TIERED",
+    "tp_atr_mult": 10.0,
+    "sl_atr_mult": 3.0,
+    "trailing_atr_mult": 1.25,
+    "tp_cooldown_bars": 0,
+    "sl_cooldown_bars": 7,
+    "max_hold_bars": 240,
+    "allow_concurrent": false,
+    "max_concurrent": 1,
+    "max_position_size": 1,
+    "execution_symbol": "ES",
+    "bar_size": "1h",
+    "live_config": {
+        "client_id": 2011,
+        "entry_mode": "marketable_limit",
+        "exit_mode": "marketable_limit"
+    },
+    "models": {
+        "long": {
+            "threshold": 0.4531453435733622,
+            "experiment_id": "E2E_HourSet_02B_long_logloss",
+            "model_path": "reports/sweep_es_hs02b_2x1_1h_scout_20260711-042257/registry/production_output/registry/E2E_HourSet_02B_long_logloss/final_model.pkl",
+            "predictions_path": "reports/sweep_es_hs02b_2x1_1h_scout_20260711-042257/registry/production_output/oos_predictions_sweep_long_logloss.csv",
+            "symbol": "ES"
+        },
+        "short": {
+            "threshold": 0.5344051543608281,
+            "experiment_id": "E2E_HourSet_02B_short_logloss",
+            "model_path": "reports/sweep_es_hs02b_2x1_2h_scout_20260711-042257/registry/production_output/registry/E2E_HourSet_02B_short_logloss/final_model.pkl",
+            "predictions_path": "reports/batch_runs/batch_20260711_042257_ES_SCOUT/predictions/ES_Sharpe_E01_predictions.csv",
+            "symbol": "ES"
+        }
+    },
+    "long": {
+        "tp_atr_mult": 8.0,
+        "sl_atr_mult": 2.5,
+        "trailing_atr_mult": 3.2,
+        "cooldown_bars": 5,
+        "max_hold_bars": 30,
+        "consecutive_signal_threshold": 2,
+        "atr_period": 12,
+        "trailing_sl_atr_offset": 1.6,
+        "tiered_exits": [
+            {
+                "qty_pct": 1.0,
+                "tp_atr_mult": 8.0
+            }
+        ],
+        "tiers": [
+            {
+                "min_prob": 0.4531453435733622,
+                "lots": 1,
+                "tp_atr_mult": 8.0,
+                "sl_atr_mult": 2.5,
+                "trailing_atr_mult": 3.2,
+                "max_hold_bars": 30
+            }
+        ]
+    },
+    "short": {
+        "tp_atr_mult": 7.0,
+        "sl_atr_mult": 1.5,
+        "trailing_atr_mult": 2.8,
+        "cooldown_bars": 13,
+        "max_hold_bars": 30,
+        "consecutive_signal_threshold": 2,
+        "atr_period": 4,
+        "trailing_sl_atr_offset": 1.4,
+        "tiered_exits": [
+            {
+                "qty_pct": 1.0,
+                "tp_atr_mult": 7.0
+            }
+        ],
+        "tiers": [
+            {
+                "min_prob": 1.0,
+                "lots": 1,
+                "tp_atr_mult": 7.0,
+                "sl_atr_mult": 1.5,
+                "trailing_atr_mult": 2.8,
+                "max_hold_bars": 30
+            }
+        ]
+    },
+    "holdout_months": 12,
+    "conflict_resolution": "hold"
+}
