@@ -1273,10 +1273,12 @@ try {
             if (Test-Path $stampedCfgDir) {
                 $cfgPatched = 0
                 foreach ($cfgFile in Get-ChildItem "$stampedCfgDir\*.json" -ErrorAction SilentlyContinue) {
-                    $cfgRaw = Get-Content $cfgFile.FullName -Raw
+                    $cfgRaw = [System.IO.File]::ReadAllText($cfgFile.FullName)
                     $cfgNew = $cfgRaw.Replace("batch_runs/$BatchId/", "batch_runs/$stampName/")
                     if ($cfgNew -ne $cfgRaw) {
-                        Set-Content -Path $cfgFile.FullName -Value $cfgNew -Encoding utf8
+                        # BOM-less UTF-8: PS5.1 Set-Content -Encoding utf8 writes a BOM,
+                        # which load_strategy_config / the orchestrator json.load reject.
+                        [System.IO.File]::WriteAllText($cfgFile.FullName, $cfgNew, [System.Text.UTF8Encoding]::new($false))
                         $cfgPatched++
                     }
                 }
