@@ -2,7 +2,7 @@
 
 When the regression guard reverts to baseline, the study's best trial was
 discarded and the Optimized columns are intentionally blank (pre==opt). Printing
-the study's best trial number (e.g. ``#2/3``) in that case is misleading — it
+the study's best trial number (e.g. ``#2/3``) in that case is misleading—it
 reads as though a non-baseline trial was selected. ``format_best_trial`` must
 report the revert explicitly instead.
 """
@@ -15,12 +15,14 @@ from agent.batch_post_optimizer import format_best_trial, generate_optimized_rep
 # all_trial_params (ticket optimizer-objective-report-parity_07032026_0830).
 # ---------------------------------------------------------------------------
 
-# The 8 optimized-parameter columns in the individual summary table, in the
-# order they appear after the "PnL (holdout)" column.
+# The 9 optimized-parameter columns in the individual summary table, in the
+# order they appear after the "PnL (holdout)" column. "Trail" (trailing
+# trigger/offset ATR mults) was added by the 2026-07-11 report change.
 _OPT_COL_NAMES = [
     "Opt Thr",
     "Opt TP",
     "Opt SL",
+    "Trail",
     "Opt TrgF",
     "Opt DstF",
     "Opt Cool",
@@ -33,7 +35,7 @@ def _make_guard_result(objective_metric, all_trial_params):
     """A single guard-triggered short/average_precision target.
 
     ``params`` is empty (the optimizer clears it on a guard revert) but a
-    populated ``all_trial_params`` from the discarded trial is present — the
+    populated ``all_trial_params`` from the discarded trial is present—the
     exact shape that used to leak rejected params into the Opt columns.
     """
     label = "NG01A 3x1 6H"
@@ -90,7 +92,7 @@ def _norm(cell):
 
 
 def _summary_opt_cells(report, label):
-    """Return the 8 normalized Opt-* cells from the guarded summary row for
+    """Return the 9 normalized Opt-* cells from the guarded summary row for
     ``label`` (the row whose Best Trial reads 'baseline (guard)')."""
     for line in report.splitlines():
         stripped = line.strip()
@@ -103,8 +105,8 @@ def _summary_opt_cells(report, label):
         if _norm(cells[-1]) != "baseline (guard)":
             continue
         # columns: label, trades(pre), trades(opt), PF(pre), PF(opt), PnL(pre),
-        # PnL(opt), PnL(holdout), then the 8 Opt cols, then Best Trial.
-        return [_norm(c) for c in cells[8:16]]
+        # PnL(opt), PnL(holdout), then the 9 Opt cols, then Best Trial.
+        return [_norm(c) for c in cells[8:17]]
     raise AssertionError(f"No guarded summary row found for label {label!r}")
 
 
@@ -132,7 +134,7 @@ def test_guarded_row_opt_columns_not_from_all_trial_params():
 
     # Summary table: every Opt column must be '-', none leaking trial params.
     opt_cells = _summary_opt_cells(report, label)
-    assert opt_cells == ["-"] * 8, f"Opt columns leaked trial params: {opt_cells}"
+    assert opt_cells == ["-"] * 9, f"Opt columns leaked trial params: {opt_cells}"
     for v in ("0.77", "3.5", "1.5", "0.4", "0.6"):
         assert v not in " ".join(opt_cells)
 
@@ -180,7 +182,7 @@ def test_guarded_row_is_objective_invariant():
 
     cells_a = _summary_opt_cells(report_a, label_a)
     cells_b = _summary_opt_cells(report_b, label_b)
-    assert cells_a == cells_b == ["-"] * 8
+    assert cells_a == cells_b == ["-"] * 9
 
 
 def test_guard_reverted_shows_baseline_not_trial_number():

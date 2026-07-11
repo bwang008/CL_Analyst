@@ -435,6 +435,48 @@ def align_markdown_table(lines: list[str]) -> str:
     return "\n".join(aligned_lines)
 
 
+def _format_trail(*sides: dict) -> str:
+    """Format the Trail column: trailing trigger / trailing SL offset (ATR mults).
+
+    One side dict renders "trigger/offset"; two render
+    "long_trigger/long_offset/short_trigger/short_offset". Values come from the
+    derived ``trailing_atr_mult`` / ``trailing_sl_atr_offset`` params; legacy
+    runs that searched trigger_frac/distance_frac are reconstructed from
+    tp_atr_mult. A side with no trailing information renders "-" per value.
+    """
+    parts = []
+    for p in sides:
+        trig = p.get("trailing_atr_mult")
+        off = p.get("trailing_sl_atr_offset")
+        if trig is None and "tp_atr_mult" in p and "trigger_frac" in p:
+            trig = p["tp_atr_mult"] * p["trigger_frac"]
+        if off is None and trig is not None and "distance_frac" in p:
+            off = trig * p["distance_frac"]
+        parts.append("-" if trig is None else f"{trig:g}")
+        parts.append("-" if off is None else f"{off:g}")
+    if set(parts) == {"-"}:
+        return "-"
+    return "/".join(parts)
+
+
+def _side_params(opt_info: dict, side: str) -> dict:
+    """Per-side params for ensembles: prefer {side}_params, else de-suffix params.
+
+    Guard-reverted rows return {} — on a revert the Opt columns are intentionally
+    blank and ``params`` may still hold the DISCARDED trial's values (see ticket
+    optimizer-objective-report-parity: never source Opt cells from rejected params).
+    """
+    sp = opt_info.get(f"{side}_params") or {}
+    if sp or opt_info.get("regression_guard_triggered"):
+        return sp
+    suffix = f"_{side}"
+    return {
+        k[: -len(suffix)]: v
+        for k, v in (opt_info.get("params") or {}).items()
+        if k.endswith(suffix)
+    }
+
+
 def _format_block_sharpes(opt_info: dict) -> str:
     """Render optuna_info.block_sharpes as '1.8/0.4/2.1' ('-' when absent)."""
     block_sharpes = (opt_info or {}).get("block_sharpes")
@@ -485,8 +527,8 @@ def generate_optimized_report(
     if has_ensembles:
         lines.append(f"### Ensembles (Top {len(all_results)})")
         lines.append("")
-        lines.append("| # | Experiment | Long Model | Short Model | Trades (pre) T/L/S | Trades (opt) T/L/S | Trades (ho) T/L/S | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (holdout) | Opt Thr | Block Sharpes | Best Trial |")
-        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+        lines.append("| # | Experiment | Long Model | Short Model | Trades (pre) T/L/S | Trades (opt) T/L/S | Trades (ho) T/L/S | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (holdout) | Opt Thr | Trail | Block Sharpes | Best Trial |")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         sorted_ensembles = _canonical_pair_order(all_results, batch_dir)
         for idx, (key, opt) in enumerate(sorted_ensembles, 1):
             # Derive experiment + model display names
@@ -550,14 +592,18 @@ def generate_optimized_report(
                 if isinstance(sv, float): sv = round(sv, 2)
                 opt_thr = f"{lv} / {sv}"
 
+                opt_trail = _format_trail(
+                    _side_params(opt_info, "long"), _side_params(opt_info, "short")
+                )
+
                 lines.append(
                     f"| {idx} | {experiment_col} | {long_model} | {short_model} | {base_trades} | {opt_trades} | {ho_trades} | "
-                    f"{base_pf} | {opt_pf} | {base_pnl} | {opt_pnl} | {ho_pnl} | {opt_thr} | "
+                    f"{base_pf} | {opt_pf} | {base_pnl} | {opt_pnl} | {ho_pnl} | {opt_thr} | {opt_trail} | "
                     f"{_format_block_sharpes(opt_info)} | {format_best_trial(opt_info)} |"
                 )
             elif opt.get("status") == "FAILED":
                 lines.append(
-                    f"| {idx} | {experiment_col} | {long_model} | {short_model} | - | FAILED | - | - | - | - | - | - | - | - | - |"
+                    f"| {idx} | {experiment_col} | {long_model} | {short_model} | - | FAILED | - | - | - | - | - | - | - | - | - | - |"
                 )
         lines.append("")
     else:
@@ -569,8 +615,8 @@ def generate_optimized_report(
             for metric in ["logloss", "average_precision"]:
                 lines.append(f"### {section_name} ({metric.replace('_', ' ').title()})")
                 lines.append("")
-                lines.append("| Experiment | Trades (pre) T/L/S | Trades (opt) T/L/S | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (holdout) | Opt Thr | Opt TP | Opt SL | Opt TrgF | Opt DstF | Opt Cool | Opt Hold | Opt Consec | Block Sharpes | Best Trial |")
-                lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+                lines.append("| Experiment | Trades (pre) T/L/S | Trades (opt) T/L/S | PF (pre) | PF (opt) | PnL (pre) | PnL (opt) | PnL (holdout) | Opt Thr | Opt TP | Opt SL | Trail | Opt TrgF | Opt DstF | Opt Cool | Opt Hold | Opt Consec | Block Sharpes | Best Trial |")
+                lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 
                 # Sort experiments naturally by label for readability
                 def natural_sort_key(s):
@@ -625,6 +671,7 @@ def generate_optimized_report(
                         opt_thr = params.get("entry_threshold", "-")
                         opt_tp = params.get("tp_atr_mult", "-")
                         opt_sl = params.get("sl_atr_mult", "-")
+                        opt_trail = _format_trail(params)
                         opt_trgf = params.get("trigger_frac", "-")
                         opt_dstf = params.get("distance_frac", "-")
                         opt_cool = params.get("cooldown_bars", "-")
@@ -638,7 +685,7 @@ def generate_optimized_report(
                             f"{base_pf:.2f} | {opt_pf:.2f} | "
                             f"${base_pnl:,.0f} | ${opt_pnl:,.0f} | "
                             f"{ho_pnl} | "
-                            f"{opt_thr} | {opt_tp} | {opt_sl} | {opt_trgf} | {opt_dstf} | {opt_cool} | {opt_hold} | {opt_consec} | "
+                            f"{opt_thr} | {opt_tp} | {opt_sl} | {opt_trail} | {opt_trgf} | {opt_dstf} | {opt_cool} | {opt_hold} | {opt_consec} | "
                             f"{_format_block_sharpes(opt_info)} | {best_trial_str} |"
                         )
                     else:
@@ -665,7 +712,7 @@ def generate_optimized_report(
                         lines.append(
                             f"| {label} | {base_trades} | - | "
                             f"{base_pf:.2f} | - | "
-                            f"${base_pnl:,.0f} | - | - | - | - | - | - | - | - | - | - | - | - |"
+                            f"${base_pnl:,.0f} | - | - | - | - | - | - | - | - | - | - | - | - | - |"
                         )
                 lines.append("")
 
