@@ -72,6 +72,7 @@ from src.live_execution.strategies.configurable_strategy import ConfigurableStra
 from src.live_execution.instrument_context import resolve_instrument_context
 from src.live_execution.data_manager import (
     REQUIRED_1H_BARS,
+    ROLL_SEAM_RESOLVED,
     DataManager,
     derive_data_paths,
 )
@@ -218,6 +219,15 @@ _WATCHDOG_TG_COOLDOWN_SECONDS = 3600
 # Auto-restart parameters (process-level recovery)
 _RESTART_MAX_ATTEMPTS = 5        # Max full restart attempts
 _RESTART_DELAY = 300.0           # Delay between restart attempts (5 minutes)
+
+# Pending roll-seam capture (jit-roll-ratio-empty_07102026_1453 Stage 2):
+# a pending roll unresolved past this deadline escalates LOUDLY
+# (log.critical + Telegram) on every retry attempt — never a silent skip.
+_PENDING_ROLL_ESCALATION_DEADLINE = timedelta(days=3)
+# Sentinel for the lazily-initialized retry gate (None is a legitimate
+# DataManager.last_timestamp value on an empty cache, so it cannot mark
+# "never attempted").
+_PENDING_ROLL_GATE_UNSET = object()
 
 # DataManager default paths are derived per symbol via
 # data_manager.derive_data_paths(ctx.brain_symbol) — T2 removed the
@@ -3682,6 +3692,29 @@ class LiveTrader:
             if self.data_manager_1h is not None:
                 self.data_manager_1h.front_month_id = new_local_sym
 
+            # 4b. Persist the roll seam FIRST (crash-safe), then attempt
+            # immediate resolution (jit-roll-ratio-empty_07102026_1453
+            # Stage 2). The old handler updated front_month_id in memory
+            # and persisted NOTHING — a restart between IBKR's CONTFUT
+            # lead flip and the next startup lost the seam forever
+            # (post-roll vs post-roll ratio ≈ 1 → tolerance-swallowed).
+            if self.data_manager_1h is not None:
+                try:
+                    self.data_manager_1h.set_pending_roll(
+                        old_sym, new_local_sym,
+                    )
+                except Exception:
+                    log.critical(
+                        "Rollover: FAILED to persist pending roll %s → %s — "
+                        "the seam will be LOST if this process dies before "
+                        "resolution succeeds.",
+                        old_sym, new_local_sym, exc_info=True,
+                    )
+                # Force an immediate attempt: the new-1h-bar retry gate may
+                # still hold the current bar from an earlier lifecycle.
+                self._pending_roll_last_attempt_bar = _PENDING_ROLL_GATE_UNSET
+                self._attempt_pending_roll_resolution()
+
             # 5. Re-subscribe Hands stream (front-month bars)
             if self._front_month_bars is not None:
                 try:
@@ -3711,6 +3744,130 @@ class LiveTrader:
             log.exception("Unexpected error during contract rollover")
         finally:
             self._rollover_in_progress = False
+
+    def _attempt_pending_roll_resolution(self) -> None:
+        """Try to resolve the persisted pending roll seam, if one exists.
+
+        jit-roll-ratio-empty_07102026_1453 (Stage 2): invoked from the
+        event-loop poll body (OUTSIDE the heartbeat gate — poll_count
+        resets on every reconnect) and immediately after rollover
+        detection. Self-gates to one resolve attempt per NEW 1h bar via
+        data_manager_1h.last_timestamp (the CONTFUT basis only ever flips
+        with new bars, so sub-bar retries are pure IBKR-pacing waste).
+
+        Outcomes:
+          - RESOLVED → clear the pending record; when a 5m manager exists
+            (shared metadata file, same execution symbol) its seam is
+            resolved too — the 5m cache otherwise keeps a silent basis
+            break.
+          - RETRY / ESCALATE → keep the pending record for the next 1h
+            bar; quiet within the escalation deadline, then log.critical +
+            Telegram with an operator remedy on every attempt (the record
+            is NOT cleared — an operator must act).
+
+        Gate state is lazily initialized (getattr default) and the whole
+        body is defensive: this method must never raise into the poll
+        loop.
+        """
+        try:
+            dm_1h = getattr(self, "data_manager_1h", None)
+            if dm_1h is None:
+                return
+            rec = dm_1h.get_pending_roll()
+            if rec is None:
+                return
+
+            # Retry gate: one attempt per new 1h bar. Lazily initialized —
+            # the sanctioned test harness builds via object.__new__ and
+            # sets no private attrs.
+            current_bar = dm_1h.last_timestamp
+            last_attempt_bar = getattr(
+                self, "_pending_roll_last_attempt_bar",
+                _PENDING_ROLL_GATE_UNSET,
+            )
+            if (
+                last_attempt_bar is not _PENDING_ROLL_GATE_UNSET
+                and last_attempt_bar == current_bar
+            ):
+                return
+            self._pending_roll_last_attempt_bar = current_bar
+
+            outcome = dm_1h.resolve_roll_seam(
+                from_contract=rec["from"],
+                to_contract=rec["to"],
+                detected_at=rec["detected_at"],
+            )
+            if outcome == ROLL_SEAM_RESOLVED:
+                dm_5m = getattr(self, "data_manager_5m", None)
+                if dm_5m is not None:
+                    # Shared metadata file, same execution symbol — the 5m
+                    # cache's seam must be captured too.
+                    try:
+                        outcome_5m = dm_5m.resolve_roll_seam(
+                            from_contract=rec["from"],
+                            to_contract=rec["to"],
+                            detected_at=rec["detected_at"],
+                        )
+                        log.info(
+                            "Pending roll: 5m manager seam scan → %s",
+                            outcome_5m,
+                        )
+                    except Exception:
+                        log.exception(
+                            "Pending roll: 5m manager seam resolution "
+                            "failed (1h seam already recorded)"
+                        )
+                dm_1h.clear_pending_roll()
+                log.warning(
+                    "PENDING ROLL RESOLVED: %s → %s (ratio recorded, "
+                    "record cleared).", rec["from"], rec["to"],
+                )
+                return
+
+            # RETRY / ESCALATE: keep the pending record for the next bar.
+            log.info(
+                "Pending roll %s → %s unresolved (outcome=%s) — will "
+                "retry on the next 1h bar.",
+                rec["from"], rec["to"], outcome,
+            )
+            # detected_at is a NAIVE local ISO stamp (DataManager
+            # convention) — keep the deadline math naive-vs-naive.
+            detected_dt = datetime.fromisoformat(rec["detected_at"])
+            age = datetime.now() - detected_dt
+            if age > _PENDING_ROLL_ESCALATION_DEADLINE:
+                log.critical(
+                    "PENDING ROLL UNRESOLVED past deadline: %s → %s "
+                    "detected %s (%.1f h ago), latest outcome=%s. The roll "
+                    "seam is still UNRECORDED — features are drifting onto "
+                    "a broken price basis. Operator remedy: check the IBKR "
+                    "CONTFUT stream; if the basis never flips, derive the "
+                    "ratio manually from an expired-contract overlap fetch "
+                    "and append it to roll_history, then clear the "
+                    "pending_roll entry.",
+                    rec["from"], rec["to"], rec["detected_at"],
+                    age.total_seconds() / 3600.0, outcome,
+                )
+                try:
+                    self._telegram.send(
+                        f"[CRITICAL] *PENDING ROLL UNRESOLVED*\n"
+                        f"`{rec['from']}` → `{rec['to']}` detected "
+                        f"`{rec['detected_at']}` — unresolved for "
+                        f"{age.days}d. The roll seam is still unrecorded; "
+                        f"features are drifting onto a broken price basis.\n"
+                        f"Remedy: verify the IBKR CONTFUT basis flip; if "
+                        f"it never comes, record the ratio manually in "
+                        f"roll\\_history and clear pending\\_roll."
+                    )
+                except Exception:
+                    log.warning(
+                        "Pending-roll escalation Telegram failed",
+                        exc_info=True,
+                    )
+        except Exception:
+            log.exception(
+                "Pending-roll resolution attempt failed (record kept for "
+                "the next retry)"
+            )
 
     # ------------------------------------------------------------------
     # Reconnection & Gap Backfill
@@ -5134,6 +5291,14 @@ class LiveTrader:
                 # Runs here (between ib.sleep() calls) for the same
                 # sync-API safety as the rollover check; never raises.
                 self._run_hourly_housekeeping()
+
+                # Pending roll-seam retry (jit-roll-ratio-empty_07102026_1453
+                # Stage 2) — like housekeeping (A-7), deliberately OUTSIDE
+                # the poll_count % _HEARTBEAT_CYCLES block: poll_count
+                # resets on every reconnect, so a heartbeat-gated retry
+                # stalls indefinitely under connection flapping. Cadence
+                # self-gates on the new-1h-bar check inside; never raises.
+                self._attempt_pending_roll_resolution()
 
                 # Periodic heartbeat (only when idle — no bars arriving)
                 if poll_count % _HEARTBEAT_CYCLES == 0:

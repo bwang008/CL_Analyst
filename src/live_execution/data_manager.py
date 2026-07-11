@@ -44,6 +44,15 @@ from src.live_execution.interfaces.data_feed_interface import DataFeedClient
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Roll-seam resolution outcome protocol (jit-roll-ratio-empty_07102026_1453
+# Stage 2). Module-level constants so live_trader compares against the same
+# strings resolve_roll_seam() returns.
+# ---------------------------------------------------------------------------
+ROLL_SEAM_RESOLVED = "RESOLVED"  # seam anchored: ratio recorded + persisted
+ROLL_SEAM_RETRY = "RETRY"        # IBKR lead not flipped yet — retry later
+ROLL_SEAM_ESCALATE = "ESCALATE"  # nothing to anchor on — operator must act
+
+# ---------------------------------------------------------------------------
 # Per-symbol data-path derivation (T2 — single naming authority)
 # ---------------------------------------------------------------------------
 
@@ -330,6 +339,12 @@ class DataManager:
         self._roll_detected: bool = False
         self._roll_ratios: list[float] = []      # multiplicative rollover ratios
         self._roll_timestamps: list[pd.Timestamp] = []  # when each rollover happened
+        # jit-roll-ratio-empty_07102026_1453 (Stage 2): count of leading
+        # _roll_ratios entries already persisted to the metadata file
+        # (Step-0 restores + _append_roll_event writes). The Step-5
+        # _save_roll_metadata writer skips them so a seam recorded mid-run
+        # is never double-appended at the next startup.
+        self._persisted_roll_events: int = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -365,6 +380,10 @@ class DataManager:
                 self._roll_ratios.append(entry["ratio"])
                 ts = pd.Timestamp(entry.get("timestamp_cutoff", entry.get("timestamp")))
                 self._roll_timestamps.append(ts)
+        # jit-roll-ratio-empty_07102026_1453: everything restored from disk
+        # is by definition already persisted — the Step-5 writer must not
+        # re-append it.
+        self._persisted_roll_events = len(self._roll_ratios)
 
         # Step 1: Load or create the cache
         if self.cache_path.exists():
@@ -412,6 +431,66 @@ class DataManager:
                         f"The warm-start seed must exist before the live trader starts.\n"
                         f"Check CL_DATA_ROOT ({os.environ.get('CL_DATA_ROOT', '(not set)')}) "
                         f"and verify the file is present at the expected path."
+                    )
+
+        # Step 1.5 (jit-roll-ratio-empty_07102026_1453 Stage 2): resolve any
+        # unresolved pending_roll for this execution symbol BEFORE
+        # _backfill() — backfill's dedup keep="last" overwrites the
+        # old-basis overlap bars with fresh new-basis IBKR values and
+        # destroys the seam anchor. This REPLACES the silent
+        # "ratio≈1 → within tolerance" swallow for the pending-roll path
+        # only: an un-anchorable pending seam is a hard stop, never
+        # wrong-basis trading.
+        pending = self.get_pending_roll()
+        if pending is not None:
+            if self.data_client is None:
+                log.warning(
+                    "Unresolved pending roll %s → %s for %s but no data "
+                    "client — offline construction cannot scan the seam; "
+                    "record kept for the next live startup.",
+                    pending["from"], pending["to"], self.execution_symbol,
+                )
+            else:
+                log.warning(
+                    "PENDING ROLL FOUND at startup: %s → %s (detected %s) — "
+                    "running seam scan before backfill...",
+                    pending["from"], pending["to"], pending["detected_at"],
+                )
+                outcome = self.resolve_roll_seam(
+                    from_contract=pending["from"],
+                    to_contract=pending["to"],
+                    detected_at=pending["detected_at"],
+                )
+                if outcome == ROLL_SEAM_RESOLVED:
+                    self.clear_pending_roll()
+                    log.warning(
+                        "PENDING ROLL RESOLVED at startup: %s → %s "
+                        "(ratio recorded, record cleared).",
+                        pending["from"], pending["to"],
+                    )
+                elif outcome == ROLL_SEAM_ESCALATE:
+                    raise RuntimeError(
+                        f"Unresolvable PENDING ROLL for "
+                        f"{self.execution_symbol}: {pending['from']} → "
+                        f"{pending['to']} (detected {pending['detected_at']}) "
+                        f"— the CONTFUT seam scan found no old-basis anchor "
+                        f"bars (every overlap bar already matches the new "
+                        f"basis), so the roll ratio cannot be recovered from "
+                        f"IBKR. Refusing to trade on a broken price basis. "
+                        f"Operator remedy: derive the ratio from an "
+                        f"expired-contract overlap fetch (median "
+                        f"same-timestamp Close ratio of {pending['from']} vs "
+                        f"{pending['to']}), append it to roll_history in "
+                        f"{self.roll_metadata_path} with the seam "
+                        f"timestamp_cutoff, remove this symbol's "
+                        f"pending_roll entry, then restart."
+                    )
+                else:  # ROLL_SEAM_RETRY — IBKR lead not flipped yet
+                    log.warning(
+                        "Pending roll %s → %s NOT yet resolvable "
+                        "(outcome=%s) — record kept; the live retry loop "
+                        "re-attempts on each new 1h bar.",
+                        pending["from"], pending["to"], outcome,
                     )
 
         # Step 2: Detect rollover and record ratio (cache stays RAW)
@@ -861,19 +940,145 @@ class DataManager:
             return legacy
         return None
 
-    def _save_roll_metadata(self) -> None:
-        """Save the current front-month ID and roll history to metadata file."""
+    def _write_roll_metadata(self, meta: dict) -> None:
+        """Write the roll-metadata dict to disk (shared low-level writer).
+
+        jit-roll-ratio-empty_07102026_1453 (Stage 2): shared by
+        _save_roll_metadata, _append_roll_event and the pending-roll
+        accessors so every writer uses one serialization convention.
+        OSError propagates — the mid-run callers must be LOUD when the
+        crash-safety record cannot be persisted.
+        """
         meta_path = Path(self.roll_metadata_path)
         meta_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
 
+    def _append_roll_event(
+        self,
+        from_contract: str,
+        to_contract: str,
+        ratio: float,
+        timestamp_cutoff,
+    ) -> None:
+        """Record one roll event in-memory AND persist it IMMEDIATELY.
+
+        jit-roll-ratio-empty_07102026_1453 (Stage 2): refactored out of
+        _save_roll_metadata's initialize-only flow so mid-run seam capture
+        (resolve_roll_seam) no longer depends on initialize() to persist.
+        Appends ratio/cutoff to _roll_ratios/_roll_timestamps and writes the
+        entry to the metadata file in the existing live schema ("to" carries
+        the execution-symbol-prefixed contract so the Step-0 ownership
+        filter restores it on the next construction). Prior roll_history
+        entries and unrelated metadata keys are preserved untouched.
+        """
+        ratio_f = float(ratio)
+        cutoff_ts = pd.Timestamp(timestamp_cutoff)
+        self._roll_ratios.append(ratio_f)
+        self._roll_timestamps.append(cutoff_ts)
+
+        meta = self._load_roll_metadata()
+        roll_history = meta.get("roll_history", [])
+        roll_history.append({
+            "from": from_contract,
+            "to": to_contract,
+            "ratio": round(ratio_f, 6),
+            "timestamp": datetime.now().isoformat(),
+            "timestamp_cutoff": cutoff_ts.isoformat(),
+        })
+        meta["roll_history"] = roll_history
+        # cumulative_ratio is informational only (no runtime consumer).
+        meta["cumulative_ratio"] = round(
+            meta.get("cumulative_ratio", 1.0) * ratio_f, 6
+        )
+        self._write_roll_metadata(meta)
+        # Everything in-memory up to here is now on disk — the Step-5
+        # writer must not re-append this event.
+        self._persisted_roll_events = len(self._roll_ratios)
+        log.warning(
+            "ROLL EVENT RECORDED + PERSISTED: %s → %s ratio=%.6f "
+            "cutoff=%s (%s)",
+            from_contract, to_contract, ratio_f, cutoff_ts,
+            self.roll_metadata_path,
+        )
+
+    # ------------------------------------------------------------------
+    # Pending-roll lifecycle (jit-roll-ratio-empty_07102026_1453 Stage 2)
+    # ------------------------------------------------------------------
+    # A mid-run rollover detection persists {from, to, detected_at} under
+    # meta["pending_roll"][execution_symbol] BEFORE any resolution attempt
+    # (crash-safe: the seam survives a process death between detection and
+    # the IBKR CONTFUT basis flip). Namespaced per execution symbol,
+    # mirroring last_front_month_by_symbol. All accessors are disk-backed —
+    # no initialize() dependency.
+
+    def set_pending_roll(self, from_contract: str, to_contract: str) -> None:
+        """Persist this execution symbol's pending roll record IMMEDIATELY.
+
+        Stamps detected_at itself (naive local datetime.now().isoformat(),
+        the existing metadata convention).
+        """
+        meta = self._load_roll_metadata()
+        pending = dict(meta.get("pending_roll") or {})
+        pending[self.execution_symbol] = {
+            "from": from_contract,
+            "to": to_contract,
+            "detected_at": datetime.now().isoformat(),
+        }
+        meta["pending_roll"] = pending
+        self._write_roll_metadata(meta)
+        log.warning(
+            "PENDING ROLL PERSISTED: %s → %s for %s (%s)",
+            from_contract, to_contract, self.execution_symbol,
+            self.roll_metadata_path,
+        )
+
+    def get_pending_roll(self) -> Optional[dict]:
+        """This execution symbol's pending roll record, or None.
+
+        Disk-backed: a record written by another instance/process is
+        visible to a fresh instance that never ran initialize(). Foreign
+        execution symbols' records are invisible.
+        """
+        meta = self._load_roll_metadata()
+        return (meta.get("pending_roll") or {}).get(self.execution_symbol)
+
+    def clear_pending_roll(self) -> None:
+        """Remove ONLY this execution symbol's pending record and persist.
+
+        Other symbols' pending records and unrelated keys survive.
+        """
+        meta = self._load_roll_metadata()
+        pending = dict(meta.get("pending_roll") or {})
+        if self.execution_symbol in pending:
+            del pending[self.execution_symbol]
+            meta["pending_roll"] = pending
+            self._write_roll_metadata(meta)
+            log.info(
+                "Pending roll record cleared for %s.", self.execution_symbol,
+            )
+
+    def _save_roll_metadata(self) -> None:
+        """Save the current front-month ID and roll history to metadata file."""
         # Load existing metadata to preserve roll history
         existing = self._load_roll_metadata()
         roll_history = existing.get("roll_history", [])
         cumulative_ratio = existing.get("cumulative_ratio", 1.0)
 
-        # Append this roll event if a ratio was applied
+        # Append this roll event if a ratio was applied.
+        # jit-roll-ratio-empty_07102026_1453 (Stage 2): events already
+        # persisted via _append_roll_event (pending-roll resolutions,
+        # Step-0 restores) are on disk — appending them again here would
+        # double-record the same economic roll. getattr default keeps
+        # __new__-constructed test stubs working (pre-existing convention
+        # for the ratio methods).
         current_ratio = self._roll_ratios[-1] if self._roll_ratios else 1.0
-        if self._roll_detected and abs(current_ratio - 1.0) > self.roll_ratio_tolerance:
+        n_persisted = getattr(self, "_persisted_roll_events", 0)
+        if (
+            self._roll_detected
+            and abs(current_ratio - 1.0) > self.roll_ratio_tolerance
+            and len(self._roll_ratios) > n_persisted
+        ):
             # C1 (T5): "from" uses the SAME namespaced read order as
             # _detect_rollover — never the raw legacy key, which in a shared
             # CL+MCL file is last-writer-wins across symbols. CL-only files:
@@ -890,6 +1095,7 @@ class DataManager:
                 "timestamp_cutoff": roll_ts.isoformat() if roll_ts is not None else None,
             })
             cumulative_ratio *= current_ratio
+            self._persisted_roll_events = len(self._roll_ratios)
 
         # T5 (C2): per-execution-symbol namespace, MERGED with (never
         # replacing) other symbols' entries. The legacy last_front_month key
@@ -900,16 +1106,19 @@ class DataManager:
         by_symbol = dict(existing.get("last_front_month_by_symbol") or {})
         by_symbol[self.execution_symbol] = self.front_month_id
 
-        meta = {
-            "last_front_month": self.front_month_id,
-            "updated_at": datetime.now().isoformat(),
-            "roll_history": roll_history,
-            "cumulative_ratio": round(cumulative_ratio, 6),
-            "last_front_month_by_symbol": by_symbol,
-        }
+        # jit-roll-ratio-empty_07102026_1453 (Stage 2): merge into the
+        # existing dict instead of rebuilding it — additive keys
+        # (pending_roll, origin-stamped fields, operator notes) must
+        # survive a startup save. A RETRY-outcome pending record spans
+        # restarts by design.
+        meta = existing
+        meta["last_front_month"] = self.front_month_id
+        meta["updated_at"] = datetime.now().isoformat()
+        meta["roll_history"] = roll_history
+        meta["cumulative_ratio"] = round(cumulative_ratio, 6)
+        meta["last_front_month_by_symbol"] = by_symbol
         try:
-            with open(meta_path, "w", encoding="utf-8") as f:
-                json.dump(meta, f, indent=2)
+            self._write_roll_metadata(meta)
             log.info(
                 "Roll metadata saved: front_month=%s  cumulative_ratio=%.6f",
                 self.front_month_id, cumulative_ratio,
@@ -1049,6 +1258,140 @@ class DataManager:
         self._ibkr_overlap_df = ibkr_df
         return median_ratio
 
+    def resolve_roll_seam(
+        self,
+        *,
+        from_contract: str,
+        to_contract: str,
+        detected_at,
+    ) -> str:
+        """Locate and record a mid-run roll seam via a CONTFUT overlap scan.
+
+        jit-roll-ratio-empty_07102026_1453 (Stage 2): shared by mid-run
+        capture (live_trader pending-roll retries) and the initialize()
+        pending-roll resolution. Fetches CONTFUT history covering
+        detected_at − 2 days → now (min "5 D"), computes the per-bar
+        quotient q_t = ibkr_close / cache_close on the timestamp
+        intersection with the cache, and classifies each overlap bar:
+            old-basis  ⇔ |q_t − 1| >  roll_ratio_tolerance
+            new-basis  ⇔ |q_t − 1| <= roll_ratio_tolerance
+
+        Outcomes (module constants):
+          - ALL bars old-basis → ROLL_SEAM_RETRY: IBKR's lead has not
+            flipped yet; recording now would strand later old-basis appends
+            unadjusted. Nothing recorded, nothing persisted.
+          - ALL bars new-basis → ROLL_SEAM_ESCALATE: nothing to anchor on.
+            Nothing recorded; the caller owns the loud stop.
+          - old-run followed by new-run → ROLL_SEAM_RESOLVED:
+            ratio = median of the old-run quotients (robust to contaminated
+            bars inside the run), cutoff = FIRST new-basis bar timestamp;
+            recorded + persisted IMMEDIATELY via _append_roll_event.
+
+        Does NOT read or clear pending_roll — callers own that lifecycle.
+
+        Args:
+            from_contract: old (pre-roll) local contract symbol.
+            to_contract: new local contract symbol (execution-symbol
+                prefixed — becomes the persisted entry's "to").
+            detected_at: pd.Timestamp or ISO-8601 str (the pending_roll
+                JSON round-trip delivers str).
+        """
+        import numpy as np
+
+        if self.data_client is None:
+            raise RuntimeError(
+                "resolve_roll_seam requires a data client — cannot scan a "
+                f"roll seam for {self.symbol} offline."
+            )
+        if self._df is None or len(self._df) == 0:
+            log.warning(
+                "resolve_roll_seam: empty cache for %s — nothing to compare "
+                "against; RETRY.", self.symbol,
+            )
+            return ROLL_SEAM_RETRY
+
+        detected_ts = pd.Timestamp(detected_at)
+        now = pd.Timestamp.now(tz="UTC").tz_localize(None)
+        span_s = (now - (detected_ts - pd.Timedelta(days=2))).total_seconds()
+        window_days = max(5, int(math.ceil(span_s / 86_400.0)))
+
+        ibkr_df = self.data_client.fetch_historical_bars_by_duration(
+            duration_str=f"{window_days} D",
+            continuous=True,
+            bar_size=self.bar_size,
+            what_to_show="TRADES",
+            use_rth=False,
+        )
+        if ibkr_df is None or ibkr_df.empty:
+            log.warning(
+                "resolve_roll_seam: IBKR returned no bars (%d D window) — "
+                "RETRY.", window_days,
+            )
+            return ROLL_SEAM_RETRY
+        ibkr_df = self._drop_incomplete_bar(ibkr_df)
+
+        overlap = self._df.index.intersection(ibkr_df.index).sort_values()
+        if len(overlap) == 0:
+            log.warning(
+                "resolve_roll_seam: no overlapping timestamps between cache "
+                "and the CONTFUT fetch — RETRY.",
+            )
+            return ROLL_SEAM_RETRY
+
+        cache_close = self._df.loc[overlap, "Close"].to_numpy(dtype=float)
+        ibkr_close = ibkr_df.loc[overlap, "Close"].to_numpy(dtype=float)
+        valid = cache_close > 0
+        if not valid.all():
+            log.warning(
+                "resolve_roll_seam: dropping %d zero-Close cache bars from "
+                "the scan.", int((~valid).sum()),
+            )
+            overlap = overlap[valid]
+            cache_close = cache_close[valid]
+            ibkr_close = ibkr_close[valid]
+            if len(overlap) == 0:
+                return ROLL_SEAM_RETRY
+
+        q = ibkr_close / cache_close
+        is_old = np.abs(q - 1.0) > self.roll_ratio_tolerance
+
+        if is_old.all():
+            log.info(
+                "resolve_roll_seam: all %d overlap bars still old-basis "
+                "(IBKR lead not flipped yet) — RETRY.", len(overlap),
+            )
+            return ROLL_SEAM_RETRY
+        if not is_old.any():
+            log.error(
+                "resolve_roll_seam: all %d overlap bars already new-basis — "
+                "no old-basis anchor for %s → %s. ESCALATE.",
+                len(overlap), from_contract, to_contract,
+            )
+            return ROLL_SEAM_ESCALATE
+
+        first_new = int(np.argmax(~is_old))
+        if first_new == 0 or bool(is_old[first_new:].any()):
+            # Not a clean old-run → new-run split (basis noise or an
+            # unsettled stream). Retrying with fresh data is safer than
+            # anchoring a wrong cutoff; the deadline escalation keeps this
+            # loud if it never settles.
+            log.warning(
+                "resolve_roll_seam: overlap is not a clean old-run → "
+                "new-run split (first_new=%d, %d old bars after it) — "
+                "RETRY.", first_new, int(is_old[first_new:].sum()),
+            )
+            return ROLL_SEAM_RETRY
+
+        ratio = float(np.median(q[:first_new]))
+        cutoff = overlap[first_new]
+        log.warning(
+            "resolve_roll_seam: seam anchored for %s → %s: %d old-basis "
+            "bars, ratio=%.6f, cutoff=%s.",
+            from_contract, to_contract, first_new, ratio, cutoff,
+        )
+        self._append_roll_event(from_contract, to_contract, ratio, cutoff)
+        return ROLL_SEAM_RESOLVED
+
     def _apply_roll_to_cache(self, ratio: float) -> None:
         """Record a rollover ratio and stitch IBKR overlap data into the cache.
 
@@ -1062,8 +1405,25 @@ class DataManager:
             log.warning("Cannot apply roll — empty cache.")
             return
 
-        # Record the ratio and the timestamp boundary
-        roll_ts = self._df.index.max()
+        # jit-roll-ratio-empty_07102026_1453 (Stage 2, Amendment 1): the
+        # cutoff must be basis-consistent with the overlap overwrite below.
+        # The old code recorded roll_ts = index.max() and THEN overwrote the
+        # overlap window with fresh NEW-basis IBKR bars, so the JIT replay
+        # multiplied those already-new-basis bars by the ratio again
+        # (double-adjusted r² plateau + a spurious second seam step).
+        # Convention chosen: cutoff = FIRST overwritten (new-basis) overlap
+        # bar — consistent with both the overwrite here and _backfill's
+        # dedup keep="last" overwrite of the same window. Fallback when
+        # there is no IBKR overlap to stitch: index.max() (no overwrite
+        # happens; the most-recent bar stays raw — legacy convention).
+        ibkr_df = getattr(self, "_ibkr_overlap_df", None)
+        overlap = None
+        if ibkr_df is not None and len(ibkr_df) > 0:
+            overlap = self._df.index.intersection(ibkr_df.index)
+        if overlap is not None and len(overlap) > 0:
+            roll_ts = overlap.min()
+        else:
+            roll_ts = self._df.index.max()
         self._roll_ratios.append(ratio)
         self._roll_timestamps.append(roll_ts)
 
@@ -1074,10 +1434,8 @@ class DataManager:
         )
 
         # Overwrite overlapping bars with fresh IBKR data for a clean seam
-        ibkr_df = getattr(self, "_ibkr_overlap_df", None)
         if ibkr_df is not None and len(ibkr_df) > 0:
-            overlap = self._df.index.intersection(ibkr_df.index)
-            if len(overlap) > 0:
+            if overlap is not None and len(overlap) > 0:
                 for col in ("Open", "High", "Low", "Close", "Volume"):
                     if col in ibkr_df.columns and col in self._df.columns:
                         self._df.loc[overlap, col] = ibkr_df.loc[overlap, col]

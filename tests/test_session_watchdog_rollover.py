@@ -837,10 +837,15 @@ class TestRollToleranceRegistry:
             )
 
     def test_registry_tolerance_values_pinned(self):
-        """Q2 ruling: CL/MCL keep today's 0.01 constant (pin); every other
-        symbol gets the ACKed 0.001 (10 bps noise floor)."""
+        """ALL symbols at 0.001 (10 bps noise floor).
+        jit-roll-ratio-empty_07102026_1453 (Stage 2, Amendment 2)
+        DELIBERATELY REVERSES the T5 zero-change pin that kept CL/MCL at
+        the legacy 0.01: real CL roll gaps (0.2-2.8%) were silently
+        tolerance-swallowed even when correctly witnessed."""
         for sym, inst in INSTRUMENT_REGISTRY.items():
-            expected = 0.01 if sym in ("CL", "MCL") else 0.001
+            # jit-roll-ratio-empty_07102026_1453: CL/MCL 0.01 -> 0.001
+            # (reverses the T5 "zero-change pin" — human-authorized).
+            expected = 0.001
             assert inst.roll_ratio_tolerance == expected, (
                 f"{sym}: roll_ratio_tolerance {inst.roll_ratio_tolerance!r} "
                 f"!= {expected}"
@@ -856,14 +861,18 @@ class TestRollToleranceRegistry:
                 roll_metadata_path=str(tmp_path / "roll.json"),
                 data_client=None,
             )
-        assert _dm("CL").roll_ratio_tolerance == 0.01
+        # jit-roll-ratio-empty_07102026_1453: CL 0.01 -> 0.001 (reverses
+        # the T5 zero-change pin — human-authorized Amendment 2).
+        assert _dm("CL").roll_ratio_tolerance == 0.001
         assert _dm("ES").roll_ratio_tolerance == 0.001
 
     @pytest.mark.parametrize(
         "symbol,scale,applied",
         [
             ("ES", 1.004, True),    # ticket case: 40 bps ES gap IS applied
-            ("CL", 1.004, False),   # pin: today's CL behavior — swallowed
+            # jit-roll-ratio-empty_07102026_1453: CL 40 bps gap now APPLIED
+            # (0.001 tolerance — reverses the T5 zero-change pin).
+            ("CL", 1.004, True),
             ("CL", 1.02, True),     # pin: today's CL behavior — applied
         ],
     )

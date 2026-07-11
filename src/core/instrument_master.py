@@ -78,7 +78,11 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         bars_per_day_5m=288,       # legacy data_manager/live_trader constant (zero-change)
         bars_per_day_1h=24,        # legacy constant (zero-change)
         live_vol_index="OVX",
-        roll_ratio_tolerance=0.01,  # legacy _ROLL_PRICE_TOLERANCE (zero-change pin)
+        # jit-roll-ratio-empty_07102026_1453 (Stage 2, Amendment 2): 0.01 ->
+        # 0.001, deliberately REVERSING the T5 zero-change pin — real CL roll
+        # gaps (0.2-2.8%) were silently tolerance-swallowed even when
+        # correctly witnessed. 10 bps matches every other symbol.
+        roll_ratio_tolerance=0.001,
     ),
     "MCL": Instrument(
         symbol="MCL",
@@ -97,7 +101,9 @@ INSTRUMENT_REGISTRY: Dict[str, Instrument] = {
         bars_per_day_5m=288,
         bars_per_day_1h=24,
         live_vol_index="OVX",
-        roll_ratio_tolerance=0.01,  # inherits CL's legacy pin (parent-shared file semantics)
+        # jit-roll-ratio-empty_07102026_1453: moves with CL (0.01 -> 0.001) —
+        # MCL shares CL's metadata-file semantics (parent-shared file).
+        roll_ratio_tolerance=0.001,
         micro_of="CL",
     ),
     "ES": Instrument(
