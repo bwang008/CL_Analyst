@@ -16,7 +16,7 @@
       "extra_args": []
     },
     {
-      "config": "configs/strategies/GC02B_Sharpe_E04_07102026.json",
+      "config": "configs/strategies/GC01B_Sharpe_E04_07052026.json",
       "enabled": true,
       "extra_args": []
     },
