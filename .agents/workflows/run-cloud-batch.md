@@ -43,6 +43,56 @@ VM teardown is driven by **local** PowerShell monitor processes. If that process
    instances for its batch-id timestamp. The monitor prints teardown; if you didn't see it,
    assume orphans and reconcile.
 
+## Resume a stalled batch
+
+**When to use it:** the LOCAL orchestrator (`gcp/run_sweep_batch.ps1`) was **externally KILLED
+mid-run** — terminal/IDE closed, OS kill, reboot (the log ends cleanly mid-poll). This is a
+**stall, not a crash**: the sweep VMs finished and uploaded `production/*_artifacts.zip` +
+`pipeline_summary.json` to GCS before self-shutdown, but the local process died before it could
+collect them and trigger the post-optimizer, so `batch_progress.json` is left incomplete and the
+batch never completes. `scripts/resume_batch.ps1` recovers COMPLETION (cost was already bounded by
+each VM's `--max-run-duration` DELETE TTL). Do NOT use it for a genuine code crash — that is a bug
+to fix, not a recovery.
+
+**Always `-DryRun` first.** The dry run performs steps 1-4 and the running-VM guard **read-only**,
+prints the full plan (which GCS artifacts it would download, the `batch_progress.json` entries it
+would reconstruct, the optimizer command + assumed arm count/machine tier, and the finalize rename),
+and makes **zero** filesystem mutations, zero `.bak` writes, and zero deploys/VM ops. Review the plan,
+then re-run without `-DryRun` to execute it.
+
+```powershell
+.\scripts\resume_batch.ps1 -BatchId batch_YYYYMMDD_HHMMSS -DryRun
+.\scripts\resume_batch.ps1 -BatchId batch_YYYYMMDD_HHMMSS
+```
+
+- **Running-VM guard (`-Force` to override).** Before doing anything mutating, it lists this batch's
+  VMs with the **targeted** filter `name~'^(optuna-sweep|opt-post)'` (never a broad kill) and keeps
+  only names carrying this batch's sweep timestamp or its `opt-post-<batch-id>` VM. If any is
+  `RUNNING`, a live run **REFUSES** (non-zero exit) — another process may own an in-flight
+  recovery/optimizer. Pass **`-Force`** to override deliberately. In `-DryRun` it only reports the block.
+- **`gcloud storage`, never the legacy bucket CLI.** Every bucket op goes through `gcloud storage`;
+  the legacy `gsutil` poll is broken in this env (python3.13). For the same reason the post-optimizer
+  is deployed with **`-NoMonitor`** (its built-in poll uses the broken CLI) and this script **self-polls**
+  gsutil-free — `gcloud storage ls` for the landed `batch_summary_optimized_*.md` and
+  `gcloud compute instances describe --format="get(status)"` for VM lifecycle.
+- **`-Objective` arm-count caveat (multi-arm batches).** The optimizer machine tier is sized from
+  `completed × 4 × armCount`, and **armCount is inferred from `-Objective`, not the manifest**
+  (`both` → 2; a comma-separated arm list → one per arm). For a multi-arm A/B batch you MUST pass the
+  same `-Objective` list the sweep used (and `-OptimizerMaxRunDurationMinutes 720`), or the opt VM
+  under-sizes. The dry run prints the assumed arm count + tier so you can correct it.
+- **A truly-missing sweep is left for a human.** An experiment is recoverable **only** when BOTH
+  `production/*.zip` AND `pipeline_summary.json` are present in GCS. A partial (one but not the other)
+  or fully-missing sweep is **reported and left** — never fabricated into a `COMPLETED` entry, and an
+  existing `DEPLOY_FAILED`/`TIMEOUT` is never flipped. Re-sweeping those is a manual follow-up. If
+  zero experiments are recoverable, the script crashes loudly (nothing to optimize).
+
+The script is idempotent and safe to run twice: it backs up `batch_progress.json` before any write,
+skips already-COMPLETED-and-intact experiments, downloads post-opt outputs already in GCS instead of
+re-deploying, and only finalize-renames the dir to `batch_<ts>_<SYMBOL>_<TIER>[_OBJAB]` after the
+post-opt outputs exist (rewriting the embedded `batch_runs/<id>/` config paths, BOM-less, exactly like
+the orchestrator). A failed rename only warns. Reconcile any leftover VMs it reports with
+`scripts/reap_orphan_vms.ps1`.
+
 ## Tiers
 
 | Tier | Manifest (v2) | Experiments | Sweep `n_trials` | Post-opt trials | Use |
