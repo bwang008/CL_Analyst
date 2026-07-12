@@ -1186,6 +1186,12 @@ def _baseline_side_display_params(cfg: dict) -> dict:
                 "consecutive_signal_threshold", cfg.get("consecutive_signal_threshold")
             ),
             "atr_period": sc.get("atr_period", cfg.get("atr_period")),
+            # Trailing values so guard-kept rows can render the Trail column
+            # (the shipped config's trailing comes from the grafted side block).
+            "trailing_atr_mult": sc.get("trailing_atr_mult", cfg.get("trailing_atr_mult")),
+            "trailing_sl_atr_offset": sc.get(
+                "trailing_sl_atr_offset", cfg.get("trailing_sl_atr_offset")
+            ),
         }
 
     return {"long": _side_vals("long"), "short": _side_vals("short")}

@@ -236,6 +236,48 @@ class TestGuardEnsembleReportBaseline:
 
 
 # ---------------------------------------------------------------------------
+# B3. Guard rows render SHIPPED params in the summary table (never rejected)
+# ---------------------------------------------------------------------------
+
+class TestSideParamsGuardFallback:
+    """_side_params: guard-triggered rows must render baseline_side_params
+    (the SHIPPED grafted baseline) — never the discarded trial's params
+    lingering in `params`, and never blank when shipped values exist."""
+
+    _OPT_INFO = {
+        "regression_guard_triggered": True,
+        "long_params": {},
+        "short_params": {},
+        # Discarded trial residue — must NEVER be rendered:
+        "params": {"entry_threshold_long": 0.99, "tp_atr_mult_long": 99.0},
+        "baseline_side_params": {
+            "long": {"entry_threshold": 0.6005, "tp_atr_mult": 7.0,
+                     "trailing_atr_mult": 2.8, "trailing_sl_atr_offset": 1.4},
+            "short": {"entry_threshold": 0.5055, "tp_atr_mult": 5.0},
+        },
+    }
+
+    def test_guard_renders_shipped_baseline(self):
+        from agent.batch_post_optimizer import _side_params
+        got = _side_params(self._OPT_INFO, "long")
+        assert got["entry_threshold"] == 0.6005
+        assert got["tp_atr_mult"] == 7.0
+        assert got["trailing_atr_mult"] == 2.8
+
+    def test_guard_never_renders_discarded_params(self):
+        from agent.batch_post_optimizer import _side_params
+        got = _side_params(self._OPT_INFO, "long")
+        assert got.get("entry_threshold") != 0.99
+        assert got.get("tp_atr_mult") != 99.0
+
+    def test_guard_without_baseline_side_params_stays_blank(self):
+        from agent.batch_post_optimizer import _side_params
+        legacy = {"regression_guard_triggered": True, "long_params": {},
+                  "params": {"entry_threshold_long": 0.99}}
+        assert _side_params(legacy, "long") == {}
+
+
+# ---------------------------------------------------------------------------
 # C. Search-space sentinel
 # ---------------------------------------------------------------------------
 

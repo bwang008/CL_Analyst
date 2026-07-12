@@ -559,12 +559,17 @@ def _format_trail(*sides: dict) -> str:
 def _side_params(opt_info: dict, side: str) -> dict:
     """Per-side params for ensembles: prefer {side}_params, else de-suffix params.
 
-    Guard-reverted rows return {} — on a revert the Opt columns are intentionally
-    blank and ``params`` may still hold the DISCARDED trial's values (see ticket
-    optimizer-objective-report-parity: never source Opt cells from rejected params).
+    Guard-reverted rows source the Opt cells from ``baseline_side_params`` —
+    the SHIPPED config (the grafted baseline the guard kept). This preserves
+    the ticket optimizer-objective-report-parity contract (never render the
+    DISCARDED trial's values, which may linger in ``params``) while no longer
+    hiding the parameters that actually shipped. Legacy results without
+    baseline_side_params render blank as before.
     """
     sp = opt_info.get(f"{side}_params") or {}
-    if sp or opt_info.get("regression_guard_triggered"):
+    if opt_info.get("regression_guard_triggered"):
+        return (opt_info.get("baseline_side_params") or {}).get(side) or {}
+    if sp:
         return sp
     suffix = f"_{side}"
     return {
@@ -681,8 +686,10 @@ def generate_optimized_report(
                 opt_pf = f"{om.get('profit_factor', 0.0):.2f}"
                 opt_pnl = f"${om.get('total_pnl', 0.0):,.0f}"
                 
-                long_params = opt_info.get("long_params", {})
-                short_params = opt_info.get("short_params", {})
+                # Via _side_params so guard-kept rows render the SHIPPED
+                # (grafted baseline) values instead of blanks.
+                long_params = _side_params(opt_info, "long")
+                short_params = _side_params(opt_info, "short")
                 lv = long_params.get('entry_threshold', '-')
                 sv = short_params.get('entry_threshold', '-')
                 if isinstance(lv, float): lv = round(lv, 2)
