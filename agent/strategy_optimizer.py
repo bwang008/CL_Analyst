@@ -847,14 +847,23 @@ def _load_ensemble_predictions(base_cfg: dict) -> pd.DataFrame:
 # execution noise.  Baseline rollback = git revert of this commit.
 #   baseline:   9 dims/side, ~1.5e8 configs/side (log10 8.17)
 #   aggressive: 5 dims/side, ~3.0e3 configs/side (log10 3.48)
-SEARCH_SPACE_TIER = "aggressive"
+SEARCH_SPACE_TIER = "rebalanced"
+# ── REBALANCED tier (2026-07-12, user decision) ────────────────────────────
+# Partial un-freeze of the aggressive tier: the aggressive pruning removed the
+# degrees of freedom needed to re-find known-good configurations (guard-tie
+# plateaus in pass-2; NG winners from the wide era unreachable). Restores the
+# four frozen dims with TIGHTER grids than the pre-aggressive baseline and
+# re-widens TP; sampler exploration raised alongside (n_startup_trials 10->30,
+# multivariate TPE). The grafted warm-start + regression guard anchor every
+# pass-2 search, which is the OOS protection the original wide space lacked.
 _PARAM_RANGES = {
-    # TP cap restored 6.0 -> 8.0 (2026-07-12, user decision after the graft-era
-    # scout): keep the 7-8x tail searchable; the grafted warm-start + regression
-    # guard now anchor the search, which was the original concern behind the cap.
-    "tp_atr_mult":                    (4.0,   8.0, 1.0,  "float"),
+    "tp_atr_mult":                    (2.0,   8.0, 0.75, "float"),
     "sl_atr_mult":                    (1.0,   3.0, 0.5,  "float"),
+    "trigger_frac":                   (0.2,   0.8, 0.2,  "float"),
+    "distance_frac":                  (0.2,   0.8, 0.2,  "float"),
     "cooldown_bars":                  (1,    13,   4,    "int"),
+    "max_hold_bars":                  (12,   36,   6,    "int"),
+    "consecutive_signal_threshold":   (0,     4,   1,    "int"),
     # NOTE: entry_threshold's static tuple is the FALLBACK only (used when a
     # side's prob series is empty/missing). The live search bounds are derived
     # per-model / per-side from the prediction distribution — see
@@ -863,19 +872,11 @@ _PARAM_RANGES = {
     "atr_period":                     (4,    36,   8,    "int"),
 }
 
-# Frozen (formerly searched) dims — deliberately constant for EVERY trial and
-# re-applied to the reconstructed best config, so trial cfg == best cfg.
-# Values are the winner-consensus medians from the audit (not config
-# fallbacks — the no-silent-default rule does not apply to deliberate
-# experiment constants).  max_hold_bars is frozen GLOBALLY at the pooled
-# median (audit P11 proposed per-target-family values; deferred — needs
-# manifest plumbing).
-_FROZEN_PARAMS = {
-    "trigger_frac": 0.4,              # trailing trigger at 40% of TP distance
-    "distance_frac": 0.5,             # trailing SL offset at 50% of trigger
-    "max_hold_bars": 30,              # pooled winner median
-    "consecutive_signal_threshold": 2,
-}
+# Frozen (formerly searched) dims. Emptied by the rebalanced tier (2026-07-12):
+# trigger_frac / distance_frac / max_hold_bars / consecutive_signal_threshold
+# are searched again. Kept as a dict so _suggest_side_params' update() path
+# and any future re-freeze stay one-line changes.
+_FROZEN_PARAMS = {}
 # conflict_resolution: provably inert in single-side mode (the opposite side
 # is disabled, and reconstruction dropped it) and modal-at-"hold" in ensemble
 # winners — frozen, no longer suggested (audit P1+P2).
@@ -1099,11 +1100,25 @@ def _extract_warm_start_params(
                 "threshold", cfg.get("entry_threshold", 0.55)
             )
 
+        # Reverse-derive the trailing latents from the config's concrete
+        # trailing values (rebalanced tier: trigger/distance are searched
+        # again, so the warm-start must emit them or enqueue_trial would
+        # leave them randomly sampled and desync the baseline trial).
+        raw_tp = side_cfg.get("tp_atr_mult", cfg.get("tp_atr_mult", 3.0))
+        raw_trail = side_cfg.get("trailing_atr_mult", cfg.get("trailing_atr_mult", 2.0))
+        raw_offset = side_cfg.get("trailing_sl_atr_offset", cfg.get("trailing_sl_atr_offset", 2.0))
+
         raw_values = {
             "entry_threshold": raw_thr,
-            "tp_atr_mult": side_cfg.get("tp_atr_mult", cfg.get("tp_atr_mult", 3.0)),
+            "tp_atr_mult": raw_tp,
             "sl_atr_mult": side_cfg.get("sl_atr_mult", cfg.get("sl_atr_mult", 1.5)),
+            "trigger_frac": raw_trail / raw_tp if raw_tp > 0 else 0.5,
+            "distance_frac": 1.0 - (raw_offset / raw_trail) if raw_trail > 0 else 0.0,
             "cooldown_bars": side_cfg.get("cooldown_bars", cfg.get("cooldown_bars", 7)),
+            "max_hold_bars": side_cfg.get("max_hold_bars", cfg.get("max_hold_bars", 24)),
+            "consecutive_signal_threshold": side_cfg.get(
+                "consecutive_signal_threshold", cfg.get("consecutive_signal_threshold", 0)
+            ),
             "atr_period": side_cfg.get("atr_period", cfg.get("atr_period", 14)),
         }
         if not include_atr:
@@ -1779,7 +1794,14 @@ def run_optimization(
         direction="maximize",
         study_name=f"strategy_opt_{model_name}_{objective_metric}",
         storage=f"sqlite:///{db_path}",
-        sampler=optuna.samplers.TPESampler(seed=effective_seed),
+        # Rebalanced tier (2026-07-12): 30 random startup trials (was default
+        # 10) so the widened space gets real coverage before TPE exploits, and
+        # multivariate TPE so the threshold x TP x SL x trailing coupling is
+        # modeled jointly instead of per-dim. Changes the trial sequence:
+        # results are NOT comparable to pre-rebalanced runs at the same seed.
+        sampler=optuna.samplers.TPESampler(
+            seed=effective_seed, n_startup_trials=30, multivariate=True,
+        ),
     )
 
     # ── Warm-start: inject baseline as trial #0 ───────────────────────
@@ -2284,7 +2306,10 @@ def run_hybrid_optimization(
         direction="maximize",
         study_name=f"hybrid_opt_{model_name}_{objective_metric}",
         storage=f"sqlite:///{db_path}",
-        sampler=optuna.samplers.TPESampler(seed=random_seed),
+        # Same rebalanced-tier sampler settings as run_optimization.
+        sampler=optuna.samplers.TPESampler(
+            seed=random_seed, n_startup_trials=30, multivariate=True,
+        ),
     )
 
     # ── Warm-start: inject baseline as first trial ────────────────────

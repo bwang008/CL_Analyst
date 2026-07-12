@@ -328,8 +328,9 @@ class TestGuardShippedPairConfig:
 class TestSearchSpaceTier:
 
     def test_tp_atr_mult_range(self):
-        # 8.0 cap restored per user decision 2026-07-12 (was briefly 6.0).
-        assert _PARAM_RANGES["tp_atr_mult"] == (4.0, 8.0, 1.0, "float")
+        # Rebalanced tier 2026-07-12: re-widened to the pre-aggressive span
+        # with a finer step (user decision).
+        assert _PARAM_RANGES["tp_atr_mult"] == (2.0, 8.0, 0.75, "float")
 
 
 # ---------------------------------------------------------------------------

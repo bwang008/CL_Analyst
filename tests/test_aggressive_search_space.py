@@ -1,19 +1,22 @@
-"""Aggressive search-space tier (2026-07-10) — contract tests.
+"""Rebalanced search-space tier (2026-07-12) — contract tests.
 
-Locks the shrunk Optuna search space defined by the dimensionality audit
-(reports/analysis/optimizer_dim_audit_07102026.md):
+Locks the REBALANCED Optuna search space (user decision, partial un-freeze of
+the 2026-07-10 aggressive tier — see the tier comment in strategy_optimizer):
 
-  * _PARAM_RANGES keeps ONLY {tp_atr_mult, sl_atr_mult, cooldown_bars,
-    entry_threshold, atr_period}, with coarsened/narrowed grids.
-  * _FROZEN_PARAMS pins {trigger_frac, distance_frac, max_hold_bars,
-    consecutive_signal_threshold} at the 112-winner consensus medians and is
-    applied to EVERY trial cfg and the reconstructed best cfg.
-  * conflict_resolution is frozen at "hold" (never suggested).
+  * _PARAM_RANGES searches 9 dims/side: the aggressive-tier survivors plus
+    re-unfrozen {trigger_frac, distance_frac, max_hold_bars,
+    consecutive_signal_threshold} on TIGHTER grids than the pre-aggressive
+    baseline; tp_atr_mult re-widened to 2.0-8.0 step 0.75.
+  * _FROZEN_PARAMS is EMPTY (kept as a dict for the update() path).
+  * conflict_resolution stays frozen at "hold" (never suggested).
   * Ensemble (pass-2) mode ties atr_period across sides via ONE
     "atr_period_shared" suggestion.
-  * Dynamic entry_threshold grids are 6-point (step = span/5, was span/10).
-  * Warm-start extraction emits EXACTLY the suggestable key set per mode, so
+  * Dynamic entry_threshold grids stay 6-point (step = span/5).
+  * Warm-start extraction emits EXACTLY the suggestable key set per mode
+    (incl. reverse-derived trigger_frac/distance_frac), so
     study.enqueue_trial() cannot desynchronize from the search space.
+  * Sampler: n_startup_trials=30, multivariate=True (checked via source
+    constants in the create_study calls — behavioral, not asserted here).
 """
 
 import copy
@@ -37,16 +40,20 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 # Expected grids (single source of truth for these tests)
 # ---------------------------------------------------------------------------
 
-TP_GRID = {4.0, 5.0, 6.0, 7.0, 8.0}
+TP_GRID = {2.0, 2.75, 3.5, 4.25, 5.0, 5.75, 6.5, 7.25, 8.0}
 SL_GRID = {1.0, 1.5, 2.0, 2.5, 3.0}
+# 0.2-step float grids are binary-inexact; compare via round(v, 10).
+TRIGGER_GRID = {0.2, 0.4, 0.6, 0.8}
+DISTANCE_GRID = {0.2, 0.4, 0.6, 0.8}
 COOLDOWN_GRID = {1, 5, 9, 13}
+MAXHOLD_GRID = {12, 18, 24, 30, 36}
+CONSEC_GRID = {0, 1, 2, 3, 4}
 ATR_GRID = {4, 12, 20, 28, 36}
 
 SEARCHED_BASE_KEYS = {
-    "tp_atr_mult", "sl_atr_mult", "cooldown_bars", "entry_threshold", "atr_period",
-}
-FROZEN_KEYS = {
-    "trigger_frac", "distance_frac", "max_hold_bars", "consecutive_signal_threshold",
+    "tp_atr_mult", "sl_atr_mult", "trigger_frac", "distance_frac",
+    "cooldown_bars", "max_hold_bars", "consecutive_signal_threshold",
+    "entry_threshold", "atr_period",
 }
 
 
@@ -164,33 +171,36 @@ class TestStaticContract:
         assert set(so._PARAM_RANGES) == SEARCHED_BASE_KEYS
 
     def test_param_ranges_grids(self):
-        # TP cap restored to 8.0 (2026-07-12 user decision): grafted warm-start
-        # + regression guard anchor the search instead of a hard cap.
-        assert so._PARAM_RANGES["tp_atr_mult"] == (4.0, 8.0, 1.0, "float")
+        # Rebalanced tier (2026-07-12 user decision).
+        assert so._PARAM_RANGES["tp_atr_mult"] == (2.0, 8.0, 0.75, "float")
         assert so._PARAM_RANGES["sl_atr_mult"] == (1.0, 3.0, 0.5, "float")
+        assert so._PARAM_RANGES["trigger_frac"] == (0.2, 0.8, 0.2, "float")
+        assert so._PARAM_RANGES["distance_frac"] == (0.2, 0.8, 0.2, "float")
         assert so._PARAM_RANGES["cooldown_bars"] == (1, 13, 4, "int")
+        assert so._PARAM_RANGES["max_hold_bars"] == (12, 36, 6, "int")
+        assert so._PARAM_RANGES["consecutive_signal_threshold"] == (0, 4, 1, "int")
         assert so._PARAM_RANGES["atr_period"] == (4, 36, 8, "int")
         low, high, step, dtype = so._PARAM_RANGES["entry_threshold"]
         # static fallback grid must stay 6-point: (high-low)/step == 5
         assert dtype == "float"
         assert (high - low) / step == pytest.approx(5.0)
+        # float step grids must divide their span exactly (Optuna would
+        # silently drop the top grid point otherwise)
+        assert (8.0 - 2.0) / 0.75 == pytest.approx(8.0)
 
     def test_int_ranges_divisible_by_step(self):
         # Optuna suggest_int requires (high-low) % step == 0.
-        for key in ("cooldown_bars", "atr_period"):
+        for key in ("cooldown_bars", "max_hold_bars",
+                    "consecutive_signal_threshold", "atr_period"):
             low, high, step, dtype = so._PARAM_RANGES[key]
             assert dtype == "int"
             assert (int(high) - int(low)) % int(step) == 0, key
 
     def test_frozen_params_contract(self):
-        assert so._FROZEN_PARAMS == {
-            "trigger_frac": 0.4,
-            "distance_frac": 0.5,
-            "max_hold_bars": 30,
-            "consecutive_signal_threshold": 2,
-        }
+        # Rebalanced tier: nothing frozen except conflict_resolution.
+        assert so._FROZEN_PARAMS == {}
         assert so._FROZEN_CONFLICT_RESOLUTION == "hold"
-        assert so.SEARCH_SPACE_TIER == "aggressive"
+        assert so.SEARCH_SPACE_TIER == "rebalanced"
 
     def test_entry_threshold_bounds_six_point_grid(self):
         s = pd.Series([i / 1000.0 for i in range(1001)])  # uniform on [0,1]
@@ -207,25 +217,30 @@ class TestSingleSideTrials:
         study, cfgs = _run_trials(optimize_side="long", n_trials=3)
         for t in study.trials:
             assert set(t.params) == {f"{k}_long" for k in SEARCHED_BASE_KEYS}
-            assert t.params["tp_atr_mult_long"] in TP_GRID
+            assert round(t.params["tp_atr_mult_long"], 10) in TP_GRID
             assert t.params["sl_atr_mult_long"] in SL_GRID
+            assert round(t.params["trigger_frac_long"], 10) in TRIGGER_GRID
+            assert round(t.params["distance_frac_long"], 10) in DISTANCE_GRID
             assert t.params["cooldown_bars_long"] in COOLDOWN_GRID
+            assert t.params["max_hold_bars_long"] in MAXHOLD_GRID
+            assert t.params["consecutive_signal_threshold_long"] in CONSEC_GRID
             assert t.params["atr_period_long"] in ATR_GRID
-            # frozen dims and conflict_resolution must never be suggested
-            assert not any("trigger_frac" in k or "distance_frac" in k
-                           or "max_hold_bars" in k
-                           or "consecutive_signal_threshold" in k
-                           or k == "conflict_resolution" for k in t.params)
+            # conflict_resolution must never be suggested
+            assert "conflict_resolution" not in t.params
 
-    def test_frozen_values_applied_to_trial_cfg(self):
+    def test_searched_values_applied_to_trial_cfg(self):
         study, cfgs = _run_trials(optimize_side="long", n_trials=2)
         for cfg, t in zip(cfgs, study.trials):
             assert cfg["conflict_resolution"] == "hold"
-            assert cfg["long"]["max_hold_bars"] == 30
-            assert cfg["long"]["consecutive_signal_threshold"] == 2
+            assert cfg["long"]["max_hold_bars"] == t.params["max_hold_bars_long"]
+            assert (cfg["long"]["consecutive_signal_threshold"]
+                    == t.params["consecutive_signal_threshold_long"])
             tp = t.params["tp_atr_mult_long"]
-            assert cfg["long"]["trailing_atr_mult"] == pytest.approx(tp * 0.4)
-            assert cfg["long"]["trailing_sl_atr_offset"] == pytest.approx(tp * 0.4 * 0.5)
+            trig = t.params["trigger_frac_long"]
+            dist = t.params["distance_frac_long"]
+            assert cfg["long"]["trailing_atr_mult"] == pytest.approx(tp * trig)
+            assert cfg["long"]["trailing_sl_atr_offset"] == pytest.approx(
+                tp * trig * (1.0 - dist))
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +265,9 @@ class TestEnsembleTrials:
             assert cfg["conflict_resolution"] == "hold"
             assert cfg["long"]["atr_period"] == cfg["short"]["atr_period"] \
                 == t.params["atr_period_shared"]
-            assert cfg["long"]["max_hold_bars"] == cfg["short"]["max_hold_bars"] == 30
+            # max_hold is per-side searched in the rebalanced tier
+            assert cfg["long"]["max_hold_bars"] == t.params["max_hold_bars_long"]
+            assert cfg["short"]["max_hold_bars"] == t.params["max_hold_bars_short"]
 
 
 # ---------------------------------------------------------------------------
