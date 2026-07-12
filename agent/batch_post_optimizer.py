@@ -323,6 +323,103 @@ def resolve_firing_band(manifest: dict) -> tuple[float, float]:
     return float(f_min), float(f_max)
 
 
+def _parse_pred_prefix(pred_prefix: str) -> tuple[str, str, str] | None:
+    """Split 'oos_predictions_<gcs_prefix>_<side>_<metric>' into
+    (gcs_prefix, side, metric). Returns None for unrecognized shapes
+    (e.g. legacy 'registry_' keys)."""
+    stem = pred_prefix
+    if not stem.startswith("oos_predictions_"):
+        return None
+    stem = stem[len("oos_predictions_"):]
+    for metric in ("average_precision", "logloss"):
+        for side in ("long", "short"):
+            suffix = f"_{side}_{metric}"
+            if stem.endswith(suffix):
+                return stem[: -len(suffix)], side, metric
+    return None
+
+
+def _build_pair_base_config(
+    base_config_path: str,
+    pass1_results: dict,
+    gcs_to_label: dict,
+    long_prefix: str,
+    short_prefix: str,
+    out_path: str,
+) -> str:
+    """Materialize the pass-2 base config for one pair by grafting each leg's
+    pass-1 winning execution params onto the generic base config.
+
+    The ensemble study then warm-starts from — and its regression guard
+    protects — the joint run of the legs' PROVEN configs instead of the
+    generic baseline. Before this, pass 2 cold-started from the generic
+    config and could silently discard a winning leg configuration (NG 02B
+    E01: the short leg's +$33k guard-kept config was never evaluated by
+    the joint search).
+
+    A leg whose pass-1 run tripped the regression guard has empty
+    optuna_info.params BY CONTRACT — its winner IS the baseline config, so
+    keeping the generic side block reproduces it exactly (INFO, not a
+    warning). Any other unresolvable leg falls back to the generic side
+    block with a loud warning — degrading to pre-change behavior, never
+    corrupting.
+    """
+    from src.live_execution.strategies.execution_models import create_execution_strategy
+
+    def _leg_params(pred_prefix: str, want_side: str) -> dict | None:
+        parsed = _parse_pred_prefix(pred_prefix)
+        if parsed is None:
+            print(f"  [PAIR-GRAFT] WARN: unrecognized prediction prefix "
+                  f"'{pred_prefix}' — generic baseline kept for {want_side}")
+            return None
+        gcs_prefix, side, metric = parsed
+        if side != want_side:
+            print(f"  [PAIR-GRAFT] WARN: '{pred_prefix}' is a {side} target "
+                  f"paired on the {want_side} slot")
+        label = gcs_to_label.get(gcs_prefix)
+        if not label:
+            print(f"  [PAIR-GRAFT] WARN: no experiment label for gcs_prefix "
+                  f"'{gcs_prefix}' — generic baseline kept for {want_side}")
+            return None
+        key = f"{label}|{side}|{metric}"
+        entry = pass1_results.get(key)
+        if not entry or entry.get("status") != "OK":
+            print(f"  [PAIR-GRAFT] WARN: no OK pass-1 result for '{key}' — "
+                  f"generic baseline kept for {want_side}")
+            return None
+        opt_info = entry.get("optuna_info") or {}
+        params = opt_info.get("params")
+        if not params:
+            if opt_info.get("regression_guard_triggered"):
+                print(f"  [PAIR-GRAFT] {want_side}: pass-1 winner for '{key}' "
+                      f"IS the baseline config (guard) — generic side block is exact")
+            else:
+                print(f"  [PAIR-GRAFT] WARN: pass-1 result '{key}' has no "
+                      f"params — generic baseline kept for {want_side}")
+            return None
+        return params
+
+    long_params = _leg_params(long_prefix, "long")
+    short_params = _leg_params(short_prefix, "short")
+    if long_params is None and short_params is None:
+        return base_config_path
+
+    with open(base_config_path, encoding="utf-8-sig") as f:
+        cfg = json.load(f)
+    strategy = create_execution_strategy(cfg)
+    for side, params in (("long", long_params), ("short", short_params)):
+        if not params:
+            continue
+        strategy.apply_trial_params(cfg, params, side=side)
+        print(f"  [PAIR-GRAFT] {side} <- pass-1 winner: "
+              f"thr={params.get('entry_threshold')} tp={params.get('tp_atr_mult')} "
+              f"sl={params.get('sl_atr_mult')} cd={params.get('cooldown_bars')} "
+              f"atr={params.get('atr_period')}")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+    return out_path
+
+
 def merge_predictions(long_path: str, short_path: str) -> pd.DataFrame:
     """Merge long + short predictions into a single DataFrame."""
     long_df = load_predictions(long_path)
@@ -811,9 +908,17 @@ def generate_optimized_report(
                 ("Consec Signal", "consecutive_signal_threshold"),
                 ("ATR Period", "atr_period"),
             ]
+            # Baseline params: prefer the baseline THIS run actually evaluated
+            # (per-pair since pass-1 grafting); global base config is the
+            # legacy fallback for results predating baseline_side_params.
+            bl_side = opt_info.get("baseline_side_params") or {}
             for display_name, param_key in param_keys:
-                # Baseline from base config long/short blocks
-                if param_key == "entry_threshold":
+                if bl_side:
+                    bl = bl_side.get("long", {}).get(param_key)
+                    bs = bl_side.get("short", {}).get(param_key)
+                    bl = '-' if bl is None else bl
+                    bs = '-' if bs is None else bs
+                elif param_key == "entry_threshold":
                     bl = base_cfg.get("models", {}).get("long", {}).get("threshold", '-') if base_cfg else '-'
                     bs = base_cfg.get("models", {}).get("short", {}).get("threshold", '-') if base_cfg else '-'
                 else:
@@ -1311,7 +1416,28 @@ def main():
         pred_map = build_pred_map(search_dirs, gcs_prefixes)
 
         print(f"  Discovered {len(pred_map)} prediction paths across {len(search_dirs)} directories")
-                    
+
+        # ── Pass-1 grafting (single-arm invocations only) ──────────────────
+        # Load this arm's pass-1 results so each pair's base config carries the
+        # legs' PROVEN params. The managed path (vm_post_optimize.sh [4c/5])
+        # always invokes pass 2 per-arm; opt_mode=ensemble has no pass-1 file
+        # and multi-arm calls are ambiguous — both skip with the reason logged.
+        pass1_results = None
+        graft_arm = None
+        _arms = parse_objectives(args.objective) if isinstance(args.objective, str) else list(args.objective)
+        if len(_arms) == 1:
+            _p1_path = os.path.join(batch_dir, f"optimization_results_{_arms[0]}.json")
+            if os.path.exists(_p1_path):
+                with open(_p1_path, encoding="utf-8-sig") as f:
+                    pass1_results = json.load(f)
+                graft_arm = _arms[0]
+                print(f"Pass-1 grafting ENABLED from {_p1_path} ({len(pass1_results)} entries)")
+            else:
+                print(f"Pass-1 grafting skipped: {_p1_path} not found "
+                      f"(opt_mode=ensemble or standalone pass-2 run)")
+        else:
+            print(f"Pass-1 grafting skipped: multi-arm invocation {_arms}")
+
         for i, pair in enumerate(top_pairs):
             long_prefix = pair["target_long"]
             short_prefix = pair["target_short"]
@@ -1342,15 +1468,26 @@ def main():
                 
             label = f"Ensemble_{i+1}"
             task_key = f"{long_prefix}|{short_prefix}"
-            
+
             # Store experiment labels for this task_key
             task_experiment_labels[task_key] = {
                 "long_label": long_exp_label,
                 "short_label": short_exp_label,
             }
-            
+
+            # Graft the legs' pass-1 winners into this pair's base config so
+            # the ensemble study warm-starts from the proven combination.
+            pair_config_path = base_config_path
+            if pass1_results is not None:
+                print(f"  [PAIR-GRAFT] {label}: {long_prefix} + {short_prefix}")
+                pair_config_path = _build_pair_base_config(
+                    base_config_path, pass1_results, gcs_to_label,
+                    long_prefix, short_prefix,
+                    os.path.join(canary_dir, f"_pair_base_{graft_arm}_ens{i+1}.json"),
+                )
+
             # Side is None for full ensemble optimization
-            opt_tasks.append((task_key, base_config_path, merged_path, label, "ensemble", None))
+            opt_tasks.append((task_key, pair_config_path, merged_path, label, "ensemble", None))
     else:
         for exp in progress.get("experiments", []):
             if exp.get("status") != "COMPLETED":

@@ -164,6 +164,10 @@ cd "$PROJECT_DIR"
 # Defaults
 BATCH_ID=""
 N_TRIALS=500
+# Pass-2 (ensemble pair) trial budget. Empty = inherit N_TRIALS (resolved after
+# arg parse). The managed deploy chain passes it explicitly from the manifest's
+# post_optimizer_ensemble_trials via run_sweep_batch.ps1 -> gcp_deploy_optimizer.ps1.
+ENSEMBLE_TRIALS=""
 # HOLDOUT_MONTHS is NOT defaulted here — it is read authoritatively from the manifest
 # (post_optimizer_holdout_months) below. The manifest is the single source of truth.
 HOLDOUT_MONTHS=""
@@ -191,6 +195,7 @@ for arg in "$@"; do
     case "$arg" in
         --batch-id=*) BATCH_ID="${arg#*=}" ;;
         --n-trials=*) N_TRIALS="${arg#*=}" ;;
+        --ensemble-trials=*) ENSEMBLE_TRIALS="${arg#*=}" ;;
         # --holdout-months is intentionally IGNORED if passed: the manifest's
         # post_optimizer_holdout_months is authoritative (set after manifest parse below).
         --holdout-months=*) : ;;
@@ -208,6 +213,11 @@ done
 if [ -z "$BATCH_ID" ]; then
     echo "ERROR: --batch-id is required" | tee -a "$LOG"
     exit 1
+fi
+
+# Resolve the pass-2 budget: explicit --ensemble-trials wins, else inherit pass-1.
+if [ -z "$ENSEMBLE_TRIALS" ]; then
+    ENSEMBLE_TRIALS="$N_TRIALS"
 fi
 
 # --- Validate the objective arm list ---------------------------------------
@@ -261,6 +271,7 @@ echo " POST-OPTIMIZER VM RUN" | tee -a "$LOG"
 echo "============================================================" | tee -a "$LOG"
 echo "  Batch ID:      $BATCH_ID" | tee -a "$LOG"
 echo "  N Trials:      $N_TRIALS" | tee -a "$LOG"
+echo "  Ens Trials:    $ENSEMBLE_TRIALS (pass-2 pairs)" | tee -a "$LOG"
 echo "  Holdout:       (read from manifest below)" | tee -a "$LOG"
 echo "  Workers:       $WORKERS" | tee -a "$LOG"
 echo "  Objective:     $OBJECTIVE_CSV (${#OBJECTIVE_ARMS[@]} arm(s))" | tee -a "$LOG"
@@ -535,12 +546,12 @@ if [ "$OPT_MODE" = "ensemble" ]; then
     # --- [4/5] Run batch_post_optimizer (ensemble mode) ---
     echo "" | tee -a "$LOG"
     echo "[4/5] Running batch post-optimizer on Top 8 (ensemble mode)..." | tee -a "$LOG"
-    echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --target-pairs-json $BATCH_DIR/top_8_ensembles.json --n-trials $N_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE_CSV --n-blocks $N_BLOCKS --lambda-dispersion $LAMBDA_DISPERSION --min-block-months $MIN_BLOCK_MONTHS --no-filter $OPT_ARGS" | tee -a "$LOG"
+    echo "  Command: python agent/batch_post_optimizer.py --batch-dir $BATCH_DIR --target-pairs-json $BATCH_DIR/top_8_ensembles.json --n-trials $ENSEMBLE_TRIALS --holdout-months $HOLDOUT_MONTHS --workers $WORKERS --objective $OBJECTIVE_CSV --n-blocks $N_BLOCKS --lambda-dispersion $LAMBDA_DISPERSION --min-block-months $MIN_BLOCK_MONTHS --no-filter $OPT_ARGS" | tee -a "$LOG"
 
     python agent/batch_post_optimizer.py \
         --batch-dir "$BATCH_DIR" \
         --target-pairs-json "$BATCH_DIR/top_8_ensembles.json" \
-        --n-trials "$N_TRIALS" \
+        --n-trials "$ENSEMBLE_TRIALS" \
         --holdout-months "$HOLDOUT_MONTHS" \
         --workers "$WORKERS" \
         --objective "$OBJECTIVE_CSV" \
@@ -631,12 +642,12 @@ else
         # Runs on the same VM that just completed individual optimization.
         # 4 pairs per arm is lightweight (~5-10 min each on the warm VM).
         echo "" | tee -a "$LOG"
-        echo "[4c/5] Running ensemble optimization on VM (arm: $ARM, $PAIR_COUNT pairs)..." | tee -a "$LOG"
+        echo "[4c/5] Running ensemble optimization on VM (arm: $ARM, $PAIR_COUNT pairs, $ENSEMBLE_TRIALS trials)..." | tee -a "$LOG"
 
         python agent/batch_post_optimizer.py \
             --batch-dir "$BATCH_DIR" \
             --target-pairs-json "$TOP_PAIRS" \
-            --n-trials "$N_TRIALS" \
+            --n-trials "$ENSEMBLE_TRIALS" \
             --holdout-months "$HOLDOUT_MONTHS" \
             --workers "$WORKERS" \
             --objective "$ARM" \

@@ -77,6 +77,12 @@ class OptunaConfig(BaseModel):
     feature_fraction_min: float = 0.3
     feature_fraction_max: float = 1.0
     post_optimizer_trials: int = 3
+    # Pass-2 (ensemble pair) Optuna budget. The joint space is ~2x the per-side
+    # dimensionality, so it may deserve a larger budget than pass 1. None means
+    # "inherit post_optimizer_trials" — resolved EXPLICITLY in run_sweep_batch.ps1 /
+    # resume_batch.ps1 (never silently downstream), which keeps every existing
+    # manifest's behavior byte-identical.
+    post_optimizer_ensemble_trials: Optional[int] = None
     # Holdout for the post-optimizer (months reserved from Optuna). REQUIRED — the
     # manifest is the single source of truth; no silent default may stand in.
     post_optimizer_holdout_months: int

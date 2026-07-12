@@ -382,6 +382,11 @@ if ($null -eq $postOptHoldout) {
     Write-Host "FATAL: post_optimizer_holdout_months missing from validated manifest." -ForegroundColor Red
     exit 1
 }
+# Pass-2 (ensemble pair) trial budget. Schema allows null = inherit pass-1 budget;
+# the inheritance is resolved HERE (the single explicit fallback site), so the sh
+# always receives a concrete number.
+$postOptEnsTrials = $optuna.post_optimizer_ensemble_trials
+if ($null -eq $postOptEnsTrials) { $postOptEnsTrials = $postOptTrials }
 
 # Apply MaxConcurrentVcpus override or read from manifest infrastructure
 $maxVcpus    = if ($MaxConcurrentVcpus -gt 0) { $MaxConcurrentVcpus } `
@@ -1105,6 +1110,7 @@ if ($batchState.completed -gt 0) {
         $optArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\gcp\gcp_deploy_optimizer.ps1",
             "-BatchId", $BatchId,
             "-NTrials", $postOptTrials,
+            "-EnsembleTrials", $postOptEnsTrials,
             "-HoldoutMonths", $postOptHoldout,
             "-MachineType", $optMachineType,
             "-Workers", $optWorkerCount,

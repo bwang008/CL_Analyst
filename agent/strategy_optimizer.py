@@ -849,7 +849,10 @@ def _load_ensemble_predictions(base_cfg: dict) -> pd.DataFrame:
 #   aggressive: 5 dims/side, ~3.0e3 configs/side (log10 3.48)
 SEARCH_SPACE_TIER = "aggressive"
 _PARAM_RANGES = {
-    "tp_atr_mult":                    (4.0,   8.0, 1.0,  "float"),
+    # TP cap 8.0 -> 6.0 (2026-07-12): NG 02B pass-2 forensics — TP 8x longs hit
+    # 5/130 holdout trades (3.8%); the 7-8x tail only ever won on the 2022 vol
+    # regime and destabilized the joint search.
+    "tp_atr_mult":                    (4.0,   6.0, 1.0,  "float"),
     "sl_atr_mult":                    (1.0,   3.0, 0.5,  "float"),
     "cooldown_bars":                  (1,    13,   4,    "int"),
     # NOTE: entry_threshold's static tuple is the FALLBACK only (used when a
@@ -1156,6 +1159,36 @@ def _extract_warm_start_params(
     except Exception as e:
         print(f"  [WARN] Failed to extract warm-start params: {e}")
         return None
+
+
+def _baseline_side_display_params(cfg: dict) -> dict:
+    """Raw per-side display params of the ACTUAL baseline config for this run.
+
+    Stored in optuna_info so reports show the baseline the run really
+    evaluated — with pass-2 pair grafting the per-pair baseline differs from
+    the global strategy config, and rendering the global one would misreport.
+    Raw values, deliberately NOT grid-snapped (display, not search).
+    """
+    def _side_vals(side: str) -> dict:
+        sc = cfg.get(side, {}) or {}
+        tiers = sc.get("tiers") or []
+        if tiers:
+            thr = tiers[0].get("min_prob")
+        else:
+            thr = cfg.get("models", {}).get(side, {}).get("threshold")
+        return {
+            "entry_threshold": thr,
+            "tp_atr_mult": sc.get("tp_atr_mult", cfg.get("tp_atr_mult")),
+            "sl_atr_mult": sc.get("sl_atr_mult", cfg.get("sl_atr_mult")),
+            "cooldown_bars": sc.get("cooldown_bars", cfg.get("cooldown_bars")),
+            "max_hold_bars": sc.get("max_hold_bars", cfg.get("max_hold_bars")),
+            "consecutive_signal_threshold": sc.get(
+                "consecutive_signal_threshold", cfg.get("consecutive_signal_threshold")
+            ),
+            "atr_period": sc.get("atr_period", cfg.get("atr_period")),
+        }
+
+    return {"long": _side_vals("long"), "short": _side_vals("short")}
 
 
 def _compute_objective_score(
@@ -1948,6 +1981,9 @@ def run_optimization(
         "wall_time_seconds": round(elapsed, 1),
         "block_sharpes": _block_details["block_sharpes"] if _block_details else None,
         "block_bounds": _block_details["block_bounds"] if _block_details else None,
+        # The baseline THIS run evaluated (pass-2 pair grafting makes it
+        # per-pair); reports must render these, not the global strategy config.
+        "baseline_side_params": _baseline_side_display_params(base_cfg) if is_tiered else None,
     }
 
     if is_tiered and optimize_side:
@@ -2460,6 +2496,8 @@ def run_hybrid_optimization(
         "wall_time_seconds": round(elapsed, 1),
         "block_sharpes": _block_details["block_sharpes"] if _block_details else None,
         "block_bounds": _block_details["block_bounds"] if _block_details else None,
+        # Same contract as run_optimization: the baseline THIS run evaluated.
+        "baseline_side_params": _baseline_side_display_params(base_cfg) if is_tiered else None,
     }
     if is_tiered and optimize_side:
         best_cfg["optuna_info"] = {

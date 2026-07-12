@@ -72,8 +72,12 @@ def parse_markdown_table(filepath, direction, metric, objective, progress_data):
                 pnl_opt = float(pnl_opt_str.replace('$', '').replace(',', ''))
                 pnl_holdout = float(pnl_holdout_str.replace('$', '').replace(',', ''))
                 
-                robustness = pnl_opt + (pnl_holdout * 6)
-                
+                # Holdout weight 2 (was 6): the 6x weight was calibrated when
+                # post_optimizer_holdout_months was 6; at the 12-month holdout the
+                # window PnL is ~2x larger, so 6x made selection effectively
+                # holdout-only and promoted peak-of-noise holdout draws.
+                robustness = pnl_opt + (pnl_holdout * 2)
+
                 # Minimums: PnL (opt) > 0, PnL (holdout) > 0, Trades (opt) >= 100
                 passed_filter = pnl_opt > 0 and pnl_holdout > 0 and trades >= 100
                 if not passed_filter:

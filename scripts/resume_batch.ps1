@@ -152,12 +152,18 @@ if ($null -eq $manifest.baseline.training_workflow.optuna.post_optimizer_trials)
 }
 $postOptTrials = [int]$manifest.baseline.training_workflow.optuna.post_optimizer_trials
 
+# Optional pass-2 budget: absent in pre-2026-07-12 manifests -> inherit pass-1
+# budget (same explicit-inheritance rule as run_sweep_batch.ps1).
+$postOptEnsTrials = $manifest.baseline.training_workflow.optuna.post_optimizer_ensemble_trials
+if ($null -eq $postOptEnsTrials) { $postOptEnsTrials = $postOptTrials }
+$postOptEnsTrials = [int]$postOptEnsTrials
+
 if ($null -eq $manifest.baseline.training_workflow.optuna.post_optimizer_holdout_months) {
     Write-Fatal "baseline.training_workflow.optuna.post_optimizer_holdout_months missing in manifest - required."
 }
 $postOptHoldout = [int]$manifest.baseline.training_workflow.optuna.post_optimizer_holdout_months
 
-Write-Ok "  Manifest validated: symbol=$symbol opt_mode=$optMode slippage=$slippage trials=$postOptTrials holdout_months=$postOptHoldout"
+Write-Ok "  Manifest validated: symbol=$symbol opt_mode=$optMode slippage=$slippage trials=$postOptTrials ens_trials=$postOptEnsTrials holdout_months=$postOptHoldout"
 
 # Load batch_progress.json (may be absent - seed a fresh state in NON-DryRun).
 $progressFile = Join-Path $BatchDir "batch_progress.json"
@@ -515,7 +521,7 @@ if (-not $postOptDone) {
         Write-Host ""
         Write-Info "  [DryRun] WOULD deploy the post-optimizer (PLAIN id $plainBatchId; rename is AFTER post-opt):"
         Write-Host "    gcp_deploy_optimizer.ps1 -BatchId $plainBatchId -NoMonitor" -ForegroundColor DarkGray
-        Write-Host "        -NTrials $postOptTrials -HoldoutMonths $postOptHoldout -MachineType $optMachineType -Workers 0" -ForegroundColor DarkGray
+        Write-Host "        -NTrials $postOptTrials -EnsembleTrials $postOptEnsTrials -HoldoutMonths $postOptHoldout -MachineType $optMachineType -Workers 0" -ForegroundColor DarkGray
         Write-Host "        -Zone $fallbackZone -SweepMode $SweepMode -OptMode $optMode -Objective $Objective" -ForegroundColor DarkGray
         Write-Host "        -NBlocks $NBlocks -LambdaDispersion $LambdaDispersion -MinBlockMonths $MinBlockMonths" -ForegroundColor DarkGray
         Write-Host "        -MaxRunDurationMinutes $OptimizerMaxRunDurationMinutes -ExecData $execData$slipEcho$tgEcho" -ForegroundColor DarkGray
@@ -526,6 +532,7 @@ if (-not $postOptDone) {
             "-BatchId", $plainBatchId,
             "-NoMonitor",
             "-NTrials", $postOptTrials,
+            "-EnsembleTrials", $postOptEnsTrials,
             "-HoldoutMonths", $postOptHoldout,
             "-MachineType", $optMachineType,
             "-Workers", 0,
