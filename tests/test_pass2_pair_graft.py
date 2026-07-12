@@ -278,6 +278,50 @@ class TestSideParamsGuardFallback:
 
 
 # ---------------------------------------------------------------------------
+# B4. Artifact generator reconstructs SHIPPED config for guard ensembles
+# ---------------------------------------------------------------------------
+
+class TestGuardShippedPairConfig:
+    """generate_ensemble_artifacts must emit the GRAFTED pair baseline for
+    guard-kept ensembles — emitting the raw base config produced promotion
+    configs + verification backtests diverging from the summary (03B E1:
+    +$25.2k summary vs +$5.8k backtest of the wrong config)."""
+
+    def _batch(self, tmp_path):
+        batch = tmp_path / "batch"
+        (batch / "configs").mkdir(parents=True)
+        (batch / "optimization_results_sharpe.json").write_text(
+            json.dumps(_pass1_results()), encoding="utf-8")
+        (batch / "batch_progress.json").write_text(json.dumps({"experiments": [
+            {"label": "ExpA", "gcs_prefix": "expa_prefix"},
+            {"label": "ExpB", "gcs_prefix": "expb_prefix"},
+        ]}), encoding="utf-8")
+        base = tmp_path / "base.json"
+        base.write_text(json.dumps(_BASE_CFG), encoding="utf-8")
+        return batch, base
+
+    def test_reconstructs_grafted_config(self, tmp_path):
+        from agent.generate_ensemble_artifacts import _guard_shipped_pair_config
+        batch, base = self._batch(tmp_path)
+        shipped = _guard_shipped_pair_config(
+            str(batch), "sharpe", f"{_LONG_PREFIX}|{_SHORT_PREFIX}",
+            str(base), str(batch / "configs" / "_g.json"))
+        assert shipped is not None
+        assert shipped["long"]["tiers"][0]["min_prob"] == 0.56
+        assert shipped["long"]["tp_atr_mult"] == 6.0
+        # Guard leg: generic side block kept byte-for-byte (its true winner).
+        assert shipped["short"] == _BASE_CFG["short"]
+
+    def test_missing_pass1_returns_none(self, tmp_path):
+        from agent.generate_ensemble_artifacts import _guard_shipped_pair_config
+        batch, base = self._batch(tmp_path)
+        (batch / "optimization_results_sharpe.json").unlink()
+        assert _guard_shipped_pair_config(
+            str(batch), "sharpe", f"{_LONG_PREFIX}|{_SHORT_PREFIX}",
+            str(base), str(batch / "configs" / "_g.json")) is None
+
+
+# ---------------------------------------------------------------------------
 # C. Search-space sentinel
 # ---------------------------------------------------------------------------
 

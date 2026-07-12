@@ -245,6 +245,48 @@ def validate_exec_data(manifest, cli_exec_data, symbol):
     return resolved
 
 
+def _guard_shipped_pair_config(batch_dir, objective, pair_key, base_config_path, out_path):
+    """Reconstruct the SHIPPED config for a guard-kept pass-2 ensemble.
+
+    A guard revert ships the pair's GRAFTED baseline (each leg's pass-1
+    winner applied to its side — batch_post_optimizer._build_pair_base_config),
+    NOT the raw base config. Emitting the raw base config for guard rows
+    produced promotion configs and verification backtests that silently
+    diverged from the summary report (03B E1: summary holdout +$25.2k vs
+    backtest of the generic config +$5.8k — caught by the operator).
+
+    Re-derives the graft from the same local inputs the optimizer VM used
+    (pass-1 optimization_results_<arm>.json + batch_progress prefixes).
+    Returns the config dict, or None when pass-1 results are unavailable
+    (legacy / opt_mode=ensemble batches — where guard baseline == raw base
+    config and the old behavior is exact by identity).
+    """
+    # Deferred import: batch_post_optimizer imports _canonical_pair_order from
+    # THIS module — a module-level import here would be circular.
+    from agent.batch_post_optimizer import (
+        _build_pair_base_config,
+        _build_gcs_prefix_to_label,
+    )
+
+    p1_path = os.path.join(batch_dir, f"optimization_results_{objective}.json")
+    progress_path = os.path.join(batch_dir, "batch_progress.json")
+    if not (os.path.exists(p1_path) and os.path.exists(progress_path)):
+        return None
+    keys = pair_key.split("|")
+    if len(keys) != 2:
+        return None
+    with open(p1_path, encoding="utf-8-sig") as f:
+        pass1_results = json.load(f)
+    with open(progress_path, encoding="utf-8-sig") as f:
+        progress = json.load(f)
+    gcs_to_label = _build_gcs_prefix_to_label(progress)
+    shipped_path = _build_pair_base_config(
+        base_config_path, pass1_results, gcs_to_label, keys[0], keys[1], out_path
+    )
+    with open(shipped_path, encoding="utf-8-sig") as f:
+        return json.load(f)
+
+
 def build_config(opt_result, objective, ensemble_idx, batch_dir, date_str, dataset_tag, base_config):
     # opt_result key example: "sweep...|sweep..."
     keys = list(opt_result.keys())
@@ -483,6 +525,28 @@ def main():
             # field is the only surviving model-symbol cross-check.
             cfg["models"]["long"]["symbol"] = baseline_symbol
             cfg["models"]["short"]["symbol"] = baseline_symbol
+
+            if regression_triggered:
+                # Guard revert: the SHIPPED config is the grafted pair
+                # baseline, not the raw base config. Reconstruct it and graft
+                # its side blocks; tiers are authoritative for thresholds.
+                # Intermediate graft source goes in the batch ROOT (like
+                # _merged_ens_*.csv) — configs/ holds only promotable,
+                # symbol-stamped configs and is swept by the validation gate.
+                shipped = _guard_shipped_pair_config(
+                    batch_dir, objective, pair_key, base_config_path,
+                    os.path.join(batch_dir, f"_guard_pair_src_{objective}_E{ensemble_idx:02d}.json"),
+                )
+                if shipped is not None:
+                    for _side in ("long", "short"):
+                        if shipped.get(_side):
+                            cfg[_side] = json.loads(json.dumps(shipped[_side]))
+                            _tiers = shipped[_side].get("tiers") or []
+                            if _tiers and _tiers[0].get("min_prob") is not None:
+                                cfg["models"][_side]["threshold"] = _tiers[0]["min_prob"]
+                    print(f"  [GUARD-RECON] E{ensemble_idx:02d}: shipped grafted baseline reconstructed for {pair_key}")
+                else:
+                    print(f"  [GUARD-RECON] WARN E{ensemble_idx:02d}: pass-1 results unavailable — emitting raw base config (pre-graft identity)")
 
             if not regression_triggered:
                 # Override long and short params
