@@ -241,8 +241,9 @@ class TestGuardEnsembleReportBaseline:
 
 class TestSearchSpaceTier:
 
-    def test_tp_atr_mult_capped_at_6(self):
-        assert _PARAM_RANGES["tp_atr_mult"] == (4.0, 6.0, 1.0, "float")
+    def test_tp_atr_mult_range(self):
+        # 8.0 cap restored per user decision 2026-07-12 (was briefly 6.0).
+        assert _PARAM_RANGES["tp_atr_mult"] == (4.0, 8.0, 1.0, "float")
 
 
 # ---------------------------------------------------------------------------

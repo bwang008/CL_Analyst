@@ -164,9 +164,9 @@ class TestStaticContract:
         assert set(so._PARAM_RANGES) == SEARCHED_BASE_KEYS
 
     def test_param_ranges_grids(self):
-        # TP cap 8.0 -> 6.0 (2026-07-12): the 7-8x tail only won on the 2022
-        # vol regime (NG 02B forensics) and destabilized the pass-2 search.
-        assert so._PARAM_RANGES["tp_atr_mult"] == (4.0, 6.0, 1.0, "float")
+        # TP cap restored to 8.0 (2026-07-12 user decision): grafted warm-start
+        # + regression guard anchor the search instead of a hard cap.
+        assert so._PARAM_RANGES["tp_atr_mult"] == (4.0, 8.0, 1.0, "float")
         assert so._PARAM_RANGES["sl_atr_mult"] == (1.0, 3.0, 0.5, "float")
         assert so._PARAM_RANGES["cooldown_bars"] == (1, 13, 4, "int")
         assert so._PARAM_RANGES["atr_period"] == (4, 36, 8, "int")

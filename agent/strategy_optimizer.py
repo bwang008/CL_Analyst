@@ -849,10 +849,10 @@ def _load_ensemble_predictions(base_cfg: dict) -> pd.DataFrame:
 #   aggressive: 5 dims/side, ~3.0e3 configs/side (log10 3.48)
 SEARCH_SPACE_TIER = "aggressive"
 _PARAM_RANGES = {
-    # TP cap 8.0 -> 6.0 (2026-07-12): NG 02B pass-2 forensics — TP 8x longs hit
-    # 5/130 holdout trades (3.8%); the 7-8x tail only ever won on the 2022 vol
-    # regime and destabilized the joint search.
-    "tp_atr_mult":                    (4.0,   6.0, 1.0,  "float"),
+    # TP cap restored 6.0 -> 8.0 (2026-07-12, user decision after the graft-era
+    # scout): keep the 7-8x tail searchable; the grafted warm-start + regression
+    # guard now anchor the search, which was the original concern behind the cap.
+    "tp_atr_mult":                    (4.0,   8.0, 1.0,  "float"),
     "sl_atr_mult":                    (1.0,   3.0, 0.5,  "float"),
     "cooldown_bars":                  (1,    13,   4,    "int"),
     # NOTE: entry_threshold's static tuple is the FALLBACK only (used when a
