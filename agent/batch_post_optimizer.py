@@ -894,8 +894,13 @@ def generate_optimized_report(
         # but the un-suffixed keys are in long_params/short_params.
         long_params = opt_info.get("long_params", {})
         short_params = opt_info.get("short_params", {})
+        # Per-pair baseline (pass-1 grafting). Also keeps GUARD-triggered
+        # ensembles (empty long/short_params by contract) on the per-side
+        # display — the legacy fallback would render the global base config
+        # as Baseline and misreport grafted pairs.
+        bl_side_params = opt_info.get("baseline_side_params") or {}
 
-        if is_ensemble and (long_params or short_params):
+        if is_ensemble and (long_params or short_params or bl_side_params):
             # Show per-side params as "L / S" values
             param_keys = [
                 ("Threshold", "entry_threshold"),
@@ -911,7 +916,7 @@ def generate_optimized_report(
             # Baseline params: prefer the baseline THIS run actually evaluated
             # (per-pair since pass-1 grafting); global base config is the
             # legacy fallback for results predating baseline_side_params.
-            bl_side = opt_info.get("baseline_side_params") or {}
+            bl_side = bl_side_params
             for display_name, param_key in param_keys:
                 if bl_side:
                     bl = bl_side.get("long", {}).get(param_key)

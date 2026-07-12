@@ -185,6 +185,57 @@ class TestBuildPairBaseConfig:
 
 
 # ---------------------------------------------------------------------------
+# B2. Guard-triggered ensembles still render the per-pair grafted baseline
+# ---------------------------------------------------------------------------
+
+class TestGuardEnsembleReportBaseline:
+    """A pass-2 regression guard empties long/short_params BY CONTRACT; the
+    report must still render baseline_side_params (the grafted per-pair
+    baseline), not fall back to the global base config (canary
+    batch_20260712_020614 finding)."""
+
+    def test_guard_ensemble_renders_grafted_baseline(self, tmp_path):
+        from agent.batch_post_optimizer import generate_optimized_report
+
+        all_results = {
+            "oos_predictions_x_long_ap|oos_predictions_y_short_ll": {
+                "status": "OK",
+                "metrics": {"total_pnl": 1.0, "trade_count": 10},
+                "optuna_info": {
+                    "regression_guard_triggered": True,
+                    "long_params": {},
+                    "short_params": {},
+                    "baseline_side_params": {
+                        "long": {"entry_threshold": 0.502254013,
+                                 "tp_atr_mult": 4.0, "sl_atr_mult": 3.0,
+                                 "cooldown_bars": 9, "atr_period": 36},
+                        "short": {"entry_threshold": 0.53,
+                                  "tp_atr_mult": 10.0, "sl_atr_mult": 3.0,
+                                  "cooldown_bars": 7, "atr_period": 20},
+                    },
+                    "baseline_metrics": {"total_pnl": 1.0, "trade_count": 10},
+                    "holdout_metrics": {},
+                },
+            },
+        }
+        # Global base config with DIFFERENT values than the grafted baseline —
+        # if the report falls back to it, the assertion below catches it.
+        base_cfg = {
+            "models": {"long": {"threshold": 0.5}, "short": {"threshold": 0.53}},
+            "long": {"tp_atr_mult": 1.5}, "short": {"tp_atr_mult": 10.0},
+        }
+        md = generate_optimized_report(
+            str(tmp_path), {"manifest": "m.json"}, all_results, "ohlcv.parquet",
+            base_cfg=base_cfg,
+        )
+        assert "0.502254013 / 0.53" in md, (
+            "guard-triggered ensemble must render the grafted per-pair "
+            "baseline threshold, not the global base config")
+        assert "| TP ATR Mult | 4.0 / 10.0 |" in md.replace("  ", " ") or \
+               "4.0 / 10.0" in md
+
+
+# ---------------------------------------------------------------------------
 # C. Search-space sentinel
 # ---------------------------------------------------------------------------
 
