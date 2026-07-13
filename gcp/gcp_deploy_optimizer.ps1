@@ -50,6 +50,11 @@ param(
     [int]$MaxRunDurationMinutes = 360,
     [string]$SweepMode = "backtest",
     [string]$OptMode = "individual",
+    # OPT-IN since 2026-07-12: run the pass-2 joint ensemble re-optimization
+    # (dormant by default; the baseline pass-1 graft artifacts are the
+    # default product). Forwarded as --ensemble-optimization to
+    # vm_post_optimize.sh.
+    [switch]$EnsembleOptimization,
     [string]$ExecData = "",
     [double]$SlippagePerSide = 0
 )
@@ -233,7 +238,11 @@ $zipName = "deploy_$VmName.zip"
 $zipFile = Join-Path $ProjectDir $zipName
 if (Test-Path $zipFile) { Remove-Item $zipFile -Force }
 
-$itemsToZip = @("src", "agent", "gcp", "requirements.txt", ".env")
+# scripts/ added 2026-07-12: the baseline artifact generator
+# (scripts/generate_baseline_ensemble_artifacts.py) runs on the optimizer VM
+# as pipeline step [4d/5] — leaving it out crashed the first post-baseline
+# canary with 'No such file or directory'.
+$itemsToZip = @("src", "agent", "gcp", "scripts", "requirements.txt", ".env")
 $existingItems = @()
 foreach ($item in $itemsToZip) {
     if (Test-Path (Join-Path $ProjectDir $item)) {
@@ -326,7 +335,8 @@ $shutdownFlag = if ($NoShutdown) { "" } else { "--shutdown" }
 $execDataFlag = if ($ExecData) { " --exec-data=$ExecData" } else { "" }
 $slippageFlag = if ($SlippagePerSide -gt 0) { " --slippage-per-side=$SlippagePerSide" } else { "" }
 $ensTrialsFlag = if ($EnsembleTrials -gt 0) { " --ensemble-trials=$EnsembleTrials" } else { "" }
-$launchCmd = "tmux kill-session -t optimizer 2>/dev/null; tmux new-session -d -s optimizer 'bash $RemoteProject/gcp/vm_post_optimize.sh --batch-id=$BatchId --n-trials=$NTrials$ensTrialsFlag --holdout-months=$HoldoutMonths --workers=$Workers --objective=$Objective --n-blocks=$NBlocks --lambda-dispersion=$LambdaDispersion --min-block-months=$MinBlockMonths --sweep-mode=$SweepMode --opt-mode=$OptMode$execDataFlag$slippageFlag $shutdownFlag'"
+$ensOptFlag = if ($EnsembleOptimization) { " --ensemble-optimization" } else { "" }
+$launchCmd = "tmux kill-session -t optimizer 2>/dev/null; tmux new-session -d -s optimizer 'bash $RemoteProject/gcp/vm_post_optimize.sh --batch-id=$BatchId --n-trials=$NTrials$ensTrialsFlag --holdout-months=$HoldoutMonths --workers=$Workers --objective=$Objective --n-blocks=$NBlocks --lambda-dispersion=$LambdaDispersion --min-block-months=$MinBlockMonths --sweep-mode=$SweepMode --opt-mode=$OptMode$ensOptFlag$execDataFlag$slippageFlag $shutdownFlag'"
 gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd --quiet 2>$null
 
 Write-Host "  Optimizer launched!" -ForegroundColor Green

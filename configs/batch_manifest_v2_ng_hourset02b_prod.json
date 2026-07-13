@@ -63,7 +63,7 @@
       "random_seed": 42,
       "optuna": {
         "_comment_lgbm_ranges": "Restored to legacy scout batch_20260626_0017_HS14B_SCOUT_FIX (wide LGBM box) to A/B the model-search-space gap. Was narrow: depth_max 6 / leaves_max 31 / est 500 / lr 0.005-0.02 / folds 3 / es 15 / min_child 150-400 / n_trials 200.",
-        "n_trials": 100,
+        "n_trials": 200,
         "metrics": [
           "logloss",
           "average_precision"
@@ -72,7 +72,7 @@
         "max_depth_max": 8,
         "num_leaves_min": 15,
         "num_leaves_max": 64,
-        "max_n_estimators": 2000,
+        "max_n_estimators": 1500,
         "early_stopping_rounds": 30,
         "max_folds": 5,
         "learning_rate_min": 0.001,
@@ -80,9 +80,8 @@
         "min_child_samples_min": 100,
         "min_child_samples_max": 500,
         "feature_fraction_min": 0.4,
-        "feature_fraction_max": 0.8,
-        "post_optimizer_trials": 150,
-        "post_optimizer_ensemble_trials": 150,
+        "feature_fraction_max": 0.9,
+        "post_optimizer_trials": 300,
         "post_optimizer_holdout_months": 12
       }
     },
@@ -95,40 +94,14 @@
   },
   "experiments": [
     {
-      "label": "NG HS02B 2x1 2H",
-      "gcs_prefix": "sweep_ng_hs02b_2x1_2h_scout",
+      "label": "NG HS02B 2x1 1H",
+      "gcs_prefix": "sweep_ng_hs02b_2x1_1h_scout",
       "overrides": {
         "symbol": "NG",
         "training_workflow": {
           "target_columns": [
-            "TARGET_TRIPLE_2x1_2H_LONG",
-            "TARGET_TRIPLE_2x1_2H_SHORT"
-          ]
-        }
-      }
-    },
-    {
-      "label": "NG HS02B 4x1 6H",
-      "gcs_prefix": "sweep_ng_hs02b_4x1_6h_scout",
-      "overrides": {
-        "symbol": "NG",
-        "training_workflow": {
-          "target_columns": [
-            "TARGET_TRIPLE_4x1_6H_LONG",
-            "TARGET_TRIPLE_4x1_6H_SHORT"
-          ]
-        }
-      }
-    },
-    {
-      "label": "NG HS02B 2x1 3H",
-      "gcs_prefix": "sweep_ng_hs02b_2x1_3h_scout",
-      "overrides": {
-        "symbol": "NG",
-        "training_workflow": {
-          "target_columns": [
-            "TARGET_TRIPLE_2x1_3H_LONG",
-            "TARGET_TRIPLE_2x1_3H_SHORT"
+            "TARGET_TRIPLE_2x1_1H_LONG",
+            "TARGET_TRIPLE_2x1_1H_SHORT"
           ]
         }
       }

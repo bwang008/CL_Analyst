@@ -432,7 +432,7 @@ def _run_generator(monkeypatch, tmp_path: Path, batch_dir: Path, data_file: str)
 
 
 def _read_emitted(batch_dir: Path, label: str) -> tuple[str, dict]:
-    config_path = batch_dir / "configs" / f"{label}_Sharpe_E01_01012026.json"
+    config_path = batch_dir / "configs" / "optimized" / f"{label}_Sharpe_E01_01012026.json"
     assert config_path.is_file(), f"generator did not emit {config_path}"
     text = config_path.read_text(encoding="utf-8")
     return text, json.loads(text)

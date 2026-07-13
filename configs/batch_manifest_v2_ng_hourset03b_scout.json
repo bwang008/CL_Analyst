@@ -1,5 +1,5 @@
 {
-  "_comment": "NG HourSet_02B SCOUT \u2014 top-6 target families from the Stage-1 AUC screen (reports/screens/ng_02b/AUC_Model_Report.md), sourced from the new short-horizon dataset (2x1_1H/2x1_2H/1x0p5_1H added on top of the 01B target suite). Mirrors batch_manifest_v2_ng_hourset01b_scout.json (same infra/execution_workflow/optuna box); only dataset_version and experiments differ. Any 1x0p5_1H family flagged 'cost?' in the screen (round-trip cost >6% of a TP winner) was excluded in favor of the next-best clean family.",
+  "_comment": "NG HourSet_03B SCOUT — curve calendar-spread A/B arm (ticket ng-03b-calendar-spread-dataset_07122026_0249). Pure mirror of batch_manifest_v2_ng_hourset02b_scout.json @ HEAD (same infra/execution_workflow/optuna box incl. post_optimizer_trials 150 + post_optimizer_ensemble_trials 150 + 12mo holdout, same 6 experiments, seed 42); only dataset_version, labels, gcs_prefixes and this comment differ. The manifest deliberately carries NO curve/month schema fields — VMs never rebuild features; HourSet_03B = HourSet_02B + 29 CURVE_* + 2 Time_Month_* columns built locally. Canary (batch_manifest_v2_ng_hourset03b_canary.json) must pass BEFORE this scout launches (pipeline code changed).",
   "infrastructure": {
     "machine_type": "c2-standard-16",
     "provisioning_model": "STANDARD",
@@ -11,7 +11,7 @@
   "baseline": {
     "symbol": "NG",
     "data_workflow": {
-      "dataset_version": "HourSet_02B",
+      "dataset_version": "HourSet_03B",
       "resolution": "1h",
       "output_dir": "data/processed",
       "features": {
@@ -95,8 +95,8 @@
   },
   "experiments": [
     {
-      "label": "NG HS02B 2x1 2H",
-      "gcs_prefix": "sweep_ng_hs02b_2x1_2h_scout",
+      "label": "NG HS03B 2x1 2H",
+      "gcs_prefix": "sweep_ng_hs03b_2x1_2h_scout",
       "overrides": {
         "symbol": "NG",
         "training_workflow": {
@@ -108,8 +108,8 @@
       }
     },
     {
-      "label": "NG HS02B 4x1 6H",
-      "gcs_prefix": "sweep_ng_hs02b_4x1_6h_scout",
+      "label": "NG HS03B 4x1 6H",
+      "gcs_prefix": "sweep_ng_hs03b_4x1_6h_scout",
       "overrides": {
         "symbol": "NG",
         "training_workflow": {
@@ -121,8 +121,8 @@
       }
     },
     {
-      "label": "NG HS02B 2x1 3H",
-      "gcs_prefix": "sweep_ng_hs02b_2x1_3h_scout",
+      "label": "NG HS03B 2x1 3H",
+      "gcs_prefix": "sweep_ng_hs03b_2x1_3h_scout",
       "overrides": {
         "symbol": "NG",
         "training_workflow": {
@@ -134,8 +134,8 @@
       }
     },
     {
-      "label": "NG HS02B 3x1 6H",
-      "gcs_prefix": "sweep_ng_hs02b_3x1_6h_scout",
+      "label": "NG HS03B 3x1 6H",
+      "gcs_prefix": "sweep_ng_hs03b_3x1_6h_scout",
       "overrides": {
         "symbol": "NG",
         "training_workflow": {

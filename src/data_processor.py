@@ -222,25 +222,31 @@ class DataProcessor:
         self,
         df: pd.DataFrame,
         include_day_of_week: bool = False,
+        include_month: bool = False,
     ) -> pd.DataFrame:
         """
         Add cyclical time features based on minutes since midnight.
-        
+
         This captures the daily trading cycle pattern using sine/cosine encoding,
         which preserves the cyclical nature (23:55 is close to 00:00).
-        
+
         Args:
             df: DataFrame with DateTime index
             include_day_of_week: If True, also add cyclical day-of-week features
-            
+            include_month: If True, also add cyclical month-of-year features
+                (Time_Month_Sin/Cos). GATED (default False) so rebuilds of
+                pre-03B datasets stay byte-identical — never make this
+                unconditional (it would break the rebuild byte-parity
+                control gate for every existing dataset).
+
         Returns:
             pd.DataFrame: DataFrame with Time_Sin and Time_Cos columns added
         """
         print("Adding cyclical time features...")
-        
+
         # Calculate minutes since midnight
         minutes = df.index.hour * 60 + df.index.minute
-        
+
         # Cyclical encoding using sine and cosine
         df['Time_Sin'] = np.sin(2 * np.pi * minutes / self.MINUTES_PER_DAY)
         df['Time_Cos'] = np.cos(2 * np.pi * minutes / self.MINUTES_PER_DAY)
@@ -251,7 +257,14 @@ class DataProcessor:
             df['Time_DayOfWeek_Sin'] = np.sin(2 * np.pi * day_of_week / 5)
             df['Time_DayOfWeek_Cos'] = np.cos(2 * np.pi * day_of_week / 5)
             print("  - Added day-of-week cyclical features")
-        
+
+        # Month of year (cyclical): Jan=(sin 0, cos 1) ... phase (month-1)/12
+        if include_month:
+            month = df.index.month
+            df['Time_Month_Sin'] = np.sin(2 * np.pi * (month - 1) / 12)
+            df['Time_Month_Cos'] = np.cos(2 * np.pi * (month - 1) / 12)
+            print("  - Added month-of-year cyclical features")
+
         return df
     
     def add_time_features_raw(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -3361,7 +3374,11 @@ class DataProcessor:
             bars_per_hour = 12 # assuming 5-min
 
         # ── Step 2: Time features ─────────────────────────────────────
-        df = self.add_time_features(df, include_day_of_week=True)
+        df = self.add_time_features(
+            df,
+            include_day_of_week=True,
+            include_month=cfg.features.include_month_encoding,
+        )
         print(f"  [20%] Time features added")
 
         # ── Step 3: AlphaFactory ──────────────────────────────────────
@@ -3384,6 +3401,19 @@ class DataProcessor:
         df = macro_engine.merge_all(df, check_staleness=False)
         n_macro = len(macro_engine.get_feature_names())
         print(f"  [55%] {n_macro} external macro features added at {datetime.now().isoformat(timespec='seconds')}")
+
+        # ── Step 4.5: Futures-curve calendar-spread features (gated) ──
+        if cfg.features.include_curve_spread:
+            from src.features.curve_features import CurveFeatureEngine
+            curve_engine = CurveFeatureEngine(
+                front_leg_csv=cfg.features.curve_front_leg_csv,
+                second_leg_csv=cfg.features.curve_second_leg_csv,
+                seasonal_bucket=cfg.features.curve_seasonal_bucket,
+                seasonal_min_prior_years=cfg.features.curve_seasonal_min_prior_years,
+                seasonal_pctl=cfg.features.curve_seasonal_pctl,
+            )
+            df = curve_engine.merge_curve(df, max_leading_nan_bars=2200)
+            print(f"  [57%] Curve calendar-spread features added at {datetime.now().isoformat(timespec='seconds')}")
 
         # ── Step 5: RAW columns ───────────────────────────────────────
         raw_horizon = cfg.targets.raw_horizon

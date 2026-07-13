@@ -37,6 +37,18 @@ class FeatureConfig(BaseModel):
     include_term_structure: bool = True
     drop_features: List[str] = Field(default_factory=list)
     keep_features: List[str] = Field(default_factory=list)
+    # ── Futures-curve calendar-spread features (CURVE_*, HourSet_03B+) ──
+    # All additive with explicit defaults so every existing DataMap stays
+    # byte-identical. Half-configured states are rejected loudly below.
+    include_curve_spread: bool = False
+    curve_front_leg_csv: Optional[str] = None
+    curve_second_leg_csv: Optional[str] = None
+    # Month-of-year cyclical encoding (Time_Month_Sin/Cos). Independent time
+    # feature — gated so rebuilds of pre-03B datasets stay byte-identical.
+    include_month_encoding: bool = False
+    curve_seasonal_bucket: Literal["week", "month", "doy_smoothed"] = "week"
+    curve_seasonal_min_prior_years: int = 2
+    curve_seasonal_pctl: bool = False
 
     @field_validator("windows")
     @classmethod
@@ -51,6 +63,47 @@ class FeatureConfig(BaseModel):
         if any(w <= 0 for w in v.values()):
             raise ValueError("All macro window sizes must be strictly positive.")
         return v
+
+    @field_validator("curve_seasonal_min_prior_years")
+    @classmethod
+    def check_seasonal_min_prior_years(cls, v: int) -> int:
+        if v < 2:
+            raise ValueError(
+                "curve_seasonal_min_prior_years must be >= 2 — a single prior year "
+                "cannot anchor a seasonal anomaly z-score."
+            )
+        return v
+
+    @model_validator(mode="after")
+    def validate_curve_config_state(self) -> "FeatureConfig":
+        # No half-configured curve states — fail loud in both directions.
+        if self.include_curve_spread:
+            if not self.curve_front_leg_csv or not str(self.curve_front_leg_csv).strip():
+                raise ValueError(
+                    "include_curve_spread=True requires curve_front_leg_csv — the curve engine "
+                    "must never guess a leg path."
+                )
+            if not self.curve_second_leg_csv or not str(self.curve_second_leg_csv).strip():
+                raise ValueError(
+                    "include_curve_spread=True requires curve_second_leg_csv — the curve engine "
+                    "must never guess a leg path."
+                )
+        else:
+            if self.curve_front_leg_csv is not None or self.curve_second_leg_csv is not None:
+                raise ValueError(
+                    "Curve leg CSV path(s) are set while include_curve_spread is False — "
+                    "half-configured state rejected (set the flag or remove the paths)."
+                )
+            if (
+                self.curve_seasonal_bucket != "week"
+                or self.curve_seasonal_min_prior_years != 2
+                or self.curve_seasonal_pctl
+            ):
+                raise ValueError(
+                    "Non-default curve_seasonal_* setting(s) while include_curve_spread is "
+                    "False — half-configured state rejected."
+                )
+        return self
 
 class DataWorkflowConfig(BaseModel):
     dataset_version: str

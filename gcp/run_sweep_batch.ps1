@@ -46,7 +46,13 @@ param(
     [double]$LambdaDispersion   = 1.0,
     [int]$MinBlockMonths        = 10,
     # Optimizer-VM control-plane TTL (minutes). Multi-arm A/B runs should pass 720.
-    [int]$OptimizerMaxRunDurationMinutes = 360
+    [int]$OptimizerMaxRunDurationMinutes = 360,
+    # OPT-IN since 2026-07-12: run the pass-2 joint ensemble re-optimization
+    # (dormant by default — the BASELINE pass-1 graft artifacts are the default
+    # product). Forwarded to gcp_deploy_optimizer.ps1 -> vm_post_optimize.sh
+    # --ensemble-optimization. Raise -OptimizerMaxRunDurationMinutes when
+    # enabling this on multi-arm runs.
+    [switch]$EnsembleOptimization
 )
 
 $ErrorActionPreference = "Continue"
@@ -1124,6 +1130,7 @@ if ($batchState.completed -gt 0) {
             "-MaxRunDurationMinutes", $OptimizerMaxRunDurationMinutes)
         if ($optExecData)       { $optArgs += @("-ExecData", $optExecData) }
         if ($optSlippage -gt 0) { $optArgs += @("-SlippagePerSide", $optSlippage) }
+        if ($EnsembleOptimization) { $optArgs += "-EnsembleOptimization" }
         if ($DisableTelegram) { $optArgs += "-DisableTelegram" }
         $optStartTracker = Get-Date
         Write-Host "  Trying optimizer deploy in zone $oz..." -ForegroundColor Yellow
@@ -1191,6 +1198,12 @@ if ($batchState.completed -gt 0) {
                 Write-Host "  WARNING: Could not download optimized reports." -ForegroundColor Yellow
                 Send-BatchTelegram "[WARNING] Post-Optimization may have failed.`nCould not download optimized reports from GCS."
             }
+            if (Test-Path (Join-Path $localBatch "batch_summary_baseline_sharpe.md")) {
+                Write-Host "  Baseline (pass-1 graft) reports downloaded." -ForegroundColor Green
+            } else {
+                Write-Host "  WARNING: batch_summary_baseline_sharpe.md not found -- the default baseline artifact set is missing." -ForegroundColor Yellow
+                Send-BatchTelegram "[WARNING] Baseline artifact set missing from GCS (batch_summary_baseline_sharpe.md)."
+            }
 
             # Clean up optimizer VM
             gcloud compute instances delete $optVmName --zone=$optActualZone --quiet 2>$null
@@ -1201,19 +1214,23 @@ if ($batchState.completed -gt 0) {
                 Write-Host ""
                 Write-Host "Downloading ensemble results from GCS..." -ForegroundColor Cyan
 
-                # Download ensemble backtest MDs
+                # Download ensemble + baseline backtest MDs
                 gcloud storage cp "$gcsBucket/*ensemble_backtests*.md" "$localBatch\" 2>$null
+                gcloud storage cp "$gcsBucket/*baseline_backtests*.md" "$localBatch\" 2>$null
 
-                # Download optimized JSON configurations
+                # Download generated configs (recursive: baseline/ + optimized/ subdirs).
+                # rsync (not cp): idempotent and does not silently drop files on
+                # transient errors (the first baseline canary lost 2 prediction
+                # CSVs locally to a swallowed cp failure).
                 $localConfigDir = Join-Path $localBatch "configs"
                 if (-not (Test-Path $localConfigDir)) { New-Item -ItemType Directory -Path $localConfigDir -Force | Out-Null }
-                gcloud storage cp "$gcsBucket/batch_configs/*.json" "$localConfigDir\" 2>$null
+                gcloud storage rsync -r "$gcsBucket/batch_configs" "$localConfigDir" 2>$null
                 gcloud storage cp "$gcsBucket/*.json" "$localBatch\" 2>$null
 
-                # Download ensemble predictions
+                # Download ensemble/baseline predictions
                 $localPredDir = Join-Path $localBatch "predictions"
                 if (-not (Test-Path $localPredDir)) { New-Item -ItemType Directory -Path $localPredDir -Force | Out-Null }
-                gcloud storage cp -r "$gcsBucket/predictions/*" "$localPredDir\" 2>$null
+                gcloud storage rsync -r "$gcsBucket/predictions" "$localPredDir" 2>$null
 
                 $ensFiles = Get-ChildItem $localBatch -Filter "*ensemble_backtests*" -ErrorAction SilentlyContinue
                 if ($ensFiles) {
@@ -1278,7 +1295,7 @@ try {
             $stampedCfgDir = Join-Path (Split-Path $BatchDir -Parent) "$stampName\configs"
             if (Test-Path $stampedCfgDir) {
                 $cfgPatched = 0
-                foreach ($cfgFile in Get-ChildItem "$stampedCfgDir\*.json" -ErrorAction SilentlyContinue) {
+                foreach ($cfgFile in Get-ChildItem $stampedCfgDir -Filter "*.json" -Recurse -ErrorAction SilentlyContinue) {
                     $cfgRaw = [System.IO.File]::ReadAllText($cfgFile.FullName)
                     $cfgNew = $cfgRaw.Replace("batch_runs/$BatchId/", "batch_runs/$stampName/")
                     if ($cfgNew -ne $cfgRaw) {

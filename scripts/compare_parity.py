@@ -39,12 +39,24 @@ import sys
 # sharpe-only. Sortino artifacts are therefore OPTIONAL-LEGACY: absent on new
 # runs (not a failure), but still fully content-checked when present on
 # historical (pre-2026-07-04) run folders.
+#
+# SINCE 2026-07-12 the pass-2 joint ensemble re-optimization is OPT-IN
+# (-EnsembleOptimization): the default chain is pass-1 -> pair selection ->
+# BASELINE (pass-1 graft) artifacts. The baseline set is REQUIRED on new runs;
+# the pass-2 ensemble set is OPTIONAL and all-or-none when any of it exists.
 REQUIRED_INDIVIDUAL = [
     "batch_summary_optimized_sharpe.md",
     "optimization_results_sharpe.json",
+    "top_pairs.json",
+    "batch_summary_baseline_sharpe.md",
+    "sharpe_baseline_backtests.md",
+]
+
+# Pass-2 (opt-in -EnsembleOptimization) artifacts: absent on default runs
+# (expected); when ANY is present, ALL must be present.
+OPTIONAL_ENSEMBLE_OPT = [
     "batch_summary_optimized_ensembles_sharpe.md",
     "optimization_results_ensembles_sharpe.json",
-    "top_pairs.json",
     "sharpe_ensemble_backtests.md",
 ]
 
@@ -113,6 +125,21 @@ def check(run_dir, ref_dir):
     for fn in REQUIRED_INDIVIDUAL:
         if not os.path.isfile(os.path.join(run_dir, fn)):
             failures.append(f"MISSING required parity artifact: {fn}")
+    ens_present = [
+        fn for fn in OPTIONAL_ENSEMBLE_OPT
+        if os.path.isfile(os.path.join(run_dir, fn))
+    ]
+    if ens_present and len(ens_present) != len(OPTIONAL_ENSEMBLE_OPT):
+        missing_ens = sorted(set(OPTIONAL_ENSEMBLE_OPT) - set(ens_present))
+        failures.append(
+            "pass-2 ensemble artifact set is PARTIAL (opt-in set is "
+            f"all-or-none): present={ens_present} missing={missing_ens}"
+        )
+    elif ens_present:
+        warnings.append(
+            "pass-2 ensemble artifacts present (opt-in -EnsembleOptimization "
+            "run) — content-checked"
+        )
     for fn in FORBIDDEN_ENSEMBLE_MODE:
         if os.path.isfile(os.path.join(run_dir, fn)):
             failures.append(
@@ -156,7 +183,8 @@ def check(run_dir, ref_dir):
     def _traceback_count(text):
         return text.count("Traceback (most recent call last)")
 
-    for fn in ("sharpe_ensemble_backtests.md", "sortino_ensemble_backtests.md"):
+    for fn in ("sharpe_baseline_backtests.md", "sharpe_ensemble_backtests.md",
+               "sortino_ensemble_backtests.md"):
         p = os.path.join(run_dir, fn)
         if not os.path.isfile(p):
             continue
@@ -183,19 +211,23 @@ def check(run_dir, ref_dir):
             )
 
     # 5. Sane economics ------------------------------------------------------
-    ores = os.path.join(run_dir, "optimization_results_ensembles_sharpe.json")
-    if os.path.isfile(ores):
+    for ores_name in ("optimization_results_sharpe.json",
+                      "optimization_results_ensembles_sharpe.json"):
+        ores = os.path.join(run_dir, ores_name)
+        if not os.path.isfile(ores):
+            continue
         try:
             data = json.load(open(ores))
             blob = json.dumps(data)
             for big in re.findall(r"-?\d{7,}\.?\d*", blob):
                 if float(big) < -1_000_000:
                     failures.append(
-                        f"catastrophic PnL detected ({big}) — -$2.5M slippage-bug class"
+                        f"catastrophic PnL detected in {ores_name} ({big}) — "
+                        "-$2.5M slippage-bug class"
                     )
                     break
         except Exception as e:
-            warnings.append(f"could not scan optimization_results_ensembles_sharpe.json: {e}")
+            warnings.append(f"could not scan {ores_name}: {e}")
 
     # Reference cross-check (informational) ---------------------------------
     if ref_dir and os.path.isdir(ref_dir):

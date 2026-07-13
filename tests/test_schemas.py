@@ -76,3 +76,72 @@ def test_missing_required_fields_in_grid():
                 }
             ]
         )
+
+
+# ---------------------------------------------------------------------------
+# Curve calendar-spread config hygiene (HourSet_03B) — no half-states
+# ---------------------------------------------------------------------------
+
+def test_curve_defaults_off_and_valid():
+    """Defaults keep every existing DataMap parsing identically (all flags off)."""
+    cfg = FeatureConfig()
+    assert cfg.include_curve_spread is False
+    assert cfg.curve_front_leg_csv is None
+    assert cfg.curve_second_leg_csv is None
+    assert cfg.include_month_encoding is False
+    assert cfg.curve_seasonal_bucket == "week"
+    assert cfg.curve_seasonal_min_prior_years == 2
+    assert cfg.curve_seasonal_pctl is False
+
+
+def test_curve_flag_on_requires_both_leg_paths():
+    with pytest.raises(ValidationError, match="curve_front_leg_csv"):
+        FeatureConfig(include_curve_spread=True)
+    with pytest.raises(ValidationError, match="curve_second_leg_csv"):
+        FeatureConfig(include_curve_spread=True, curve_front_leg_csv="C:/legs/c0.csv")
+    with pytest.raises(ValidationError, match="curve_front_leg_csv"):
+        FeatureConfig(include_curve_spread=True, curve_second_leg_csv="C:/legs/c1.csv")
+
+
+def test_curve_leg_paths_without_flag_rejected():
+    with pytest.raises(ValidationError, match="half-configured"):
+        FeatureConfig(curve_front_leg_csv="C:/legs/c0.csv")
+    with pytest.raises(ValidationError, match="half-configured"):
+        FeatureConfig(curve_second_leg_csv="C:/legs/c1.csv")
+
+
+def test_curve_seasonal_settings_without_flag_rejected():
+    with pytest.raises(ValidationError, match="half-configured"):
+        FeatureConfig(curve_seasonal_bucket="month")
+    with pytest.raises(ValidationError, match="half-configured"):
+        FeatureConfig(curve_seasonal_min_prior_years=3)
+    with pytest.raises(ValidationError, match="half-configured"):
+        FeatureConfig(curve_seasonal_pctl=True)
+
+
+def test_curve_seasonal_min_prior_years_floor():
+    with pytest.raises(ValidationError, match=">= 2"):
+        FeatureConfig(
+            include_curve_spread=True,
+            curve_front_leg_csv="C:/legs/c0.csv",
+            curve_second_leg_csv="C:/legs/c1.csv",
+            curve_seasonal_min_prior_years=1,
+        )
+
+
+def test_curve_fully_configured_accepted():
+    cfg = FeatureConfig(
+        include_curve_spread=True,
+        curve_front_leg_csv="C:/legs/c0.csv",
+        curve_second_leg_csv="C:/legs/c1.csv",
+        curve_seasonal_bucket="week",
+        curve_seasonal_min_prior_years=2,
+    )
+    assert cfg.include_curve_spread is True
+
+
+def test_month_encoding_independent_of_curve():
+    # include_month_encoding is a time feature — legal without any curve config
+    cfg = FeatureConfig(include_month_encoding=True)
+    assert cfg.include_month_encoding is True
+    assert cfg.include_curve_spread is False

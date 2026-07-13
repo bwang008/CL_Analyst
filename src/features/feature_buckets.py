@@ -29,8 +29,9 @@ FEATURE_BUCKETS: dict[str, list[str]] = {
     # Always-on: minimal OHLCV-derived features
     "core": ["ATR_14", "Volume_Log", "log_ret"],
 
-    # Cyclical time encoding (hour-of-day, day-of-week)
-    "time": ["Hour_", "DayOfWeek_"],
+    # Cyclical time encoding (time-of-day, day-of-week, month-of-year):
+    # Time_Sin/Time_Cos, Time_DayOfWeek_*, Time_Month_*
+    "time": ["Time_"],
 
     # Bollinger bands, ATR ratios, vol-of-vol
     "volatility": ["VOL_"],
@@ -59,6 +60,10 @@ FEATURE_BUCKETS: dict[str, list[str]] = {
     # Term structure shapes: Diff, Ratio, Inversion across windows
     "term_structure": ["TS_"],
 
+    # Futures-curve calendar-spread features (CURVE_*) — strictly separate
+    # from the TS_ cross-window indicator shapes above
+    "curve": ["CURVE_"],
+
     # AlphaFactory macro context (rolling regime indicators)
     "macro_tech": ["MACRO_"],
 
@@ -71,7 +76,8 @@ TOGGLEABLE_BUCKETS: list[str] = [
     b for b in FEATURE_BUCKETS if b != "core"
 ]
 
-# Minimum trials needed when bucket search is active (2^11 ≈ 2K combos)
+# Minimum trials needed when bucket search is active
+# (13 toggleable buckets → 2^13 = 8,192 combos)
 BUCKET_MIN_TRIALS = 150
 
 

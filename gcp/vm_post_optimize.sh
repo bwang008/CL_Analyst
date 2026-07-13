@@ -187,6 +187,11 @@ LAMBDA_DISPERSION=1.0
 MIN_BLOCK_MONTHS=10
 SWEEP_MODE="backtest"
 OPT_MODE="individual"
+# Pass-2 (joint ensemble re-optimization) is OPT-IN since 2026-07-12: the
+# default pipeline product is the BASELINE (pass-1 graft) artifact set. The
+# pass-2 code is fully intact and dormant — pass --ensemble-optimization
+# (threaded from run_sweep_batch.ps1 -EnsembleOptimization) to run it.
+ENSEMBLE_OPTIMIZATION=false
 BUCKET="gs://cltrainer-optuna-results"
 LOG="post_optimize_$(date +%Y%m%d_%H%M%S).log"
 
@@ -206,6 +211,7 @@ for arg in "$@"; do
         --min-block-months=*) MIN_BLOCK_MONTHS="${arg#*=}" ;;
         --sweep-mode=*) SWEEP_MODE="${arg#*=}" ;;
         --opt-mode=*) OPT_MODE="${arg#*=}" ;;
+        --ensemble-optimization) ENSEMBLE_OPTIMIZATION=true ;;
         --shutdown) SHUTDOWN=true ;;
     esac
 done
@@ -280,6 +286,7 @@ echo "  Lambda Disp:   $LAMBDA_DISPERSION" | tee -a "$LOG"
 echo "  Min Blk Mos:   $MIN_BLOCK_MONTHS" | tee -a "$LOG"
 echo "  Sweep Mode:    $SWEEP_MODE" | tee -a "$LOG"
 echo "  Opt Mode:      $OPT_MODE" | tee -a "$LOG"
+echo "  Ens Opt:       $ENSEMBLE_OPTIMIZATION (pass-2 joint re-optimization; opt-in)" | tee -a "$LOG"
 echo "  Bucket:        $BUCKET" | tee -a "$LOG"
 echo "  CPUs:          $(nproc)" | tee -a "$LOG"
 echo "============================================================" | tee -a "$LOG"
@@ -638,39 +645,78 @@ else
             exit 1
         fi
 
-        # --- [4c/5] Run ensemble optimization on VM (per arm) ---
-        # Runs on the same VM that just completed individual optimization.
-        # 4 pairs per arm is lightweight (~5-10 min each on the warm VM).
-        echo "" | tee -a "$LOG"
-        echo "[4c/5] Running ensemble optimization on VM (arm: $ARM, $PAIR_COUNT pairs, $ENSEMBLE_TRIALS trials)..." | tee -a "$LOG"
+        # --- [4c/5] Pass-2 ensemble optimization (OPT-IN, per arm) ---
+        # DORMANT BY DEFAULT since 2026-07-12: the pass-2 joint re-opt was
+        # shown to overfit the optimizer window (03B forensic). Runs only
+        # with --ensemble-optimization; the code path is fully intact.
+        if [ "$ENSEMBLE_OPTIMIZATION" = true ]; then
+            echo "" | tee -a "$LOG"
+            echo "[4c/5] Running ensemble optimization on VM (arm: $ARM, $PAIR_COUNT pairs, $ENSEMBLE_TRIALS trials)..." | tee -a "$LOG"
 
-        python agent/batch_post_optimizer.py \
-            --batch-dir "$BATCH_DIR" \
-            --target-pairs-json "$TOP_PAIRS" \
-            --n-trials "$ENSEMBLE_TRIALS" \
-            --holdout-months "$HOLDOUT_MONTHS" \
-            --workers "$WORKERS" \
-            --objective "$ARM" \
-            --n-blocks "$N_BLOCKS" \
-            --lambda-dispersion "$LAMBDA_DISPERSION" \
-            --min-block-months "$MIN_BLOCK_MONTHS" \
-            --no-filter \
-            $EXEC_ENS_ARGS \
-            2>&1 | tee -a "$LOG"
+            python agent/batch_post_optimizer.py \
+                --batch-dir "$BATCH_DIR" \
+                --target-pairs-json "$TOP_PAIRS" \
+                --n-trials "$ENSEMBLE_TRIALS" \
+                --holdout-months "$HOLDOUT_MONTHS" \
+                --workers "$WORKERS" \
+                --objective "$ARM" \
+                --n-blocks "$N_BLOCKS" \
+                --lambda-dispersion "$LAMBDA_DISPERSION" \
+                --min-block-months "$MIN_BLOCK_MONTHS" \
+                --no-filter \
+                $EXEC_ENS_ARGS \
+                2>&1 | tee -a "$LOG"
+        else
+            echo "" | tee -a "$LOG"
+            echo "[4c/5] SKIPPED — pass-2 ensemble optimization is opt-in (pass --ensemble-optimization to enable; arm: $ARM)" | tee -a "$LOG"
+        fi
     done
 
-    # Generate ensemble backtest artifacts (markdown reports) — one call, all
-    # arms: generate_ensemble_artifacts skips arms without pass-2 results.
-    echo "  Generating ensemble backtest artifacts..." | tee -a "$LOG"
-    ENS_ART_ARGS="--batch-dir $BATCH_DIR --data data/processed/$OHLCV_BASENAME --objectives $OBJECTIVE_CSV"
+    if [ "$ENSEMBLE_OPTIMIZATION" = true ]; then
+        # Generate ensemble backtest artifacts (markdown reports) — one call,
+        # all arms: generate_ensemble_artifacts skips arms without pass-2
+        # results. Outputs land under configs/optimized + predictions/optimized.
+        echo "  Generating ensemble backtest artifacts..." | tee -a "$LOG"
+        ENS_ART_ARGS="--batch-dir $BATCH_DIR --data data/processed/$OHLCV_BASENAME --objectives $OBJECTIVE_CSV"
+        if [ -n "$EXEC_DATA_PATH" ]; then
+            ENS_ART_ARGS="$ENS_ART_ARGS --exec-data $EXEC_DATA_PATH"
+        fi
+        if (( $(echo "$SLIPPAGE_PER_SIDE > 0" | bc -l) )); then
+            ENS_ART_ARGS="$ENS_ART_ARGS --slippage-per-side $SLIPPAGE_PER_SIDE"
+        fi
+        python agent/generate_ensemble_artifacts.py $ENS_ART_ARGS 2>&1 | tee -a "$LOG"
+        echo "  Ensemble optimization complete." | tee -a "$LOG"
+    fi
+
+    # --- [4d/5] BASELINE (pass-1 graft) artifacts — the DEFAULT product ---
+    # Always runs in individual mode: for each top_pairs pair, graft the
+    # pass-1 winners (same graft the pass-2 guard ships), emit promotable
+    # configs/baseline + predictions/baseline, and backtest them into
+    # batch_summary_baseline_<arm>.md + <arm>_baseline_backtests.md.
+    echo "" | tee -a "$LOG"
+    echo "[4d/5] Generating BASELINE (pass-1 graft) ensemble artifacts..." | tee -a "$LOG"
+    BASE_ART_ARGS="--batch-dir $BATCH_DIR --data data/processed/$OHLCV_BASENAME --objectives $OBJECTIVE_CSV"
     if [ -n "$EXEC_DATA_PATH" ]; then
-        ENS_ART_ARGS="$ENS_ART_ARGS --exec-data $EXEC_DATA_PATH"
+        BASE_ART_ARGS="$BASE_ART_ARGS --exec-data $EXEC_DATA_PATH"
     fi
     if (( $(echo "$SLIPPAGE_PER_SIDE > 0" | bc -l) )); then
-        ENS_ART_ARGS="$ENS_ART_ARGS --slippage-per-side $SLIPPAGE_PER_SIDE"
+        BASE_ART_ARGS="$BASE_ART_ARGS --slippage-per-side $SLIPPAGE_PER_SIDE"
     fi
-    python agent/generate_ensemble_artifacts.py $ENS_ART_ARGS 2>&1 | tee -a "$LOG"
-    echo "  Ensemble optimization complete." | tee -a "$LOG"
+    python scripts/generate_baseline_ensemble_artifacts.py $BASE_ART_ARGS 2>&1 | tee -a "$LOG"
+    echo "  Baseline artifacts complete." | tee -a "$LOG"
+
+    # --- [4e/5] Readable optimized summary (JSON-sourced companion) ---
+    # Renders batch_summary_optimized_<arm>_readable.md from the structured
+    # optimization_results JSONs (individual sides always; ensembles section
+    # only when pass-2 ran). Never touches the machine-contract markdowns.
+    echo "" | tee -a "$LOG"
+    echo "[4e/5] Rendering readable optimized summary..." | tee -a "$LOG"
+    python scripts/generate_baseline_ensemble_artifacts.py \
+        --batch-dir "$BATCH_DIR" \
+        --objectives "$OBJECTIVE_CSV" \
+        --render-optimized \
+        2>&1 | tee -a "$LOG"
+    echo "  Readable summary complete." | tee -a "$LOG"
 fi
 
 OPT_EXIT=$?
@@ -698,6 +744,10 @@ echo "[5/6] Uploading results to GCS..." | tee -a "$LOG"
 for f in "$BATCH_DIR"/batch_summary_optimized_*.md; do
     [ -f "$f" ] && gsutil cp "$f" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
 done
+# Baseline (pass-1 graft) reports — the default pipeline product
+for f in "$BATCH_DIR"/batch_summary_baseline_*.md "$BATCH_DIR"/*_baseline_backtests.md; do
+    [ -f "$f" ] && gsutil cp "$f" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
+done
 for f in "$BATCH_DIR"/optimization_results_*.json; do
     [ -f "$f" ] && gsutil cp "$f" "$BUCKET/$GCS_OPT_PREFIX/" 2>&1 | tee -a "$LOG" || true
 done
@@ -717,10 +767,11 @@ find reports/ -name "*_opt.json" \( -path "*/canary_output/*" -o -path "*/produc
 find reports/ -name "*_opt_long.json" \( -path "*/canary_output/*" -o -path "*/production_output/*" \) -exec gsutil cp {} "$BUCKET/$GCS_OPT_PREFIX/configs/" \; 2>&1 | tee -a "$LOG" || true
 find reports/ -name "*_opt_short.json" \( -path "*/canary_output/*" -o -path "*/production_output/*" \) -exec gsutil cp {} "$BUCKET/$GCS_OPT_PREFIX/configs/" \; 2>&1 | tee -a "$LOG" || true
 
-# Upload generated batch configs (correctly-formatted with all top-level keys)
+# Upload generated batch configs (recursive: baseline/ + optimized/ subdirs
+# plus any legacy flat *.json from generate_batch_configs)
 if [ -d "$BATCH_DIR/configs" ]; then
-    gsutil -m cp "$BATCH_DIR/configs/*.json" "$BUCKET/$GCS_OPT_PREFIX/batch_configs/" 2>&1 | tee -a "$LOG" || true
-    echo "  Uploaded batch configs" | tee -a "$LOG"
+    gsutil -m cp -r "$BATCH_DIR/configs/*" "$BUCKET/$GCS_OPT_PREFIX/batch_configs/" 2>&1 | tee -a "$LOG" || true
+    echo "  Uploaded batch configs (recursive)" | tee -a "$LOG"
 fi
 
 # Upload ensemble backtest artifacts (MDs, JSONs, predictions)

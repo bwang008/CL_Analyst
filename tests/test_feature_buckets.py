@@ -17,10 +17,10 @@ from src.features.feature_buckets import (
 
 @pytest.fixture
 def sample_columns():
-    """Realistic subset of set_12 feature columns."""
+    """Realistic subset of production feature columns."""
     return [
         "ATR_14", "Volume_Log", "log_ret",           # core
-        "Hour_sin", "Hour_cos", "DayOfWeek_sin",      # time
+        "Time_Sin", "Time_Cos", "Time_DayOfWeek_Sin",  # time (real column names)
         "VOL_BB_UPPER_288", "VOL_ATR_RATIO_864",      # volatility
         "MOM_RSI_14", "MOM_MACD_Signal",               # momentum
         "TREND_SLOPE_288", "TREND_R2_864",             # trend
@@ -29,6 +29,8 @@ def sample_columns():
         "DIST_SKEW_288", "DIST_KURTOSIS_864",          # distribution
         "EXHAUST_CUM_RET_288",                         # exhaustion
         "EXHDIV_SLOPE_DIVERGE_288",                    # divergence
+        "TS_VOL_PARK_DIFF_24v840",                     # term_structure
+        "CURVE_SPREAD_PCT", "CURVE_SPREAD_SEASONAL_Z",  # curve
         "MACRO_MEAN_REV_3D",                           # macro_tech
         "VIX_change_1D", "COT_MM_net_pct_14D",        # macro_external
     ]
@@ -45,8 +47,47 @@ def test_classify_core():
 
 
 def test_classify_time():
-    assert classify_feature("Hour_sin") == "time"
-    assert classify_feature("DayOfWeek_cos") == "time"
+    # REAL production column names (the old Hour_sin/DayOfWeek_cos prefixes
+    # were fictional — no dataset ever emitted them, silently making the time
+    # bucket always-on in bucket mode).
+    assert classify_feature("Time_Sin") == "time"
+    assert classify_feature("Time_Cos") == "time"
+    assert classify_feature("Time_DayOfWeek_Sin") == "time"
+    assert classify_feature("Time_DayOfWeek_Cos") == "time"
+    assert classify_feature("Time_Month_Sin") == "time"
+    assert classify_feature("Time_Month_Cos") == "time"
+    # The fictional legacy prefixes must NOT classify anymore
+    assert classify_feature("Hour_sin") is None
+    assert classify_feature("DayOfWeek_cos") is None
+
+
+def test_classify_curve():
+    assert classify_feature("CURVE_SPREAD_PCT") == "curve"
+    assert classify_feature("CURVE_CONTANGO_SIGN") == "curve"
+    assert classify_feature("CURVE_SPREAD_SEASONAL_Z") == "curve"
+    assert classify_feature("CURVE_BARS_SINCE_ROLL") == "curve"
+    # CURVE_ is strictly separate from the TS_ term-structure bucket
+    assert classify_feature("TS_VOL_PARK_DIFF_24v840") == "term_structure"
+
+
+def test_time_and_curve_buckets_toggle(sample_columns):
+    """time and curve are genuinely toggleable: excluded when inactive,
+    included when active (they must never be silently always-on)."""
+    core_only = get_active_features(sample_columns, {"core"})
+    assert "Time_Sin" not in core_only
+    assert "Time_DayOfWeek_Sin" not in core_only
+    assert "CURVE_SPREAD_PCT" not in core_only
+    assert "CURVE_SPREAD_SEASONAL_Z" not in core_only
+
+    with_time = get_active_features(sample_columns, {"core", "time"})
+    assert "Time_Sin" in with_time
+    assert "Time_DayOfWeek_Sin" in with_time
+    assert "CURVE_SPREAD_PCT" not in with_time
+
+    with_curve = get_active_features(sample_columns, {"core", "curve"})
+    assert "CURVE_SPREAD_PCT" in with_curve
+    assert "CURVE_SPREAD_SEASONAL_Z" in with_curve
+    assert "Time_Sin" not in with_curve
 
 
 def test_classify_indicators():

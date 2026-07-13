@@ -312,9 +312,12 @@ def main():
         print(f"Error: Batch dir {batch_dir} not found.")
         sys.exit(1)
 
-    # Output dirs
-    configs_dir = os.path.join(batch_dir, "configs")
-    predictions_dir = os.path.join(batch_dir, "predictions")
+    # Output dirs — pass-2 (ensemble-optimization) artifacts live under the
+    # optimized/ subfolders; the default-pipeline baseline artifacts live
+    # under configs/baseline + predictions/baseline (written by
+    # scripts/generate_baseline_ensemble_artifacts.py).
+    configs_dir = os.path.join(batch_dir, "configs", "optimized")
+    predictions_dir = os.path.join(batch_dir, "predictions", "optimized")
     os.makedirs(configs_dir, exist_ok=True)
     os.makedirs(predictions_dir, exist_ok=True)
 
@@ -499,7 +502,7 @@ def main():
 
             if use_merged:
                 shutil.copy2(merged_csv_path, predictions_dst)
-                pred_path_workspace = os.path.join(args.batch_dir, "predictions", predictions_name).replace("\\", "/")
+                pred_path_workspace = os.path.join(args.batch_dir, "predictions", "optimized", predictions_name).replace("\\", "/")
                 pred_path_long = pred_path_workspace
                 pred_path_short = pred_path_workspace
             else:
@@ -602,16 +605,16 @@ def main():
             # Markdown
             markdown_lines.append(f"## Ensemble {ensemble_idx}: {long_sweep} / {short_sweep}")
             markdown_lines.append(f"**Long**: {long_desc} ({long_sweep}) | **Short**: {short_desc} ({short_sweep})")
-            markdown_lines.append(f"**Config**: [{config_name}](configs/{config_name})")
+            markdown_lines.append(f"**Config**: [{config_name}](configs/optimized/{config_name})")
             if use_merged:
-                markdown_lines.append(f"**Predictions**: [{predictions_name}](predictions/{predictions_name})")
+                markdown_lines.append(f"**Predictions**: [{predictions_name}](predictions/optimized/{predictions_name})")
             else:
                 markdown_lines.append(f"**Predictions**: Individual sweep paths")
             
             markdown_lines.append("")
             markdown_lines.append("### Verification Command")
             markdown_lines.append("```bash")
-            rel_config_path = f"{batch_dir}/configs/{config_name}".replace("\\", "/")
+            rel_config_path = f"{batch_dir}/configs/optimized/{config_name}".replace("\\", "/")
             _econ_flags = (
                 f"--slippage-per-side {args.slippage_per_side} "
                 f"--contract-multiplier {contract_multiplier}"
