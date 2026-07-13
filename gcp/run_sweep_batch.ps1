@@ -1277,6 +1277,17 @@ try {
             $stampTier = "RUN"
             $manifestLeaf = Split-Path -Leaf $ManifestPath
             if ($manifestLeaf -match '(canary|scout|prod)') { $stampTier = $Matches[1].ToUpper() }
+            # Dataset tag in the stamp (operator request 2026-07-12, ticket
+            # unified-02c-curve-datasets_07122026_2313): batch_<ts>_<SYM>_<DATASET>_<TIER>,
+            # e.g. ..._NG_02C_CANARY. Derived from manifest dataset_version with the
+            # HourSet_ prefix stripped; legacy format (no dataset part) when unreadable.
+            $stampDataset = ""
+            try {
+                $dsVer = [string]$stampManifest.baseline.data_workflow.dataset_version
+                if (-not [string]::IsNullOrWhiteSpace($dsVer)) {
+                    $stampDataset = ($dsVer -replace '^(?i)HourSet_?', '').Trim().ToUpper()
+                }
+            } catch {}
             $stampArmCount = 0
             foreach ($armName in $Objective.Split(',')) {
                 $armName = $armName.Trim()
@@ -1284,7 +1295,11 @@ try {
                 if ($armName -eq 'both') { $stampArmCount += 2 } else { $stampArmCount += 1 }
             }
             $stampSuffix = if ($stampArmCount -gt 1) { "_OBJAB" } else { "" }
-            $stampName = "${BatchId}_$($stampSymbol.Trim().ToUpper())_${stampTier}${stampSuffix}"
+            $stampName = if ($stampDataset) {
+                "${BatchId}_$($stampSymbol.Trim().ToUpper())_${stampDataset}_${stampTier}${stampSuffix}"
+            } else {
+                "${BatchId}_$($stampSymbol.Trim().ToUpper())_${stampTier}${stampSuffix}"
+            }
             Rename-Item -Path $BatchDir -NewName $stampName -ErrorAction Stop
             Write-Host "  Batch folder auto-stamped: reports\batch_runs\$stampName" -ForegroundColor Green
             # The VM writes configs with the PLAIN batch-id path (it cannot know

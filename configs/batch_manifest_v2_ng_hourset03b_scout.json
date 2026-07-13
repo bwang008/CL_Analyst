@@ -95,6 +95,19 @@
   },
   "experiments": [
     {
+      "label": "NG HS03B 2x1 1H",
+      "gcs_prefix": "sweep_ng_hs03b_2x1_1h_scout",
+      "overrides": {
+        "symbol": "NG",
+        "training_workflow": {
+          "target_columns": [
+            "TARGET_TRIPLE_2x1_1H_LONG",
+            "TARGET_TRIPLE_2x1_1H_SHORT"
+          ]
+        }
+      }
+    },
+    {
       "label": "NG HS03B 2x1 2H",
       "gcs_prefix": "sweep_ng_hs03b_2x1_2h_scout",
       "overrides": {
@@ -103,6 +116,19 @@
           "target_columns": [
             "TARGET_TRIPLE_2x1_2H_LONG",
             "TARGET_TRIPLE_2x1_2H_SHORT"
+          ]
+        }
+      }
+    },
+    {
+      "label": "NG HS03B 5x1 6H",
+      "gcs_prefix": "sweep_ng_hs03b_5x1_6h_scout",
+      "overrides": {
+        "symbol": "NG",
+        "training_workflow": {
+          "target_columns": [
+            "TARGET_TRIPLE_5x1_6H_LONG",
+            "TARGET_TRIPLE_5x1_6H_SHORT"
           ]
         }
       }

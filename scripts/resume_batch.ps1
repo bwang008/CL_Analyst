@@ -621,7 +621,20 @@ function Get-BatchTier {
 
 $stampTier = Get-BatchTier -Manifest $manifest -Plan $plan
 $stampSuffix = if ($armCount -gt 1) { "_OBJAB" } else { "" }
-$stampName = "${plainBatchId}_$($symbol.Trim().ToUpper())_${stampTier}${stampSuffix}"
+# Dataset tag in the stamp — mirrors run_sweep_batch.ps1 (operator request
+# 2026-07-12): batch_<ts>_<SYM>_<DATASET>_<TIER>, e.g. ..._NG_02C_CANARY.
+$stampDataset = ""
+try {
+    $dsVer = [string]$manifest.baseline.data_workflow.dataset_version
+    if (-not [string]::IsNullOrWhiteSpace($dsVer)) {
+        $stampDataset = ($dsVer -replace '^(?i)HourSet_?', '').Trim().ToUpper()
+    }
+} catch {}
+$stampName = if ($stampDataset) {
+    "${plainBatchId}_$($symbol.Trim().ToUpper())_${stampDataset}_${stampTier}${stampSuffix}"
+} else {
+    "${plainBatchId}_$($symbol.Trim().ToUpper())_${stampTier}${stampSuffix}"
+}
 
 # Only rename if post-opt outputs exist AND the dir is still the plain batch_<ts> name.
 $dirLeaf = Split-Path -Leaf $BatchDir

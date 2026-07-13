@@ -1,11 +1,11 @@
 {
   "_comment": "NG HourSet_02B SCOUT \u2014 top-6 target families from the Stage-1 AUC screen (reports/screens/ng_02b/AUC_Model_Report.md), sourced from the new short-horizon dataset (2x1_1H/2x1_2H/1x0p5_1H added on top of the 01B target suite). Mirrors batch_manifest_v2_ng_hourset01b_scout.json (same infra/execution_workflow/optuna box); only dataset_version and experiments differ. Any 1x0p5_1H family flagged 'cost?' in the screen (round-trip cost >6% of a TP winner) was excluded in favor of the next-best clean family.",
   "infrastructure": {
-    "machine_type": "c2-standard-16",
+    "machine_type": "n2-standard-32",
     "provisioning_model": "STANDARD",
     "timeout_minutes": 360,
     "max_concurrent_vcpus": 288,
-    "vcpus_per_vm": 16,
+    "vcpus_per_vm": 32,
     "max_concurrent_vms": 12
   },
   "baseline": {
@@ -95,6 +95,19 @@
   },
   "experiments": [
     {
+      "label": "NG HS02B 2x1 1H",
+      "gcs_prefix": "sweep_ng_hs02b_2x1_1h_scout",
+      "overrides": {
+        "symbol": "NG",
+        "training_workflow": {
+          "target_columns": [
+            "TARGET_TRIPLE_2x1_1H_LONG",
+            "TARGET_TRIPLE_2x1_1H_SHORT"
+          ]
+        }
+      }
+    },
+    {
       "label": "NG HS02B 2x1 2H",
       "gcs_prefix": "sweep_ng_hs02b_2x1_2h_scout",
       "overrides": {
@@ -103,6 +116,19 @@
           "target_columns": [
             "TARGET_TRIPLE_2x1_2H_LONG",
             "TARGET_TRIPLE_2x1_2H_SHORT"
+          ]
+        }
+      }
+    },
+    {
+      "label": "NG HS02B 5x1 6H",
+      "gcs_prefix": "sweep_ng_hs02b_5x1_6h_scout",
+      "overrides": {
+        "symbol": "NG",
+        "training_workflow": {
+          "target_columns": [
+            "TARGET_TRIPLE_5x1_6H_LONG",
+            "TARGET_TRIPLE_5x1_6H_SHORT"
           ]
         }
       }

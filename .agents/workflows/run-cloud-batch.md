@@ -238,10 +238,12 @@ deploys the post-optimizer VM (reads `opt_mode`), downloads results, and writes 
 **Folder Naming Convention (AUTO-STAMPED since ticket `block-sharpe-objective-ab_07092026_1031`):**
 `run_sweep_batch.ps1` now renames the output directory itself after the batch completes and results
 are downloaded — no manual rename step. This prevents ambiguity across multiple runs.
-Format: `batch_<timestamp>_<SYMBOL>_<TIER>[_OBJAB]` — SYMBOL from the manifest `baseline.symbol`,
-TIER = first match of (canary|scout|prod) in the manifest filename (uppercased; fallback `RUN`),
-and `_OBJAB` appended when the objective list has more than one arm.
-Example: `batch_20260706_143139` → `batch_20260706_143139_CL_SCOUT_OBJAB`.
+Format: `batch_<timestamp>_<SYMBOL>_<DATASET>_<TIER>[_OBJAB]` — SYMBOL from the manifest
+`baseline.symbol`, DATASET = manifest `dataset_version` with the `HourSet_` prefix stripped
+(e.g. `02C`; omitted when unreadable — legacy format), TIER = first match of
+(canary|scout|prod) in the manifest filename (uppercased; fallback `RUN`), and `_OBJAB`
+appended when the objective list has more than one arm.
+Example: `batch_20260713_020000` → `batch_20260713_020000_NG_02C_CANARY`.
 A failed rename only logs a warning (never fails the batch) — if you see the warning, the folder
 keeps its plain `batch_<timestamp>` name and may be renamed manually to the same format.
 
