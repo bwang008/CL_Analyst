@@ -307,7 +307,10 @@ def build_live_features(
     #    ffill is standard for timeseries gaps (carries last valid value forward).
     #    bfill and fillna(0) are REMOVED — they fabricate values the model never
     #    saw during training and silently mask warm-up deficits.
-    work.replace([np.inf, -np.inf], np.nan, inplace=True)
+    # Non-inplace replace + explicit infer_objects() is byte-identical to the
+    # old inplace form (verified pandas 1.5.3 + 2.3.1) but avoids the pandas
+    # 2.x silent-downcast FutureWarning that will become an error.
+    work = work.replace([np.inf, -np.inf], np.nan).infer_objects()
     work.ffill(inplace=True)
 
     # 6. Extract the last rows with the model's expected columns

@@ -284,7 +284,12 @@ class AlphaFactory:
                 from datetime import datetime as _dt
                 print(f"[AlphaFactory] Term structure shapes done at {_dt.now().isoformat(timespec='seconds')}")
 
-        self.df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        # Non-inplace + explicit infer_objects(): retains the historical
+        # dtype-downcast behavior byte-identically while avoiding the pandas
+        # 2.x `replace(inplace=True)` silent-downcast FutureWarning (which
+        # becomes an error once pandas removes silent downcasting). Verified
+        # byte-identical on pandas 1.5.3 and 2.3.1.
+        self.df = self.df.replace([np.inf, -np.inf], np.nan).infer_objects()
         if log_progress:
             print(f"[AlphaFactory] Complete: {datetime.now().isoformat(timespec='seconds')}")
         return self.df
