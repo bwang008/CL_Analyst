@@ -327,6 +327,20 @@ class LiveTrader:
         from src.live_execution.strategy_config import StrategyConfig
         _sc = StrategyConfig.from_dict(strategy_config)
 
+        # BACKTEST-ONLY GUARD (ticket trailing-stop-ladder_07132026_1745):
+        # the live trailing path implements only the single one-shot rung.
+        # Refuse to start on a multi-rung ladder config until the live
+        # implementation + /validate-parity land (blueprint Phase 3).
+        for _lside in ("long", "short"):
+            _ladder = getattr(_sc, _lside).trailing_ladder
+            if _ladder is not None and len(_ladder) > 1:
+                raise RuntimeError(
+                    f"Config has a multi-rung {_lside}.trailing_ladder "
+                    f"({len(_ladder)} rungs) but live execution only supports "
+                    f"the single legacy trailing rung — trailing_ladder is "
+                    f"backtest-only until the Phase-3 live implementation ships."
+                )
+
         self._max_hold_bars: int = _sc.max_hold_bars
 
         # Trailing stop config (parity with backtest engine)

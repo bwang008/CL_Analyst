@@ -870,6 +870,11 @@ _PARAM_RANGES = {
     # _entry_threshold_bounds() and FIRING_FRAC_MIN/MAX below.
     "entry_threshold":                (0.30,  0.70, 0.08, "float"),
     "atr_period":                     (4,    36,   8,    "int"),
+    # Trailing-stop ladder on/off (ticket trailing-stop-ladder_07132026_1745).
+    # When True, _derive_trailing_params materializes a FIXED second rung:
+    # trigger2 = a1 + 0.5*(TP - a1), lock2 = a1 (ratchet to previous trigger).
+    # Placement is never searched — only this boolean is.
+    "ladder_enabled":                 (False, True, None, "bool"),
 }
 
 # Frozen (formerly searched) dims. Emptied by the rebalanced tier (2026-07-12):
@@ -1000,11 +1005,37 @@ def _snap_to_grid(value: float, low: float, high: float, step: float,
 
 
 def _derive_trailing_params(params: dict) -> dict:
-    """Derive structural trailing stops from latent variables."""
+    """Derive structural trailing stops from latent variables.
+
+    When ``ladder_enabled`` is True, additionally materialize the FIXED
+    geometric second rung (operator-approved rule, ticket
+    trailing-stop-ladder_07132026_1745): trigger2 = midpoint of the remaining
+    distance to TP, lock2 = rung-1's trigger level. ``ladder_enabled=False``
+    emits ``trailing_ladder=None`` so apply_trial_params strips any stale
+    ladder from a warm-start config.
+    """
     out = params.copy()
     if "trigger_frac" in out and "tp_atr_mult" in out:
         out["trailing_atr_mult"] = round(out["tp_atr_mult"] * out.pop("trigger_frac"), 10)
         out["trailing_sl_atr_offset"] = round(out["trailing_atr_mult"] * (1.0 - out.pop("distance_frac")), 10)
+    if "ladder_enabled" in out:
+        if out.pop("ladder_enabled"):
+            for _k in ("trailing_atr_mult", "trailing_sl_atr_offset", "tp_atr_mult"):
+                if _k not in out:
+                    raise ValueError(
+                        f"ladder_enabled=True requires '{_k}' to derive the fixed "
+                        f"rung 2 (got keys {sorted(out)})"
+                    )
+            _a1 = out["trailing_atr_mult"]
+            _o1 = out["trailing_sl_atr_offset"]
+            _tp = out["tp_atr_mult"]
+            _a2 = round(_a1 + 0.5 * (_tp - _a1), 10)
+            out["trailing_ladder"] = [
+                {"activation_atr": _a1, "lock_atr": _o1},
+                {"activation_atr": _a2, "lock_atr": _a1},
+            ]
+        else:
+            out["trailing_ladder"] = None
     return out
 
 
@@ -1120,6 +1151,8 @@ def _extract_warm_start_params(
                 "consecutive_signal_threshold", cfg.get("consecutive_signal_threshold", 0)
             ),
             "atr_period": side_cfg.get("atr_period", cfg.get("atr_period", 14)),
+            # Boolean dim — presence of a config ladder anchors the warm start.
+            "ladder_enabled": bool(side_cfg.get("trailing_ladder")),
         }
         if not include_atr:
             raw_values.pop("atr_period")
@@ -1130,6 +1163,9 @@ def _extract_warm_start_params(
                 low, high, step, dtype = _entry_threshold_grid(entry_thr_bounds, side)
             else:
                 low, high, step, dtype = _PARAM_RANGES[key]
+            if dtype == "bool":
+                params[f"{key}_{suffix}"] = bool(raw_val)
+                continue
             snapped = _snap_to_grid(raw_val, low, high, step, dtype)
             if snapped != raw_val:
                 print(f"  [WARM-START] {key}_{suffix}: {raw_val} -> {snapped} (snapped to grid)")
@@ -1165,6 +1201,9 @@ def _extract_warm_start_params(
                 else:
                     low, high, step, dtype = _PARAM_RANGES[key]
                     raw_val = base_cfg.get(key, low)
+                if dtype == "bool":
+                    warm[key] = bool(base_cfg.get("trailing_ladder"))
+                    continue
                 snapped = _snap_to_grid(raw_val, low, high, step, dtype)
                 if snapped != raw_val:
                     print(f"  [WARM-START] {key}: {raw_val} -> {snapped} (snapped to grid)")
@@ -1435,6 +1474,8 @@ def make_objective(
                 params[key] = trial.suggest_float(
                     f"{key}_{suffix}", d_low, d_high, step=d_step
                 )
+            elif dtype == "bool":
+                params[key] = trial.suggest_categorical(f"{key}_{suffix}", [False, True])
             elif dtype == "float":
                 params[key] = trial.suggest_float(f"{key}_{suffix}", low, high, step=step)
             elif dtype == "int":
@@ -1488,6 +1529,8 @@ def make_objective(
                 if key == "entry_threshold":
                     d_low, d_high, d_step = _entry_thr_range("long")
                     params[key] = trial.suggest_float(key, d_low, d_high, step=d_step)
+                elif dtype == "bool":
+                    params[key] = trial.suggest_categorical(key, [False, True])
                 elif dtype == "float":
                     params[key] = trial.suggest_float(key, low, high, step=step)
                 elif dtype == "int":

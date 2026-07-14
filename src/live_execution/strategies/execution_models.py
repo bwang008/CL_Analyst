@@ -644,6 +644,17 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
                     side_cfg["trailing_sl_atr_offset"] = params[_tso_key]
                     break
 
+            # Trailing ladder is PER-SIDE ONLY (never top-level, never in
+            # tiers). None = explicit removal so a disabled trial strips any
+            # stale ladder inherited from a warm-start config.
+            if "trailing_ladder" in params:
+                if params["trailing_ladder"] is None:
+                    side_cfg.pop("trailing_ladder", None)
+                else:
+                    side_cfg["trailing_ladder"] = [
+                        dict(rung) for rung in params["trailing_ladder"]
+                    ]
+
             # Write into tiered_exits blocks
             for exit_tier in side_cfg.get("tiered_exits", []):
                 if tp is not None:

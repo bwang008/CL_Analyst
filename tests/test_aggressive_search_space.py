@@ -3,10 +3,12 @@
 Locks the REBALANCED Optuna search space (user decision, partial un-freeze of
 the 2026-07-10 aggressive tier — see the tier comment in strategy_optimizer):
 
-  * _PARAM_RANGES searches 9 dims/side: the aggressive-tier survivors plus
+  * _PARAM_RANGES searches 10 dims/side: the aggressive-tier survivors plus
     re-unfrozen {trigger_frac, distance_frac, max_hold_bars,
     consecutive_signal_threshold} on TIGHTER grids than the pre-aggressive
-    baseline; tp_atr_mult re-widened to 2.0-8.0 step 0.75.
+    baseline; tp_atr_mult re-widened to 2.0-8.0 step 0.75; plus the
+    ladder_enabled BOOLEAN (2026-07-14, trailing-stop-ladder ticket) that
+    toggles the derived fixed 2-rung trailing ladder.
   * _FROZEN_PARAMS is EMPTY (kept as a dict for the update() path).
   * conflict_resolution stays frozen at "hold" (never suggested).
   * Ensemble (pass-2) mode ties atr_period across sides via ONE
@@ -54,6 +56,10 @@ SEARCHED_BASE_KEYS = {
     "tp_atr_mult", "sl_atr_mult", "trigger_frac", "distance_frac",
     "cooldown_bars", "max_hold_bars", "consecutive_signal_threshold",
     "entry_threshold", "atr_period",
+    # Boolean on/off for the FIXED 2-rung trailing ladder (operator-approved
+    # 2026-07-14, ticket trailing-stop-ladder_07132026_1745). Rung placement
+    # is derived (trigger2 = a1 + 0.5*(TP-a1), lock2 = a1), never searched.
+    "ladder_enabled",
 }
 
 
@@ -225,6 +231,7 @@ class TestSingleSideTrials:
             assert t.params["max_hold_bars_long"] in MAXHOLD_GRID
             assert t.params["consecutive_signal_threshold_long"] in CONSEC_GRID
             assert t.params["atr_period_long"] in ATR_GRID
+            assert t.params["ladder_enabled_long"] in {True, False}
             # conflict_resolution must never be suggested
             assert "conflict_resolution" not in t.params
 

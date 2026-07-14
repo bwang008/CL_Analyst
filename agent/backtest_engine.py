@@ -114,6 +114,39 @@ class ExitReason(Enum):
     EOD_FLATTEN = "EOD_FLATTEN"  # Optional overlay: profitable winner flattened before the daily session halt
 
 
+def _normalize_trailing_ladder(
+    rungs, label: str
+) -> Optional[tuple[tuple[float, float], ...]]:
+    """Normalize a trailing ladder into ((activation, lock), ...) tuples.
+
+    Accepts (activation, lock) pairs or {"activation_atr", "lock_atr"} dicts.
+    Structural validation only (monotonicity, lock < activation); the
+    TP-relative and legacy-scalar consistency checks live in
+    ``strategy_config.parse_trailing_ladder`` where the side context exists.
+    """
+    if rungs is None:
+        return None
+    norm: list[tuple[float, float]] = []
+    for r in rungs:
+        if isinstance(r, dict):
+            norm.append((float(r["activation_atr"]), float(r["lock_atr"])))
+        else:
+            a, o = r
+            norm.append((float(a), float(o)))
+    if not norm:
+        raise ValueError(f"{label} must contain at least one rung (pass None to disable)")
+    prev_a = prev_o = float("-inf")
+    for i, (a, o) in enumerate(norm):
+        if o >= a:
+            raise ValueError(f"{label}[{i}] lock ({o}) must be strictly below activation ({a})")
+        if a <= prev_a:
+            raise ValueError(f"{label} activations must be strictly increasing (rung {i})")
+        if o <= prev_o:
+            raise ValueError(f"{label} locks must be strictly increasing (rung {i})")
+        prev_a, prev_o = a, o
+    return tuple(norm)
+
+
 @dataclass
 class TradeRecord:
     """Result of a single completed trade."""
@@ -262,15 +295,15 @@ class _OpenPosition:
     tp_price: float
     sl_price: float
     original_sl_price: float
-    trailing_activated: bool = False
+    trailing_rung: int = 0  # rungs consumed (0 = trailing not activated)
     bars_held: int = 0
     highest_high: float = 0.0
     lowest_low: float = float("inf")
     lots: int = 1
     # Per-trade overrides (None = use engine global)
     pos_max_horizon: Optional[int] = None
-    pos_trailing_atr_mult: Optional[float] = None
-    pos_trailing_sl_atr_offset: Optional[float] = None
+    # Resolved trailing ladder for this position ((activation, lock), ...)
+    pos_trailing_ladder: tuple = ()
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +358,8 @@ class BacktestEngine:
         atr_period_short: Optional[int] = None,
         trailing_sl_atr_offset_long: Optional[float] = None,
         trailing_sl_atr_offset_short: Optional[float] = None,
+        trailing_ladder_long=None,
+        trailing_ladder_short=None,
         commission_per_side: float = 2.50,
         slippage_per_side: float = 0.01,
         contract_multiplier: float = 1000.0,
@@ -349,6 +384,13 @@ class BacktestEngine:
         # Per-side trailing SL offset (fall back to global trailing_sl_atr_offset)
         self.trailing_sl_atr_offset_long: float = trailing_sl_atr_offset_long if trailing_sl_atr_offset_long is not None else trailing_sl_atr_offset
         self.trailing_sl_atr_offset_short: float = trailing_sl_atr_offset_short if trailing_sl_atr_offset_short is not None else trailing_sl_atr_offset
+        # Per-side trailing ladders (None = single legacy rung, unchanged behavior)
+        self.trailing_ladder_long = _normalize_trailing_ladder(
+            trailing_ladder_long, "trailing_ladder_long"
+        )
+        self.trailing_ladder_short = _normalize_trailing_ladder(
+            trailing_ladder_short, "trailing_ladder_short"
+        )
         self.commission_per_side = commission_per_side
         self.slippage_per_side = slippage_per_side
         self.contract_multiplier = contract_multiplier
@@ -384,7 +426,7 @@ class BacktestEngine:
         self._tp_price: float = 0.0
         self._sl_price: float = 0.0
         self._original_sl_price: float = 0.0
-        self._trailing_activated: bool = False
+        self._trailing_rung: int = 0  # rungs consumed (0 = trailing not activated)
         self._bars_held: int = 0
         self._highest_high: float = 0.0
         self._lowest_low: float = float("inf")
@@ -394,6 +436,9 @@ class BacktestEngine:
         self._trade_max_horizon: int = max_horizon
         self._trade_trailing_atr_mult: float = trailing_atr_mult
         self._trade_trailing_sl_atr_offset: float = trailing_sl_atr_offset
+        self._trade_trailing_ladder: tuple[tuple[float, float], ...] = (
+            (trailing_atr_mult, trailing_sl_atr_offset),
+        )
 
         # Concurrent mode state
         self._open_positions: list[_OpenPosition] = []
@@ -435,6 +480,8 @@ class BacktestEngine:
             "trailing_sl_atr_offset": sc.trailing_sl_atr_offset,
             "trailing_sl_atr_offset_long": sc.long.trailing_sl_atr_offset,
             "trailing_sl_atr_offset_short": sc.short.trailing_sl_atr_offset,
+            "trailing_ladder_long": sc.long.trailing_ladder,
+            "trailing_ladder_short": sc.short.trailing_ladder,
             "execution_strategy": strategy,
             "execution_guard": guard,
             "weekend_flatten": sc.weekend_flatten,
@@ -502,7 +549,7 @@ class BacktestEngine:
         self._tp_price = 0.0
         self._sl_price = 0.0
         self._original_sl_price = 0.0
-        self._trailing_activated = False
+        self._trailing_rung = 0
         self._bars_held = 0
         self._highest_high = 0.0
         self._lowest_low = float("inf")
@@ -513,6 +560,9 @@ class BacktestEngine:
         self._trade_max_horizon = self.max_horizon
         self._trade_trailing_atr_mult = self.trailing_atr_mult
         self._trade_trailing_sl_atr_offset = self.trailing_sl_atr_offset
+        self._trade_trailing_ladder = (
+            (self.trailing_atr_mult, self.trailing_sl_atr_offset),
+        )
         self._blocked_trades_count = 0
 
         # Reset mutable engine state
@@ -674,6 +724,29 @@ class BacktestEngine:
             else self.trailing_sl_atr_offset_short
         )
 
+        # Per-side trailing ladder. When a ladder is configured, rung 1 is the
+        # source of truth; an Order carrying a DIFFERENT trailing override
+        # means the config is internally inconsistent — crash loudly.
+        _side_ladder = (
+            self.trailing_ladder_long if signal_side == 1
+            else self.trailing_ladder_short
+        )
+        if _side_ladder:
+            if (
+                order is not None
+                and order.trailing_atr_mult is not None
+                and abs(order.trailing_atr_mult - _side_ladder[0][0]) > 1e-9
+            ):
+                raise ValueError(
+                    f"Order trailing_atr_mult ({order.trailing_atr_mult}) conflicts "
+                    f"with trailing_ladder rung 1 activation ({_side_ladder[0][0]})"
+                )
+            self._trade_trailing_ladder = _side_ladder
+        else:
+            self._trade_trailing_ladder = (
+                (self._trade_trailing_atr_mult, self._trade_trailing_sl_atr_offset),
+            )
+
         self._state = TradeState.IN_POSITION
         self._entry_dt = dt
         self._entry_price = order.override_entry_price if (order is not None and order.override_entry_price is not None) else bar.exec_Close
@@ -681,7 +754,7 @@ class BacktestEngine:
         self._side = signal_side
         self._lots = lots
         self._bars_held = 0
-        self._trailing_activated = False
+        self._trailing_rung = 0
 
         entry_order_side = "Buy" if signal_side == 1 else "Sell"
         self._entry_fill = self._apply_slippage(self._entry_price, entry_order_side)
@@ -769,7 +842,7 @@ class BacktestEngine:
             exit_price = self._gap_fill_price(
                 bar_open, self._sl_price, self._side, is_tp=False
             )
-            reason = ExitReason.TRAILING_BE if self._trailing_activated else ExitReason.SL
+            reason = ExitReason.TRAILING_BE if self._trailing_rung > 0 else ExitReason.SL
             self._close_trade(dt, exit_price, reason)
             return
 
@@ -777,7 +850,7 @@ class BacktestEngine:
             exit_price = self._gap_fill_price(
                 bar_open, self._sl_price, self._side, is_tp=False
             )
-            reason = ExitReason.TRAILING_BE if self._trailing_activated else ExitReason.SL
+            reason = ExitReason.TRAILING_BE if self._trailing_rung > 0 else ExitReason.SL
             self._close_trade(dt, exit_price, reason)
             return
 
@@ -804,30 +877,32 @@ class BacktestEngine:
             self._close_trade(dt, bar_open, _flat_reason)
             return
 
-        # 3. Trailing stop upgrade: move SL after +N×ATR in favor
-        #    SL target = entry ± offset×ATR (0 = breakeven, >0 = lock profit)
-        #    Uses per-side trailing_sl_atr_offset set at entry in _on_flat()
-        if not self._trailing_activated:
+        # 3. Trailing ladder ratchet: after the extreme-since-entry crosses a
+        #    rung's activation (+N×ATR in favor), move the SL to that rung's
+        #    lock (entry ± lock×ATR; 0 = breakeven). A single bar may advance
+        #    multiple rungs; the moved stop is only effective from the NEXT
+        #    bar (this block runs after the exit checks above). Legacy configs
+        #    are a 1-rung ladder — byte-identical to the old one-shot latch.
+        _ladder = self._trade_trailing_ladder
+        while self._trailing_rung < len(_ladder):
+            _act, _lock = _ladder[self._trailing_rung]
             if self._side == 1:
-                if self._highest_high >= (
-                    self._entry_price + self._trade_trailing_atr_mult * self._atr_at_entry
+                if self._highest_high < (
+                    self._entry_price + _act * self._atr_at_entry
                 ):
-                    self._sl_price = (
-                        self._entry_price
-                        + self._trade_trailing_sl_atr_offset * self._atr_at_entry
-                    )
-                    self._trailing_activated = True
+                    break
+                self._sl_price = (
+                    self._entry_price + _lock * self._atr_at_entry
+                )
             else:
-                if self._lowest_low <= (
-                    self._entry_price - self._trade_trailing_atr_mult * self._atr_at_entry
+                if self._lowest_low > (
+                    self._entry_price - _act * self._atr_at_entry
                 ):
-                    self._sl_price = (
-                        self._entry_price
-                        - self._trade_trailing_sl_atr_offset * self._atr_at_entry
-                    )
-                    self._trailing_activated = True
-
-        pass
+                    break
+                self._sl_price = (
+                    self._entry_price - _lock * self._atr_at_entry
+                )
+            self._trailing_rung += 1
 
     # -------------------------------------------------------------------
     # Concurrent-mode helpers
@@ -862,6 +937,34 @@ class BacktestEngine:
             if order.trailing_atr_mult is not None:
                 pos_trailing_atr_mult = order.trailing_atr_mult
 
+        # Resolve the trailing ladder (same rules as _on_flat): a configured
+        # side ladder wins and must agree with any Order trailing override;
+        # otherwise build the legacy 1-rung ladder from the resolved values.
+        _side_ladder = (
+            self.trailing_ladder_long if signal_side == 1
+            else self.trailing_ladder_short
+        )
+        _side_offset = (
+            self.trailing_sl_atr_offset_long if signal_side == 1
+            else self.trailing_sl_atr_offset_short
+        )
+        if _side_ladder:
+            if (
+                pos_trailing_atr_mult is not None
+                and abs(pos_trailing_atr_mult - _side_ladder[0][0]) > 1e-9
+            ):
+                raise ValueError(
+                    f"Order trailing_atr_mult ({pos_trailing_atr_mult}) conflicts "
+                    f"with trailing_ladder rung 1 activation ({_side_ladder[0][0]})"
+                )
+            pos_ladder = _side_ladder
+        else:
+            _act = (
+                pos_trailing_atr_mult if pos_trailing_atr_mult is not None
+                else self.trailing_atr_mult
+            )
+            pos_ladder = ((_act, _side_offset),)
+
         # Static SL/TP mimic IBKR reality: fill-basis + penny-grid rounding
         # (same derivation as _on_flat).
         if signal_side == 1:
@@ -884,11 +987,7 @@ class BacktestEngine:
             lowest_low=bar.exec_Low,
             lots=lots,
             pos_max_horizon=pos_max_horizon,
-            pos_trailing_atr_mult=pos_trailing_atr_mult,
-            pos_trailing_sl_atr_offset=(
-                self.trailing_sl_atr_offset_long if signal_side == 1
-                else self.trailing_sl_atr_offset_short
-            ),
+            pos_trailing_ladder=pos_ladder,
         )
         self._open_positions.append(pos)
 
@@ -927,7 +1026,7 @@ class BacktestEngine:
                 bar_open, pos.sl_price, pos.side, is_tp=False
             )
             exit_reason = (
-                ExitReason.TRAILING_BE if pos.trailing_activated
+                ExitReason.TRAILING_BE if pos.trailing_rung > 0
                 else ExitReason.SL
             )
         elif sl_hit:
@@ -935,7 +1034,7 @@ class BacktestEngine:
                 bar_open, pos.sl_price, pos.side, is_tp=False
             )
             exit_reason = (
-                ExitReason.TRAILING_BE if pos.trailing_activated
+                ExitReason.TRAILING_BE if pos.trailing_rung > 0
                 else ExitReason.SL
             )
         elif tp_hit:
@@ -962,28 +1061,29 @@ class BacktestEngine:
                 exit_price = bar_open
                 exit_reason = _flat_reason
 
-        # 3. Trailing stop upgrade (use per-position overrides if set)
-        eff_trailing = pos.pos_trailing_atr_mult if pos.pos_trailing_atr_mult is not None else self.trailing_atr_mult
-        eff_offset = pos.pos_trailing_sl_atr_offset if pos.pos_trailing_sl_atr_offset is not None else self.trailing_sl_atr_offset
-        if exit_reason is None and not pos.trailing_activated:
-            if pos.side == 1:
-                if pos.highest_high >= (
-                    pos.entry_price + eff_trailing * pos.atr_at_entry
-                ):
+        # 3. Trailing ladder ratchet (see _on_in_position — same semantics:
+        #    advance after exit checks, moved stop effective next bar)
+        if exit_reason is None:
+            _ladder = pos.pos_trailing_ladder
+            while pos.trailing_rung < len(_ladder):
+                _act, _lock = _ladder[pos.trailing_rung]
+                if pos.side == 1:
+                    if pos.highest_high < (
+                        pos.entry_price + _act * pos.atr_at_entry
+                    ):
+                        break
                     pos.sl_price = (
-                        pos.entry_price
-                        + eff_offset * pos.atr_at_entry
+                        pos.entry_price + _lock * pos.atr_at_entry
                     )
-                    pos.trailing_activated = True
-            else:
-                if pos.lowest_low <= (
-                    pos.entry_price - eff_trailing * pos.atr_at_entry
-                ):
+                else:
+                    if pos.lowest_low > (
+                        pos.entry_price - _act * pos.atr_at_entry
+                    ):
+                        break
                     pos.sl_price = (
-                        pos.entry_price
-                        - eff_offset * pos.atr_at_entry
+                        pos.entry_price - _lock * pos.atr_at_entry
                     )
-                    pos.trailing_activated = True
+                pos.trailing_rung += 1
 
         if exit_reason is not None and exit_price is not None:
             exit_order_side = "Sell" if pos.side == 1 else "Buy"

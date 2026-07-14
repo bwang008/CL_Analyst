@@ -60,6 +60,77 @@ def _resolve_trailing_offset(block: dict, global_fallback: float) -> float:
     return global_fallback
 
 
+def parse_trailing_ladder(
+    raw: Any,
+    *,
+    tp_atr_mult: float,
+    trailing_atr_mult: float,
+    trailing_sl_atr_offset: float,
+    label: str,
+) -> Optional[tuple[tuple[float, float], ...]]:
+    """Parse and validate a per-side ``trailing_ladder`` config block.
+
+    Shape: a non-empty list of ``{"activation_atr": float, "lock_atr": float}``
+    rungs. When the max favorable excursion (in entry-ATR units) crosses a
+    rung's activation, the stop ratchets to ``entry ± lock_atr × ATR``.
+
+    Validation (crash loudly — no silent null defaults):
+      - every rung must carry BOTH keys
+      - activations strictly increasing; locks strictly increasing
+      - each rung's lock strictly below its activation
+      - last activation strictly below the side's ``tp_atr_mult``
+      - rung 1 must equal the legacy scalars (``trailing_atr_mult``,
+        ``trailing_sl_atr_offset``), which stay in the config for downstream
+        readers — a mismatch means the config is internally inconsistent.
+
+    Returns ``None`` when *raw* is absent (feature off, legacy behavior).
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(f"{label} must be a list of rung objects, got {type(raw).__name__}")
+    if len(raw) == 0:
+        raise ValueError(f"{label} must contain at least one rung (omit the key to disable)")
+
+    rungs: list[tuple[float, float]] = []
+    for i, r in enumerate(raw):
+        if not isinstance(r, dict) or "activation_atr" not in r or "lock_atr" not in r:
+            raise ValueError(
+                f"{label}[{i}] must be an object with 'activation_atr' and 'lock_atr' (got {r!r})"
+            )
+        rungs.append((float(r["activation_atr"]), float(r["lock_atr"])))
+
+    prev_act = float("-inf")
+    prev_lock = float("-inf")
+    for i, (act, lock) in enumerate(rungs):
+        if lock >= act:
+            raise ValueError(
+                f"{label}[{i}] lock_atr ({lock}) must be strictly below activation_atr ({act})"
+            )
+        if act <= prev_act:
+            raise ValueError(f"{label} activation_atr must be strictly increasing (rung {i})")
+        if lock <= prev_lock:
+            raise ValueError(f"{label} lock_atr must be strictly increasing (rung {i})")
+        prev_act, prev_lock = act, lock
+
+    if rungs[-1][0] >= tp_atr_mult:
+        raise ValueError(
+            f"{label} last activation_atr ({rungs[-1][0]}) must be strictly below "
+            f"the side's tp_atr_mult ({tp_atr_mult}) — a rung at/past TP can never fire"
+        )
+
+    _EPS = 1e-9
+    if abs(rungs[0][0] - trailing_atr_mult) > _EPS or abs(rungs[0][1] - trailing_sl_atr_offset) > _EPS:
+        raise ValueError(
+            f"{label} rung 1 ({rungs[0][0]}, {rungs[0][1]}) must equal the side's legacy "
+            f"scalars trailing_atr_mult={trailing_atr_mult} / "
+            f"trailing_sl_atr_offset={trailing_sl_atr_offset} (they remain the "
+            f"source of truth for downstream readers)"
+        )
+
+    return tuple(rungs)
+
+
 # ---------------------------------------------------------------------------
 # DataClasses
 # ---------------------------------------------------------------------------
@@ -76,6 +147,10 @@ class SideConfig:
     max_hold_bars: int
     cooldown_bars: int
     consecutive_signal_threshold: int
+    # Optional N-rung trailing ladder ((activation_atr, lock_atr), ...);
+    # None = single legacy rung (unchanged behavior). Rung 1 always equals
+    # (trailing_atr_mult, trailing_sl_atr_offset) — enforced at parse.
+    trailing_ladder: Optional[tuple[tuple[float, float], ...]] = None
 
 
 @dataclass(frozen=True)
@@ -224,17 +299,27 @@ class StrategyConfig:
             block = cfg.get(side_key, {})
             if not isinstance(block, dict):
                 block = {}
+            side_tp = float(block.get("tp_atr_mult", g_tp))
+            side_trailing = float(block.get("trailing_atr_mult", g_trailing))
+            side_offset = _resolve_trailing_offset(block, g_offset)
             return SideConfig(
-                tp_atr_mult=float(block.get("tp_atr_mult", g_tp)),
+                tp_atr_mult=side_tp,
                 sl_atr_mult=float(block.get("sl_atr_mult", g_sl)),
-                trailing_atr_mult=float(block.get("trailing_atr_mult", g_trailing)),
-                trailing_sl_atr_offset=_resolve_trailing_offset(block, g_offset),
+                trailing_atr_mult=side_trailing,
+                trailing_sl_atr_offset=side_offset,
                 atr_period=int(block.get("atr_period", g_atr)),
                 max_hold_bars=int(block.get("max_hold_bars", g_max_hold)),
                 cooldown_bars=int(block.get("cooldown_bars", g_cooldown)),
                 consecutive_signal_threshold=int(
                     block.get("consecutive_signal_threshold",
                               _DEFAULT_CONSECUTIVE_SIGNAL_THRESHOLD)
+                ),
+                trailing_ladder=parse_trailing_ladder(
+                    block.get("trailing_ladder"),
+                    tp_atr_mult=side_tp,
+                    trailing_atr_mult=side_trailing,
+                    trailing_sl_atr_offset=side_offset,
+                    label=f"{side_key}.trailing_ladder",
                 ),
             )
 
