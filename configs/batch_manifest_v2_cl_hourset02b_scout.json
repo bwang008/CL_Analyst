@@ -1,11 +1,11 @@
 {
   "_comment": "HourSet_15B renamed to 02B SCOUT \u2014 top-6 target families from the corrected Stage-1 AUC screen (reports/screens/cl_15b/AUC_Model_Report.md, re-run after the 0p5-decimal parser fix), sourced from the new short-horizon dataset (2x1_1H/2x1_2H/1x0p5_1H added on top of the 14B target suite). Mirrors batch_manifest_v2_hourset14b_scout.json (same infra/execution_workflow/optuna box); only dataset_version and experiments differ. 1x0p5_1H (ROC 0.729/0.709) was excluded: it flags 'cost?' at 6.9% round-trip cost of a TP winner \u2014 same cost-mirage pattern later confirmed on NG/SI B datasets.",
   "infrastructure": {
-    "machine_type": "c2-standard-16",
+    "machine_type": "n2-standard-32",
     "provisioning_model": "STANDARD",
     "timeout_minutes": 360,
     "max_concurrent_vcpus": 288,
-    "vcpus_per_vm": 16,
+    "vcpus_per_vm": 32,
     "max_concurrent_vms": 12
   },
   "baseline": {
@@ -81,7 +81,8 @@
         "min_child_samples_max": 500,
         "feature_fraction_min": 0.4,
         "feature_fraction_max": 0.9,
-        "post_optimizer_trials": 125,
+        "post_optimizer_trials": 150,
+        "post_optimizer_ensemble_trials": 0,
         "post_optimizer_holdout_months": 12
       }
     },

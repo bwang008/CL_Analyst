@@ -1,11 +1,11 @@
 {
   "_comment": "HourSet_15B CANARY - pipeline-validation cut of batch_manifest_v2_hourset15b_scout.json, built on the batch_manifest_v2_hourset14b_canary.json template (canary optuna: 3 sweep trials / 3 post-opt trials, narrow LGBM box, gcs canary dir, opt_mode=individual two-pass chain). Same 15B dataset (CL_HourSet_15B.parquet); targets cut from the scout's 6 down to 2 (kept the two horizon-6 families 4x1_6H + 3x1_6H, both confirmed present in the parquet; 3x1_6H matches the 14B canary for cross-dataset comparability).",
   "infrastructure": {
-    "machine_type": "c2-standard-16",
+    "machine_type": "n2-standard-32",
     "provisioning_model": "STANDARD",
     "timeout_minutes": 240,
     "max_concurrent_vcpus": 288,
-    "vcpus_per_vm": 16,
+    "vcpus_per_vm": 32,
     "max_concurrent_vms": 12
   },
   "baseline": {
@@ -50,6 +50,7 @@
         "feature_fraction_min": 0.4,
         "feature_fraction_max": 0.8,
         "post_optimizer_trials": 3,
+        "post_optimizer_ensemble_trials": 0,
         "post_optimizer_holdout_months": 12
       }
     },
