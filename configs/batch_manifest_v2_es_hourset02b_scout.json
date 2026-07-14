@@ -72,7 +72,7 @@
         "max_depth_max": 8,
         "num_leaves_min": 15,
         "num_leaves_max": 64,
-        "max_n_estimators": 1500,
+        "max_n_estimators": 2000,
         "early_stopping_rounds": 30,
         "max_folds": 5,
         "learning_rate_min": 0.001,
@@ -81,7 +81,8 @@
         "min_child_samples_max": 500,
         "feature_fraction_min": 0.4,
         "feature_fraction_max": 0.8,
-        "post_optimizer_trials": 125,
+        "post_optimizer_trials": 150,
+        "post_optimizer_ensemble_trials": 0,
         "post_optimizer_holdout_months": 12
       }
     },
