@@ -3415,6 +3415,15 @@ class DataProcessor:
             df = curve_engine.merge_curve(df, max_leading_nan_bars=2200)
             print(f"  [57%] Curve calendar-spread features added at {datetime.now().isoformat(timespec='seconds')}")
 
+        # ── Step 4.6: Extended-moments OHLCV pack (gated) ─────────────
+        # Must run after AlphaFactory (Step 3) + external macro (Step 4):
+        # the engine hard-requires VOL_YZ_*/VOL_PARK_24/MACRO_* inputs and
+        # raises on any gap rather than guessing.
+        if cfg.features.include_extended_moments:
+            from src.features.extended_moments import ExtendedMomentsEngine
+            df = ExtendedMomentsEngine().add_features(df)
+            print(f"  [58%] Extended-moments features added at {datetime.now().isoformat(timespec='seconds')}")
+
         # ── Step 5: RAW columns ───────────────────────────────────────
         raw_horizon = cfg.targets.raw_horizon
         

@@ -49,6 +49,12 @@ class FeatureConfig(BaseModel):
     curve_seasonal_bucket: Literal["week", "month", "doy_smoothed"] = "week"
     curve_seasonal_min_prior_years: int = 2
     curve_seasonal_pctl: bool = False
+    # ── Extended-moments OHLCV pack (HourSet_04E+) ──
+    # Cross-moments, event-time durations, robust quantile moments, volume-
+    # distribution stats (XMOM_/DUR_/VOLU_ + family additions). Needs no
+    # external data beyond what 02B-class datasets already load. Additive:
+    # default False keeps every existing DataMap rebuild byte-identical.
+    include_extended_moments: bool = False
 
     @field_validator("windows")
     @classmethod

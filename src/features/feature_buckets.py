@@ -64,6 +64,12 @@ FEATURE_BUCKETS: dict[str, list[str]] = {
     # from the TS_ cross-window indicator shapes above
     "curve": ["CURVE_"],
 
+    # Extended-moments pack (HourSet_04E+): cross-moments between series,
+    # event-time durations, volume-distribution stats. Families that reuse
+    # existing prefixes (TREND_QUAD_CURV, STRUC_AC1, VOL_JUMP_RATIO, ...)
+    # classify into their parent buckets by design.
+    "extended_moments": ["XMOM_", "DUR_", "VOLU_"],
+
     # AlphaFactory macro context (rolling regime indicators)
     "macro_tech": ["MACRO_"],
 
@@ -77,7 +83,7 @@ TOGGLEABLE_BUCKETS: list[str] = [
 ]
 
 # Minimum trials needed when bucket search is active
-# (13 toggleable buckets → 2^13 = 8,192 combos)
+# (14 toggleable buckets → 2^14 = 16,384 combos)
 BUCKET_MIN_TRIALS = 150
 
 
