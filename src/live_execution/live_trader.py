@@ -5437,7 +5437,7 @@ class LiveTrader:
             if self._data_mute else ""
         )
         log.info(
-            "HEARTBEAT: alive | last_bar=%s | market=%s | position=%s%s | connected=%s%s%s",
+            "HEARTBEAT: alive | last_bar=%s | market=%s | position= %s%s | connected=%s%s%s",
             last_bar_str,
             market_status,
             pos_str,

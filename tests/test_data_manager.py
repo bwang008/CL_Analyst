@@ -3,10 +3,18 @@ Tests for DataManager — Three-Tier data architecture.
 
 Tests seed loading, cache creation/reuse, dedup, monotonicity,
 and append logic. IBKR backfill is tested via mocking.
+
+TDD-TESTER AUTHORIZATION
+Target Implementation File: src/live_execution/data_manager.py
+Target Class/Function: DataManager.append_bar
+Ticket: alpha-factory-downcast-warning_07142026_0816
+Status: FINALIZED
+Strict-Lock: TRUE (Implementation agents may NOT modify this file)
 """
 
 import os
 import tempfile
+import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -440,6 +448,120 @@ class TestAppendBarDtypeCoercion:
                 "DateTime": new_ts,
                 "Open": 71.0, "High": 71.5, "Low": 70.5,
                 "Close": "NOTANUM", "Volume": 2000.0,
+            }],
+            index=pd.DatetimeIndex([new_ts], name="DateTime"),
+        )
+        with pytest.raises((ValueError, TypeError)):
+            dm.append_bar(bad_row)
+
+
+# ---------------------------------------------------------------------------
+# Tests: DateTime dtype coercion on append (residual reconnect poisoning)
+# Ticket alpha-factory-downcast-warning_07142026_0816
+# ---------------------------------------------------------------------------
+
+_PANDAS_MAJOR = int(pd.__version__.split(".")[0])
+
+
+class TestAppendBarDateTimeDtype:
+    """The prior OHLCV coercion (ticket 1h-reconnect-object-dtype_07082026_0032)
+    fixed Open/High/Low/Close/Volume but SKIPPED the ``DateTime`` column. The
+    reconnect gap-backfill loop (live_trader.py:4216-4217) appends bars via
+    ``append_bar(row.to_frame().T)`` from ``iterrows()`` — an all-object 1-row
+    frame — so ``pd.concat`` permanently upcasts the cache's ``datetime64[ns]``
+    DateTime column to object. Every downstream
+    ``replace([inf, -inf], nan)`` over the poisoned frame (alpha_factory.py:292)
+    then fires the pandas 2.x "Downcasting behavior in `replace` is deprecated"
+    FutureWarning on every hourly inference.
+
+    Fix under test: ``append_bar`` must coerce the incoming row's ``DateTime``
+    column with ``pd.to_datetime(..., errors="raise")`` alongside the existing
+    OHLCV ``pd.to_numeric`` loop.
+    """
+
+    @staticmethod
+    def _reconnect_style_row_object_datetime(ts):
+        """Reconnect-backfill row with an OBJECT-dtype ``DateTime`` column —
+        the exact shape the live path produces on the fleet interpreter.
+
+        Pandas-version nuance: on pandas 2.x, ``iterrows() -> to_frame().T``
+        leaves ALL columns object (silent datetime inference was removed from
+        the DataFrame constructor in 2.0), so the pin below is a no-op there.
+        On pandas 1.5.3 (this test env), the transpose constructor re-infers
+        the all-Timestamp column back to datetime64, hiding the bug — so we
+        pin ``DateTime`` back to object to reproduce the fleet-interpreter
+        input byte-for-byte. ``append_bar`` must be robust to an object
+        DateTime column regardless of pandas version.
+        """
+        row = TestAppendBarDtypeCoercion._reconnect_style_row(ts)
+        row["DateTime"] = row["DateTime"].astype(object)
+        return row
+
+    def test_reconnect_style_append_keeps_datetime64(self, mock_seed, cache_path):
+        """Core red test: after a reconnect-style append, the cache's DateTime
+        column must still be datetime64[ns] — not upcast to object."""
+        dm = DataManager(
+            symbol="CL", seed_path=str(mock_seed),
+            cache_path=str(cache_path), data_client=None,
+        )
+        dm.initialize()
+        # Precondition: the cache starts with a proper datetime64 DateTime column.
+        assert pd.api.types.is_datetime64_any_dtype(dm.dataframe["DateTime"])
+
+        new_ts = dm.last_timestamp + timedelta(minutes=5)
+        object_row = self._reconnect_style_row_object_datetime(new_ts)
+        # Precondition: the incoming row's DateTime really is object dtype (the bug).
+        assert object_row["DateTime"].dtype == object
+
+        dm.append_bar(object_row)
+
+        assert pd.api.types.is_datetime64_any_dtype(dm.dataframe["DateTime"]), (
+            f"DateTime column upcast to {dm.dataframe['DateTime'].dtype} — "
+            "object-dtype reconnect row poisoned the cache on concat"
+        )
+
+    @pytest.mark.skipif(
+        _PANDAS_MAJOR < 2,
+        reason="replace() downcast FutureWarning only exists in pandas 2.x; "
+               "on 1.5.3 this test would be trivially green regardless of the "
+               "fix. Run under the fleet interpreter (pandas 2.2.2) for signal.",
+    )
+    def test_inf_replace_no_futurewarning_after_reconnect_append(
+        self, mock_seed, cache_path
+    ):
+        """Symptom guard: the inf-replace feature step (alpha_factory.py:292
+        pattern) over the post-append frame must not emit any FutureWarning."""
+        dm = DataManager(
+            symbol="CL", seed_path=str(mock_seed),
+            cache_path=str(cache_path), data_client=None,
+        )
+        dm.initialize()
+        new_ts = dm.last_timestamp + timedelta(minutes=5)
+        dm.append_bar(self._reconnect_style_row_object_datetime(new_ts))
+
+        frame = dm.dataframe
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FutureWarning)
+            # Exact pattern from src/features/alpha_factory.py:292
+            frame.replace([np.inf, -np.inf], np.nan).infer_objects()
+
+    def test_unparseable_datetime_bar_raises_loudly(self, mock_seed, cache_path):
+        """A bar whose DateTime value is unparseable garbage must fail LOUDLY at
+        ingestion (pd.to_datetime errors="raise") — never silently enter the
+        cache or coerce to NaT (repo no-silent-defaults rule)."""
+        dm = DataManager(
+            symbol="CL", seed_path=str(mock_seed),
+            cache_path=str(cache_path), data_client=None,
+        )
+        dm.initialize()
+        new_ts = dm.last_timestamp + timedelta(minutes=5)
+        # Valid DatetimeIndex (so the set_index branch is skipped) but garbage
+        # in the DateTime COLUMN — current code silently concats it into _df.
+        bad_row = pd.DataFrame(
+            [{
+                "DateTime": "not-a-date",
+                "Open": 71.0, "High": 71.5, "Low": 70.5,
+                "Close": 71.2, "Volume": 2000.0,
             }],
             index=pd.DatetimeIndex([new_ts], name="DateTime"),
         )

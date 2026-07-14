@@ -12,11 +12,19 @@ format is retired.
 > **BASELINE (pass-1 graft) artifact generation** and STOPS. The pass-2 joint ensemble
 > re-optimization was demoted after the 03B forensic showed it overfitting the optimizer
 > window (all-4-pairs holdout −$81k shipped vs +$61k for the grafted baselines; see
-> `reports/batch_runs/batch_20260712_130740_NG_SCOUT/model_detective_report.md`). The
-> pass-2 code is fully intact and dormant — enable it per run with
-> **`-EnsembleOptimization`** on `run_sweep_batch.ps1` (threaded through
-> `gcp_deploy_optimizer.ps1` → `vm_post_optimize.sh --ensemble-optimization`). Only do
-> this when the operator explicitly requests it.
+> `reports/batch_runs/batch_20260712_130740_NG_SCOUT/model_detective_report.md`).
+>
+> **TRIGGER IS MANIFEST-DRIVEN since 2026-07-14:** pass-2 runs **iff the manifest's
+> `optuna.post_optimizer_ensemble_trials` > 0** (and uses that value as its trial budget);
+> `0` or absent → pass-2 skipped, baseline-only product. No CLI flag needed. The
+> `-EnsembleOptimization` switch on `run_sweep_batch.ps1` remains as a legacy override
+> (forces pass-2; inherits the pass-1 budget when the manifest gives no positive value).
+> `resume_batch.ps1` honors the same manifest trigger (this also FIXED the old resume gap
+> where pass-2 was never re-enabled on a resumed optimizer). Decision point is the LOCAL
+> orchestrator; the VM contract (`vm_post_optimize.sh --ensemble-optimization`) is
+> unchanged. **Set a positive `post_optimizer_ensemble_trials` only when the operator
+> explicitly requests pass-2** — the dry-run sanity gate prints the trigger state
+> (`pass-2 ensemble optimization: ON/OFF`), verify it before launch.
 >
 > The **BASELINE product** per arm: `batch_summary_baseline_<obj>.md` (aligned results +
 > per-side params tables), `<obj>_baseline_backtests.md` (full engine dumps incl. 12-mo
@@ -99,10 +107,12 @@ then re-run without `-DryRun` to execute it.
   (`both` → 2; a comma-separated arm list → one per arm). For a multi-arm A/B batch you MUST pass the
   same `-Objective` list the sweep used (and `-OptimizerMaxRunDurationMinutes 720`), or the opt VM
   under-sizes. The dry run prints the assumed arm count + tier so you can correct it.
-- **`-EnsembleOptimization` batches:** `resume_batch.ps1` redeploys the optimizer with the DEFAULT
-  (baseline-only) chain — it does not thread the flag. When resuming a batch that was launched with
-  `-EnsembleOptimization`, redeploy the optimizer manually with
-  `gcp_deploy_optimizer.ps1 ... -EnsembleOptimization`.
+- **Pass-2 on resume (FIXED 2026-07-14):** `resume_batch.ps1` now reads the manifest trigger
+  itself — `post_optimizer_ensemble_trials > 0` re-enables pass-2 on the resumed optimizer with
+  that budget; `0`/absent resumes baseline-only. The old caveat (resume silently dropping
+  `-EnsembleOptimization`) is gone; the only remaining manual case is a batch launched with the
+  legacy CLI override while its manifest says `0` — resume follows the manifest, so redeploy
+  manually with `gcp_deploy_optimizer.ps1 ... -EnsembleOptimization` if you truly want pass-2 there.
 - **A truly-missing sweep is left for a human.** An experiment is recoverable **only** when BOTH
   `production/*.zip` AND `pipeline_summary.json` are present in GCS. A partial (one but not the other)
   or fully-missing sweep is **reported and left** — never fabricated into a `COMPLETED` entry, and an
@@ -253,7 +263,8 @@ conda activate trader
 python scripts/compare_parity.py --run reports\batch_runs\batch_<timestamp>
 # exit 0 = PARITY PASS. Default required set: pass-1 report/JSON + top_pairs.json +
 # batch_summary_baseline_sharpe.md + sharpe_baseline_backtests.md. The pass-2 ensemble
-# set is optional (all-or-none, present only on -EnsembleOptimization runs). Also checks
+# set is optional (all-or-none, present only on pass-2 runs — manifest
+# post_optimizer_ensemble_trials > 0 or legacy -EnsembleOptimization). Also checks
 # Top-4, no FileNotFound/new tracebacks, manifest-slippage match, sane PnL.
 ```
 
@@ -283,17 +294,17 @@ reports/batch_runs/batch_<timestamp>/
 ├── wall_clock_summary.md
 ├── configs/
 │   ├── baseline/                                ← promotable BASELINE configs (<TAG>_<Obj>_E0N_baseline_<date>.json) — subject to the config validation gate (step 5) before use
-│   └── optimized/                               ← pass-2 configs (ONLY on -EnsembleOptimization runs)
+│   └── optimized/                               ← pass-2 configs (ONLY on pass-2 runs)
 ├── predictions/
 │   ├── baseline/                                ← per-side prediction CSV copies per baseline ensemble
-│   └── optimized/                               ← merged prediction CSVs (ONLY on -EnsembleOptimization runs)
+│   └── optimized/                               ← merged prediction CSVs (ONLY on pass-2 runs)
 └── manifest.json                                ← frozen config
 ```
 `batch_summary_optimized_sharpe_readable.md` — the human-readable companion of the pass-1
 (and, when present, pass-2) machine summaries — is rendered automatically by the VM chain
 (`[4e/5]`, JSON-sourced; re-runnable locally via
 `scripts/generate_baseline_ensemble_artifacts.py --batch-dir <dir> --render-optimized`).
-`-EnsembleOptimization` runs additionally emit `batch_summary_optimized_ensembles_sharpe.md`,
+Pass-2 runs (manifest-triggered) additionally emit `batch_summary_optimized_ensembles_sharpe.md`,
 `optimization_results_ensembles_sharpe.json` and `sharpe_ensemble_backtests.md` (all-or-none set).
 (opt_mode=ensemble instead emits `batch_ensemble_pre_opt.md` + `top_8_ensembles.json`.)
 

@@ -152,10 +152,14 @@ if ($null -eq $manifest.baseline.training_workflow.optuna.post_optimizer_trials)
 }
 $postOptTrials = [int]$manifest.baseline.training_workflow.optuna.post_optimizer_trials
 
-# Optional pass-2 budget: absent in pre-2026-07-12 manifests -> inherit pass-1
-# budget (same explicit-inheritance rule as run_sweep_batch.ps1).
+# Pass-2 budget + MANIFEST-DRIVEN trigger (2026-07-14, same rule as
+# run_sweep_batch.ps1): post_optimizer_ensemble_trials > 0 -> pass-2 runs on the
+# resumed optimizer; 0 or null/missing -> baseline-only. VALUE inheritance kept so
+# the sh always receives a concrete positive number (legacy opt_mode="ensemble").
+# This also FIXES the old resume gap where pass-2 was never re-enabled on resume.
 $postOptEnsTrials = $manifest.baseline.training_workflow.optuna.post_optimizer_ensemble_trials
-if ($null -eq $postOptEnsTrials) { $postOptEnsTrials = $postOptTrials }
+$runEnsembleOpt = ($null -ne $postOptEnsTrials -and [int]$postOptEnsTrials -gt 0)
+if ($null -eq $postOptEnsTrials -or [int]$postOptEnsTrials -le 0) { $postOptEnsTrials = $postOptTrials }
 $postOptEnsTrials = [int]$postOptEnsTrials
 
 if ($null -eq $manifest.baseline.training_workflow.optuna.post_optimizer_holdout_months) {
@@ -517,6 +521,7 @@ if (-not $postOptDone) {
 
     if ($DryRun) {
         $slipEcho = if ($slippage -gt 0) { " -SlippagePerSide $slippage" } else { "" }
+        $ensEcho  = if ($runEnsembleOpt) { " -EnsembleOptimization" } else { "" }
         $tgEcho   = if ($DisableTelegram) { " -DisableTelegram" } else { "" }
         Write-Host ""
         Write-Info "  [DryRun] WOULD deploy the post-optimizer (PLAIN id $plainBatchId; rename is AFTER post-opt):"
@@ -524,7 +529,7 @@ if (-not $postOptDone) {
         Write-Host "        -NTrials $postOptTrials -EnsembleTrials $postOptEnsTrials -HoldoutMonths $postOptHoldout -MachineType $optMachineType -Workers 0" -ForegroundColor DarkGray
         Write-Host "        -Zone $fallbackZone -SweepMode $SweepMode -OptMode $optMode -Objective $Objective" -ForegroundColor DarkGray
         Write-Host "        -NBlocks $NBlocks -LambdaDispersion $LambdaDispersion -MinBlockMonths $MinBlockMonths" -ForegroundColor DarkGray
-        Write-Host "        -MaxRunDurationMinutes $OptimizerMaxRunDurationMinutes -ExecData $execData$slipEcho$tgEcho" -ForegroundColor DarkGray
+        Write-Host "        -MaxRunDurationMinutes $OptimizerMaxRunDurationMinutes -ExecData $execData$slipEcho$ensEcho$tgEcho" -ForegroundColor DarkGray
         Write-Host "    then self-poll (via gcloud storage) for batch_summary_optimized_*.md, download results, targeted-delete $optVmName." -ForegroundColor DarkGray
     } else {
         # Build the deploy arg array (PLAIN $BatchId; -NoMonitor mandatory - built-in poll uses the banned bucket CLI).
@@ -546,6 +551,7 @@ if (-not $postOptDone) {
             "-MaxRunDurationMinutes", $OptimizerMaxRunDurationMinutes,
             "-ExecData", $execData)
         if ($slippage -gt 0)   { $optArgs += @("-SlippagePerSide", $slippage) }
+        if ($runEnsembleOpt)   { $optArgs += "-EnsembleOptimization" }
         if ($DisableTelegram)  { $optArgs += "-DisableTelegram" }
 
         Write-Info "  Deploying post-optimizer VM ($optVmName) in zone $fallbackZone ..."

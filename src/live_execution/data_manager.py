@@ -576,6 +576,15 @@ class DataManager:
             if col in row.columns:
                 row[col] = pd.to_numeric(row[col], errors="raise")
 
+        # DateTime needs the same treatment: an object-dtype DateTime row upcasts
+        # the cache's datetime64 column on concat, and every downstream
+        # ``replace([inf, -inf])`` over the poisoned frame then fires the pandas
+        # 2.x downcast FutureWarning (alpha_factory.py:292, ticket
+        # alpha-factory-downcast-warning_07142026_0816). ``errors="raise"`` again:
+        # an unparseable bar timestamp must crash loudly, never coerce to NaT.
+        if "DateTime" in row.columns:
+            row["DateTime"] = pd.to_datetime(row["DateTime"], errors="raise")
+
         self._df = pd.concat([self._df, row])
         self._dedup_and_sort()
 

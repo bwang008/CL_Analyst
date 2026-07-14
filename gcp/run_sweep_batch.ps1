@@ -388,11 +388,18 @@ if ($null -eq $postOptHoldout) {
     Write-Host "FATAL: post_optimizer_holdout_months missing from validated manifest." -ForegroundColor Red
     exit 1
 }
-# Pass-2 (ensemble pair) trial budget. Schema allows null = inherit pass-1 budget;
-# the inheritance is resolved HERE (the single explicit fallback site), so the sh
-# always receives a concrete number.
+# Pass-2 (ensemble pair) trial budget + MANIFEST-DRIVEN trigger (2026-07-14):
+#   post_optimizer_ensemble_trials > 0   -> run pass-2 with that budget
+#   0 or null/missing                    -> skip pass-2 (baseline-only default)
+#   -EnsembleOptimization switch         -> legacy override: forces pass-2 and, when
+#                                           the manifest gives no positive budget,
+#                                           inherits the pass-1 budget (old behavior).
+# The VALUE inheritance below is kept so the sh always receives a concrete positive
+# number (the legacy opt_mode="ensemble" path consumes ENSEMBLE_TRIALS unconditionally).
 $postOptEnsTrials = $optuna.post_optimizer_ensemble_trials
-if ($null -eq $postOptEnsTrials) { $postOptEnsTrials = $postOptTrials }
+$runEnsembleOpt = [bool]$EnsembleOptimization -or `
+    ($null -ne $postOptEnsTrials -and [int]$postOptEnsTrials -gt 0)
+if ($null -eq $postOptEnsTrials -or [int]$postOptEnsTrials -le 0) { $postOptEnsTrials = $postOptTrials }
 
 # Apply MaxConcurrentVcpus override or read from manifest infrastructure
 $maxVcpus    = if ($MaxConcurrentVcpus -gt 0) { $MaxConcurrentVcpus } `
@@ -492,6 +499,13 @@ if ($DryRun) {
         Write-Host "    FAIL: opt_mode must be 'individual' or 'ensemble' (got '$optModeManifest')." -ForegroundColor Red; exit 1
     }
     Write-Host "    [OK] opt_mode = $optModeManifest (from manifest)" -ForegroundColor Green
+
+    # 5b. Pass-2 trigger state (manifest-driven since 2026-07-14).
+    if ($runEnsembleOpt) {
+        Write-Host "    [OK] pass-2 ensemble optimization: ON ($postOptEnsTrials trials; manifest post_optimizer_ensemble_trials > 0 or -EnsembleOptimization)" -ForegroundColor Yellow
+    } else {
+        Write-Host "    [OK] pass-2 ensemble optimization: OFF (post_optimizer_ensemble_trials is 0/absent) - baseline-only product" -ForegroundColor Green
+    }
 
     # 6. Data-aware holdout/OOS collapse guard. Loads the dataset's real date range and
     #    fails if the post-opt holdout carve (post_optimizer_holdout_months) swallows the
@@ -1130,7 +1144,7 @@ if ($batchState.completed -gt 0) {
             "-MaxRunDurationMinutes", $OptimizerMaxRunDurationMinutes)
         if ($optExecData)       { $optArgs += @("-ExecData", $optExecData) }
         if ($optSlippage -gt 0) { $optArgs += @("-SlippagePerSide", $optSlippage) }
-        if ($EnsembleOptimization) { $optArgs += "-EnsembleOptimization" }
+        if ($runEnsembleOpt) { $optArgs += "-EnsembleOptimization" }
         if ($DisableTelegram) { $optArgs += "-DisableTelegram" }
         $optStartTracker = Get-Date
         Write-Host "  Trying optimizer deploy in zone $oz..." -ForegroundColor Yellow

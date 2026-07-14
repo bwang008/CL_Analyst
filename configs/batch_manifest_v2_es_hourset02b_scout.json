@@ -1,5 +1,5 @@
 {
-  "_comment": "ES HourSet_02B SCOUT \u2014 top-6 target families from the Stage-1 AUC screen (reports/screens/es_02b/AUC_Model_Report.md), sourced from the new short-horizon dataset (2x1_1H/2x1_2H/1x0p5_1H added on top of the 01B target suite). Mirrors batch_manifest_v2_es_hourset01b_scout.json (same infra/execution_workflow/optuna box); only dataset_version and experiments differ. Any 1x0p5_1H family flagged 'cost?' in the screen (round-trip cost >6% of a TP winner) was excluded in favor of the next-best clean family.",
+  "_comment": "ES HourSet_02B SCOUT \u2014 top-6 CLEAN target families from the Stage-1 AUC screen (reports/screens/es_02b/AUC_Model_Report.md). 1x0p5_1H RETIRED globally 2026-07-14 (operator decision) and replaced by 5x1_6H, the next-best clean family (ROC 0.746/0.744) \u2014 menu now matches NG/SI/GC 02B scouts (2x1_1H/2x1_2H/2x1_3H/3x1_6H/4x1_6H/5x1_6H). post_optimizer_ensemble_trials=0 \u2014 pass-2 OFF (manifest-driven trigger since 2026-07-14; >0 would run pass-2 with that budget). Canary required before this scout (trailing-ladder search-space change, commit 810324a).",
   "infrastructure": {
     "machine_type": "n2-standard-32",
     "provisioning_model": "STANDARD",
@@ -121,14 +121,14 @@
       }
     },
     {
-      "label": "ES HS02B 1x0.5 1H",
-      "gcs_prefix": "sweep_es_hs02b_1x0p5_1h_scout",
+      "label": "ES HS02B 5x1 6H",
+      "gcs_prefix": "sweep_es_hs02b_5x1_6h_scout",
       "overrides": {
         "symbol": "ES",
         "training_workflow": {
           "target_columns": [
-            "TARGET_TRIPLE_1x0p5_1H_LONG",
-            "TARGET_TRIPLE_1x0p5_1H_SHORT"
+            "TARGET_TRIPLE_5x1_6H_LONG",
+            "TARGET_TRIPLE_5x1_6H_SHORT"
           ]
         }
       }
