@@ -310,9 +310,12 @@ def side_params_for_summary(block):
 
 _TRADES_RE = re.compile(r"Total Trades:\s*([\d,]+)")
 _PNL_RE = re.compile(r"Total Net PnL:\s*\$\s*(-?[\d,]+(?:\.\d+)?)")
+_DD_RE = re.compile(r"Max Drawdown:\s*\$\s*(-?[\d,]+(?:\.\d+)?)")
 _AB_TRADES_RE = re.compile(r"Trade Count\s+(-?[\d,]+)\s+(-?[\d,]+)")
 _AB_PNL_RE = re.compile(
     r"Total Net PnL\s+\$\s*(-?[\d,]+(?:\.\d+)?)\s+\$\s*(-?[\d,]+(?:\.\d+)?)")
+_AB_DD_RE = re.compile(
+    r"Max Drawdown\s+\$\s*(-?[\d,]+(?:\.\d+)?)\s+\$\s*(-?[\d,]+(?:\.\d+)?)")
 
 
 def _parse_int(pattern, segment):
@@ -338,10 +341,11 @@ def _parse_float(pattern, segment):
 def parse_engine_output(stdout):
     """Parse agent/backtest_engine.py stdout into the summary fields.
 
-    Keys: full_pnl, full_trades (Historical AGGREGATE SUMMARY), opt_pnl,
-    opt_trades (A/B COMPARISON Optimizer Window column), holdout_pnl,
-    holdout_trades (Holdout AGGREGATE SUMMARY), holdout_monthly_breakdown
-    (the HOLDOUT report's MONTHLY BREAKDOWN block only).
+    Keys: full_pnl, full_trades, full_maxdd (Historical AGGREGATE SUMMARY),
+    opt_pnl, opt_trades, opt_maxdd (A/B COMPARISON Optimizer Window column),
+    holdout_pnl, holdout_trades, holdout_maxdd (Holdout AGGREGATE SUMMARY),
+    holdout_monthly_breakdown (the HOLDOUT report's MONTHLY BREAKDOWN block
+    only).
 
     Per-field loud fallback: anything unparseable == the exact string
     'UNPARSED' — never zero/blank/None.
@@ -371,10 +375,13 @@ def parse_engine_output(stdout):
     return {
         "full_pnl": _parse_float(_PNL_RE, hist_part),
         "full_trades": _parse_int(_TRADES_RE, hist_part),
+        "full_maxdd": _parse_float(_DD_RE, hist_part),
         "opt_pnl": _parse_float(_AB_PNL_RE, ab_part),
         "opt_trades": _parse_int(_AB_TRADES_RE, ab_part),
+        "opt_maxdd": _parse_float(_AB_DD_RE, ab_part),
         "holdout_pnl": _parse_float(_PNL_RE, holdout_part),
         "holdout_trades": _parse_int(_TRADES_RE, holdout_part),
+        "holdout_maxdd": _parse_float(_DD_RE, holdout_part),
         "holdout_monthly_breakdown": breakdown,
     }
 
@@ -597,6 +604,19 @@ def _fmt_cell(v):
     if v == UNPARSED:
         return UNPARSED
     return str(v)
+
+
+def _fmt_recovery(pnl, maxdd):
+    """Recovery factor: PnL / |MaxDD| — the fixed-window Calmar/MAR analog.
+
+    UNPARSED propagates (never a fabricated number); a zero drawdown (only
+    possible with no losing excursion at all) renders '-' rather than inf.
+    """
+    if pnl == UNPARSED or maxdd == UNPARSED:
+        return UNPARSED
+    if maxdd == 0:
+        return "-"
+    return f"{pnl / abs(maxdd):.2f}"
 
 
 def _render_md_table(headers, rows, right_align=()):
@@ -826,6 +846,8 @@ def _run_objective(batch_dir, objective, args, manifest, symbol,
             f"E{idx:02d}", experiment, f"{long_desc} + {short_desc}",
             _fmt_pnl(parsed["full_pnl"]), _fmt_pnl(parsed["opt_pnl"]),
             _fmt_pnl(parsed["holdout_pnl"]),
+            _fmt_pnl(parsed["holdout_maxdd"]),
+            _fmt_recovery(parsed["holdout_pnl"], parsed["holdout_maxdd"]),
             f"{_fmt_cell(parsed['full_trades'])} / "
             f"{_fmt_cell(parsed['opt_trades'])} / "
             f"{_fmt_cell(parsed['holdout_trades'])}",
@@ -852,14 +874,20 @@ def _run_objective(batch_dir, objective, args, manifest, symbol,
             "",
         ]
         details += _render_md_table(
-            ["Window", "Net PnL", "Trades"],
+            ["Window", "Net PnL", "MaxDD", "PnL/DD", "Trades"],
             [["Full", _fmt_pnl(parsed["full_pnl"]),
+              _fmt_pnl(parsed["full_maxdd"]),
+              _fmt_recovery(parsed["full_pnl"], parsed["full_maxdd"]),
               _fmt_cell(parsed["full_trades"])],
              ["Opt-window", _fmt_pnl(parsed["opt_pnl"]),
+              _fmt_pnl(parsed["opt_maxdd"]),
+              _fmt_recovery(parsed["opt_pnl"], parsed["opt_maxdd"]),
               _fmt_cell(parsed["opt_trades"])],
              ["Holdout", _fmt_pnl(parsed["holdout_pnl"]),
+              _fmt_pnl(parsed["holdout_maxdd"]),
+              _fmt_recovery(parsed["holdout_pnl"], parsed["holdout_maxdd"]),
               _fmt_cell(parsed["holdout_trades"])]],
-            right_align={1, 2})
+            right_align={1, 2, 3, 4})
         details += [
             "",
             "**Holdout MONTHLY BREAKDOWN**:",
@@ -889,8 +917,9 @@ def _run_objective(batch_dir, objective, args, manifest, symbol,
     sm_lines += _render_md_table(
         ["#", "Experiment (Long / Short)", "Models",
          "PnL (full)", "PnL (opt-window)", "PnL (holdout)",
+         "MaxDD (ho)", "PnL/DD (ho)",
          "Trades (full/opt/ho)"],
-        result_rows, right_align={3, 4, 5, 6})
+        result_rows, right_align={3, 4, 5, 6, 7, 8})
     sm_lines += [
         "",
         "### Per-side baseline parameters (pass-1 graft)",

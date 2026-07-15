@@ -94,6 +94,7 @@ Running backtest on historical data...
 ------------------------------------------------------------------------------------------
   Total Trades:     1071
   Total Net PnL:    $     85,342.29
+  Max Drawdown:     $    -31,000.55
 
   MONTHLY BREAKDOWN
 ------------------------------------------------------------------------------------------
@@ -109,6 +110,7 @@ HOLDOUT REPORT  (12 months: 2025-07-02 -> 2026-07-02, 5,902 bars)
 ------------------------------------------------------------------------------------------
   Total Trades:     243
   Total Net PnL:    $     25,528.41
+  Max Drawdown:     $     -8,750.25
 
   MONTHLY BREAKDOWN
 ------------------------------------------------------------------------------------------
@@ -128,6 +130,7 @@ HOLDOUT REPORT  (12 months: 2025-07-02 -> 2026-07-02, 5,902 bars)
 ----------------------------------------------------------------------
   Trade Count                             828                243
   Total Net PnL                    $59,813.88         $25,528.41
+  Max Drawdown                    $-12,345.67         $-8,750.25
 ======================================================================
 """
 
@@ -439,6 +442,23 @@ class TestMainBaseline:
         assert "22,906.67" not in sm                    # full-window-only row
         assert "0.61" in sm                             # E01 long threshold
         assert f"{OBJECTIVE}_baseline_backtests.md" in sm
+        # Drawdown columns: raw holdout MaxDD + recovery factor
+        # (holdout PnL / |holdout MaxDD| = 25,528.41 / 8,750.25 = 2.92)
+        assert "MaxDD (ho)" in sm
+        assert "PnL/DD (ho)" in sm
+        assert "$-8,750.25" in sm
+        assert "2.92" in sm
+
+    def test_summary_drawdown_unparsed_never_zero(self, workspace, monkeypatch):
+        batch = _build_batch_fixture(workspace)
+        _install_fakes(monkeypatch, GARBAGE_ENGINE_OUTPUT)
+        main(["--batch-dir", str(batch)])
+        sm = (batch / f"batch_summary_baseline_{OBJECTIVE}.md").read_text(
+            encoding="utf-8")
+        # ratio must carry the UNPARSED marker, never a fabricated number
+        assert "MaxDD (ho)" in sm
+        assert "PnL/DD (ho)" in sm
+        assert "UNPARSED" in sm
 
     def test_order_contract_verified_when_optimized_report_exists(
             self, workspace, monkeypatch):
@@ -516,6 +536,9 @@ class TestParseEngineOutput:
         assert p["opt_trades"] == 828
         assert p["holdout_pnl"] == pytest.approx(25528.41)
         assert p["holdout_trades"] == 243
+        assert p["full_maxdd"] == pytest.approx(-31000.55)
+        assert p["opt_maxdd"] == pytest.approx(-12345.67)
+        assert p["holdout_maxdd"] == pytest.approx(-8750.25)
         assert "10,700.63" in p["holdout_monthly_breakdown"]
         assert "22,906.67" not in p["holdout_monthly_breakdown"]
 
