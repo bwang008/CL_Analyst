@@ -327,16 +327,30 @@ class TestBuildBaselineConfig:
 class TestPairSelection:
     def test_load_top_pairs_order_and_source(self, workspace):
         batch = _build_batch_fixture(workspace)
-        keys, name = load_top_pairs(str(batch), OBJECTIVE)
+        keys, name, qualify = load_top_pairs(str(batch), OBJECTIVE)
         assert keys == [PAIR_A_KEY, PAIR_B_KEY]
         assert name == "top_pairs.json"
+        # legacy fixture (no flags) -> qualify status UNKNOWN, never guessed
+        assert qualify == [{"long": None, "short": None}] * 2
+
+    def test_load_top_pairs_qualify_flags(self, workspace):
+        batch = _build_batch_fixture(workspace)
+        _write_json(batch / "top_pairs.json", [
+            {"target_long": PAIR_A_LONG, "target_short": PAIR_A_SHORT,
+             "long_passed_filter": True, "short_passed_filter": True},
+            {"target_long": PAIR_B_LONG, "target_short": PAIR_B_SHORT,
+             "long_passed_filter": True, "short_passed_filter": False},
+        ])
+        _, _, qualify = load_top_pairs(str(batch), OBJECTIVE)
+        assert qualify == [{"long": True, "short": True},
+                           {"long": True, "short": False}]
 
     def test_arm_variant_preferred(self, workspace):
         batch = _build_batch_fixture(workspace)
         _write_json(batch / "top_pairs_block_min.json", [
             {"target_long": PAIR_B_LONG, "target_short": PAIR_B_SHORT},
         ])
-        keys, name = load_top_pairs(str(batch), "block_min")
+        keys, name, _ = load_top_pairs(str(batch), "block_min")
         assert keys == [PAIR_B_KEY]
         assert name == "top_pairs_block_min.json"
 
@@ -459,6 +473,33 @@ class TestMainBaseline:
         assert "MaxDD (ho)" in sm
         assert "PnL/DD (ho)" in sm
         assert "UNPARSED" in sm
+
+    def test_qualify_marker_on_penalized_leg(self, workspace, monkeypatch):
+        batch = _build_batch_fixture(workspace)
+        _write_json(batch / "top_pairs.json", [
+            {"target_long": PAIR_A_LONG, "target_short": PAIR_A_SHORT,
+             "long_passed_filter": True, "short_passed_filter": True},
+            {"target_long": PAIR_B_LONG, "target_short": PAIR_B_SHORT,
+             "long_passed_filter": True, "short_passed_filter": False},
+        ])
+        _install_fakes(monkeypatch, CANNED_ENGINE_OUTPUT)
+        main(["--batch-dir", str(batch)])
+        sm = (batch / f"batch_summary_baseline_{OBJECTIVE}.md").read_text(
+            encoding="utf-8")
+        assert "| E01 " in sm          # qualifying pair unmarked
+        assert "| E02*" in sm          # penalized short leg marked
+        assert "FAILED the pair-selection qualify" in sm
+        assert "Qualify flags unavailable" not in sm
+
+    def test_qualify_legacy_pairs_file_says_unavailable(
+            self, workspace, monkeypatch):
+        batch = _build_batch_fixture(workspace)   # fixture has NO flags
+        _install_fakes(monkeypatch, CANNED_ENGINE_OUTPUT)
+        main(["--batch-dir", str(batch)])
+        sm = (batch / f"batch_summary_baseline_{OBJECTIVE}.md").read_text(
+            encoding="utf-8")
+        assert "Qualify flags unavailable" in sm
+        assert "E01*" not in sm and "E02*" not in sm
 
     def test_order_contract_verified_when_optimized_report_exists(
             self, workspace, monkeypatch):

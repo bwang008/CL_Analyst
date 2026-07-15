@@ -181,8 +181,15 @@ def _read_json(path):
 
 
 def load_top_pairs(batch_dir, objective="sharpe"):
-    """Return (pair_key_list, pairs_filename). The arm's pairs file IS the
-    E-slot order authority (same candidates as _canonical_pair_order)."""
+    """Return (pair_key_list, pairs_filename, qualify_list). The arm's pairs
+    file IS the E-slot order authority (same candidates as
+    _canonical_pair_order).
+
+    qualify_list[i] is {"long": bool|None, "short": bool|None} — the
+    selector's passed_filter flags per leg. None means the pairs file
+    predates the flags (legacy) and qualify status is UNKNOWN, which the
+    report must say rather than guess.
+    """
     candidates = (["top_pairs.json"] if objective == "sharpe"
                   else [f"top_pairs_{objective}.json", "top_pairs.json"])
     for name in candidates:
@@ -198,7 +205,16 @@ def load_top_pairs(batch_dir, objective="sharpe"):
             raise ValueError(
                 f"{path} is empty or malformed — cannot derive baseline pairs"
             )
-        return keys, name
+        qualify = [
+            {
+                "long": (bool(p["long_passed_filter"])
+                         if "long_passed_filter" in p else None),
+                "short": (bool(p["short_passed_filter"])
+                          if "short_passed_filter" in p else None),
+            }
+            for p in pairs
+        ]
+        return keys, name, qualify
     raise ValueError(
         f"no pairs file found in {batch_dir} (tried: {', '.join(candidates)}) "
         "— pair selection must run before baseline artifact generation"
@@ -678,7 +694,7 @@ def _run_objective(batch_dir, objective, args, manifest, symbol,
                    slippage, contract_multiplier):
     batch_name = os.path.basename(os.path.normpath(batch_dir))
 
-    pair_keys, pairs_file = load_top_pairs(batch_dir, objective)
+    pair_keys, pairs_file, pair_qualify = load_top_pairs(batch_dir, objective)
     print(f"  [BASELINE] {len(pair_keys)} pair(s) from {pairs_file}")
 
     # When the opt-in pass-2 report exists, the E-slot order must match it 1:1.
@@ -842,8 +858,15 @@ def _run_objective(batch_dir, objective, args, manifest, symbol,
                   f"{unparsed_keys} — summary will carry UNPARSED markers "
                   "(raw output preserved in the backtests file)")
 
+        qual = pair_qualify[idx - 1]
+        if qual["long"] is None or qual["short"] is None:
+            num_cell = f"E{idx:02d}"
+        elif qual["long"] and qual["short"]:
+            num_cell = f"E{idx:02d}"
+        else:
+            num_cell = f"E{idx:02d}*"
         result_rows.append([
-            f"E{idx:02d}", experiment, f"{long_desc} + {short_desc}",
+            num_cell, experiment, f"{long_desc} + {short_desc}",
             _fmt_pnl(parsed["full_pnl"]), _fmt_pnl(parsed["opt_pnl"]),
             _fmt_pnl(parsed["holdout_pnl"]),
             _fmt_pnl(parsed["holdout_maxdd"]),
@@ -920,6 +943,23 @@ def _run_objective(batch_dir, objective, args, manifest, symbol,
          "MaxDD (ho)", "PnL/DD (ho)",
          "Trades (full/opt/ho)"],
         result_rows, right_align={3, 4, 5, 6, 7, 8})
+    if any(q["long"] is None or q["short"] is None for q in pair_qualify):
+        sm_lines += [
+            "",
+            "_Qualify flags unavailable: this batch's pairs file predates "
+            "the per-leg passed_filter annotation — re-run "
+            "unified_pair_optimizer to annotate which slots were filled by "
+            "penalized non-qualifying legs._",
+        ]
+    elif any(row[0].endswith("*") for row in result_rows):
+        sm_lines += [
+            "",
+            "_\\* = includes a leg that FAILED the pair-selection qualify "
+            "filter (needs opt PnL > 0, holdout PnL > 0, trades >= 100). "
+            "The selector penalizes rather than drops non-qualifiers, so "
+            "these slots are filled by negative-ranked legs — treat as "
+            "what-if combos, not candidates._",
+        ]
     sm_lines += [
         "",
         "### Per-side baseline parameters (pass-1 graft)",

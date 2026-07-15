@@ -149,12 +149,18 @@ def select_pairs_for_objective(batch_dir, objective, progress_data, top_n):
     table_short = [[m["experiment"], m["metric"], m["objective"], m["pnl_opt"], m["pnl_holdout"], m["trades"], m["robustness"]] for m in short_models]
     print(tabulate(table_short, headers=["Experiment", "Metric", "Objective", "Opt PnL", "Holdout PnL", "Trades", "Robustness Score"], tablefmt="github", floatfmt=".2f"))
 
-    # Combinatorial Pairing
+    # Combinatorial Pairing. The qualify flags are ADDITIVE keys: every
+    # reader resolves pairs via .get("target_long")/.get("target_short")
+    # and compare_parity only checks the pair COUNT — but downstream report
+    # generators need to know when a slot was filled by a PENALIZED
+    # (-1e6 robustness) non-qualifying leg rather than a real candidate.
     pairs = []
     for l, s in itertools.product(long_models, short_models):
         pairs.append({
             "target_long": l["unique_target"],
-            "target_short": s["unique_target"]
+            "target_short": s["unique_target"],
+            "long_passed_filter": bool(l["passed_filter"]),
+            "short_passed_filter": bool(s["passed_filter"]),
         })
 
     out_name = "top_pairs.json" if objective == "sharpe" else f"top_pairs_{objective}.json"

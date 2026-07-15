@@ -116,9 +116,14 @@ def _progress(n_longs, n_shorts):
 
 
 def _expected_pairs(top_longs, top_shorts):
+    # The fixture rows all qualify, so both passed_filter flags are True —
+    # the flags are ADDITIVE keys on every emitted pair (report generators
+    # mark penalized slots from them).
     return [
         {"target_long": f"oos_predictions_l{li}_long_logloss",
-         "target_short": f"oos_predictions_s{si}_short_logloss"}
+         "target_short": f"oos_predictions_s{si}_short_logloss",
+         "long_passed_filter": True,
+         "short_passed_filter": True}
         for li, si in itertools.product(top_longs, top_shorts)
     ]
 
@@ -150,6 +155,28 @@ class TestSelectPairsWidth:
         pairs = _run_selection(tmp_path, n_longs=5, n_shorts=3, top_n=4)
         assert len(pairs) == 12
         assert pairs == _expected_pairs([1, 2, 3, 4], [1, 2, 3])
+
+    def test_penalized_leg_carries_false_flag(self, tmp_path):
+        # A short with negative holdout PnL fails the qualify filter; it
+        # still FILLS the slot (penalize-not-drop) but must be flagged.
+        md = ("# Batch Summary (Optimized)\n\n### Long Model (Logloss)\n\n"
+              + _HEADER + _row("L1", 9000) + _row("L2", 8000)
+              + "\n### Short Model (Logloss)\n\n" + _HEADER
+              + _row("S1", 9000)
+              + "| S2 | 100 | 150 | 1.10 | 1.30 | $1,000 | $5,000 "
+              + "| $-2,000 |\n")
+        (tmp_path / "batch_summary_optimized_sharpe.md").write_text(
+            md, encoding="utf-8")
+        select_pairs_for_objective(
+            str(tmp_path), "sharpe", _progress(2, 2), 2)
+        pairs = json.loads(
+            (tmp_path / "top_pairs.json").read_text(encoding="utf-8"))
+        assert len(pairs) == 4
+        flags = {(p["target_short"], p["short_passed_filter"])
+                 for p in pairs}
+        assert ("oos_predictions_s1_short_logloss", True) in flags
+        assert ("oos_predictions_s2_short_logloss", False) in flags
+        assert all(p["long_passed_filter"] for p in pairs)
 
 
 # ===========================================================================
