@@ -162,12 +162,22 @@ $runEnsembleOpt = ($null -ne $postOptEnsTrials -and [int]$postOptEnsTrials -gt 0
 if ($null -eq $postOptEnsTrials -or [int]$postOptEnsTrials -le 0) { $postOptEnsTrials = $postOptTrials }
 $postOptEnsTrials = [int]$postOptEnsTrials
 
+# Pair-selection width (optional; EXPLICIT default 2 = historical 2x2 pairs).
+# Resume reads the RAW manifest (no pydantic pass), so the [1, 8] schema range
+# is re-enforced loudly here — never forwarded unvalidated to the VM.
+$pairTopN = $manifest.baseline.training_workflow.optuna.pair_selection_top_n
+if ($null -eq $pairTopN) { $pairTopN = 2 }
+$pairTopN = [int]$pairTopN
+if ($pairTopN -lt 1 -or $pairTopN -gt 8) {
+    Write-Fatal "baseline.training_workflow.optuna.pair_selection_top_n ($pairTopN) out of range - must be within [1, 8]."
+}
+
 if ($null -eq $manifest.baseline.training_workflow.optuna.post_optimizer_holdout_months) {
     Write-Fatal "baseline.training_workflow.optuna.post_optimizer_holdout_months missing in manifest - required."
 }
 $postOptHoldout = [int]$manifest.baseline.training_workflow.optuna.post_optimizer_holdout_months
 
-Write-Ok "  Manifest validated: symbol=$symbol opt_mode=$optMode slippage=$slippage trials=$postOptTrials ens_trials=$postOptEnsTrials holdout_months=$postOptHoldout"
+Write-Ok "  Manifest validated: symbol=$symbol opt_mode=$optMode slippage=$slippage trials=$postOptTrials ens_trials=$postOptEnsTrials pair_top_n=$pairTopN holdout_months=$postOptHoldout"
 
 # Load batch_progress.json (may be absent - seed a fresh state in NON-DryRun).
 $progressFile = Join-Path $BatchDir "batch_progress.json"
@@ -526,7 +536,7 @@ if (-not $postOptDone) {
         Write-Host ""
         Write-Info "  [DryRun] WOULD deploy the post-optimizer (PLAIN id $plainBatchId; rename is AFTER post-opt):"
         Write-Host "    gcp_deploy_optimizer.ps1 -BatchId $plainBatchId -NoMonitor" -ForegroundColor DarkGray
-        Write-Host "        -NTrials $postOptTrials -EnsembleTrials $postOptEnsTrials -HoldoutMonths $postOptHoldout -MachineType $optMachineType -Workers 0" -ForegroundColor DarkGray
+        Write-Host "        -NTrials $postOptTrials -EnsembleTrials $postOptEnsTrials -PairTopN $pairTopN -HoldoutMonths $postOptHoldout -MachineType $optMachineType -Workers 0" -ForegroundColor DarkGray
         Write-Host "        -Zone $fallbackZone -SweepMode $SweepMode -OptMode $optMode -Objective $Objective" -ForegroundColor DarkGray
         Write-Host "        -NBlocks $NBlocks -LambdaDispersion $LambdaDispersion -MinBlockMonths $MinBlockMonths" -ForegroundColor DarkGray
         Write-Host "        -MaxRunDurationMinutes $OptimizerMaxRunDurationMinutes -ExecData $execData$slipEcho$ensEcho$tgEcho" -ForegroundColor DarkGray
@@ -538,6 +548,7 @@ if (-not $postOptDone) {
             "-NoMonitor",
             "-NTrials", $postOptTrials,
             "-EnsembleTrials", $postOptEnsTrials,
+            "-PairTopN", $pairTopN,
             "-HoldoutMonths", $postOptHoldout,
             "-MachineType", $optMachineType,
             "-Workers", 0,

@@ -145,12 +145,30 @@ class OptunaConfig(BaseModel):
     # Holdout for the post-optimizer (months reserved from Optuna). REQUIRED — the
     # manifest is the single source of truth; no silent default may stand in.
     post_optimizer_holdout_months: int
+    # Pair-selection width: unified_pair_optimizer picks the top-N long and
+    # top-N short models by robustness and emits the N x N combinatorial pairs
+    # (top_pairs.json) consumed by the grafted-baseline / pass-2 layers.
+    # Threaded manifest -> run_sweep_batch.ps1 -PairTopN ->
+    # gcp_deploy_optimizer.ps1 --pair-top-n= -> vm_post_optimize.sh
+    # --top-n "$PAIR_TOP_N". EXPLICIT default 2 (the historical hardcoded
+    # argparse default) keeps every existing manifest byte-compatible (4 pairs).
+    pair_selection_top_n: int = 2
 
     @field_validator("post_optimizer_holdout_months")
     @classmethod
     def validate_holdout_positive(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("post_optimizer_holdout_months must be strictly positive — the holdout must be respected.")
+        return v
+
+    @field_validator("pair_selection_top_n")
+    @classmethod
+    def validate_pair_selection_top_n(cls, v: int) -> int:
+        if not (1 <= v <= 8):
+            raise ValueError(
+                f"pair_selection_top_n must be within [1, 8] (got {v}) — "
+                "pairs grow N x N; widen deliberately, never silently."
+            )
         return v
 
 class TrainingWorkflowConfig(BaseModel):

@@ -1,4 +1,6 @@
-"""Render the BASELINE (pass-1 graft) ensemble artifacts for a batch's Top-4 pairs.
+"""Render the BASELINE (pass-1 graft) ensemble artifacts for a batch's top-N pairs
+(every pair in the arm's top_pairs.json — N is manifest-driven via
+optuna.pair_selection_top_n; the historical default 2 per side yields 4 pairs).
 
 Lineage: ticket pre-ensemble-artifacts_07122026_1712 (built as the "pre"
 counterfactual renderer) — promoted to the DEFAULT pipeline product when the

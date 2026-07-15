@@ -401,6 +401,19 @@ $runEnsembleOpt = [bool]$EnsembleOptimization -or `
     ($null -ne $postOptEnsTrials -and [int]$postOptEnsTrials -gt 0)
 if ($null -eq $postOptEnsTrials -or [int]$postOptEnsTrials -le 0) { $postOptEnsTrials = $postOptTrials }
 
+# Pair-selection width (manifest optuna.pair_selection_top_n): top-N models per
+# side -> N x N combinatorial pairs (top_pairs.json). EXPLICIT default 2 when
+# absent (the historical hardcoded argparse default -> 4 pairs); schema already
+# validates [1, 8], re-checked here loudly so a stale orchestrator dump can
+# never smuggle an out-of-range width to the VM.
+$pairTopN = $optuna.pair_selection_top_n
+if ($null -eq $pairTopN) { $pairTopN = 2 }
+$pairTopN = [int]$pairTopN
+if ($pairTopN -lt 1 -or $pairTopN -gt 8) {
+    Write-Host "FATAL: pair_selection_top_n ($pairTopN) out of range - must be within [1, 8]." -ForegroundColor Red
+    exit 1
+}
+
 # Apply MaxConcurrentVcpus override or read from manifest infrastructure
 $maxVcpus    = if ($MaxConcurrentVcpus -gt 0) { $MaxConcurrentVcpus } `
                else { [int]$limits.max_concurrent_vcpus }
@@ -1131,6 +1144,7 @@ if ($batchState.completed -gt 0) {
             "-BatchId", $BatchId,
             "-NTrials", $postOptTrials,
             "-EnsembleTrials", $postOptEnsTrials,
+            "-PairTopN", $pairTopN,
             "-HoldoutMonths", $postOptHoldout,
             "-MachineType", $optMachineType,
             "-Workers", $optWorkerCount,

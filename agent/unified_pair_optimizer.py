@@ -169,9 +169,10 @@ def select_pairs_for_objective(batch_dir, objective, progress_data, top_n):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Top 2 Unified Selection & Pairing Engine")
+    parser = argparse.ArgumentParser(description="Top-N Unified Selection & Pairing Engine (N x N combinatorial pairs)")
     parser.add_argument("--batch-dir", required=True, help="Path to batch directory")
-    parser.add_argument("--top-n", type=int, default=2, help="Number of top models to select per side")
+    parser.add_argument("--top-n", type=int, default=2,
+                        help="Number of top models to select per side (manifest optuna.pair_selection_top_n; default 2 -> 4 pairs)")
     parser.add_argument(
         "--objectives", default="sharpe",
         help="Comma-separated objective arms. Each arm reads ONLY its own "

@@ -168,6 +168,12 @@ N_TRIALS=500
 # arg parse). The managed deploy chain passes it explicitly from the manifest's
 # post_optimizer_ensemble_trials via run_sweep_batch.ps1 -> gcp_deploy_optimizer.ps1.
 ENSEMBLE_TRIALS=""
+# Pair-selection width: top-N models per side -> N x N pairs from the
+# individual-mode unified_pair_optimizer call. Empty = explicit default 2
+# (resolved after arg parse; the historical hardcoded width -> 4 pairs). The
+# managed deploy chain passes it from the manifest's optuna.pair_selection_top_n
+# via run_sweep_batch.ps1 / resume_batch.ps1 -> gcp_deploy_optimizer.ps1.
+PAIR_TOP_N=""
 # HOLDOUT_MONTHS is NOT defaulted here — it is read authoritatively from the manifest
 # (post_optimizer_holdout_months) below. The manifest is the single source of truth.
 HOLDOUT_MONTHS=""
@@ -201,6 +207,7 @@ for arg in "$@"; do
         --batch-id=*) BATCH_ID="${arg#*=}" ;;
         --n-trials=*) N_TRIALS="${arg#*=}" ;;
         --ensemble-trials=*) ENSEMBLE_TRIALS="${arg#*=}" ;;
+        --pair-top-n=*) PAIR_TOP_N="${arg#*=}" ;;
         # --holdout-months is intentionally IGNORED if passed: the manifest's
         # post_optimizer_holdout_months is authoritative (set after manifest parse below).
         --holdout-months=*) : ;;
@@ -225,6 +232,19 @@ fi
 if [ -z "$ENSEMBLE_TRIALS" ]; then
     ENSEMBLE_TRIALS="$N_TRIALS"
 fi
+
+# Resolve the pair-selection width: explicit --pair-top-n wins, else the
+# explicit default 2 (historical width; NEVER a silent null).
+if [ -z "$PAIR_TOP_N" ]; then
+    PAIR_TOP_N=2
+fi
+case "$PAIR_TOP_N" in
+    [1-8]) : ;;
+    *)
+        echo "ERROR: --pair-top-n must be an integer within [1, 8] (got '$PAIR_TOP_N')" | tee -a "$LOG"
+        exit 1
+        ;;
+esac
 
 # --- Validate the objective arm list ---------------------------------------
 # OBJECTIVE is a comma-separated list; every element must be one of
@@ -278,6 +298,7 @@ echo "============================================================" | tee -a "$L
 echo "  Batch ID:      $BATCH_ID" | tee -a "$LOG"
 echo "  N Trials:      $N_TRIALS" | tee -a "$LOG"
 echo "  Ens Trials:    $ENSEMBLE_TRIALS (pass-2 pairs)" | tee -a "$LOG"
+echo "  Pair Top-N:    $PAIR_TOP_N per side (N x N pairs)" | tee -a "$LOG"
 echo "  Holdout:       (read from manifest below)" | tee -a "$LOG"
 echo "  Workers:       $WORKERS" | tee -a "$LOG"
 echo "  Objective:     $OBJECTIVE_CSV (${#OBJECTIVE_ARMS[@]} arm(s))" | tee -a "$LOG"
@@ -625,8 +646,8 @@ else
     for ARM in "${OBJECTIVE_ARMS[@]}"; do
         # --- [4b/5] Unified Selection & Pairing Engine (per arm) ---
         echo "" | tee -a "$LOG"
-        echo "[4b/5] Running Unified Selection & Pairing Engine (arm: $ARM)..." | tee -a "$LOG"
-        python agent/unified_pair_optimizer.py --batch-dir "$BATCH_DIR" --objectives "$ARM" 2>&1 | tee -a "$LOG"
+        echo "[4b/5] Running Unified Selection & Pairing Engine (arm: $ARM, top-n: $PAIR_TOP_N)..." | tee -a "$LOG"
+        python agent/unified_pair_optimizer.py --batch-dir "$BATCH_DIR" --objectives "$ARM" --top-n "$PAIR_TOP_N" 2>&1 | tee -a "$LOG"
 
         # Resolve this arm's pairs file (top_pairs.json for sharpe is
         # parity-compatible; other arms get top_pairs_<arm>.json).

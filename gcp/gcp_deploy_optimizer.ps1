@@ -24,6 +24,10 @@ param(
     # inherits NTrials. run_sweep_batch.ps1 always passes a concrete value
     # (manifest post_optimizer_ensemble_trials, resolved there).
     [int]$EnsembleTrials = 0,
+    # Pair-selection width: top-N models per side -> N x N pairs. Forwarded to
+    # vm_post_optimize.sh as --pair-top-n= (manifest optuna.pair_selection_top_n,
+    # resolved in run_sweep_batch.ps1 / resume_batch.ps1; default 2 = 4 pairs).
+    [int]$PairTopN = 2,
     # DEPRECATED / IGNORED: holdout is read authoritatively from the manifest
     # (post_optimizer_holdout_months) by vm_post_optimize.sh. Passing this has no effect.
     [int]$HoldoutMonths = 0,
@@ -114,6 +118,7 @@ Write-Host "  Pricing:       $ProvisioningModel"
 Write-Host "  N Trials:      $NTrials"
 $ensTrialsDisplay = if ($EnsembleTrials -gt 0) { $EnsembleTrials } else { "$NTrials (inherited)" }
 Write-Host "  Ens Trials:    $ensTrialsDisplay (pass-2 pairs)"
+Write-Host "  Pair Top-N:    $PairTopN per side ($($PairTopN * $PairTopN) pairs)"
 Write-Host "  Holdout:       $HoldoutMonths months"
 Write-Host "  Workers:       $Workers"
 Write-Host "  Objective:     $Objective"
@@ -335,8 +340,10 @@ $shutdownFlag = if ($NoShutdown) { "" } else { "--shutdown" }
 $execDataFlag = if ($ExecData) { " --exec-data=$ExecData" } else { "" }
 $slippageFlag = if ($SlippagePerSide -gt 0) { " --slippage-per-side=$SlippagePerSide" } else { "" }
 $ensTrialsFlag = if ($EnsembleTrials -gt 0) { " --ensemble-trials=$EnsembleTrials" } else { "" }
+# Pair-selection width is always concrete (default 2 mirrors the sh default).
+$pairTopNFlag = " --pair-top-n=$PairTopN"
 $ensOptFlag = if ($EnsembleOptimization) { " --ensemble-optimization" } else { "" }
-$launchCmd = "tmux kill-session -t optimizer 2>/dev/null; tmux new-session -d -s optimizer 'bash $RemoteProject/gcp/vm_post_optimize.sh --batch-id=$BatchId --n-trials=$NTrials$ensTrialsFlag --holdout-months=$HoldoutMonths --workers=$Workers --objective=$Objective --n-blocks=$NBlocks --lambda-dispersion=$LambdaDispersion --min-block-months=$MinBlockMonths --sweep-mode=$SweepMode --opt-mode=$OptMode$ensOptFlag$execDataFlag$slippageFlag $shutdownFlag'"
+$launchCmd = "tmux kill-session -t optimizer 2>/dev/null; tmux new-session -d -s optimizer 'bash $RemoteProject/gcp/vm_post_optimize.sh --batch-id=$BatchId --n-trials=$NTrials$ensTrialsFlag$pairTopNFlag --holdout-months=$HoldoutMonths --workers=$Workers --objective=$Objective --n-blocks=$NBlocks --lambda-dispersion=$LambdaDispersion --min-block-months=$MinBlockMonths --sweep-mode=$SweepMode --opt-mode=$OptMode$ensOptFlag$execDataFlag$slippageFlag $shutdownFlag'"
 gcloud compute ssh $VmName --zone=$Zone --command=$launchCmd --quiet 2>$null
 
 Write-Host "  Optimizer launched!" -ForegroundColor Green
