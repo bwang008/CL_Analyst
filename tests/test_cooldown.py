@@ -179,7 +179,12 @@ class TestTimeBarrierExitMode:
         # Position is open
         trader.exec_client.get_position.return_value = 1
         trader.exec_client.cancel_open_orders.return_value = 0
-        trader.exec_client.close_position.return_value = MagicMock()
+        trader.exec_client.close_position.return_value = MagicMock(order=MagicMock(orderId=55))
+        # Fake-fidelity (exit-fill-unverified_07152026_1855): the fixed exit
+        # confirms the fill before booking/resetting. Model a fill that really
+        # happened so the completed-exit assertions below still hold.
+        trader.exec_client.get_position_settled.return_value = 0  # settled CONFIRMS the exit filled
+        trader.exec_client.get_executions.return_value = [{"order_id": "55", "price": 72.50}]
 
         result = trader._check_time_barrier(
             bar_time=pd.Timestamp("2026-03-02 18:00:00"),
@@ -207,7 +212,11 @@ class TestTimeBarrierExitMode:
 
         trader.exec_client.get_position.return_value = 1
         trader.exec_client.cancel_open_orders.return_value = 0
-        trader.exec_client.close_position.return_value = MagicMock()
+        trader.exec_client.close_position.return_value = MagicMock(order=MagicMock(orderId=56))
+        # Fake-fidelity (exit-fill-unverified_07152026_1855): confirm the fill
+        # so the fixed exit reaches the completed-exit (flat) branch.
+        trader.exec_client.get_position_settled.return_value = 0  # settled CONFIRMS the exit filled
+        trader.exec_client.get_executions.return_value = [{"order_id": "56", "price": 72.50}]
 
         trader._check_time_barrier(
             bar_time=pd.Timestamp("2026-03-02 18:00:00"),

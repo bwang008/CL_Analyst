@@ -162,7 +162,14 @@ class TestExitReasonVocabulary:
         t = _make_trader()
         t.exec_client.get_position.return_value = 1
         t.exec_client.cancel_open_orders.return_value = 2
-        t.exec_client.close_position.return_value = MagicMock()
+        t.exec_client.close_position.return_value = MagicMock(order=MagicMock(orderId=71))
+        # Fake-fidelity (exit-fill-unverified_07152026_1855): the fixed exit
+        # gates the book/reset on a broker confirmation. Model the fill that
+        # really happened — settled CONFIRMS the exit filled, and a matching
+        # execution supplies the proven price — so the reset (asserted below)
+        # still runs with reason="TIME_BARRIER".
+        t.exec_client.get_position_settled.return_value = 0  # settled CONFIRMS the exit filled
+        t.exec_client.get_executions.return_value = [{"order_id": "71", "price": 90.0}]
         t._active_trade_id = "trade_1"
         t._position_entry_bar_time = pd.Timestamp("2026-06-01 00:00:00")
         t._position_bars_held = 6

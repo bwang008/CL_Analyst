@@ -144,7 +144,14 @@ def test_out_of_band_exit_routing(caplog):
     
     trader.exec_client = MagicMock()
     trader.exec_client.cancel_open_orders.return_value = 2
-    
+    # Fake-fidelity (exit-fill-unverified_07152026_1855): the fixed time-barrier
+    # exit confirms the fill before booking/resetting. Model the fill that
+    # really happened — settled CONFIRMS flat and a matching execution supplies
+    # the proven price — so the completed-exit assertions below still hold
+    # ("10" registered as a processed exit id, result True).
+    trader.exec_client.get_position_settled.return_value = 0  # settled CONFIRMS the exit filled
+    trader.exec_client.get_executions.return_value = [{"order_id": "10", "price": 70.50}]
+
     mock_trade = MagicMock()
     mock_trade.order.orderId = 10
     trader.exec_client.close_position.return_value = mock_trade

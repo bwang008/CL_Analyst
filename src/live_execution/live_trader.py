@@ -182,6 +182,16 @@ _RESUBSCRIBE_RETRY_BASE_SECONDS = 60
 _RESUBSCRIBE_RETRY_CAP_SECONDS = 300
 _MAX_RESUBSCRIBE_RETRIES = 5
 
+# TIME BARRIER exit confirmation (exit-fill-unverified_07152026_1855): the
+# confirmed-flat gate defers an UNFILLED exit to the next bar rather than
+# booking a fabricated price and disarming both safety nets. Bound the
+# cross-bar retries by ATTEMPTS (never a sleep — a sleep blocks the live event
+# loop); on exhaustion escalate LOUD and keep the position TRACKED so
+# housekeeping's HEAL branch (not the detect-only UNTRACKED branch) owns it.
+# The 5-minute kill switch, armed for free by the deferral, is the real net —
+# this ceiling only bounds how long we retry the exit quietly before shouting.
+_MAX_TIME_BARRIER_EXIT_ATTEMPTS = 6
+
 # Hourly order housekeeping (hourly-order-housekeeping_07072026_0435):
 # in-child broker-vs-ledger sweep at ~:15 wall clock — after the :00
 # signal bar and the :06 read-only fleet monitor, so each hour composes
@@ -645,6 +655,12 @@ class LiveTrader:
         # TP/SL order tracking for software-side OCA (no parentId linkage)
         self._tp_order_ids: list[int] = []
         self._sl_order_id: Optional[int] = None
+        # TIME BARRIER exit confirmation state (exit-fill-unverified_07152026_1855):
+        # the exit is confirmed against a settled broker snapshot before the
+        # ledger is booked; these bound the cross-bar retry and remember the
+        # last pending exit order id. Both are CLEARED by _reset_position_state.
+        self._time_barrier_exit_attempts: int = 0
+        self._pending_exit_order_id: Optional[int] = None
         # Persistent set of order IDs already processed as TP/SL exits.
         # Intentionally NOT cleared by _reset_position_state() so that a
         # duplicate IBKR Filled callback arriving after the state reset cannot
@@ -1220,6 +1236,11 @@ class LiveTrader:
         self._tracked_tp_price = None
         self._tracked_sl_price = None
         self._active_trade_id: Optional[str] = None
+        # TIME BARRIER exit confirmation state — cleared on any real close so a
+        # fresh position starts with a clean retry budget and no stale pending
+        # exit id (exit-fill-unverified_07152026_1855).
+        self._time_barrier_exit_attempts = 0
+        self._pending_exit_order_id = None
 
     def _clear_pending_entry(self) -> None:
         """Clear ONLY the pending-entry record — never in-position state.
@@ -1679,11 +1700,20 @@ class LiveTrader:
         cancelled = self.exec_client.cancel_open_orders(
             symbol=self._execution_symbol,
         )
+        # :1679 just cancelled the resting SL/TP on the broker. Reflect that in
+        # memory NOW: the in-memory ids no longer point at live orders, and
+        # clearing them ARMS the 5-minute kill switch (its guards at :5776/:5782
+        # fire on _active_trade_id set + _sl_order_id None) to cover any
+        # deferral window below. The tracked PRICES survive so A3 can re-arm.
+        self._sl_order_id = None
+        self._tp_order_ids = []
+
         trade = self.exec_client.close_position(
             symbol=self._execution_symbol,
             exit_mode=self._exit_mode,
             current_price=current_price,
         )
+        _exit_oid = getattr(getattr(trade, "order", None), "orderId", None)
         log.info(
             "[TRADE] EXIT: TIME BARRIER after %d bars "
             "(cancelled=%d orders, position=%d, price=%.2f)",
@@ -1698,11 +1728,136 @@ class LiveTrader:
             current_price=current_price,
             atr_value=atr_value,
             exit_reason="REASON_TIMEOUT",
-            order_id=getattr(getattr(trade, "order", None), "orderId", None)
-            if trade is not None
-            else None,
+            order_id=_exit_oid,
         )
-        # Close position in ledger
+
+        # A0 — the exit was NEVER SUBMITTED: close_position returned None (the
+        # close_cl_position:825 no-match return) or an order object carrying no
+        # orderId. A missing orderId is a HARD failure (no silent-None default)
+        # — we can neither confirm nor cancel an exit that does not exist. Do
+        # NOT book, do NOT reset; re-arm protection (no live exit exists, so
+        # re-arming is safe here) and keep the trade tracked to retry next bar.
+        if trade is None or _exit_oid is None:
+            log.critical(
+                "[TIME BARRIER] exit order was NEVER SUBMITTED for trade %s "
+                "(close_position returned %r) — NOT booking; re-arming "
+                "protection and keeping the position tracked to retry next bar",
+                self._active_trade_id, trade,
+            )
+            self._rearm_time_barrier_protection(current_position)
+            self._pending_exit_order_id = None
+            self._note_time_barrier_deferral(_exit_oid)
+            return False
+
+        # The exit WAS submitted — register its id so the async fill callback
+        # recognises it as a known exit (not a PHANTOM FILL) and remember it as
+        # the pending exit for the cross-bar retry.
+        self._processed_exit_order_ids.add(str(_exit_oid))
+        self._pending_exit_order_id = _exit_oid
+
+        # A1 — gate on broker truth. Never book / reset / re-arm on the mere
+        # submission; ask the broker whether the position actually went flat
+        # (same main-thread, event-loop-idle contract already relied on at the
+        # :1592 settled read in this method).
+        settled = self._confirm_settled_position(self._execution_symbol)
+        if settled is None:
+            # Unconfirmed -> fail closed (mirrors the :1593-1601 precedent). The
+            # exit is still live and can still fill: no ledger write, no reset,
+            # keep the position tracked, do NOT re-arm and do NOT cancel it away
+            # (BINDING CONDITION 1). Retry next bar.
+            log.error(
+                "[TIME BARRIER] exit %s submitted for trade %s but the settled "
+                "snapshot could not be confirmed — no book, no reset, retaining "
+                "the position + live exit (fail-closed); retrying next bar",
+                _exit_oid, self._active_trade_id,
+            )
+            self._note_time_barrier_deferral(_exit_oid)
+            return False
+        if settled == 0:
+            # Flat: the exit filled. Book the PROVEN price and finish.
+            return self._book_time_barrier_flat(_exit_oid)
+
+        # settled != 0 — the incident: the exit did not (yet) fill. A2: retire
+        # the stranded GTC exit BEFORE touching protection — leaving it resting
+        # would let it double-fill against a re-armed stop.
+        cancel_count = self.exec_client.cancel_orders_by_ids([_exit_oid])
+        if cancel_count == 0:
+            # Not open — a filled order has already left openTrades(), so the
+            # cancel was a silent no-op. No live exit can fire => route on a
+            # fresh settled read (BINDING CONDITION 2).
+            return self._route_retired_time_barrier_exit(
+                _exit_oid, current_position,
+            )
+        # BINDING CONDITION 1 — cancel_count >= 1: the exit is only
+        # cancel-REQUESTED, not dead. ib_insync fires cancelOrder
+        # fire-and-forget (ibkr_execution.py:298-313) and a fast fill can still
+        # cross at the exchange (the race documented at ibkr_client.py:1583-1588).
+        # NEVER re-arm while it can still fill: re-scan the open book, and only
+        # once the exit has LEFT it may the settled read be taken (the ordering
+        # is load-bearing — a settled snapshot pre-dating the fill would re-arm
+        # a stop onto a flat book = a naked reversal).
+        open_trades = self.exec_client.get_open_trades(
+            self._execution_symbol,
+        ) or []
+        exit_still_open = any(
+            str(getattr(evt, "order_id", None)) == str(_exit_oid)
+            for evt in open_trades
+        )
+        if exit_still_open:
+            # Still live -> defer: stay tracked, _sl_order_id None so the
+            # 5-minute kill switch covers the gap, no re-arm, no ledger write.
+            # Retry next bar (bounded by bars/attempts, never a sleep).
+            log.warning(
+                "[TIME BARRIER] exit %s cancel-requested but still resting — "
+                "deferring: no re-arm (would double-fill), position stays "
+                "tracked and the kill switch covers the gap; retrying next bar",
+                _exit_oid,
+            )
+            self._note_time_barrier_deferral(_exit_oid)
+            return False
+        # The exit has left the book -> STRICTLY AFTER that, route on settled.
+        return self._route_retired_time_barrier_exit(
+            _exit_oid, current_position,
+        )
+
+    def _route_retired_time_barrier_exit(
+        self, exit_oid, current_position,
+    ) -> bool:
+        """Route a TIME BARRIER exit once it is provably no longer live (cancel
+        count 0, or count>=1 then gone from the open book). Re-confirm settled
+        STRICTLY AFTER retirement and branch: flat -> book the proven price;
+        still-open -> re-arm protection (A3) and stay tracked; unconfirmed ->
+        fail closed (no re-arm). Returns _check_time_barrier's value."""
+        settled = self._confirm_settled_position(self._execution_symbol)
+        if settled is None:
+            log.error(
+                "[TIME BARRIER] exit %s retired but the settled snapshot could "
+                "not be confirmed — no book, no reset, no re-arm (fail-closed); "
+                "retrying next bar", exit_oid,
+            )
+            self._note_time_barrier_deferral(exit_oid)
+            return False
+        if settled == 0:
+            # The exit filled after all — book the proven price and finish.
+            return self._book_time_barrier_flat(exit_oid)
+        # Still open and the exit is provably dead -> A3: safe to re-arm.
+        self._rearm_time_barrier_protection(current_position)
+        log.warning(
+            "[TIME BARRIER] exit %s died without filling; re-armed protection "
+            "and kept trade %s tracked — retrying exit next bar",
+            exit_oid, self._active_trade_id,
+        )
+        self._note_time_barrier_deferral(exit_oid)
+        return False
+
+    def _book_time_barrier_flat(self, exit_oid) -> bool:
+        """settled == 0: the exit filled. Book the ledger CLOSED with the PROVEN
+        execution price (NULL when no execution matches the exit order id — an
+        explicit unknown, never the fabricated current_price; the :2305-2313
+        precedent), then reset with reason='TIME_BARRIER' (the backtest flavors
+        TIME_BARRIER exits as SL for sl_cooldown_bars parity) and report a
+        completed exit."""
+        exit_price = self._resolve_exit_fill_price(exit_oid)
         if self._active_trade_id is not None:
             try:
                 self.telemetry.close_position(
@@ -1710,19 +1865,82 @@ class LiveTrader:
                     reason="TIME_BARRIER",
                     close_time=self._utc_iso_now(),
                     bars_held=self._position_bars_held,
-                    exit_price=current_price,
+                    exit_price=exit_price,
                 )
             except Exception:
                 log.debug("Failed to close ledger position", exc_info=True)
-        # Register the exit order ID so the async fill callback recognises it
-        # as a known exit rather than triggering PHANTOM FILL BLOCKED.
-        _exit_oid = getattr(getattr(trade, "order", None), "orderId", None)
-        if _exit_oid is not None:
-            self._processed_exit_order_ids.add(str(_exit_oid))
-        # Pass the real reason so ConfigurableStrategy applies sl_cooldown_bars
-        # (the backtest flavors TIME_BARRIER exits as SL, backtest_engine).
         self._reset_position_state(reason="TIME_BARRIER")
         return True
+
+    def _resolve_exit_fill_price(self, exit_oid) -> Optional[float]:
+        """Return the PROVEN fill price for the exit order id from broker
+        executions, or None when no execution matches (str/int-robust — ledger
+        ids are ints, execution records carry str order ids; the same join key
+        as _recover_oob_close:2294-2303). NEVER fabricates a price from the
+        stale bar close."""
+        try:
+            executions = self.exec_client.get_executions(
+                self._execution_symbol,
+            ) or []
+        except Exception:
+            log.error(
+                "[TIME BARRIER] get_executions failed — booking NULL exit price "
+                "for order %s (never a fabricated price)", exit_oid,
+                exc_info=True,
+            )
+            return None
+        for rec in executions:
+            if str(rec.get("order_id")) == str(exit_oid):
+                return rec.get("price")
+        return None
+
+    def _rearm_time_barrier_protection(self, current_position) -> None:
+        """Re-place SL/TP from the ledger's stored prices after an unfilled
+        TIME BARRIER exit was retired (A3), or when the exit was never
+        submitted (A0). The now-dead order ids were cleared when :1679 cancelled
+        them; the tracked PRICES survive for exactly this re-arm."""
+        self._verify_and_heal_protective_legs(
+            trade_id=self._active_trade_id,
+            tp_order_id=None,
+            sl_order_id=None,
+            tp_price=self._tracked_tp_price,
+            sl_price=self._tracked_sl_price,
+            quantity=abs(current_position) or 1,
+            position_side=self._position_side,
+        )
+
+    def _note_time_barrier_deferral(self, exit_oid) -> None:
+        """Count one deferred TIME BARRIER exit attempt (A4). On exhaustion,
+        escalate LOUD (log.critical + Telegram + health event) while keeping the
+        position TRACKED so housekeeping's HEAL branch (:2813) owns it rather
+        than the detect-only UNTRACKED branch (:2757). Bounded by attempts,
+        never a sleep — the 5-minute kill switch is the real net."""
+        self._time_barrier_exit_attempts += 1
+        if self._time_barrier_exit_attempts < _MAX_TIME_BARRIER_EXIT_ATTEMPTS:
+            return
+        detail = (
+            f"TIME BARRIER exit for trade {self._active_trade_id} still "
+            f"unconfirmed after {self._time_barrier_exit_attempts} attempts "
+            f"(last exit order {exit_oid}) — position stays TRACKED for "
+            f"housekeeping heal / the kill switch; needs a human if it persists"
+        )
+        log.critical("[TIME BARRIER] %s", detail)
+        try:
+            self._emit_health_event("time-barrier-exit-unconfirmed", detail)
+        except Exception:
+            log.debug(
+                "emit_health_event failed (time-barrier-exit)", exc_info=True,
+            )
+        try:
+            if getattr(self, "_telegram", None) is not None:
+                self._telegram.send(
+                    f"*TIME BARRIER EXIT UNCONFIRMED* — "
+                    f"{self._execution_symbol}\n\n{detail}"
+                )
+        except Exception:
+            log.debug(
+                "Telegram send failed (time-barrier-exit)", exc_info=True,
+            )
 
     def _bars_since(self, ts: object) -> Optional[int]:
         """Count brain-stream bars strictly AFTER ``ts`` (gap-immune).
