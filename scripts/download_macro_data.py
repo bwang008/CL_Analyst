@@ -56,6 +56,12 @@ log = logging.getLogger("MacroDownloader")
 
 from src.data_paths import get_data_path
 
+# FRED schema contract — imported (not restated) so this producer and the
+# consumer (macro_features) agree on the required column set by construction.
+# macro_features imports this script only lazily, so this top-level import is
+# cycle-free (verified by the test suite).
+from src.features.macro_features import _FRED_BASE_COLS, vol_label_for
+
 # Where to save everything
 OUTPUT_DIR = get_data_path("raw/macro")
 
@@ -79,6 +85,8 @@ def download_fred_data(api_key: str, instrument=None) -> dict[str, pd.DataFrame]
         )
         sys.exit(1)
 
+    import time
+
     fred = Fred(api_key=api_key)
     results: dict[str, pd.DataFrame] = {}
 
@@ -97,40 +105,74 @@ def download_fred_data(api_key: str, instrument=None) -> dict[str, pd.DataFrame]
             base_series[instrument.volatility_index] = label
         return base_series
 
-    series_map = _get_fred_series(instrument or getattr(download_fred_data, "instrument", None))
+    series_map = _get_fred_series(instrument)
+    failed: list[str] = []
+    max_attempts = 3
     for series_id, label in series_map.items():
         log.info("Downloading FRED/%s (%s) ...", series_id, label)
-        try:
-            data = fred.get_series(series_id)
-            if data is None or len(data) == 0:
-                log.warning("  -> No data returned for %s", series_id)
-                continue
 
-            df = pd.DataFrame({
-                "Date": data.index,
-                label: data.values,
-            })
-            df["Date"] = pd.to_datetime(df["Date"])
+        # Bounded retry: the observed failure mode is a transient outage, so a
+        # series that succeeds on a later attempt is fine. Both an empty/None
+        # response and a raised exception count as a failed attempt.
+        data = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                fetched = fred.get_series(series_id)
+                if fetched is None or len(fetched) == 0:
+                    log.warning("  -> No data returned for %s (attempt %d/%d)",
+                                series_id, attempt, max_attempts)
+                else:
+                    data = fetched
+                    break
+            except Exception as exc:
+                log.warning("  -> Fetch failed for %s (attempt %d/%d): %s",
+                            series_id, attempt, max_attempts, exc)
+            if attempt < max_attempts:
+                time.sleep(0.5 * attempt)  # short backoff between retries
 
-            # Drop rows where value is NaN (FRED uses '.' for missing)
-            df = df.dropna(subset=[label])
+        if data is None:
+            log.error("  -> Giving up on FRED/%s after %d attempts",
+                      series_id, max_attempts)
+            failed.append(series_id)
+            continue
 
-            log.info(
-                "  -> %d rows: %s to %s",
-                len(df),
-                df["Date"].min().strftime("%Y-%m-%d"),
-                df["Date"].max().strftime("%Y-%m-%d"),
-            )
-            results[label] = df
+        df = pd.DataFrame({
+            "Date": data.index,
+            label: data.values,
+        })
+        df["Date"] = pd.to_datetime(df["Date"])
 
-        except Exception as exc:
-            log.error("  -> Failed for %s: %s", series_id, exc)
+        # Drop rows where value is NaN (FRED uses '.' for missing)
+        df = df.dropna(subset=[label])
+
+        log.info(
+            "  -> %d rows: %s to %s",
+            len(df),
+            df["Date"].min().strftime("%Y-%m-%d"),
+            df["Date"].max().strftime("%Y-%m-%d"),
+        )
+        results[label] = df
+
+    if failed:
+        # No partial dict may escape: a partial file would silently overwrite a
+        # known-good one downstream (save_fred_data / the live refresh path).
+        raise RuntimeError(
+            "FRED download failed for series: "
+            + ", ".join(failed)
+            + f" (after {max_attempts} attempts each). "
+            "Refusing to return a partial macro dataset."
+        )
 
     return results
 
 
 def save_fred_data(data: dict[str, pd.DataFrame], instrument=None) -> Path:
-    """Save all FRED data merged into a single CSV."""
+    """Save all FRED data merged into a single CSV.
+
+    Validates the assembled frame against the required column contract before
+    writing, and writes atomically (temp file + os.replace). A partial/invalid
+    frame therefore raises instead of overwriting a known-good file.
+    """
     if not data:
         log.error("No FRED data to save")
         return Path()
@@ -150,9 +192,35 @@ def save_fred_data(data: dict[str, pd.DataFrame], instrument=None) -> Path:
         if col != "Date":
             merged[col] = merged[col].ffill()
 
+    # --- Schema guard: never overwrite a known-good file with a partial one.
+    # Required columns are derived from the SAME contract the consumer reads
+    # (_FRED_BASE_COLS + vol_label_for), so producer and consumer agree by
+    # construction. With no instrument, validate against the base columns only.
+    required_cols = set(_FRED_BASE_COLS)
+    if instrument is not None:
+        required_cols.add(vol_label_for(instrument))
+    missing = sorted(required_cols - set(merged.columns))
+    if missing:
+        label = f"_{instrument.symbol.lower()}" if instrument else ""
+        raise ValueError(
+            f"FRED frame is missing required column(s) {missing}; refusing to "
+            f"overwrite fred_macro_data{label}.csv (would corrupt a known-good file)."
+        )
+
     suffix = f"_{instrument.symbol.lower()}" if instrument else ""
     output_path = OUTPUT_DIR / f"fred_macro_data{suffix}.csv"
-    merged.to_csv(output_path, index=False)
+
+    # Atomic write: write a temp file in the same directory, then os.replace it
+    # onto the destination. A failed write can never leave a corrupt/partial
+    # destination behind, and no temp file survives success or failure.
+    tmp_path = output_path.with_name(output_path.name + ".tmp")
+    try:
+        merged.to_csv(tmp_path, index=False)
+        os.replace(tmp_path, output_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
     log.info("Saved FRED data to %s (%d rows, %d columns)",
              output_path, len(merged), len(merged.columns))
 
@@ -562,9 +630,6 @@ def main():
     from src.core.instrument_master import get_instrument
     instrument = get_instrument(args.symbol)
 
-    # Inject instrument into global scope for downloading functions
-    download_fred_data.instrument = instrument
-
     # Ensure output directory exists
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -595,21 +660,8 @@ def main():
             else:
                 sys.exit(1)
         else:
-            fred_data = download_fred_data(api_key)
-            if fred_data:
-                # Combine FRED data and save
-                fred_path = OUTPUT_DIR / f"fred_macro_data_{instrument.symbol.lower()}.csv"
-                combined_fred = None
-                for label, df in fred_data.items():
-                    if combined_fred is None:
-                        combined_fred = df
-                    else:
-                        combined_fred = pd.merge(combined_fred, df, on="Date", how="outer")
-                
-                if combined_fred is not None:
-                    combined_fred.sort_values("Date", inplace=True)
-                    combined_fred.to_csv(fred_path, index=False)
-                    log.info("Saved combined FRED data to %s", fred_path)
+            fred_data = download_fred_data(api_key, instrument=instrument)
+            save_fred_data(fred_data, instrument=instrument)
 
     # --- CFTC COT ---
     if do_cot:
