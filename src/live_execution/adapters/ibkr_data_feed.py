@@ -222,6 +222,30 @@ class IBKRDataFeedClient(DataFeedClient):
         # T2 (C6): the silent '= "CL"' default is dropped — all callers
         # pass the symbol explicitly.
         return self.manager.get_front_month_contract(symbol=symbol)
+
+    def get_continuous_lead_local_symbol(self) -> str:
+        """localSymbol of IBKR's CURRENT CONTFUT lead for the brain symbol.
+
+        roll-seam-preflip-escalate_07162026: NOT the fleet's buffer-based
+        front month (get_front_month_contract) — this is IBKR's own lead,
+        which flips at its own schedule (~LTD). Freshly qualified on every
+        call: the caller's whole question is WHETHER the lead has flipped,
+        so a cached answer would defeat the check.
+        """
+        from src.live_execution.ibkr_client import build_future_contract
+
+        contract = build_future_contract(
+            self._instrument_context.brain_symbol, continuous=True,
+        )
+        qualified = self.manager.qualify_contract(contract)
+        local_symbol = getattr(qualified, "localSymbol", "") or ""
+        if not local_symbol:
+            raise RuntimeError(
+                f"CONTFUT qualification for "
+                f"{self._instrument_context.brain_symbol} returned no "
+                f"localSymbol — cannot identify the continuous lead."
+            )
+        return local_symbol
         
     def get_bid_ask(self, contract: Any, timeout: float = 2.0) -> tuple:
         return self.manager.get_bid_ask(contract=contract, timeout=timeout)

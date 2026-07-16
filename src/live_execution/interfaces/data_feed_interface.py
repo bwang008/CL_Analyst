@@ -86,6 +86,23 @@ class DataFeedClient(ABC):
         # Python does not enforce abstract signature parity and the parity
         # harness depends on the sim staying byte-untouched.
         pass
+
+    def get_continuous_lead_local_symbol(self) -> str:
+        """localSymbol of the provider's CURRENT continuous-contract lead.
+
+        roll-seam-preflip-escalate_07162026: resolve_roll_seam() uses this
+        to distinguish "IBKR has not flipped the CONTFUT lead yet" (the
+        routine LTD-buffer window after every fleet roll) from "the cache
+        lost its old-basis anchor". Deliberately NON-abstract with a
+        raising default: a provider that cannot genuinely answer must
+        never vouch for a price-basis decision — callers treat the raise
+        as "lead unknown" and keep the conservative loud path.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot report a continuous-contract "
+            f"lead — only providers with a real continuous chain "
+            f"(IBKR CONTFUT) can answer."
+        )
         
     @abstractmethod
     def get_bid_ask(self, contract: Any, timeout: float = 2.0) -> tuple:

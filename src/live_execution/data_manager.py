@@ -24,6 +24,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -49,8 +50,32 @@ log = logging.getLogger(__name__)
 # strings resolve_roll_seam() returns.
 # ---------------------------------------------------------------------------
 ROLL_SEAM_RESOLVED = "RESOLVED"  # seam anchored: ratio recorded + persisted
-ROLL_SEAM_RETRY = "RETRY"        # IBKR lead not flipped yet — retry later
+ROLL_SEAM_RETRY = "RETRY"        # seam not observable yet — retry later
 ROLL_SEAM_ESCALATE = "ESCALATE"  # nothing to anchor on — operator must act
+
+# roll-seam-preflip-escalate_07162026: futures month code + year digit(s)
+# at the tail of an IBKR localSymbol ("CLQ6" -> "Q6", "MGCQ6" -> "Q6",
+# "NGF27" -> "F27"). Used to compare a pending roll's EXECUTION contract
+# (micros pend e.g. MGCQ6) against the BRAIN symbol's CONTFUT lead (the
+# parent, e.g. GCQ6) where exact string equality can never match.
+_MONTH_CODE_RE = re.compile(r"([FGHJKMNQUVXZ]\d{1,2})\s*$")
+
+
+def _contract_month_code(local_symbol: str) -> Optional[str]:
+    """Month-code tail of a futures localSymbol, or None if unparseable."""
+    if not isinstance(local_symbol, str):
+        return None
+    m = _MONTH_CODE_RE.search(local_symbol.strip())
+    return m.group(1) if m else None
+
+
+def _same_contract_month(a: str, b: str) -> bool:
+    """True when two localSymbols name the same delivery month — exact
+    match, or equal month codes across product prefixes (GCQ6 vs MGCQ6)."""
+    if a == b:
+        return True
+    code_a = _contract_month_code(a)
+    return code_a is not None and code_a == _contract_month_code(b)
 
 # ---------------------------------------------------------------------------
 # Per-symbol data-path derivation (T2 — single naming authority)
@@ -475,7 +500,9 @@ class DataManager:
                         f"{pending['to']} (detected {pending['detected_at']}) "
                         f"— the CONTFUT seam scan found no old-basis anchor "
                         f"bars (every overlap bar already matches the new "
-                        f"basis), so the roll ratio cannot be recovered from "
+                        f"basis) and the CONTFUT lead is no longer "
+                        f"{pending['from']} (flipped or unidentifiable), so "
+                        f"the roll ratio cannot be recovered from "
                         f"IBKR. Refusing to trade on a broken price basis. "
                         f"Operator remedy: derive the ratio from an "
                         f"expired-contract overlap fetch (median "
@@ -1267,6 +1294,41 @@ class DataManager:
         self._ibkr_overlap_df = ibkr_df
         return median_ratio
 
+    def _contfut_lead_or_none(self) -> Optional[str]:
+        """Best-effort query of the data client's current continuous lead.
+
+        roll-seam-preflip-escalate_07162026: returns None whenever the
+        client cannot genuinely answer — no such capability, the query
+        raised, or a non-string/empty result. Callers MUST treat None as
+        "lead unknown" and keep the conservative loud path; this helper
+        never raises into the seam scan.
+        """
+        getter = getattr(
+            self.data_client, "get_continuous_lead_local_symbol", None
+        )
+        if getter is None:
+            log.warning(
+                "resolve_roll_seam: data client %s exposes no "
+                "get_continuous_lead_local_symbol — CONTFUT lead unknown.",
+                type(self.data_client).__name__,
+            )
+            return None
+        try:
+            lead = getter()
+        except Exception as exc:
+            log.warning(
+                "resolve_roll_seam: CONTFUT lead query failed (%s: %s) — "
+                "lead unknown.", type(exc).__name__, exc,
+            )
+            return None
+        if not isinstance(lead, str) or not lead.strip():
+            log.warning(
+                "resolve_roll_seam: CONTFUT lead query returned %r — "
+                "lead unknown.", lead,
+            )
+            return None
+        return lead.strip()
+
     def resolve_roll_seam(
         self,
         *,
@@ -1286,11 +1348,21 @@ class DataManager:
             new-basis  ⇔ |q_t − 1| <= roll_ratio_tolerance
 
         Outcomes (module constants):
-          - ALL bars old-basis → ROLL_SEAM_RETRY: IBKR's lead has not
-            flipped yet; recording now would strand later old-basis appends
-            unadjusted. Nothing recorded, nothing persisted.
-          - ALL bars new-basis → ROLL_SEAM_ESCALATE: nothing to anchor on.
-            Nothing recorded; the caller owns the loud stop.
+          - ALL bars old-basis → ROLL_SEAM_RETRY: the fetch differs from
+            every cache bar — the lead flipped but the cache holds no
+            post-flip appends yet; recording now would leave the cutoff
+            unanchored. Nothing recorded, nothing persisted.
+          - ALL bars new-basis (fetch matches everywhere) → an AMBIGUOUS
+            signature (roll-seam-preflip-escalate_07162026): the routine
+            LTD-buffer window looks exactly like a rebased cache, because
+            the fleet rolls its front month roll_buffer_days BEFORE IBKR
+            flips the CONTFUT lead — cache and fetch are then BOTH still
+            old-basis. Disambiguated via the client's current CONTFUT
+            lead: lead still from_contract (exact or month-code match,
+            micros pend MGCQ6 while the brain lead is GCQ6) →
+            ROLL_SEAM_RETRY (no seam exists in the data yet); lead
+            flipped or unknown/unqueryable → ROLL_SEAM_ESCALATE: nothing
+            to anchor on. Nothing recorded; the caller owns the loud stop.
           - old-run followed by new-run → ROLL_SEAM_RESOLVED:
             ratio = median of the old-run quotients (robust to contaminated
             bars inside the run), cutoff = FIRST new-basis bar timestamp;
@@ -1371,10 +1443,27 @@ class DataManager:
             )
             return ROLL_SEAM_RETRY
         if not is_old.any():
+            # roll-seam-preflip-escalate_07162026: "every overlap bar
+            # matches the fetch" is what a rebased (anchor-destroyed)
+            # cache looks like — but ALSO what the whole LTD-buffer
+            # window looks like (fleet front month rolls days before
+            # IBKR flips the CONTFUT lead; both sides still old-basis).
+            # Only IBKR's actual current lead can tell them apart.
+            lead = self._contfut_lead_or_none()
+            if lead is not None and _same_contract_month(lead, from_contract):
+                log.info(
+                    "resolve_roll_seam: all %d overlap bars match the fetch "
+                    "and the CONTFUT lead is still %s — pre-flip buffer "
+                    "window for %s → %s, the seam has not appeared in the "
+                    "data yet. RETRY.",
+                    len(overlap), lead, from_contract, to_contract,
+                )
+                return ROLL_SEAM_RETRY
             log.error(
                 "resolve_roll_seam: all %d overlap bars already new-basis — "
-                "no old-basis anchor for %s → %s. ESCALATE.",
-                len(overlap), from_contract, to_contract,
+                "no old-basis anchor for %s → %s (CONTFUT lead: %s). "
+                "ESCALATE.",
+                len(overlap), from_contract, to_contract, lead or "unknown",
             )
             return ROLL_SEAM_ESCALATE
 
