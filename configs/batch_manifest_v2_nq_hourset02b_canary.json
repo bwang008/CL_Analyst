@@ -1,0 +1,111 @@
+{
+  "_comment": "NQ HourSet_02B CANARY - mirrors batch_manifest_v2_es_hourset02b_canary.json (same asset class: index future, VIX, TFF COT) changing only symbol=NQ, dataset_version=HourSet_02B, exec=NQ_raw.parquet, labels/prefixes. Gates the NQ 02B pipeline (new dataset, first 02B scout for NQ) per canary-before-scout. 2 experiments (2x1_1H #1 + 3x1_6H mid) at n_trials 3 (plumbing canary, not statistics). Targets from Stage-1 screen reports/screens/nq_02b.",
+  "infrastructure": {
+    "machine_type": "n2-standard-32",
+    "provisioning_model": "STANDARD",
+    "timeout_minutes": 240,
+    "max_concurrent_vcpus": 288,
+    "vcpus_per_vm": 32,
+    "max_concurrent_vms": 12
+  },
+  "baseline": {
+    "symbol": "NQ",
+    "data_workflow": {
+      "dataset_version": "HourSet_02B",
+      "resolution": "1h",
+      "output_dir": "data/processed",
+      "features": {
+        "windows": [
+          24,
+          72,
+          168
+        ],
+        "macro_windows": {
+          "1W": 168
+        }
+      },
+      "targets": {
+        "raw_horizon": 120,
+        "atr_period": 14,
+        "definitions": [
+          {
+            "type": "triple_barrier",
+            "tp_multiplier": 2.0,
+            "sl_multiplier": 1.0,
+            "horizon": 1
+          },
+          {
+            "type": "triple_barrier",
+            "tp_multiplier": 3.0,
+            "sl_multiplier": 1.0,
+            "horizon": 6
+          }
+        ]
+      }
+    },
+    "training_workflow": {
+      "train_cutoff_date": "2022-01-01",
+      "holdout_cutoff_date": null,
+      "target_columns": [],
+      "gcs_base_dir": "gs://cltrainer-optuna-results/canary",
+      "random_seed": 42,
+      "optuna": {
+        "n_trials": 3,
+        "metrics": [
+          "logloss",
+          "average_precision"
+        ],
+        "max_depth_min": 3,
+        "max_depth_max": 6,
+        "num_leaves_min": 15,
+        "num_leaves_max": 31,
+        "max_n_estimators": 500,
+        "early_stopping_rounds": 15,
+        "max_folds": 3,
+        "learning_rate_min": 0.005,
+        "learning_rate_max": 0.02,
+        "min_child_samples_min": 150,
+        "min_child_samples_max": 400,
+        "feature_fraction_min": 0.4,
+        "feature_fraction_max": 0.8,
+        "post_optimizer_trials": 3,
+        "post_optimizer_ensemble_trials": 0,
+        "post_optimizer_holdout_months": 12
+      }
+    },
+    "execution_workflow": {
+      "slippage_per_side": 0.25,
+      "opt_mode": "individual",
+      "execution_data_path": "gs://cltrainer-optuna-results/data/NQ_raw.parquet",
+      "strategy_config_path": "configs/strategies/hourly_ensemble_010.json"
+    }
+  },
+  "experiments": [
+    {
+      "label": "NQ HS02B 2x1 1H",
+      "gcs_prefix": "sweep_nq_hs02b_2x1_1h_canary",
+      "overrides": {
+        "symbol": "NQ",
+        "training_workflow": {
+          "target_columns": [
+            "TARGET_TRIPLE_2x1_1H_LONG",
+            "TARGET_TRIPLE_2x1_1H_SHORT"
+          ]
+        }
+      }
+    },
+    {
+      "label": "NQ HS02B 3x1 6H",
+      "gcs_prefix": "sweep_nq_hs02b_3x1_6h_canary",
+      "overrides": {
+        "symbol": "NQ",
+        "training_workflow": {
+          "target_columns": [
+            "TARGET_TRIPLE_3x1_6H_LONG",
+            "TARGET_TRIPLE_3x1_6H_SHORT"
+          ]
+        }
+      }
+    }
+  ]
+}
