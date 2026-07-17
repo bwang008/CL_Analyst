@@ -5615,15 +5615,12 @@ class LiveTrader:
         # Market hours check (CL: Sun 18:00 ET → Fri 17:00 ET)
         market_status = self._get_market_status(now)
 
-        # Position and PNL lookup — two realized figures shown side by side:
-        #   ib_real_pnl  : IBKR's raw PortfolioItem.realizedPNL (daily,
-        #                  per-contract; drops to $0 when the position leaves
-        #                  the portfolio feed — shown raw, uncached).
+        # Position and PNL lookup.
         #   loc_real_pnl : our restart-surviving cumulative, summed from the
         #                  per-fill CommissionReport.realizedPNL we persist in
         #                  the tradebook DB (scoped to this bot's client_id).
         try:
-            unr_pnl, ib_real_pnl = 0.0, 0.0
+            unr_pnl = 0.0
             pos = 0
             if (self.data_client.is_connected() and self.exec_client.is_connected()):
                 acct = self.exec_client.get_account_summary(
@@ -5631,7 +5628,6 @@ class LiveTrader:
                 )
                 pos = acct["cl_position"]
                 unr_pnl = acct["cl_unrealized_pnl"]
-                ib_real_pnl = acct["cl_realized_pnl"]
 
             # DB read, independent of the broker connection — never zeroes out.
             try:
@@ -5642,8 +5638,7 @@ class LiveTrader:
             pos_str = f"{pos:g} contracts" if pos != 0 else "FLAT"
             pnl_str = (
                 f" | unr_pnl=${unr_pnl:,.2f}"
-                f" | ib_real_pnl=${ib_real_pnl:,.2f}"
-                f" | loc_real_pnl=${loc_real_pnl:,.2f}"
+                f" | real_pnl=${loc_real_pnl:,.2f}"
             )
         except Exception:
             pos_str = "unknown"
