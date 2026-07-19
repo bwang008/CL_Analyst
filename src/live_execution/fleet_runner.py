@@ -675,6 +675,13 @@ def main(argv=None):
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    # Transliterate the console StreamHandler's output to ASCII so em-dashes /
+    # arrows / stray emoji never render as mojibake on a Windows console.
+    from src.live_execution.ascii_safe import AsciiFormatter
+    for _h in logging.getLogger().handlers:
+        _h.setFormatter(
+            AsciiFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        )
     # The runner's own supervision lines join the shared daily fleet log
     # (children tag themselves "<SYM> cid=<id>" via cli.py).
     from src.live_execution.fleet_log import setup_fleet_logging

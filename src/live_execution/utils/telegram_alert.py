@@ -6,6 +6,12 @@ Designed for fire-and-forget usage — all network errors are caught
 and logged, never bubbled. A dropped Telegram connection must never
 crash the live trader.
 
+Keep message text plain ASCII: no emoji, no decorative punctuation, no
+unnecessary filler. Non-ASCII in operator output has caused crashes in the
+past when a sink could not render/encode it. ``send()`` runs every message
+through ``ascii_safe.to_ascii`` as a safety net (emoji dropped, ``—`` -> ``-``),
+but author strings in ASCII to begin with — see ``ascii_safe`` for the why.
+
 Setup:
     1. Talk to @BotFather on Telegram → /newbot → copy the token.
     2. Send any message to your new bot.
@@ -17,8 +23,8 @@ Usage:
     from src.live_execution.utils.telegram_alert import TelegramAlerter
 
     tg = TelegramAlerter()            # reads from env / .env
-    tg.send("🚀 LiveTrader started")  # fire-and-forget
-    tg.send("⚠️ SL HIT: SELL 1 MCL @ 62.45", parse_mode="Markdown")
+    tg.send("LiveTrader started")     # fire-and-forget
+    tg.send("SL HIT: SELL 1 MCL @ 62.45", parse_mode="Markdown")
 """
 
 from __future__ import annotations
@@ -34,6 +40,8 @@ except ImportError:
     requests = None  # type: ignore[assignment]
 
 from dotenv import load_dotenv
+
+from src.live_execution.ascii_safe import to_ascii
 
 # Load .env from project root
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -105,7 +113,10 @@ class TelegramAlerter:
                 
         now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
         prefix_str = f"[{self.prefix}] " if getattr(self, "prefix", "") else ""
-        message = f"_{now_str}_\n\n{prefix_str}{message}"
+        # Strip emoji and transliterate punctuation to plain ASCII — no emoji
+        # in operator messages, and no mojibake in any client that mishandles
+        # Unicode.
+        message = to_ascii(f"_{now_str}_\n\n{prefix_str}{message}")
 
         if requests is None:
             log.warning("requests library not installed — cannot send Telegram alert")

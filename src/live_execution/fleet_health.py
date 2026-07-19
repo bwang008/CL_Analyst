@@ -61,9 +61,9 @@ _TRACEBACK_MARKER = "Traceback (most recent call last):"
 
 _HEARTBEAT_RE = re.compile(
     r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?"
-    r"\[(?P<child>[A-Z]{1,6} cid=\d+)\].*?HEARTBEAT: alive \| "
-    r"last_bar=(?P<age>[\d.]+)h ago.*?"
-    r"position=(?P<position>[^|]+?)\s*\|.*?"
+    r"\[(?P<child>[A-Z]{1,6} cid=\d+)\].*?alive \| "
+    r"bar=\s*(?P<age>[\d.]+)h.*?"
+    r"pos=\s*(?P<position>[^|]+?)\s*\|.*?"
     r"subs_lost=(?P<subs>True|False)"
 )
 

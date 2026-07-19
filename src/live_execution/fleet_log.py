@@ -34,6 +34,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from src.live_execution.ascii_safe import AsciiFormatter
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_FLEET_LOG_DIR = _PROJECT_ROOT / "reports" / "fleet"
 
@@ -160,7 +162,7 @@ def setup_fleet_logging(tag, log_dir=DEFAULT_FLEET_LOG_DIR,
     )
     handler.setLevel(level)
     handler.setFormatter(
-        logging.Formatter(_LINE_FORMAT.format(tag=tag), datefmt=_DATE_FORMAT)
+        AsciiFormatter(_LINE_FORMAT.format(tag=tag), datefmt=_DATE_FORMAT)
     )
     root.addHandler(handler)
     return handler

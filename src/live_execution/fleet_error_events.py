@@ -383,14 +383,14 @@ class FleetErrorEventWriter:
     def _notify(self, event, updated):
         if self.telegram is None:
             return
-        headline = ("🛑 restart cap exhausted" if event["gave_up"]
-                    else "🚨 Fleet child crashed")
+        headline = ("restart cap exhausted" if event["gave_up"]
+                    else "Fleet child crashed")
         if event["classification"] == "infrastructure":
-            triage = (f"🔌 Classified INFRASTRUCTURE "
+            triage = (f"Classified INFRASTRUCTURE "
                       f"(`{event['matched_infra_pattern']}`) — no ticket, "
                       f"filed for the record.")
         else:
-            triage = "🤖 Error event queued for AI triage."
+            triage = "Error event queued for AI triage."
         suffix = " (recurring crash, event updated)" if updated else ""
         self.telegram.send(
             f"{headline}: *{event['model_name']}* "

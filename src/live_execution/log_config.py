@@ -15,6 +15,8 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from src.live_execution.ascii_safe import AsciiFormatter
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _LOG_DIR = _PROJECT_ROOT / "reports"
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
@@ -77,7 +79,7 @@ def _setup_file_logging(client_id: int) -> None:
     file_handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(
-        logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT)
+        AsciiFormatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT)
     )
     logging.getLogger().addHandler(file_handler)
     log.info("File logging enabled: %s", log_file)

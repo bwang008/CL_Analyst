@@ -693,7 +693,10 @@ class LiveTrader:
 
             def filter(self, record: logging.LogRecord) -> bool:
                 if not getattr(record, "_symbol_prefixed", False):
-                    record.msg = f"[{self.symbol}] {record.msg}"
+                    # Pad to width 3 so the tag column aligns across children
+                    # ("[CL ]", "[MES]", "[NG ]") — otherwise 2- vs 3-char
+                    # symbols shift every field after them by a character.
+                    record.msg = f"[{self.symbol:<3}] {record.msg}"
                     record._symbol_prefixed = True
                 return True
 
@@ -4381,7 +4384,7 @@ class LiveTrader:
                                 len(new_bars), self._last_bar_time_5m,
                             )
                             self._telegram.send(
-                                f"🔄 *Reconnect Backfill (5M) Completed*\n"
+                                f"*Reconnect Backfill (5M) Completed*\n"
                                 f"Successfully stitched *{len(new_bars)}* missing 5-minute bars into cache.\n"
                                 f"Latest: `{self._last_bar_time_5m}`"
                             )
@@ -4442,7 +4445,7 @@ class LiveTrader:
                                 len(new_bars), self._last_bar_time_1h,
                             )
                             self._telegram.send(
-                                f"🔄 *Reconnect Backfill (1H) Completed*\n"
+                                f"*Reconnect Backfill (1H) Completed*\n"
                                 f"Successfully stitched *{len(new_bars)}* missing 1-hour bars into cache.\n"
                                 f"Latest: `{self._last_bar_time_1h}`"
                             )
@@ -5235,7 +5238,7 @@ class LiveTrader:
                 bar_str = "N/A"
 
             self._telegram.send(
-                f"📊 *Trade Entry*\n"
+                f"*Trade Entry*\n"
                 f"{signal.action} {signal.lots} `{local_sym}`\n"
                 f"Price: `{current_price:.2f}`\n"
                 f"TP: `{signal.tp_price:.2f}` / SL: `{signal.sl_price:.2f}`\n"
@@ -5331,7 +5334,7 @@ class LiveTrader:
 
         # ── 1-Hour Heartbeat ───────────────────────────────────────────
         if stream == self._bar_size and bar_time.minute == 0:
-            self._telegram.send(f"💓 *1-Hour Heartbeat*\n\n" + self._build_heartbeat_payload())
+            self._telegram.send(f"*1-Hour Heartbeat*\n\n" + self._build_heartbeat_payload())
 
     # ------------------------------------------------------------------
     # Reconnection
@@ -5604,16 +5607,25 @@ class LiveTrader:
         """Log a periodic heartbeat so the user knows the trader is alive."""
         now = datetime.now(timezone.utc).replace(tzinfo=None)
 
-        # Time since last bar
+        # Time since last bar. Right-padded to a fixed width so the "bar="
+        # column aligns across children (fleet_health._HEARTBEAT_RE parses
+        # the numeric "bar=<N>h" token — keep that shape).
         if getattr(self, "_last_bar_time_5m", None) is not None:
             delta = now - self._last_bar_time_5m
             hours = delta.total_seconds() / 3600
-            last_bar_str = f"{hours:.1f}h ago ({self._last_bar_time_5m})"
+            bar_str = f"{hours:5.1f}h"
         else:
-            last_bar_str = "no bars received yet"
+            bar_str = "  n/a "
 
-        # Market hours check (CL: Sun 18:00 ET → Fri 17:00 ET)
+        # Market hours check (CL: Sun 18:00 ET → Fri 17:00 ET). Parked LAST in
+        # the line on purpose: it is the one variable-length field (CLOSED
+        # strings are byte-fenced verbose), so trailing it keeps the numeric
+        # columns above aligned instead of being pushed around by its length.
         market_status = self._get_market_status(now)
+
+        connected = (
+            self.data_client.is_connected() and self.exec_client.is_connected()
+        )
 
         # Position and PNL lookup.
         #   loc_real_pnl : our restart-surviving cumulative, summed from the
@@ -5622,7 +5634,7 @@ class LiveTrader:
         try:
             unr_pnl = 0.0
             pos = 0
-            if (self.data_client.is_connected() and self.exec_client.is_connected()):
+            if connected:
                 acct = self.exec_client.get_account_summary(
                     symbol=self._execution_symbol,
                 )
@@ -5635,13 +5647,16 @@ class LiveTrader:
             except Exception:
                 loc_real_pnl = 0.0
 
-            pos_str = f"{pos:g} contracts" if pos != 0 else "FLAT"
+            # Fixed-width, right-aligned so pos/unr/real form clean columns
+            # across children. FLAT renders as 0 (a padded number aligns; the
+            # word "FLAT" would not).
+            pos_str = f"{int(pos):>3d}"
             pnl_str = (
-                f" | unr_pnl=${unr_pnl:,.2f}"
-                f" | real_pnl=${loc_real_pnl:,.2f}"
+                f" | unr=${unr_pnl:>10,.2f}"
+                f" | real=${loc_real_pnl:>11,.2f}"
             )
         except Exception:
-            pos_str = "unknown"
+            pos_str = "  ?"
             pnl_str = ""
 
         subs_status = " | subs_lost=True" if self._subscriptions_lost else ""
@@ -5649,15 +5664,18 @@ class LiveTrader:
             f" | DATA_MUTE={int((time.time() - self._data_mute_since) / 60)}min"
             if self._data_mute else ""
         )
+        # Layout (parsed by fleet_health._HEARTBEAT_RE — preserve the
+        # "alive |", "bar=", "pos=", and "subs_lost=" tokens if you edit this):
+        #   alive | bar=<age>h | pos=<n> | unr=$<x> | real=$<x> | conn=T/F | <market>
         log.info(
-            "HEARTBEAT: alive | last_bar=%s | market=%s | position= %s%s | connected=%s%s%s",
-            last_bar_str,
-            market_status,
+            "alive | bar=%s | pos=%s%s | conn=%s%s%s | %s",
+            bar_str,
             pos_str,
             pnl_str,
-            (self.data_client.is_connected() and self.exec_client.is_connected()),
+            "T" if connected else "F",
             subs_status,
             mute_status,
+            market_status,
         )
 
         # Naked position guardrail (kill switch)
@@ -6326,7 +6344,7 @@ class LiveTrader:
                 
                 try:
                     self._telegram.send(
-                        f"🚀 *ENTRY FILLED*\n"
+                        f"*ENTRY FILLED*\n"
                         f"Side: `{side_str}`\n"
                         f"Price: `{avg_price}`\n"
                         f"Qty: `{int(qty)}`"

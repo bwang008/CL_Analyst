@@ -39,15 +39,13 @@ from src.live_execution import fleet_health as fh
 # Fixtures
 # ===========================================================================
 
-_HB = ("2026-07-06 06:14:39 [INFO] [CL cid=1400] LiveTrader: [CL] "
-       "HEARTBEAT: alive | last_bar=0.3h ago (2026-07-06 12:55:00) | "
-       "market=OPEN | position=-1 contracts | unr_pnl=$27.63 | "
-       "real_pnl=$0.00 | connected=True | subs_lost=True")
+_HB = ("2026-07-06 06:14:39 [INFO] [CL cid=1400] LiveTrader: [CL ] "
+       "alive | bar=  0.3h | pos= -1 | unr=$     27.63 | "
+       "real=$      0.00 | conn=T | subs_lost=True | OPEN")
 
-_HB_OK = ("2026-07-06 07:14:39 [INFO] [NG cid=3000] LiveTrader: [NG] "
-          "HEARTBEAT: alive | last_bar=0.1h ago (2026-07-06 14:10:00) | "
-          "market=OPEN | position=FLAT | unr_pnl=$0.00 | real_pnl=$0.00 | "
-          "connected=True | subs_lost=False")
+_HB_OK = ("2026-07-06 07:14:39 [INFO] [NG cid=3000] LiveTrader: [NG ] "
+          "alive | bar=  0.1h | pos=  0 | unr=$      0.00 | real=$      0.00 | "
+          "conn=T | subs_lost=False | OPEN")
 
 _LOG_CLEAN = "\n".join([
     "2026-07-06 06:00:05 [INFO] [CL cid=1400] LiveTrader: [CL] INFERENCE ok",
