@@ -76,6 +76,17 @@ RESTART_BACKOFF_CAP_SECONDS = 300.0
 DEFAULT_MAX_RESTARTS = 5
 DEFAULT_POLL_INTERVAL_SECONDS = 10.0
 
+# Console-heartbeat rotation: enabled instance i gets
+# --heartbeat-offset i * 5s, so every ~5 minutes the whole fleet reports as
+# one burst — one line every 5s, in manifest order. The children coordinate
+# through the SHARED system clock (cli.py --heartbeat-offset anchors each
+# child's heartbeat to wall-clock phase); the runner's only role is
+# assigning these static offsets at spawn. Restarts rebuild the same
+# command, so a child keeps its slot. APPEND new instances to the manifest
+# to keep existing offsets stable. At the 16-instance ceiling the burst is
+# 80s, well inside the 300s heartbeat interval.
+HEARTBEAT_OFFSET_SPACING_SECONDS = 5.0
+
 REQUIRED_MANIFEST_KEYS = ("instances", "stagger_seconds", "data_port", "exec_port")
 REQUIRED_INSTANCE_KEYS = ("config", "enabled")
 
@@ -83,10 +94,14 @@ REQUIRED_INSTANCE_KEYS = ("config", "enabled")
 class _Instance:
     """Bookkeeping for one enabled fleet instance and its child process."""
 
-    def __init__(self, config_path, extra_args, client_id):
+    def __init__(self, config_path, extra_args, client_id,
+                 heartbeat_offset=0.0):
         self.config_path = config_path
         self.extra_args = list(extra_args)
         self.client_id = client_id
+        # Console-heartbeat phase (cli.py --heartbeat-offset). validate()
+        # always passes the real slot; 0.0 is the standalone default.
+        self.heartbeat_offset = heartbeat_offset
         self.cmd = None          # built at launch time
         self.proc = None         # live Popen handle (None = not running)
         self.restarts = 0        # restarts consumed so far
@@ -300,7 +315,7 @@ class FleetRunner:
         # (c) explicit live_config.client_id in every enabled config;
         #     unique AND spaced >= 2 apart (each instance also uses cid+1).
         instances = []
-        for entry in enabled:
+        for i, entry in enumerate(enabled):
             cfg_path = Path(entry["config"])
             with open(cfg_path, "r", encoding="utf-8") as fh:
                 strategy_cfg = json.load(fh)
@@ -314,7 +329,8 @@ class FleetRunner:
                 )
             client_id = live_cfg["client_id"]
             instances.append(
-                _Instance(cfg_path, entry.get("extra_args", []), client_id)
+                _Instance(cfg_path, entry.get("extra_args", []), client_id,
+                          HEARTBEAT_OFFSET_SPACING_SECONDS * i)
             )
 
         by_cid = sorted(instances, key=lambda inst: inst.client_id)
@@ -545,6 +561,7 @@ class FleetRunner:
             "--config", str(instance.config_path),
             "--data-port", str(self.manifest["data_port"]),
             "--exec-port", str(self.manifest["exec_port"]),
+            "--heartbeat-offset", f"{instance.heartbeat_offset:g}",
         ] + list(instance.extra_args)
 
     def _spawn(self, instance):

@@ -189,6 +189,14 @@ def main() -> None:
         choices=["Normal", "Urgent", "Patient"],
         help="Adaptive algo urgency (default: Normal). Only used with --entry-mode adaptive.",
     )
+    parser.add_argument(
+        "--heartbeat-offset", type=float, default=0.0,
+        help=(
+            "Phase offset (seconds) for the wall-clock console heartbeat. "
+            "The fleet runner passes 5s x manifest index so children "
+            "report in a fixed rotation; standalone runs keep 0."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -319,6 +327,7 @@ def main() -> None:
         adaptive_priority=resolved_adaptive_priority,
         exit_mode=resolved_exit_mode,
         client_id=resolved_client_id,
+        heartbeat_offset=args.heartbeat_offset,
     )
     # Live-path opt-in: real bots surface alive-but-degraded states
     # (stale-bar watchdog firings, exhausted resubscribe retries) to the

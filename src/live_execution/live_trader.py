@@ -34,6 +34,7 @@ import hashlib
 import json
 import logging
 import logging.handlers
+import math
 import os
 import re
 import signal
@@ -134,6 +135,41 @@ _DEFAULT_STRATEGY = None
 
 # Polling interval in seconds (ib.sleep)
 _POLL_INTERVAL = 5.0
+
+# Console heartbeat: wall-clock anchored — each child fires when the SHARED
+# system clock crosses (t - offset) % interval == 0, so a fleet of children
+# reports at fixed spacing in a stable order with zero runtime coordination
+# (the fleet runner assigns each child's phase via --heartbeat-offset).
+# Replaces the poll-count gate (60 x 5s cycles) whose phase was an accident
+# of startup duration, drifted with per-cycle work, and re-phased on every
+# reconnect (poll_count reset).
+_HEARTBEAT_INTERVAL = 300.0
+# Floor for the deadline-shortened sleep: never busy-spin, but small enough
+# that firing jitter stays well under the 5s inter-child spacing.
+_HEARTBEAT_MIN_SLEEP = 0.05
+
+
+def _initial_heartbeat_deadline(now: float, offset: float,
+                                interval: float = _HEARTBEAT_INTERVAL) -> float:
+    """First tick strictly after `now` on the (offset mod interval) grid."""
+    return (math.floor((now - offset) / interval) + 1) * interval + offset
+
+
+def _advance_heartbeat_deadline(deadline: float, now: float,
+                                interval: float = _HEARTBEAT_INTERVAL) -> float:
+    """Next on-grid tick strictly after `now`. A late fire (backfill or
+    reconnect stall) SKIPS the missed ticks instead of bursting, so the
+    child rejoins the fleet rotation at its own slot."""
+    missed = math.ceil((now - deadline) / interval + 1e-9)
+    return deadline + interval * max(1, missed)
+
+
+def _heartbeat_sleep(now: float, deadline: float,
+                     poll_interval: float = _POLL_INTERVAL) -> float:
+    """Poll sleep, shortened so the loop wakes AT the deadline instead of
+    up to a full poll late — firing jitter must stay far below the 5s
+    spacing between children for the rotation order to hold."""
+    return min(poll_interval, max(_HEARTBEAT_MIN_SLEEP, deadline - now))
 
 # Reconnection parameters
 _RECONNECT_BASE_DELAY = 5.0      # Initial delay before reconnect attempt (seconds)
@@ -305,6 +341,7 @@ class LiveTrader:
         adaptive_priority: str = "Normal",
         exit_mode: str = "market",
         client_id: Optional[int] = None,
+        heartbeat_offset: float = 0.0,
     ) -> None:
         self.data_client = data_client
         self.exec_client = exec_client
@@ -313,6 +350,10 @@ class LiveTrader:
         self.entry_mode = entry_mode
         self.adaptive_priority = adaptive_priority
         self.exit_mode = exit_mode
+        # Console-heartbeat phase on the shared wall clock (seconds). The
+        # fleet runner passes 5s * manifest index so children report in a
+        # fixed rotation; 0.0 = standalone run (no rotation to join).
+        self._heartbeat_offset = float(heartbeat_offset)
         self._open_orders = {}
 
         # Strategy (owns model, config, threshold, sizing, bracket math)
@@ -3984,8 +4025,9 @@ class LiveTrader:
         """Try to resolve the persisted pending roll seam, if one exists.
 
         jit-roll-ratio-empty_07102026_1453 (Stage 2): invoked from the
-        event-loop poll body (OUTSIDE the heartbeat gate — poll_count
-        resets on every reconnect) and immediately after rollover
+        event-loop poll body (OUTSIDE the heartbeat gate — that gate
+        fires only every _HEARTBEAT_INTERVAL and skips missed ticks
+        after a stall) and immediately after rollover
         detection. Self-gates to one resolve attempt per NEW 1h bar via
         data_manager_1h.last_timestamp (the CONTFUT basis only ever flips
         with new bars, so sub-bar retries are pure IBKR-pacing waste).
@@ -5474,10 +5516,12 @@ class LiveTrader:
         log.info("Entering event loop (poll every %.1fs) ...", _POLL_INTERVAL)
         log.info("Press Ctrl+C to stop.")
 
-        # Heartbeat: log status every ~5 minutes (60 cycles × 5s) when
-        # no new bars arrive, so the user knows the trader is alive.
-        _HEARTBEAT_CYCLES = 60  # 60 × 5s = 300s = 5 minutes
-        poll_count = 0
+        # Heartbeat: wall-clock anchored ticks every _HEARTBEAT_INTERVAL at
+        # this child's phase offset (see the constant's comment). getattr:
+        # Strict-Locked loop tests construct bare object.__new__ traders
+        # without the attribute; 0.0 matches the standalone default.
+        hb_offset = float(getattr(self, "_heartbeat_offset", 0.0))
+        next_heartbeat = _initial_heartbeat_deadline(time.time(), hb_offset)
 
         while self._running:
             try:
@@ -5508,35 +5552,44 @@ class LiveTrader:
                         self._running = False
                         self._needs_restart = True
                         break
-                    # Reconnect succeeded — resume normal polling
-                    poll_count = 0
+                    # Reconnect succeeded — resume normal polling. The
+                    # heartbeat deadline is wall-clock anchored, so the
+                    # child keeps its fleet-rotation slot across reconnects
+                    # (the old poll_count reset re-phased it arbitrarily).
                     continue
 
+                # Sleep the normal poll interval, shortened to wake AT the
+                # heartbeat deadline (sub-poll firing precision).
+                sleep_for = _heartbeat_sleep(time.time(), next_heartbeat)
                 if hasattr(self.data_client, "sleep"):
-                    self.data_client.sleep(_POLL_INTERVAL)
+                    self.data_client.sleep(sleep_for)
                 else:
-                    time.sleep(_POLL_INTERVAL)
-                poll_count += 1
+                    time.sleep(sleep_for)
 
                 # Hourly housekeeping sweep — invoked EVERY poll and
                 # self-gated on the wall clock (A-7), deliberately NOT
-                # inside the poll_count % _HEARTBEAT_CYCLES block:
-                # poll_count resets on every reconnect, so a poll-counted
-                # schedule stalls indefinitely under connection flapping.
-                # Runs here (between ib.sleep() calls) for the same
-                # sync-API safety as the rollover check; never raises.
+                # inside the heartbeat gate: that gate fires only every
+                # _HEARTBEAT_INTERVAL and SKIPS missed ticks after a stall,
+                # so a heartbeat-gated schedule can starve. Runs here
+                # (between ib.sleep() calls) for the same sync-API safety
+                # as the rollover check; never raises.
                 self._run_hourly_housekeeping()
 
                 # Pending roll-seam retry (jit-roll-ratio-empty_07102026_1453
                 # Stage 2) — like housekeeping (A-7), deliberately OUTSIDE
-                # the poll_count % _HEARTBEAT_CYCLES block: poll_count
-                # resets on every reconnect, so a heartbeat-gated retry
-                # stalls indefinitely under connection flapping. Cadence
+                # the heartbeat gate (same starvation reasoning). Cadence
                 # self-gates on the new-1h-bar check inside; never raises.
                 self._attempt_pending_roll_resolution()
 
-                # Periodic heartbeat (only when idle — no bars arriving)
-                if poll_count % _HEARTBEAT_CYCLES == 0:
+                # Periodic heartbeat: fires when the shared wall clock
+                # crosses this child's next on-phase tick. The deadline is
+                # advanced BEFORE the work so an exception below can never
+                # re-fire the same tick.
+                now = time.time()
+                if now >= next_heartbeat:
+                    next_heartbeat = _advance_heartbeat_deadline(
+                        next_heartbeat, now
+                    )
                     self._log_heartbeat()
                     # Contract rollover check (once per UTC day).
                     # Runs here (between ib.sleep() calls) so that
@@ -5573,7 +5626,6 @@ class LiveTrader:
                             self._running = False
                             self._needs_restart = True
                             break
-                        poll_count = 0
             except KeyboardInterrupt:
                 self._running = False
             except (ConnectionError, OSError) as exc:
