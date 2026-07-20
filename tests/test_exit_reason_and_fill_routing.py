@@ -82,6 +82,9 @@ def _make_trader() -> LiveTrader:
     t._atr_at_entry = 0.5
     t._trade_trailing_atr_mult = 1.0
     t._pending_entry_order_id = None
+    # TIME BARRIER submit-and-defer state (settle-confirm-event-loop_07202026_0713):
+    # the re-entrancy guard at the top of _check_time_barrier reads this.
+    t._pending_exit_order_id = None
     t._build_event_id = MagicMock(return_value="evt-test")
     t._base_tradebook_fields = MagicMock(return_value={})
     return t
@@ -176,11 +179,17 @@ class TestExitReasonVocabulary:
         t._trade_max_hold_bars = 6
         t._reset_position_state = MagicMock()
 
-        exited = t._check_time_barrier(
+        # Submit-and-defer (settle-confirm-event-loop_07202026_0713): the
+        # in-callback _check_time_barrier submits + defers; the settled confirm and
+        # the reset(reason="TIME_BARRIER") now run BYTE-FOR-BYTE in the idle-loop
+        # reconciler. Same completed-exit outcome, relocated.
+        submit_result = t._check_time_barrier(
             bar_time=pd.Timestamp("2026-06-01 07:00:00"),
             current_price=90.0,
             atr_value=0.9,
         )
+        assert submit_result is False  # submit-and-defer: no inline confirm/reset
+        exited = t._reconcile_pending_position_state()
 
         assert exited is True
         t._reset_position_state.assert_called_once_with(reason="TIME_BARRIER")
@@ -196,13 +205,22 @@ class TestExitReasonVocabulary:
         t._position_bars_held = 6
         t._reset_position_state = MagicMock()
 
+        # Submit-and-defer (settle-confirm-event-loop_07202026_0713): a flat cache
+        # read for a tracked trade no longer books/resets in-callback — it DEFERS
+        # (returns False, NO inline settled confirm). The confirmed-flat OOB book +
+        # reset(reason="CLOSED_OOB") run BYTE-FOR-BYTE in the idle-loop reconciler.
         exited = t._check_time_barrier(
             bar_time=pd.Timestamp("2026-05-26 13:00:00"),
             current_price=94.2,
             atr_value=1.0,
         )
+        assert exited is False  # in-callback defer: no inline OOB book/reset
+        t._reset_position_state.assert_not_called()
 
-        assert exited is False
+        t._reconcile_pending_position_state()
+
+        # The idle-loop reconciler's flat-read branch confirmed settled==0 and
+        # booked the OOB close, resetting with reason="CLOSED_OOB".
         t._reset_position_state.assert_called_once_with(reason="CLOSED_OOB")
 
     @pytest.mark.parametrize("reason", ["CLOSED", "CLOSED_OOB"])

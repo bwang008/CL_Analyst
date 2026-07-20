@@ -1,28 +1,51 @@
 """
 TDD-TESTER AUTHORIZATION
 Target Implementation File: src/live_execution/live_trader.py
-Target Class/Function: LiveTrader._check_time_barrier (the TIME BARRIER exit
-                       branch, live_trader.py:1679-1725)
+Target Class/Function: LiveTrader._reconcile_pending_position_state (the relocated
+                       settled decision) + LiveTrader._check_time_barrier (now
+                       submit-and-defer)
 Status: FINALIZED
 Strict-Lock: TRUE (Implementation agents may NOT modify this file)
-Ticket: exit-fill-unverified_07152026_1855
+Ticket: exit-fill-unverified_07152026_1855 (original)
+        + settle-confirm-event-loop_07202026_0713 (control-flow adaptation)
 
 Regression suite for the fire-and-forget TIME BARRIER exit that left a NAKED +
 UNTRACKED live position (2026-07-14 NG incident, client_id 3000).
 
-The defect: the TIME BARRIER exit at live_trader.py:1679-1725 cancels the
-protective SL/TP, books the ledger CLOSED with a FABRICATED price
-(exit_price=current_price), and resets position state — all WITHOUT confirming
-the exit order actually filled. When the exit (a GTC limit priced off a stale
-bar close) never fills, the position is left naked, and BOTH safety nets are
-disarmed by the same reset (kill switch needs _active_trade_id; housekeeping
-heal needs an OPEN ledger row).
+The original defect: the TIME BARRIER exit cancelled the protective SL/TP, booked
+the ledger CLOSED with a FABRICATED price (exit_price=current_price), and reset
+position state — all WITHOUT confirming the exit order actually filled. When the
+exit (a GTC limit priced off a stale bar close) never fills, the position is left
+naked, and BOTH safety nets are disarmed by the same reset (kill switch needs
+_active_trade_id; housekeeping heal needs an OPEN ledger row).
 
-The invariant this ticket establishes (blueprint):
+The invariant the original ticket (a1464d2) established:
     Never book a close, never reset position state, and never re-arm protection
     until the broker has been asked and has answered. Book only on a *confirmed*
     flat with a *proven* fill price; re-arm the stop only once no exit order
     that could still fill is live AND the position is confirmed still open.
+
+CONTROL-FLOW ADAPTATION (settle-confirm-event-loop_07202026_0713):
+    a1464d2 ran that confirm/book/re-arm decision INLINE in _check_time_barrier —
+    but _check_time_barrier is reached only from inside the ib_insync bar-update
+    callback (a RUNNING asyncio loop), and the settled read it depends on does
+    `self.ib.run()` == loop.run_until_complete(), which raises
+    `RuntimeError: This event loop is already running` in that context. The fix
+    moves the settled read OUT of the callback: _check_time_barrier now only
+    SUBMITS the exit and DEFERS (sets _pending_exit_order_id, returns False), and
+    the BYTE-FOR-BYTE-identical A1/A2/route decision logic runs in the new
+    idle-loop reconciler _reconcile_pending_position_state().
+
+    These tests are adapted to the new control flow WITHOUT weakening any
+    assertion (fake-fidelity/flow adaptation — same precedent as a1464d2). Every
+    decision assertion below is now driven through _submit_then_reconcile(), which
+    performs the in-callback submit-and-defer and then the idle-loop reconcile.
+    The decision logic — and thus every assertion's strength — is unchanged; only
+    WHERE it runs moved. The reconciler returns the same True/False verdict
+    _check_time_barrier used to (True = exit booked/completed, False = deferred), a
+    testability contract that follows directly from the byte-for-byte relocation.
+    Loop-aware coverage of the RuntimeError itself lives in the companion file
+    tests/test_settle_confirm_loop_deferral.py.
 
 Four cases (deterministic, no real I/O — LiveTrader built via object.__new__,
 exec_client/telemetry stubbed, mirroring tests/test_exit_reason_and_fill_routing.py
@@ -32,13 +55,13 @@ and tests/test_reconnect_false_flat_recovery.py):
      reset, keep tracked, retire the stranded exit by id BEFORE re-arming, and
      the (unchanged) kill switch fires for free on the next poll.
   2. Confirmed fill books the *proven* execution price, never current_price.
-  3. BINDING CONDITION 2 (the race): settled=1 but cancel_orders_by_ids -> 0
+  3. BINDING CONDITION (the race): settled=1 but cancel_orders_by_ids -> 0
      (the exit had already filled) => book the proven price, do NOT re-arm.
   4. Unconfirmed (settled -> None) fails closed: no book, no reset, stays
      tracked, no re-arm.
 
-These tests FAIL against the current fire-and-forget code (Red phase) and pass
-only once the blueprint's Site A fix is implemented.
+These tests FAIL until the reconciler exists (Red for the settle-confirm-event-loop
+ticket) and pass only once its fix is implemented.
 """
 
 from __future__ import annotations
@@ -156,6 +179,36 @@ def _run_barrier(t):
     )
 
 
+def _submit_then_reconcile(t):
+    """Drive the NEW control flow (settle-confirm-event-loop_07202026_0713).
+
+    The in-callback ``_check_time_barrier`` may no longer call the settled read
+    (it runs inside the ib_insync bar-update callback, a RUNNING asyncio loop,
+    where ``self.ib.run()`` raises ``RuntimeError: This event loop is already
+    running``). It now only SUBMITS the exit and DEFERS (sets
+    ``_pending_exit_order_id``, returns ``False``); the a1464d2 A1/A2/route
+    settled DECISION — relocated BYTE-FOR-BYTE — runs on a genuinely-idle tick in
+    ``_reconcile_pending_position_state()``.
+
+    This helper performs BOTH steps and returns the reconciler's verdict — the
+    same ``True`` (exit booked/completed) / ``False`` (deferred) these tests
+    asserted on ``_check_time_barrier`` before the relocation. It also pins the
+    submit-and-defer contract (the in-callback call must return ``False`` and
+    make NO settled read), so the adaptation adds strength rather than loosening.
+    """
+    submit_result = _run_barrier(t)
+    assert submit_result is False, (
+        "the in-callback _check_time_barrier must SUBMIT-AND-DEFER (return False) "
+        "— the settled decision now belongs to the idle-loop reconciler"
+    )
+    assert t._pending_exit_order_id == _EXIT_OID, (
+        "the submitted exit id must be recorded as pending for the reconciler"
+    )
+    # The settled read must NOT happen inside the bar-update callback.
+    t.exec_client.get_position_settled.assert_not_called()
+    return t._reconcile_pending_position_state()
+
+
 # ---------------------------------------------------------------------------
 # Case 1 — reproduce the incident: unconfirmed-non-flat must NOT book/reset
 # ---------------------------------------------------------------------------
@@ -195,7 +248,7 @@ class TestIncidentReproduction:
         t._verify_and_heal_protective_legs = MagicMock(side_effect=_rearm)
         t._reset_position_state = MagicMock()
 
-        result = _run_barrier(t)
+        result = _submit_then_reconcile(t)
 
         # 1a. Did NOT exit cleanly — deferred to a later bar.
         assert result is False, (
@@ -246,7 +299,7 @@ class TestIncidentReproduction:
             SimpleNamespace(order_id=_EXIT_OID, symbol="NG", status="Submitted")
         ]
 
-        result = _run_barrier(t)
+        result = _submit_then_reconcile(t)
 
         assert result is False
         # The exit path left the trade tracked with no live stop — exactly the
@@ -302,7 +355,7 @@ class TestConfirmedFillBooksProvenPrice:
         t._verify_and_heal_protective_legs = MagicMock()
         t._reset_position_state = MagicMock()
 
-        result = _run_barrier(t)
+        result = _submit_then_reconcile(t)
 
         assert result is True, "a confirmed flat is a completed exit"
         t.telemetry.close_position.assert_called_once()
@@ -333,7 +386,7 @@ class TestConfirmedFillBooksProvenPrice:
         t._verify_and_heal_protective_legs = MagicMock()
         t._reset_position_state = MagicMock()
 
-        result = _run_barrier(t)
+        result = _submit_then_reconcile(t)
 
         assert result is True
         kwargs = t.telemetry.close_position.call_args.kwargs
@@ -379,7 +432,7 @@ class TestRaceBranchBindingCondition2:
         t._verify_and_heal_protective_legs = MagicMock()
         t._reset_position_state = MagicMock()
 
-        result = _run_barrier(t)
+        result = _submit_then_reconcile(t)
 
         assert result is True, "the race resolves to a completed (flat) exit"
         t.exec_client.cancel_orders_by_ids.assert_called_once_with([_EXIT_OID])
@@ -413,7 +466,7 @@ class TestUnconfirmedFailsClosed:
         t._verify_and_heal_protective_legs = MagicMock()
         t._reset_position_state = MagicMock()
 
-        result = _run_barrier(t)
+        result = _submit_then_reconcile(t)
 
         assert result is False, "an unconfirmed read must not report an exit"
         t.telemetry.close_position.assert_not_called()

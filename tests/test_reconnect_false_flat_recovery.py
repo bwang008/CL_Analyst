@@ -235,6 +235,11 @@ def _time_barrier_lt(*, first_read, settled, active_trade="trade_777"):
     lt._position_entry_bar_time = None
     lt.telemetry = MagicMock()
     lt._reset_position_state = MagicMock()
+    # TIME BARRIER submit-and-defer state (settle-confirm-event-loop_07202026_0713):
+    # the re-entrancy guard at the top of _check_time_barrier reads this. No pending
+    # exit here — these guard the flat-read branch, which _check_time_barrier defers
+    # to the idle-loop reconciler.
+    lt._pending_exit_order_id = None
     return lt
 
 
@@ -242,6 +247,9 @@ class TestTimeBarrierFalseFlatGuard:
     def test_false_flat_does_not_book_oob_close(self):
         import pandas as pd
         lt = _time_barrier_lt(first_read=0, settled=-1)
+        # In-callback: a flat cache read for a tracked trade DEFERS — no inline
+        # settled confirm, no book, no cancel, no reset. (settle-confirm-event-loop
+        # _07202026_0713 submit-and-defer.)
         out = lt._check_time_barrier(
             bar_time=pd.Timestamp("2026-07-08 14:00:00"),
             current_price=68.5, atr_value=0.4,
@@ -251,9 +259,21 @@ class TestTimeBarrierFalseFlatGuard:
         lt.exec_client.cancel_open_orders.assert_not_called()
         lt._reset_position_state.assert_not_called()
 
+        # PROTECTION RE-VERIFIED through the idle-loop reconciler (the $296k
+        # naked-short guard): the settled read (settled=-1) confirms the position is
+        # STILL OPEN (false flat) — the reconciler must STILL make NO close, NO
+        # cancel, NO reset. Position + protective orders retained.
+        lt._reconcile_pending_position_state()
+        lt.telemetry.close_position.assert_not_called()
+        lt.exec_client.cancel_open_orders.assert_not_called()
+        lt._reset_position_state.assert_not_called()
+
     def test_unconfirmed_read_fails_closed(self):
         import pandas as pd
         lt = _time_barrier_lt(first_read=0, settled=asyncio.TimeoutError)
+        # In-callback: flat cache read for a tracked trade DEFERS WITHOUT touching
+        # the settled read (a settled read here re-enters the running loop). No book,
+        # no cancel, and — the discriminator — no in-callback health emission.
         out = lt._check_time_barrier(
             bar_time=pd.Timestamp("2026-07-08 14:00:00"),
             current_price=68.5, atr_value=0.4,
@@ -261,7 +281,18 @@ class TestTimeBarrierFalseFlatGuard:
         assert out is False
         lt.telemetry.close_position.assert_not_called()
         lt.exec_client.cancel_open_orders.assert_not_called()
+        lt._emit_health_event.assert_not_called()  # no in-callback settled read
+
+        # The settled confirm — and its FAIL-CLOSED behaviour — moved BYTE-FOR-BYTE
+        # to the idle-loop reconciler ($296k naked-short guard): the settled snapshot
+        # times out (raises), the LOUD health event fires, and NOTHING is
+        # closed/cancelled/reset (position + protective orders retained).
+        lt._reconcile_pending_position_state()
+        lt.telemetry.close_position.assert_not_called()
+        lt.exec_client.cancel_open_orders.assert_not_called()
+        lt._reset_position_state.assert_not_called()
         lt._emit_health_event.assert_called_once()
+        assert lt._emit_health_event.call_args.args[0] == "position-flat-unconfirmed"
 
     def test_confirmed_flat_books_oob_close(self):
         import pandas as pd
@@ -270,11 +301,19 @@ class TestTimeBarrierFalseFlatGuard:
         lt._build_event_id = MagicMock(return_value="evt-1")
         lt._base_tradebook_fields = MagicMock(return_value={})
         lt.exec_client.cancel_open_orders.return_value = 0
+        # In-callback: DEFER — never book/reset off an unconfirmed flat in the bar
+        # callback.
         out = lt._check_time_barrier(
             bar_time=pd.Timestamp("2026-07-08 14:00:00"),
             current_price=68.5, atr_value=0.4,
         )
         assert out is False
+        lt.telemetry.close_position.assert_not_called()
+        lt._reset_position_state.assert_not_called()
+
+        # The idle-loop reconciler's flat-read branch confirms settled==0 (a REAL
+        # out-of-band close) and books it — BYTE-FOR-BYTE the relocated :1668 block.
+        lt._reconcile_pending_position_state()
         lt.telemetry.close_position.assert_called_once()
         assert lt._reset_position_state.call_args.kwargs.get("reason") == "CLOSED_OOB"
 

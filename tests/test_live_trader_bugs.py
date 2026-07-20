@@ -136,6 +136,9 @@ def test_out_of_band_exit_routing(caplog):
     trader._last_decision_context_by_order_id = {}
     trader._processed_exit_order_ids = set()
     trader._pending_entry_order_id = None
+    # TIME BARRIER submit-and-defer state (settle-confirm-event-loop_07202026_0713):
+    # the re-entrancy guard at the top of _check_time_barrier reads this.
+    trader._pending_exit_order_id = None
     trader._front_month_str = "202607"
     
     # Track the system generated bracket IDs
@@ -156,14 +159,21 @@ def test_out_of_band_exit_routing(caplog):
     mock_trade.order.orderId = 10
     trader.exec_client.close_position.return_value = mock_trade
     
-    # 1. Trigger the time barrier
-    result = trader._check_time_barrier(
+    # 1. Trigger the time barrier. Submit-and-defer
+    # (settle-confirm-event-loop_07202026_0713): the in-callback _check_time_barrier
+    # submits the exit + registers its id and returns False; the settled confirm/book
+    # runs in the idle-loop reconciler. The exit id is registered on submit (so the
+    # fill callback recognises it), and the completed-exit verdict (True) comes from
+    # the reconcile.
+    submit_result = trader._check_time_barrier(
         bar_time=pd.Timestamp("2026-06-30 02:00:00", tz="UTC"),
         current_price=70.50,
         atr_value=0.5
     )
-    assert result is True  # _check_time_barrier returns True if it exited
-    assert "10" in trader._processed_exit_order_ids
+    assert submit_result is False  # submit-and-defer: no inline confirm/book
+    assert "10" in trader._processed_exit_order_ids  # exit id registered on submit
+    result = trader._reconcile_pending_position_state()
+    assert result is True  # reconciler books the confirmed fill (_check_time_barrier exited)
     
     # 2. Trigger the _on_standard_execution_event callback for the fill of order 10
     evt = StandardExecutionEvent(

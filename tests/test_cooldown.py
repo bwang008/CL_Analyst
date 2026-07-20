@@ -114,6 +114,9 @@ def _make_trader_stub(
     # Entry order TTL state
     trader._pending_entry_order_id = None
     trader._pending_entry_bar_time = None
+    # TIME BARRIER submit-and-defer state (settle-confirm-event-loop_07202026_0713):
+    # the re-entrancy guard at the top of _check_time_barrier reads this.
+    trader._pending_exit_order_id = None
 
     # Trailing stop state
     trader._trailing_activated = False
@@ -186,11 +189,18 @@ class TestTimeBarrierExitMode:
         trader.exec_client.get_position_settled.return_value = 0  # settled CONFIRMS the exit filled
         trader.exec_client.get_executions.return_value = [{"order_id": "55", "price": 72.50}]
 
-        result = trader._check_time_barrier(
+        # Submit-and-defer (settle-confirm-event-loop_07202026_0713): the
+        # in-callback _check_time_barrier now only SUBMITS the exit + records
+        # _pending_exit_order_id and returns False; the settled confirm/book runs
+        # BYTE-FOR-BYTE in the idle-loop reconciler. Drive both — the completed-exit
+        # verdict (result is True) and the exit_mode routing assertions are unchanged.
+        submit_result = trader._check_time_barrier(
             bar_time=pd.Timestamp("2026-03-02 18:00:00"),
             current_price=72.50,
             atr_value=0.5,
         )
+        assert submit_result is False  # submit-and-defer: no inline confirm/book
+        result = trader._reconcile_pending_position_state()
 
         assert result is True
         # Verify it called close_position with exit_mode, NOT close_position_market

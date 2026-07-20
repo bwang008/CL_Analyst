@@ -1614,11 +1614,17 @@ class TestStartupRecovery:
         lt.exec_client.cancel_open_orders.assert_called_once_with(symbol="GC")
 
     def test_time_barrier_broker_flat_branch_fence(self, caplog):
-        """FENCE (passes today): _check_time_barrier's broker-flat branch
-        is UNCHANGED in v1 — CLOSED_OOB close reason, bulk symbol cancel,
-        strategy cooldown via _reset_position_state. Its synthetic
-        bar-price exit_price is DELIBERATELY NOT pinned: housekeeping
-        repairs those rows afterwards (A-1(b))."""
+        """FENCE (re-pointed by settle-confirm-event-loop_07202026_0713):
+        Direction A supersedes the v1 in-callback broker-flat branch. The
+        confirmed-flat out-of-band close is now booked BYTE-FOR-BYTE by the
+        idle-loop reconciler's flat-read branch (_book_out_of_band_close),
+        NOT inline in _check_time_barrier (which defers the flat read). What
+        this fence guards is UNCHANGED, only relocated: CLOSED_OOB close
+        reason, bulk symbol cancel, strategy cooldown via
+        _reset_position_state -> on_exit. The exit_price is DELIBERATELY NOT
+        pinned — the idle reconciler has no bar price and books an explicit
+        None (honest-unknown); housekeeping / kill switch own any priced
+        flatten (A-1(b))."""
         lt = object.__new__(lt_module.LiveTrader)
         lt._execution_symbol = "GC"
         lt._instrument_context = _instrument_ctx()
@@ -1646,17 +1652,28 @@ class TestStartupRecovery:
         lt._sl_order_id = 202
         lt._tracked_tp_price = None
         lt._tracked_sl_price = None
+        # TIME BARRIER submit-and-defer state (settle-confirm-event-loop_07202026_0713):
+        # the re-entrancy guard at the top of _check_time_barrier reads this.
+        lt._pending_exit_order_id = None
         _attach_identity_seams(lt)
 
+        # In-callback: a flat cache read for a tracked trade DEFERS (no inline
+        # confirm/book/reset). The confirmed-flat OOB book runs in the reconciler.
         result = lt._check_time_barrier(
             bar_time=pd.Timestamp("2026-07-07 14:00:00"),
             current_price=68.11, atr_value=0.4,
         )
-
         assert result is False
+        lt.telemetry.close_position.assert_not_called()  # deferred, not booked inline
+        lt.exec_client.cancel_open_orders.assert_not_called()
+
+        # Idle-loop reconciler: settled CONFIRMS flat -> book the OOB close
+        # (byte-for-byte the relocated broker-flat branch).
+        lt._reconcile_pending_position_state()
+
         c = lt.telemetry.close_position.call_args
         assert c.kwargs.get("reason") == "CLOSED_OOB", (
-            "the legacy broker-flat branch must keep writing CLOSED_OOB "
+            "the broker-flat OOB branch must keep writing CLOSED_OOB "
             "(the reason housekeeping's whitelist keys on)"
         )
         lt.exec_client.cancel_open_orders.assert_called_once_with(symbol="GC")

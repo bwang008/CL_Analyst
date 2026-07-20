@@ -1645,83 +1645,46 @@ class LiveTrader:
         current_price: float,
         atr_value: Optional[float],
     ) -> bool:
-        """Enforce 24-hour (288-bar) exit to match backtests."""
+        """Enforce 24-hour (288-bar) exit to match backtests.
+
+        SUBMIT-AND-DEFER (settle-confirm-event-loop_07202026_0713). This runs
+        INSIDE the ib_insync bar-update callback (_on_bar_update_* -> _on_new_bar
+        -> here), i.e. from an already-RUNNING asyncio loop. It may therefore
+        only SUBMIT orders (non-blocking placeOrder/cancelOrder) and RECORD
+        intent — it must NEVER call the settled read: _confirm_settled_position
+        -> get_position_settled does self.ib.run() == loop.run_until_complete(),
+        which re-enters the running loop and raises 'This event loop is already
+        running'. Every settled-based confirm/book/re-arm decision is deferred to
+        _reconcile_pending_position_state, which runs on a genuinely-idle
+        main-loop tick.
+        """
+        # BINDING CONDITION 2 — re-entrancy guard. While a TIME BARRIER exit is
+        # already outstanding, the idle-loop reconciler owns its resolution; a
+        # second bar callback must NOT submit another exit or read settled (a
+        # repeat settled read would re-crash in-loop). Defer immediately.
+        if self._pending_exit_order_id is not None:
+            return False
+
         current_position = self.exec_client.get_position(
             symbol=self._execution_symbol,
         )
-        if current_position == 0 and self._active_trade_id is not None:
-            # We think we hold a position but read flat. Right after a
-            # reconnect this can be a stale/empty ib_insync cache — CONFIRM
-            # with a settled snapshot before cancelling protective orders or
-            # booking an out-of-band close (reconnect-false-flat-oob).
-            settled = self._confirm_settled_position(self._execution_symbol)
-            if settled is None:
-                # Unconfirmed → fail closed: retain position + orders, defer.
-                log.error(
-                    "[TIME BARRIER] flat read for tracked trade %s could not "
-                    "be confirmed (settled snapshot failed) — retaining "
-                    "position + protective orders this cycle (fail-closed).",
+        if current_position == 0:
+            if self._active_trade_id is not None:
+                # We think we hold a position but read flat. Right after a
+                # reconnect this can be a stale/empty ib_insync cache. DEFER:
+                # do NOT confirm settled here (that does self.ib.run() and
+                # re-enters the running callback loop) and do NOT book an
+                # out-of-band close off an unconfirmed flat — the idle-loop
+                # reconciler's flat-read branch owns the settled confirm +
+                # OOB-close booking (reconnect-false-flat-oob, relocated).
+                log.info(
+                    "[TIME BARRIER] flat read for tracked trade %s — deferring "
+                    "the settled confirm + any out-of-band-close decision to "
+                    "the idle-loop reconciler (no in-callback settled read)",
                     self._active_trade_id,
                 )
                 return False
-            current_position = settled
-        if current_position == 0:
-            # Detect out-of-band close (manual TWS close, external system, etc.)
-            if self._active_trade_id is not None:
-                log.info(
-                    "[TRADE] EXIT: OUT-OF-BAND close detected — position went "
-                    "flat while trade %s was still tracked (held %d bars)",
-                    self._active_trade_id, self._position_bars_held,
-                )
-                try:
-                    self.telemetry.close_position(
-                        self._active_trade_id,
-                        reason="CLOSED_OOB",
-                        close_time=self._utc_iso_now(),
-                        bars_held=self._position_bars_held,
-                        exit_price=current_price,
-                    )
-                except Exception:
-                    log.debug(
-                        "Failed to close ledger position (OOB)", exc_info=True
-                    )
-                # Log a tradebook event for auditability
-                event_ts = self._utc_iso_now()
-                event_id = self._build_event_id(
-                    event_type="POSITION_CLOSED_OOB",
-                    event_ts=event_ts,
-                )
-                try:
-                    self.telemetry.log_tradebook_event(
-                        event_id=event_id,
-                        event_type="POSITION_CLOSED_OOB",
-                        event_timestamp_utc=event_ts,
-                        symbol=self._execution_symbol,
-                        status="CLOSED",
-                        **self._base_tradebook_fields(),
-                    )
-                except Exception:
-                    log.debug(
-                        "Failed to log OOB tradebook event", exc_info=True
-                    )
-                # Cancel any orphaned TP/SL orders still live on IBKR
-                try:
-                    cancelled = self.exec_client.cancel_open_orders(
-                        symbol=self._execution_symbol,
-                    )
-                    if cancelled > 0:
-                        log.info(
-                            "OOB CLEANUP: cancelled %d orphaned CL order(s)",
-                            cancelled,
-                        )
-                except Exception:
-                    log.debug(
-                        "OOB CLEANUP: cancel_open_cl_orders failed",
-                        exc_info=True,
-                    )
-            # CLOSED_OOB: an exit whose true reason was lost. on_exit() only
-            # fires when _position_side != 0, i.e. exactly the OOB case; the
-            # routine flat-bar reset below it never reaches the strategy.
+            # Genuinely flat + untracked — routine flat bar.
             self._reset_position_state(reason="CLOSED_OOB")
             return False
 
@@ -1794,75 +1757,225 @@ class LiveTrader:
             return False
 
         # The exit WAS submitted — register its id so the async fill callback
-        # recognises it as a known exit (not a PHANTOM FILL) and remember it as
-        # the pending exit for the cross-bar retry.
+        # recognises it as a known exit (not a PHANTOM FILL), record it as the
+        # pending exit, and DEFER. The settled confirm/book/re-arm decision runs
+        # in _reconcile_pending_position_state on the next genuinely-idle tick
+        # (this callback runs inside the running loop; a settled read here would
+        # raise 'This event loop is already running'). Until the reconciler
+        # clears _pending_exit_order_id the re-entrancy guard above blocks a
+        # second exit, and _sl_order_id is None so the 5-minute kill switch
+        # covers the deferral window.
         self._processed_exit_order_ids.add(str(_exit_oid))
         self._pending_exit_order_id = _exit_oid
+        return False
 
-        # A1 — gate on broker truth. Never book / reset / re-arm on the mere
-        # submission; ask the broker whether the position actually went flat
-        # (same main-thread, event-loop-idle contract already relied on at the
-        # :1592 settled read in this method).
-        settled = self._confirm_settled_position(self._execution_symbol)
-        if settled is None:
-            # Unconfirmed -> fail closed (mirrors the :1593-1601 precedent). The
-            # exit is still live and can still fill: no ledger write, no reset,
-            # keep the position tracked, do NOT re-arm and do NOT cancel it away
-            # (BINDING CONDITION 1). Retry next bar.
+    def _reconcile_pending_position_state(self) -> bool:
+        """Idle-loop settled-based reconciler (settle-confirm-event-loop).
+
+        Owns ALL settled-based confirmation for a tracked trade. It MUST run on
+        a genuinely-idle main-loop tick (wired into _event_loop immediately
+        BEFORE _run_hourly_housekeeping): the settled read it depends on does
+        self.ib.run() == loop.run_until_complete(), which raises 'This event
+        loop is already running' if reached from inside the ib_insync bar-update
+        callback. It is therefore NEVER called from _check_time_barrier, which
+        now only submits the exit + records intent and defers here.
+
+        Two independently-triggered branches, in order:
+          * Pending-exit (_pending_exit_order_id set): resolve the TIME BARRIER
+            exit _check_time_barrier submitted-and-deferred — the a1464d2
+            A1/A2/route settled decision, relocated byte-for-byte to this idle
+            context (the loop has now turned since submission, so the fill is
+            reflected and the settled snapshot is authoritative). Returns True
+            when the exit is booked/completed, False when deferred.
+          * Flat-read (a tracked trade with NO pending exit whose cached
+            position reads flat): the reconnect-false-flat / out-of-band-close
+            case — confirm settled and, on a CONFIRMED flat, book the OOB close.
+            Its trigger is the flat cache read itself, NOT the pending exit.
+
+        Never raises into the event loop (the housekeeping/rollover pattern): an
+        internal failure logs and DEFERS to the next idle tick — it must NEVER
+        book or re-arm on an unconfirmed / guessed value (no cheap fix).
+        """
+        try:
+            # --- Pending-exit branch (owns BINDING CONDITION 2's deferral) ----
+            if self._pending_exit_order_id is not None:
+                exit_oid = self._pending_exit_order_id
+                current_position = self.exec_client.get_position(
+                    symbol=self._execution_symbol,
+                )
+                # A1 — gate on broker truth. The loop is idle and has turned
+                # since the exit was submitted in the bar callback, so the fill
+                # is reflected and this settled snapshot is authoritative (same
+                # main-thread, event-loop-idle contract self.ib.run() needs).
+                settled = self._confirm_settled_position(self._execution_symbol)
+                if settled is None:
+                    # Unconfirmed -> fail closed (the :1593-1601 precedent). The
+                    # exit is still live and can still fill: no ledger write, no
+                    # reset, keep the position tracked, do NOT re-arm and do NOT
+                    # cancel it away (BINDING CONDITION 1). Retry next idle tick.
+                    log.error(
+                        "[TIME BARRIER] exit %s for trade %s could not be "
+                        "confirmed (settled snapshot failed) — no book, no "
+                        "reset, retaining the position + live exit "
+                        "(fail-closed); retrying next idle tick",
+                        exit_oid, self._active_trade_id,
+                    )
+                    self._note_time_barrier_deferral(exit_oid)
+                    return False
+                if settled == 0:
+                    # Flat: the exit filled. Book the PROVEN price and finish.
+                    return self._book_time_barrier_flat(exit_oid)
+
+                # settled != 0 — the incident: the exit did not (yet) fill. A2:
+                # retire the stranded GTC exit BEFORE touching protection —
+                # leaving it resting would let it double-fill against a re-armed
+                # stop.
+                cancel_count = self.exec_client.cancel_orders_by_ids([exit_oid])
+                if cancel_count == 0:
+                    # Not open — a filled order has already left openTrades(), so
+                    # the cancel was a silent no-op. No live exit can fire =>
+                    # route on a fresh settled read.
+                    return self._route_retired_time_barrier_exit(
+                        exit_oid, current_position,
+                    )
+                # BINDING CONDITION 1 — cancel_count >= 1: the exit is only
+                # cancel-REQUESTED, not dead. ib_insync fires cancelOrder
+                # fire-and-forget (ibkr_execution.py:298-313) and a fast fill can
+                # still cross at the exchange (the race documented at
+                # ibkr_client.py:1583-1588). NEVER re-arm while it can still
+                # fill: re-scan the open book, and only once the exit has LEFT it
+                # may the settled read be taken (the ordering is load-bearing — a
+                # settled snapshot pre-dating the fill would re-arm a stop onto a
+                # flat book = a naked reversal).
+                open_trades = self.exec_client.get_open_trades(
+                    self._execution_symbol,
+                ) or []
+                exit_still_open = any(
+                    str(getattr(evt, "order_id", None)) == str(exit_oid)
+                    for evt in open_trades
+                )
+                if exit_still_open:
+                    # Still live -> defer: stay tracked, _sl_order_id None so the
+                    # 5-minute kill switch covers the gap, no re-arm, no ledger
+                    # write. Retry next tick (bounded by bars/attempts, never a
+                    # sleep).
+                    log.warning(
+                        "[TIME BARRIER] exit %s cancel-requested but still "
+                        "resting — deferring: no re-arm (would double-fill), "
+                        "position stays tracked and the kill switch covers the "
+                        "gap; retrying next idle tick", exit_oid,
+                    )
+                    self._note_time_barrier_deferral(exit_oid)
+                    return False
+                # The exit has left the book -> STRICTLY AFTER that, route on
+                # settled.
+                return self._route_retired_time_barrier_exit(
+                    exit_oid, current_position,
+                )
+
+            # --- Flat-read branch (BINDING CONDITION 3) -----------------------
+            # A tracked trade with NO pending exit whose cached position reads
+            # flat is the reconnect-false-flat / out-of-band-close case (the
+            # :1657 site, relocated to the idle context). Independently
+            # triggered by the flat cache read — NOT gated on a pending exit.
+            if self._active_trade_id is not None:
+                current_position = self.exec_client.get_position(
+                    symbol=self._execution_symbol,
+                )
+                if current_position != 0:
+                    # Healthy / non-flat -> nothing to reconcile. Do NOT take a
+                    # settled snapshot (an ib.run per poll) for a healthy
+                    # position every idle tick.
+                    return False
+                # Flat cache read -> confirm with a settled snapshot before
+                # booking an out-of-band close (idle here, so self.ib.run() is
+                # safe).
+                settled = self._confirm_settled_position(self._execution_symbol)
+                if settled is None:
+                    # Unconfirmed -> fail closed: retain position + protective
+                    # orders, defer (the :1658-1666 precedent, relocated).
+                    log.error(
+                        "[RECONCILE] flat read for tracked trade %s could not "
+                        "be confirmed (settled snapshot failed) — retaining "
+                        "position + protective orders this tick (fail-closed)",
+                        self._active_trade_id,
+                    )
+                    return False
+                if settled != 0:
+                    # False flat — the position is genuinely still open; the
+                    # cache read was stale. Nothing to book; steady-state
+                    # management resumes on the next bar.
+                    return False
+                # CONFIRMED flat -> book the out-of-band close.
+                self._book_out_of_band_close()
+                return False
+
+            return False
+        except Exception:
+            # Never-raises boundary (like housekeeping/rollover): DEFER on
+            # failure — log and retry next idle tick. This is the ONLY permitted
+            # catch and it must NEVER book or re-arm on an unconfirmed / guessed
+            # value.
             log.error(
-                "[TIME BARRIER] exit %s submitted for trade %s but the settled "
-                "snapshot could not be confirmed — no book, no reset, retaining "
-                "the position + live exit (fail-closed); retrying next bar",
-                _exit_oid, self._active_trade_id,
+                "[RECONCILE] pending-position reconciliation failed — deferring "
+                "to the next idle tick (no book, no re-arm on an unconfirmed "
+                "value)",
+                exc_info=True,
             )
-            self._note_time_barrier_deferral(_exit_oid)
             return False
-        if settled == 0:
-            # Flat: the exit filled. Book the PROVEN price and finish.
-            return self._book_time_barrier_flat(_exit_oid)
 
-        # settled != 0 — the incident: the exit did not (yet) fill. A2: retire
-        # the stranded GTC exit BEFORE touching protection — leaving it resting
-        # would let it double-fill against a re-armed stop.
-        cancel_count = self.exec_client.cancel_orders_by_ids([_exit_oid])
-        if cancel_count == 0:
-            # Not open — a filled order has already left openTrades(), so the
-            # cancel was a silent no-op. No live exit can fire => route on a
-            # fresh settled read (BINDING CONDITION 2).
-            return self._route_retired_time_barrier_exit(
-                _exit_oid, current_position,
-            )
-        # BINDING CONDITION 1 — cancel_count >= 1: the exit is only
-        # cancel-REQUESTED, not dead. ib_insync fires cancelOrder
-        # fire-and-forget (ibkr_execution.py:298-313) and a fast fill can still
-        # cross at the exchange (the race documented at ibkr_client.py:1583-1588).
-        # NEVER re-arm while it can still fill: re-scan the open book, and only
-        # once the exit has LEFT it may the settled read be taken (the ordering
-        # is load-bearing — a settled snapshot pre-dating the fill would re-arm
-        # a stop onto a flat book = a naked reversal).
-        open_trades = self.exec_client.get_open_trades(
-            self._execution_symbol,
-        ) or []
-        exit_still_open = any(
-            str(getattr(evt, "order_id", None)) == str(_exit_oid)
-            for evt in open_trades
+    def _book_out_of_band_close(self) -> None:
+        """Book a CONFIRMED out-of-band close for the tracked trade (the
+        in-callback :1668-1725 block, relocated to the idle reconciler). The
+        exit price is an explicit unknown (None) — the idle reconciler has no bar
+        price and NEVER fabricates one (the honest-unknown convention); the
+        NAKED_POSITION kill switch / housekeeping own any priced flatten."""
+        log.info(
+            "[TRADE] EXIT: OUT-OF-BAND close detected — position CONFIRMED flat "
+            "while trade %s was still tracked (held %d bars)",
+            self._active_trade_id, self._position_bars_held,
         )
-        if exit_still_open:
-            # Still live -> defer: stay tracked, _sl_order_id None so the
-            # 5-minute kill switch covers the gap, no re-arm, no ledger write.
-            # Retry next bar (bounded by bars/attempts, never a sleep).
-            log.warning(
-                "[TIME BARRIER] exit %s cancel-requested but still resting — "
-                "deferring: no re-arm (would double-fill), position stays "
-                "tracked and the kill switch covers the gap; retrying next bar",
-                _exit_oid,
+        try:
+            self.telemetry.close_position(
+                self._active_trade_id,
+                reason="CLOSED_OOB",
+                close_time=self._utc_iso_now(),
+                bars_held=self._position_bars_held,
+                exit_price=None,
             )
-            self._note_time_barrier_deferral(_exit_oid)
-            return False
-        # The exit has left the book -> STRICTLY AFTER that, route on settled.
-        return self._route_retired_time_barrier_exit(
-            _exit_oid, current_position,
+        except Exception:
+            log.debug("Failed to close ledger position (OOB)", exc_info=True)
+        # Log a tradebook event for auditability
+        event_ts = self._utc_iso_now()
+        event_id = self._build_event_id(
+            event_type="POSITION_CLOSED_OOB",
+            event_ts=event_ts,
         )
+        try:
+            self.telemetry.log_tradebook_event(
+                event_id=event_id,
+                event_type="POSITION_CLOSED_OOB",
+                event_timestamp_utc=event_ts,
+                symbol=self._execution_symbol,
+                status="CLOSED",
+                **self._base_tradebook_fields(),
+            )
+        except Exception:
+            log.debug("Failed to log OOB tradebook event", exc_info=True)
+        # Cancel any orphaned TP/SL orders still live on IBKR
+        try:
+            cancelled = self.exec_client.cancel_open_orders(
+                symbol=self._execution_symbol,
+            )
+            if cancelled > 0:
+                log.info(
+                    "OOB CLEANUP: cancelled %d orphaned order(s)", cancelled,
+                )
+        except Exception:
+            log.debug("OOB CLEANUP: cancel_open_orders failed", exc_info=True)
+        # CLOSED_OOB: an exit whose true reason was lost. on_exit() only fires
+        # when _position_side != 0, i.e. exactly the OOB case.
+        self._reset_position_state(reason="CLOSED_OOB")
 
     def _route_retired_time_barrier_exit(
         self, exit_oid, current_position,
@@ -5565,6 +5678,16 @@ class LiveTrader:
                     self.data_client.sleep(sleep_for)
                 else:
                     time.sleep(sleep_for)
+
+                # Idle-loop settled reconciler (settle-confirm-event-loop). MUST
+                # run BEFORE housekeeping (BINDING CONDITION 1 ordering): if the
+                # OOB-closer / 5-min kill switch acts on a pending TIME BARRIER
+                # exit first, the NULL-price row persists — just sooner. Runs
+                # here in the genuinely-idle slot (between ib.sleep() calls) so
+                # its settled read (self.ib.run()) is safe — it CANNOT run in the
+                # bar-update callback, which is inside the running loop. It is
+                # the never-raise boundary for all settled-based confirmation.
+                self._reconcile_pending_position_state()
 
                 # Hourly housekeeping sweep — invoked EVERY poll and
                 # self-gated on the wall clock (A-7), deliberately NOT
