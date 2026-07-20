@@ -4515,6 +4515,16 @@ class LiveTrader:
                     )
 
                     if chunk_df is not None and not chunk_df.empty:
+                        # Drop the still-forming tail bar: an empty endDateTime
+                        # makes IBKR return the currently-forming bar as the last
+                        # row, and the stitch filter below only drops OLDER bars.
+                        # Completeness is measured from the FETCH-literal bar-size
+                        # ("5 min") — NOT self._bar_size (which may be 2h/4h and
+                        # would mis-size the test) — against the already-computed
+                        # tz-naive UTC `now`, so a not-yet-closed bar never enters
+                        # the rolling window / cache nor advances _last_bar_time_5m
+                        # (the live stream redelivers it when it completes).
+                        chunk_df = chunk_df[(chunk_df.index + pd.Timedelta("5 min")) <= now]
                         # Only keep bars newer than our last known bar
                         new_bars = chunk_df[chunk_df.index > self._last_bar_time_5m]
                         if len(new_bars) > 0:
@@ -4578,6 +4588,16 @@ class LiveTrader:
                     )
 
                     if chunk_df is not None and not chunk_df.empty:
+                        # Drop the still-forming tail bar: an empty endDateTime
+                        # makes IBKR return the currently-forming bar as the last
+                        # row, and the stitch filter below only drops OLDER bars.
+                        # Completeness is measured from the FETCH-literal bar-size
+                        # ("1 hour") — NOT self._bar_size (2h/4h would mis-size the
+                        # test) — against the already-computed tz-naive UTC `now`,
+                        # so a not-yet-closed bar never enters the rolling window /
+                        # cache nor advances _last_bar_time_1h (the live stream
+                        # redelivers it as NEW 1H BAR + inference when it completes).
+                        chunk_df = chunk_df[(chunk_df.index + pd.Timedelta("1 hour")) <= now]
                         new_bars = chunk_df[chunk_df.index > self._last_bar_time_1h]
                         if len(new_bars) > 0:
                             self.rolling_df_1h = pd.concat([self.rolling_df_1h, new_bars])

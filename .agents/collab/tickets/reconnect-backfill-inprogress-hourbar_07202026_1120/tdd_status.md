@@ -1,0 +1,8 @@
+# TDD Dashboard — reconnect-backfill-inprogress-hourbar_07202026_1120
+
+Impact-Reviewer APPROVED (inline variant, 3 conditions). Branch: development.
+Blueprint: `.agents/collab/tickets/reconnect-backfill-inprogress-hourbar_07202026_1120/blueprint.md`.
+
+[2026-07-20T18:37Z] | reconnect-backfill-inprogress-hourbar_07202026_1120 | PHASE: Red | STATUS: TDD-Manager initialized. Git baseline clean (only this ticket folder untracked). Spawning TDD-Tester to write the red regression (in-progress tail bar not stitched, completed bar fires NEW BAR; 5M twin). Waiting.
+[2026-07-20T18:52Z] | reconnect-backfill-inprogress-hourbar_07202026_1120 | PHASE: Red | STATUS: Tester DONE. NEW isolated file tests/test_reconnect_backfill_incomplete_bar.py (Tester correctly avoided the strict-locked test_reconnect_recovery_fixes.py). RED CONFIRMED: 3 failed for the right reasons (T1 in-progress 16:00 tail IS stitched; T2 _on_new_bar 0 calls = the missed hour; T3 5M 16:15 tail stitched). Isolated new file = no collateral risk to existing tests (git shows only this file added). now frozen deterministically (datetime subclass, mid-hour 16:17 UTC). Spawning TDD-Coder. Waiting.
+[2026-07-20T19:00Z] | reconnect-backfill-inprogress-hourbar_07202026_1120 | PHASE: Green | STATUS: Coder DONE. FULL FAST SUITE GREEN: 2442 passed, 1 skipped, ZERO regressions (baseline 2439 + 3 new). TDD-Manager reviewed diff: confined to live_trader.py (+20 = 2 completeness filters + why-comments); both reuse now:4491, fetch-literal duration, before new_bars filter; no inner try/except (loud), dedup untouched, no cheap-fix smells. All 3 binding conditions met. tdd_result.md written. Committing (deploy operator-gated, same restart as 731ebed, canary required).
