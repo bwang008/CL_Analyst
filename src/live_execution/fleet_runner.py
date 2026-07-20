@@ -52,12 +52,15 @@ Usage:
 import argparse
 import json
 import logging
+import re
 import signal
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+
+from src.live_execution.ascii_safe import to_ascii
 
 log = logging.getLogger("FleetRunner")
 
@@ -96,13 +99,71 @@ class _Instance:
         return Path(self.config_path).stem
 
 
-def _pump_stderr(pipe, sink, echo_stream):
+def _ascii_bytes(raw: bytes) -> bytes:
+    """Transliterate a child's stderr line to ASCII for the CONSOLE echo.
+
+    The children's own basicConfig StreamHandler is not ASCII-sanitized, so
+    the runner is the console gateway: em-dashes / arrows / stray emoji become
+    plain ASCII here instead of rendering as mojibake (the U+FFFD box). The
+    crash-capture SINK keeps the raw bytes untouched (traceback fidelity).
+    """
+    try:
+        return to_ascii(raw.decode("utf-8", "replace")).encode("ascii", "ignore")
+    except Exception:
+        return raw
+
+
+class _ConsoleSeparator:
+    """Serializes the children's echoed stderr and inserts one blank line
+    between heartbeat rounds, so the interleaved bots group cleanly.
+
+    Content-driven, NOT wall-clock: a round completes when a heartbeat for a
+    symbol already seen in the current round arrives, and that repeat opens the
+    next round. This tracks the real cadence regardless of each bot's start
+    phase, the stagger, or the bot count -- a fixed-time separator slices
+    THROUGH rounds because their phase (start-time offset) is arbitrary. Every
+    line is also ASCII-sanitized: the runner is the console gateway (the
+    children's own stderr handler is not sanitized).
+
+    All pump threads share one instance; a lock keeps the merged stream (and
+    the round state) consistent.
+    """
+
+    # Heartbeat tag + marker, e.g. "[CL ] alive |" / "[MGC] alive |".
+    _HB_RE = re.compile(rb"\[([A-Z0-9]{1,4})\s*\]\s+alive \|")
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._lock = threading.Lock()
+        self._seen: set[bytes] = set()
+
+    def write_line(self, raw: bytes) -> None:
+        m = self._HB_RE.search(raw)
+        with self._lock:
+            if m is not None:
+                sym = m.group(1)
+                if sym in self._seen:
+                    self._write(b"\n")      # round complete -> blank separator
+                    self._seen.clear()
+                self._seen.add(sym)
+            self._write(_ascii_bytes(raw))
+
+    def _write(self, data: bytes) -> None:
+        try:
+            self._stream.write(data)
+            self._stream.flush()
+        except (ValueError, OSError):
+            pass
+
+
+def _pump_stderr(pipe, sink, console):
     """Tee one child's stderr: every line goes to the sink file (crash
-    capture) and, when echo_stream is set, to the runner's console.
+    capture) and, when `console` is set, to the runner's console via the
+    shared _ConsoleSeparator (ASCII-sanitized, grouped by heartbeat round).
 
     Runs on a daemon thread per child; exits at pipe EOF (child death) and
     closes the sink so poll_once() reads a fully flushed traceback. Write
-    errors on one target never stop the other.
+    errors on one target never stop the other. The sink keeps raw bytes.
     """
     try:
         for line in iter(pipe.readline, b""):
@@ -111,12 +172,8 @@ def _pump_stderr(pipe, sink, echo_stream):
                 sink.flush()
             except (ValueError, OSError):
                 pass
-            if echo_stream is not None:
-                try:
-                    echo_stream.write(line)
-                    echo_stream.flush()
-                except (ValueError, OSError):
-                    pass
+            if console is not None:
+                console.write_line(line)
     finally:
         try:
             sink.close()
@@ -152,6 +209,10 @@ class FleetRunner:
         # sys.stderr.buffer at spawn time.
         self._echo_child_stderr = bool(echo_child_stderr)
         self._stderr_echo_stream = stderr_echo_stream
+        # One shared console gateway across all pump threads (created lazily at
+        # first spawn) — inserts blank lines between heartbeat rounds and
+        # ASCII-sanitizes the echo.
+        self._console = None
 
         self.manifest = None          # raw parsed manifest dict
         self.instances = []           # _Instance for each ENABLED entry
@@ -502,14 +563,18 @@ class FleetRunner:
                 instance.name
             )
             instance.proc = self._popen(instance.cmd, stderr=subprocess.PIPE)
-            echo = None
+            console = None
             if self._echo_child_stderr:
-                echo = self._stderr_echo_stream
-                if echo is None:
-                    echo = getattr(sys.stderr, "buffer", None)
+                if self._console is None:
+                    stream = self._stderr_echo_stream
+                    if stream is None:
+                        stream = getattr(sys.stderr, "buffer", None)
+                    if stream is not None:
+                        self._console = _ConsoleSeparator(stream)
+                console = self._console
             instance.stderr_pump = threading.Thread(
                 target=_pump_stderr,
-                args=(instance.proc.stderr, instance.stderr_sink, echo),
+                args=(instance.proc.stderr, instance.stderr_sink, console),
                 name=f"stderr-pump-{instance.name}",
                 daemon=True,
             )
@@ -727,6 +792,8 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, _handle_signal)
 
     runner.launch_all()
+    # Heartbeat rounds are grouped by the shared _ConsoleSeparator on the echo
+    # path (blank line inserted when a round completes) — no timer needed.
     try:
         while True:
             live = runner.poll_once()

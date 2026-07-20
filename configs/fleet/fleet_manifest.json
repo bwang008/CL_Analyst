@@ -26,7 +26,7 @@
       "extra_args": []
     }
   ],
-  "stagger_seconds": 60,
+  "stagger_seconds": 30,
   "data_port": 4002,
   "exec_port": 4002
 }
