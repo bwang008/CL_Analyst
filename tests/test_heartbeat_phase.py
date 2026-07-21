@@ -17,6 +17,15 @@ startup and the phases drifted / re-phased on reconnect. The new contract:
 
 Companion to the Strict-Locked tests/test_fleet_runner.py (command-shape
 assertions there are membership-based, so the appended flag is additive).
+
+TDD-TESTER AUTHORIZATION
+Target Implementation File: src/live_execution/live_trader.py
+Target Class/Function: module-level _HEARTBEAT_GRID_DELAY (=15.0) applied at the
+    sole offset-consumption site in LiveTrader._event_loop
+    (hb_offset = _HEARTBEAT_GRID_DELAY + self._heartbeat_offset)
+Ticket: heartbeat-bar-log-collision_07212026_0815
+Status: FINALIZED
+Strict-Lock: TRUE (Implementation agents may NOT modify this file)
 """
 
 import json
@@ -31,6 +40,7 @@ from src.live_execution.fleet_runner import (
     FleetRunner,
 )
 from src.live_execution.live_trader import (
+    _HEARTBEAT_GRID_DELAY,
     _HEARTBEAT_INTERVAL,
     _HEARTBEAT_MIN_SLEEP,
     _POLL_INTERVAL,
@@ -259,7 +269,9 @@ class TestEventLoopWallClockHeartbeat:
 
         lt.data_client.sleep = _sleep
 
-        with patch.object(lt_module, "time", fake):
+        with patch.object(lt_module, "time", fake), patch.object(
+            lt_module, "_HEARTBEAT_GRID_DELAY", 0.0
+        ):
             lt._event_loop()
 
         assert fires == [1202.0, 1502.0]
@@ -295,7 +307,9 @@ class TestEventLoopWallClockHeartbeat:
 
         lt.data_client.sleep = _sleep
 
-        with patch.object(lt_module, "time", fake):
+        with patch.object(lt_module, "time", fake), patch.object(
+            lt_module, "_HEARTBEAT_GRID_DELAY", 0.0
+        ):
             lt._event_loop()
 
         assert fires[0] == 1202.0
@@ -322,13 +336,47 @@ class TestEventLoopWallClockHeartbeat:
         lt._reconnect = MagicMock(side_effect=_reconnect)
         lt.data_client.sleep = fake.sleep
 
-        with patch.object(lt_module, "time", fake):
+        with patch.object(lt_module, "time", fake), patch.object(
+            lt_module, "_HEARTBEAT_GRID_DELAY", 0.0
+        ):
             lt._event_loop()
 
         assert lt._reconnect.call_count == 1
         assert fires == [1202.0], (
             "the first tick moved — reconnect re-phased the wall-clock "
             "schedule"
+        )
+
+    def test_grid_delay_shifts_whole_fleet_past_boundary(self):
+        """POLICY guard (go-forward): the module-level _HEARTBEAT_GRID_DELAY
+        shifts the ENTIRE heartbeat gate 15s past every 5-min boundary so the
+        fleet's `alive` block prints after the ~T+5s NEW-5M-BAR burst clears.
+
+        Delay ACTIVE (default 15.0, deliberately NOT patched away) on top of a
+        phase-0 child: from a 1000.0 clock the first (and only) fire must land
+        at boundary 1200 + 15 = 1215.0, i.e. _initial_heartbeat_deadline with
+        an EFFECTIVE offset of 15 = (floor((1000-15)/300)+1)*300 + 15."""
+        assert lt_module._HEARTBEAT_GRID_DELAY == 15.0, (
+            "the go-forward policy default drifted — bars land ~T+5s, so the "
+            "gate must sit +15s past the boundary to clear the bar burst"
+        )
+        fake = FakeTime(1000.0)
+        fires, sleeps = [], []
+        lt = make_loop_trader(fires, fake, stop_after=1)
+        lt._heartbeat_offset = 0.0
+
+        def _sleep(seconds):
+            sleeps.append(seconds)
+            fake.sleep(seconds)
+
+        lt.data_client.sleep = _sleep
+
+        with patch.object(lt_module, "time", fake):
+            lt._event_loop()
+
+        assert fires == [1215.0], (
+            "the grid delay did not shift the phase-0 child to +15s past the "
+            "5-min boundary — the alive block would collide with the bar burst"
         )
 
 

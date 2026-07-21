@@ -147,6 +147,16 @@ _HEARTBEAT_INTERVAL = 300.0
 # Floor for the deadline-shortened sleep: never busy-spin, but small enough
 # that firing jitter stays well under the 5s inter-child spacing.
 _HEARTBEAT_MIN_SLEEP = 0.05
+# Base grid delay: shift the ENTIRE wall-clock heartbeat GATE (not just the
+# `alive` line — the once-per-UTC-day contract-rollover check and the
+# stale-bar watchdog ride this same gate and shift with it, harmlessly) this
+# many seconds PAST each 5-min boundary so the fleet's `alive |` block prints
+# AFTER the ~T+5s `NEW 5M BAR` burst (IBKR delivers 5-min bars at ~T+5s, so
+# 15s clears the burst). Applied ON TOP OF each child's per-child phase
+# (fleet_runner --heartbeat-offset); total = delay + phase must stay within
+# _HEARTBEAT_INTERVAL — at the 16-instance ceiling that is 15 + 15*5 = 90s,
+# comfortably inside 300s.
+_HEARTBEAT_GRID_DELAY = 15.0
 
 
 def _initial_heartbeat_deadline(now: float, offset: float,
@@ -5689,7 +5699,7 @@ class LiveTrader:
         # this child's phase offset (see the constant's comment). getattr:
         # Strict-Locked loop tests construct bare object.__new__ traders
         # without the attribute; 0.0 matches the standalone default.
-        hb_offset = float(getattr(self, "_heartbeat_offset", 0.0))
+        hb_offset = _HEARTBEAT_GRID_DELAY + float(getattr(self, "_heartbeat_offset", 0.0))
         next_heartbeat = _initial_heartbeat_deadline(time.time(), hb_offset)
 
         while self._running:
