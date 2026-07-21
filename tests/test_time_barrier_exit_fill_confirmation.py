@@ -2,12 +2,28 @@
 TDD-TESTER AUTHORIZATION
 Target Implementation File: src/live_execution/live_trader.py
 Target Class/Function: LiveTrader._reconcile_pending_position_state (the relocated
-                       settled decision) + LiveTrader._check_time_barrier (now
-                       submit-and-defer)
+                       settled decision + its never-raise except boundary now
+                       advances the retry budget) + LiveTrader._check_time_barrier
+                       (submit-and-defer) + LiveTrader._check_naked_position
+                       (bounded pending-exit guard)
 Status: FINALIZED
 Strict-Lock: TRUE (Implementation agents may NOT modify this file)
 Ticket: exit-fill-unverified_07152026_1855 (original)
         + settle-confirm-event-loop_07202026_0713 (control-flow adaptation)
+        + killswitch-pending-exit-guard_07202026_1805 (contract CORRECTION:
+          the naked-position kill switch must DEFER to the idle-loop reconciler
+          while a TIME BARRIER exit is pending AND the reconciler's bounded retry
+          budget is not yet spent, then flatten as the ultimate net once
+          _time_barrier_exit_attempts reaches _MAX_TIME_BARRIER_EXIT_ATTEMPTS.
+          This CORRECTS the earlier claim that the kill switch fires "for free"
+          on the FIRST deferral poll — that immediate-fire raced the reconciler
+          and prematurely flattened a healthy mid-exit MES position on 2026-07-20.
+          The rewrite of test_kill_switch_fires_for_free_because_trade_stays_tracked
+          and the new TestKillSwitchBoundedPendingExitGuard class below assert the
+          bounded behavior; NO assertion is loosened — flatten-at-_MAX replaces
+          flatten-on-poll-1, and a NEW persistent-broker-failure case proves the
+          bound is monotonic per poll (advances even when a broker call throws) so
+          the kill switch can never be suppressed forever.)
 
 Regression suite for the fire-and-forget TIME BARRIER exit that left a NAKED +
 UNTRACKED live position (2026-07-14 NG incident, client_id 3000).
@@ -72,7 +88,10 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-from src.live_execution.live_trader import LiveTrader
+from src.live_execution.live_trader import (
+    LiveTrader,
+    _MAX_TIME_BARRIER_EXIT_ATTEMPTS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -281,20 +300,40 @@ class TestIncidentReproduction:
             "the exit must be cancelled BEFORE the stop is re-armed"
         )
 
-    def test_kill_switch_fires_for_free_because_trade_stays_tracked(self):
-        """Free consequence (blueprint): because the fixed exit keeps
-        _active_trade_id set while _sl_order_id is None during the deferral
-        window, the UNCHANGED kill switch's guards (:5776/:5782) both pass and
-        it flattens the naked position on the next 5-minute poll.
+    def test_kill_switch_defers_to_reconciler_then_fires_at_budget_exhaustion(
+        self,
+    ):
+        """CONTRACT CORRECTION (killswitch-pending-exit-guard_07202026_1805).
 
-        RED today: the fire-and-forget reset nulls _active_trade_id (:1724),
-        so _check_naked_position returns at its first guard and NEVER flattens
-        (grep 'KILL SWITCH' fleet_20260714.log -> 0)."""
+        The BOUNDED contract that replaces the buggy "fires for free on the
+        first deferral poll" claim. During the deferral window the exit keeps
+        _active_trade_id set and _sl_order_id None (BINDING CONDITION 1 — no
+        stop may be re-armed while the exit can still fill), and
+        _pending_exit_order_id points at the resting exit. The reconciler owns
+        that exit's lifecycle, so the naked-position kill switch must:
+
+          * DEFER (NOT flatten) while _pending_exit_order_id is set AND the
+            reconciler's retry budget is unspent
+            (_time_barrier_exit_attempts < _MAX_TIME_BARRIER_EXIT_ATTEMPTS) —
+            flattening here would race the reconciler's cancel-and-defer and
+            market-close a healthy mid-exit position (the 2026-07-20 MES
+            incident); and
+          * FLATTEN as the ultimate net once the budget is exhausted
+            (_time_barrier_exit_attempts == _MAX) and the stop is still None —
+            the kill switch releases exactly when the reconciler's A4 pages a
+            human.
+
+        RED today: with NO pending-exit guard, _check_naked_position sees
+        `_sl_order_id is None` + `pos != 0` on the FIRST deferral poll and
+        flattens immediately (attempts == 1), racing the reconciler — the exact
+        premature-flatten this ticket fixes. (The stale prior assertion —
+        `flatten-on-poll-1 is a feature` — was itself the defect.)"""
         t = _make_time_barrier_trader()
         t.exec_client.get_position_settled.return_value = 1
         t.exec_client.cancel_orders_by_ids.return_value = 1
-        # The exit rests forever (never leaves the open book) -> deferral:
-        # stay tracked, _sl_order_id None, no re-arm, retry next bar.
+        # The exit rests forever (never leaves the open book) -> BINDING
+        # CONDITION 1 defer: stay tracked, _sl_order_id None, no re-arm,
+        # _pending_exit_order_id retained, attempts incremented to 1.
         t.exec_client.get_open_trades.return_value = [
             SimpleNamespace(order_id=_EXIT_OID, symbol="NG", status="Submitted")
         ]
@@ -302,19 +341,31 @@ class TestIncidentReproduction:
         result = _submit_then_reconcile(t)
 
         assert result is False
-        # The exit path left the trade tracked with no live stop — exactly the
-        # state the kill switch is designed to catch.
+        # The exit path left the trade tracked with no live stop, one pending
+        # exit, one deferral spent — exactly the mid-exit window.
         assert t._active_trade_id == "trade_71", (
-            "the fix must keep _active_trade_id set so the kill switch can "
-            "re-arm for free"
+            "the fix must keep _active_trade_id set so the reconciler still "
+            "owns the exit and the kill switch can escalate later"
         )
         assert t._sl_order_id is None, (
             "no stop may be re-armed while the exit can still fill "
             "(BINDING CONDITION 1)"
         )
+        assert t._pending_exit_order_id == _EXIT_OID, (
+            "the pending exit must stay recorded so the kill switch knows the "
+            "reconciler still owns this exit"
+        )
+        assert t._time_barrier_exit_attempts == 1, (
+            "the BINDING CONDITION 1 defer must have advanced the retry budget "
+            "exactly once"
+        )
+        assert t._time_barrier_exit_attempts < _MAX_TIME_BARRIER_EXIT_ATTEMPTS, (
+            "budget must not be spent after a single deferral"
+        )
         t.telemetry.close_position.assert_not_called()
 
-        # Next poll: the kill switch (unchanged) must now FIRE and flatten.
+        # First poll (budget unspent): the kill switch must DEFER, NOT flatten
+        # — flattening here races the reconciler's cancel-and-defer.
         t.exec_client.reset_mock(return_value=True, side_effect=True)
         t.telemetry.reset_mock()
         t.exec_client.get_position.return_value = 1  # broker still shows +1
@@ -322,8 +373,30 @@ class TestIncidentReproduction:
 
         t._check_naked_position()
 
+        # Flattening here (racing the reconciler's cancel-and-defer) is the
+        # premature-flatten regression this ticket fixes.
+        t.exec_client.close_position.assert_not_called()
+        t.telemetry.close_position.assert_not_called()
+
+        # Budget exhausted (attempts == _MAX) with the stop still None: the
+        # kill switch releases as the ultimate net and flattens.
+        t.exec_client.reset_mock(return_value=True, side_effect=True)
+        t.telemetry.reset_mock()
+        t._time_barrier_exit_attempts = _MAX_TIME_BARRIER_EXIT_ATTEMPTS
+        assert t._pending_exit_order_id == _EXIT_OID  # still pending
+        assert t._sl_order_id is None                 # still no stop
+        t.exec_client.get_position.return_value = 1
+        t._reset_position_state = MagicMock()
+
+        t._check_naked_position()
+
         assert t.exec_client.close_position.called, (
-            "kill switch must flatten the naked position with a market order"
+            "at _MAX with no live stop the kill switch must flatten the naked "
+            "position with a market order (ultimate net)"
+        )
+        assert (
+            t.exec_client.close_position.call_args.kwargs.get("exit_mode")
+            == "market"
         )
         assert t.telemetry.close_position.called, (
             "kill switch must book the ledger close"
@@ -475,3 +548,183 @@ class TestUnconfirmedFailsClosed:
         # Exit may still fill -> never re-arm, never cancel it away.
         t._verify_and_heal_protective_legs.assert_not_called()
         t.exec_client.cancel_orders_by_ids.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Bounded pending-exit kill-switch guard
+# (killswitch-pending-exit-guard_07202026_1805)
+#
+# The naked-position kill switch (_check_naked_position) must DEFER to the
+# idle-loop reconciler while a TIME BARRIER exit is pending AND the reconciler's
+# retry budget is unspent, then FLATTEN as the ultimate net once
+# _time_barrier_exit_attempts reaches _MAX_TIME_BARRIER_EXIT_ATTEMPTS. The bound
+# must be MONOTONIC PER POLL — it advances on EVERY unresolved reconciler poll,
+# INCLUDING one whose broker calls throw — so the kill switch can never be
+# suppressed forever (that was the hole that veto'd the unconditional-skip v1).
+# ---------------------------------------------------------------------------
+
+
+class _BrokerAPIThrow(RuntimeError):
+    """A selective broker-API failure: the settled read still succeeds, but a
+    downstream call (cancel_orders_by_ids / get_open_trades) keeps throwing. The
+    persistent-failure case that must NOT freeze the retry budget."""
+
+
+class TestKillSwitchBoundedPendingExitGuard:
+    def test_kill_switch_defers_while_pending_exit_within_budget(self):
+        """CONTRACT 1 — incident regression (false-flatten sentinel).
+
+        MES-shaped defer state: settled -> 1 (still holding), cancel_orders_by_ids
+        -> 1 (cancel-requested, not dead), and the exit is STILL in the open book
+        (BINDING CONDITION 1 defer). The reconciler advances the budget to 1 and
+        keeps the exit pending with _sl_order_id None. With a pending exit and an
+        unspent budget the kill switch MUST NOT flatten — doing so races the
+        reconciler's cancel-and-defer and market-closes a healthy mid-exit
+        position (the exact 2026-07-20 real-money MES incident).
+
+        RED today: with no pending-exit guard, _check_naked_position sees
+        `_sl_order_id is None` + `pos != 0` and flattens immediately."""
+        t = _make_time_barrier_trader()
+        t.exec_client.get_position_settled.return_value = 1
+        t.exec_client.cancel_orders_by_ids.return_value = 1
+        t.exec_client.get_open_trades.return_value = [
+            SimpleNamespace(order_id=_EXIT_OID, symbol="NG", status="Submitted")
+        ]
+
+        result = _submit_then_reconcile(t)
+
+        # Post-reconcile state: mid-exit deferral window.
+        assert result is False
+        assert t._pending_exit_order_id == _EXIT_OID, (
+            "the exit must stay recorded as pending for the reconciler"
+        )
+        assert t._time_barrier_exit_attempts == 1, (
+            "the BINDING CONDITION 1 defer must have advanced the budget once"
+        )
+        assert t._time_barrier_exit_attempts < _MAX_TIME_BARRIER_EXIT_ATTEMPTS
+        assert t._sl_order_id is None, (
+            "no stop is re-armed while the exit can still fill "
+            "(BINDING CONDITION 1)"
+        )
+
+        # Now the kill switch runs mid-exit. It MUST defer, not flatten.
+        t.exec_client.reset_mock(return_value=True, side_effect=True)
+        t.telemetry.reset_mock()
+        t.exec_client.get_position.return_value = 1  # IBKR still shows +1
+        t._reset_position_state = MagicMock()
+
+        t._check_naked_position()
+
+        t.exec_client.close_position.assert_not_called()
+        t.telemetry.close_position.assert_not_called()
+
+    def test_kill_switch_flattens_when_budget_exhausted(self):
+        """CONTRACT 2 — ultimate-net preserved (fence).
+
+        With a pending exit but the retry budget SPENT
+        (_time_barrier_exit_attempts == _MAX_TIME_BARRIER_EXIT_ATTEMPTS), the stop
+        still None, and IBKR reporting a live position, the kill switch MUST still
+        flatten — the bounded guard releases exactly when the reconciler's A4
+        pages a human, so a genuinely-stuck exit is never left backstopped only by
+        human escalation.
+
+        This fence guards the fix against OVER-reaching (skipping forever). It is
+        NOT tautological: the _MAX budget is imported from the source module and
+        the pending-exit attribute is set, so a fix that made the guard skip
+        unconditionally would flip this assertion to a failure."""
+        t = _make_time_barrier_trader()
+        # Mid-exit deferral window with the budget exhausted.
+        t._pending_exit_order_id = _EXIT_OID
+        t._time_barrier_exit_attempts = _MAX_TIME_BARRIER_EXIT_ATTEMPTS
+        t._sl_order_id = None
+        t.exec_client.get_position.return_value = 1  # IBKR shows a live position
+        t._reset_position_state = MagicMock()
+
+        t._check_naked_position()
+
+        assert t.exec_client.close_position.called, (
+            "at _MAX with no live stop the kill switch must flatten as the "
+            "ultimate net"
+        )
+        assert (
+            t.exec_client.close_position.call_args.kwargs.get("exit_mode")
+            == "market"
+        )
+        assert t.telemetry.close_position.called, "the ledger close must be booked"
+        assert (
+            t.telemetry.close_position.call_args.kwargs.get("reason")
+            == "NAKED_POSITION_KILL_SWITCH"
+        )
+
+    def test_persistent_broker_failure_still_advances_budget_and_terminates(self):
+        """CONTRACT 3 — persistent-broker-failure termination (the hole that
+        veto'd v1).
+
+        The settled read keeps succeeding (position still open, settled != 0) but
+        the downstream cancel_orders_by_ids RAISES on EVERY reconciler poll. The
+        never-raise except boundary must still ADVANCE the retry budget so the
+        bound is monotonic per poll — otherwise a selective broker-API failure
+        freezes _time_barrier_exit_attempts below _MAX forever, suppressing BOTH
+        the kill switch AND the A4 human escalation (strictly worse than status
+        quo). This proves the bound cannot freeze and the system always
+        terminates.
+
+        RED today: the except boundary logs and returns False WITHOUT advancing
+        the budget, so _time_barrier_exit_attempts stays 0 across every poll — the
+        counter freezes and the kill switch is suppressed indefinitely."""
+        t = _make_time_barrier_trader()
+        # Post-submit deferred state (mirror _check_time_barrier: exit pending,
+        # protective stop already cleared) established directly so each poll's
+        # budget advance is countable from a known zero.
+        t._pending_exit_order_id = _EXIT_OID
+        t._sl_order_id = None
+        assert t._time_barrier_exit_attempts == 0
+        # settled read succeeds and reports STILL OPEN so control reaches the
+        # cancel call...
+        t.exec_client.get_position_settled.return_value = 1
+        t.exec_client.get_position.return_value = 1
+        # ...which throws on every poll.
+        t.exec_client.cancel_orders_by_ids.side_effect = _BrokerAPIThrow(
+            "cancelOrder RPC unavailable"
+        )
+        t._reset_position_state = MagicMock()
+
+        # (a) + (b) + (c): every unresolved poll advances the budget by exactly
+        # one DESPITE the throw, never raises out (returns False), and reaches
+        # _MAX within _MAX polls.
+        for i in range(_MAX_TIME_BARRIER_EXIT_ATTEMPTS):
+            result = t._reconcile_pending_position_state()
+            assert result is False, (
+                "the never-raise boundary must swallow the broker throw and "
+                "DEFER (return False), never raise into the event loop"
+            )
+            assert t._time_barrier_exit_attempts == i + 1, (
+                "the retry budget must advance by exactly one per poll even when "
+                "the broker call throws — otherwise the bound freezes and the "
+                "kill switch is suppressed forever"
+            )
+            # The pending exit is retained across the throw so the branch is
+            # re-entered next poll.
+            assert t._pending_exit_order_id == _EXIT_OID
+
+        assert t._time_barrier_exit_attempts == _MAX_TIME_BARRIER_EXIT_ATTEMPTS, (
+            "the budget must reach _MAX within _MAX polls (bounded termination)"
+        )
+
+        # (d): budget now spent -> the kill switch releases and flattens, so the
+        # system TERMINATES in an auto-flatten rather than an infinite quiet loop.
+        t.exec_client.reset_mock(return_value=True, side_effect=True)
+        t.telemetry.reset_mock()
+        t.exec_client.get_position.return_value = 1
+        t._reset_position_state = MagicMock()
+
+        t._check_naked_position()
+
+        assert t.exec_client.close_position.called, (
+            "once the budget is exhausted the kill switch must flatten — the "
+            "bound guarantees termination"
+        )
+        assert (
+            t.telemetry.close_position.call_args.kwargs.get("reason")
+            == "NAKED_POSITION_KILL_SWITCH"
+        )

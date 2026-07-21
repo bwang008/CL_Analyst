@@ -91,6 +91,16 @@ Target Class/Function: ExecutionClient.cancel_orders_by_ids,
 Status: FINALIZED
 Strict-Lock: TRUE (Implementation agents may NOT modify this file)
 
+Adapted (killswitch-pending-exit-guard_07202026_1805): MECHANICAL fixture repair
+only — _kill_switch_stub() now also declares lt._pending_exit_order_id = None and
+lt._time_barrier_exit_attempts = 0, the two attrs _check_naked_position's new
+bounded pending-exit guard reads (an object.__new__ stub would otherwise raise
+AttributeError once that guard lands). Semantically a no-op: a GENUINE naked
+position has no pending TIME BARRIER exit, so the guard skips and the kill switch
+still fires. The FENCE test_kill_switch_real_close_still_fires_cooldown_and_bulk_cancel
+still asserts the full flatten unchanged (contract 4: genuine-naked still flattens).
+No assertion here is loosened.
+
 Ticket: oob-entry-state-recovery_07062026_2335
 Phase: RED — every blueprint requirement (D1/D2/D3) and every binding
 amendment A1-A8 has at least one test that FAILS on current HEAD. Tests
@@ -626,6 +636,14 @@ def _kill_switch_stub():
     lt._processed_exit_order_ids = set()
     _attach_position_state(lt, side=1)
     lt._sl_order_id = None  # the naked-position trigger
+    # killswitch-pending-exit-guard_07202026_1805: _check_naked_position gained a
+    # bounded pending-exit guard that reads these two attrs immediately after the
+    # _sl_order_id guard. A GENUINE naked position has no pending TIME BARRIER
+    # exit, so the guard is a no-op here (skips -> the kill switch still fires);
+    # this object.__new__ stub must still declare them or the guard raises
+    # AttributeError.
+    lt._pending_exit_order_id = None
+    lt._time_barrier_exit_attempts = 0
     _attach_identity_seams(lt)
     return lt
 

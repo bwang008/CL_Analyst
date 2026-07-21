@@ -1708,10 +1708,16 @@ class LiveTrader:
             symbol=self._execution_symbol,
         )
         # :1679 just cancelled the resting SL/TP on the broker. Reflect that in
-        # memory NOW: the in-memory ids no longer point at live orders, and
-        # clearing them ARMS the 5-minute kill switch (its guards at :5776/:5782
-        # fire on _active_trade_id set + _sl_order_id None) to cover any
-        # deferral window below. The tracked PRICES survive so A3 can re-arm.
+        # memory NOW: the in-memory ids no longer point at live orders. Clearing
+        # _sl_order_id hands the exit lifecycle to the idle-loop reconciler
+        # (_reconcile_pending_position_state); it does NOT immediately arm the
+        # 5-minute kill switch over the deferral window. The kill switch DEFERS
+        # to the reconciler while _pending_exit_order_id is set AND the bounded
+        # retry budget (_time_barrier_exit_attempts < _MAX_TIME_BARRIER_EXIT_
+        # ATTEMPTS) is unspent (killswitch-pending-exit-guard_07202026_1805, see
+        # _check_naked_position); it covers the deferral window as the ultimate
+        # net only AFTER that budget is exhausted. The tracked PRICES survive so
+        # A3 can re-arm.
         self._sl_order_id = None
         self._tp_order_ids = []
 
@@ -1922,6 +1928,36 @@ class LiveTrader:
                 "value)",
                 exc_info=True,
             )
+            # Keep the retry budget MONOTONIC PER POLL even when a broker call
+            # threw (killswitch-pending-exit-guard_07202026_1805). A persistent
+            # SELECTIVE broker failure (settled read succeeds but
+            # cancel_orders_by_ids / get_open_trades keeps throwing) would
+            # otherwise freeze _time_barrier_exit_attempts < _MAX forever,
+            # suppressing BOTH the kill switch AND A4 — strictly worse than the
+            # status quo. Advance ONLY the counter (+ possibly fire A4 inside
+            # _note_time_barrier_deferral); this boundary still NEVER books,
+            # resets, or re-arms on an unconfirmed value. Read the id off the
+            # ATTRIBUTE — the local exit_oid may be unbound if the throw preceded
+            # its :1802 assignment; when None the flat-read branch threw and owns
+            # no time-barrier budget, so skip the advance. The ATTRIBUTE ACCESS
+            # ITSELF is inside the guard: a degraded/partial stub may not have set
+            # _pending_exit_order_id, and its AttributeError must NOT escape this
+            # boundary — an escaping raise would break the caller's event loop
+            # (it would skip _log_heartbeat and spin the while-_running loop).
+            try:
+                if self._pending_exit_order_id is not None:
+                    self._note_time_barrier_deferral(self._pending_exit_order_id)
+            except Exception:
+                # Inner catch exists SOLELY to keep this never-raise boundary
+                # non-raising if the attribute is unset or
+                # _note_time_barrier_deferral's telemetry/Telegram I/O throws —
+                # it degrades to debug (NOT a bare pass) and swallows no other
+                # logic.
+                log.debug(
+                    "[RECONCILE] deferral-budget advance failed inside the "
+                    "never-raise boundary — ignored",
+                    exc_info=True,
+                )
             return False
 
     def _book_out_of_band_close(self) -> None:
@@ -6207,6 +6243,25 @@ class LiveTrader:
 
         if self._sl_order_id is not None:
             return  # SL is tracked — position is protected
+
+        # A TIME BARRIER exit submitted-and-deferred clears _sl_order_id and
+        # hands the exit lifecycle to the idle-loop reconciler
+        # (_reconcile_pending_position_state), which books on fill / re-arms the
+        # SL on non-fill (A3) / escalates A4 at budget exhaustion. During that
+        # window _sl_order_id is None but the position is NOT naked: firing here
+        # would defeat the clean modeled exit, raise a false CRITICAL "naked"
+        # alarm, and race the reconciler's live exit (double-close / reversal
+        # risk, the reconnect-false-flat-oob $296k class). Defer while a pending
+        # exit is unresolved AND the reconciler's bounded retry budget is unspent.
+        # The budget advances on EVERY unresolved poll incl. throws (the
+        # never-raise boundary in _reconcile_pending_position_state), so this can
+        # never skip forever; at _MAX the kill switch releases as the ultimate net
+        # exactly when A4 pages a human (killswitch-pending-exit-guard_07202026_1805).
+        if (
+            self._pending_exit_order_id is not None
+            and self._time_barrier_exit_attempts < _MAX_TIME_BARRIER_EXIT_ATTEMPTS
+        ):
+            return
 
         # Verify IBKR actually has a position (avoid false positives)
         try:
