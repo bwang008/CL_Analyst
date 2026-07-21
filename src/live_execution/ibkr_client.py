@@ -784,9 +784,14 @@ class IBKRConnectionManager:
                 else:
                     lmt_price = round_to_tick(current_price - buf, inst.tick_size)
                 order = LimitOrder(action, qty, lmt_price)
+                # %g, not %.2f: small-tick instruments (NG buffer=0.002,
+                # price=2.883) printed a real value as "0.00"/"2.88" and once
+                # misled a naked-position investigation. %g shows the true
+                # magnitude across every instrument (CL..ES) without scientific
+                # notation in our price ranges.
                 log.info(
                     "Exit mode: MARKETABLE_LIMIT %s "
-                    "(price=%.2f, limit=%.2f, buffer=%.2f)",
+                    "(price=%g, limit=%g, buffer=%g)",
                     action, current_price, lmt_price, buf,
                 )
 

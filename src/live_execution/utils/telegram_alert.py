@@ -133,6 +133,18 @@ class TelegramAlerter:
 
         try:
             resp = requests.post(url, json=payload, timeout=_TIMEOUT)
+            # A Markdown parse failure (400 "can't parse entities") happens
+            # whenever the body carries an unbalanced _ or * — snake_case
+            # identifiers like trade_27 or module paths. That silently dropped
+            # A4 escalation alerts. Retry once as plain text so the alert still
+            # delivers; literal _/* in the fallback are acceptable.
+            if resp.status_code == 400 and parse_mode:
+                log.debug(
+                    "Telegram 400 with parse_mode=%s; retrying as plain text",
+                    parse_mode,
+                )
+                payload.pop("parse_mode", None)
+                resp = requests.post(url, json=payload, timeout=_TIMEOUT)
             if resp.status_code != 200:
                 log.warning(
                     "Telegram API returned %d: %s",
