@@ -91,8 +91,6 @@ class ConfigurableStrategy(Strategy):
         # Internal state for execution strategy cooldowns
         self._last_exit_bars_ago_long: int = 9999
         self._last_exit_bars_ago_short: int = 9999
-        self._last_exit_reason_long: str = ""
-        self._last_exit_reason_short: str = ""
 
         # ── Tiered config ─────────────────────────────────────────────
         if self._is_tiered:
@@ -426,33 +424,27 @@ class ConfigurableStrategy(Strategy):
         elif current_position < 0:
             self._last_exit_bars_ago_long += 1
 
-        # Advanced cooldown guard to match BacktestEngine
+        # Cooldown gate — the SOLE live authority, exactly mirroring the
+        # backtest (cooldown-single-authority-wiring_07222026_1051): the
+        # backtest enforces ONLY the flavor-blind per-side ``cooldown_bars``
+        # (TieredEnsembleStrategy re-gate, resolution side_cfg -> top-level
+        # -> 0; armed by _close_trade for EVERY exit reason). The flavored
+        # sl/tp_cooldown_bars pair was removed from the engine in 3d95040
+        # (2026-05-12) and is dead vocabulary — enforcing it here made live
+        # stricter than the backtest wherever the hand-template 7 exceeded
+        # the Optuna-searched per-side value.
         if current_position == 0:
             long_cfg = self.config.get("long", {})
-            tp_cd_l = long_cfg.get("tp_cooldown_bars", self.config.get("tp_cooldown_bars", 0))
-            sl_cd_l = long_cfg.get("sl_cooldown_bars", self.config.get("sl_cooldown_bars", 3))
-            # CLOSED/CLOSED_OOB (LiveTrader's default / out-of-band resets) are
-            # treated conservatively as SL-flavored: the backtest flavors
-            # TIME_BARRIER exits with sl_cooldown, and an OOB close is an exit
-            # whose true reason was lost — the longer cooldown is the safe match.
-            # OOB-recovery vocabulary (A7): SL_HIT_OOB IS an SL exit learned
-            # late; CLOSED_OOB_UNRECOVERED keeps the conservative SL cooldown.
-            # TP_HIT_OOB is CONSCIOUSLY EXCLUDED — TP flavor is expressed by
-            # absence from these tuples.
-            long_cooldown = sl_cd_l if self._last_exit_reason_long in ("SL_HIT", "TIME_BARRIER", "REVERSE", "CLOSED", "CLOSED_OOB", "SL_HIT_OOB", "CLOSED_OOB_UNRECOVERED") else tp_cd_l
-            # UNION with the flavor-independent per-side cooldown_bars: the
-            # backtest enforces it via the TieredEnsembleStrategy re-gate
-            # reading REAL EngineState counters; live's re-gate is sentinel-
-            # neutralized, so the sole-authority gate here must cover it.
-            long_cooldown = max(long_cooldown, int(long_cfg.get("cooldown_bars", 0)))
+            long_cooldown = int(
+                long_cfg.get("cooldown_bars", self.config.get("cooldown_bars", 0))
+            )
             if self._last_exit_bars_ago_long <= long_cooldown:
                 buy_prob = 0.0
 
             short_cfg = self.config.get("short", {})
-            tp_cd_s = short_cfg.get("tp_cooldown_bars", self.config.get("tp_cooldown_bars", 0))
-            sl_cd_s = short_cfg.get("sl_cooldown_bars", self.config.get("sl_cooldown_bars", 3))
-            short_cooldown = sl_cd_s if self._last_exit_reason_short in ("SL_HIT", "TIME_BARRIER", "REVERSE", "CLOSED", "CLOSED_OOB", "SL_HIT_OOB", "CLOSED_OOB_UNRECOVERED") else tp_cd_s
-            short_cooldown = max(short_cooldown, int(short_cfg.get("cooldown_bars", 0)))
+            short_cooldown = int(
+                short_cfg.get("cooldown_bars", self.config.get("cooldown_bars", 0))
+            )
             if self._last_exit_bars_ago_short <= short_cooldown:
                 sell_prob = 0.0
 
@@ -595,11 +587,9 @@ class ConfigurableStrategy(Strategy):
         """
         if side == 1:
             self._last_exit_bars_ago_long = -1
-            self._last_exit_reason_long = str(exit_reason)
         elif side == -1:
             self._last_exit_bars_ago_short = -1
-            self._last_exit_reason_short = str(exit_reason)
-            
+
         if hasattr(self._exec_strategy, 'on_exit'):
             self._exec_strategy.on_exit(side, exit_reason, bars_held)
 

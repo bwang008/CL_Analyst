@@ -13,11 +13,13 @@ Defects D and E from the 2026-07-03 ledger-parity replay (see
 
 D — exit-reason vocabulary gap:
   * The time-barrier exit must call _reset_position_state(reason="TIME_BARRIER")
-    (not the default "CLOSED"), so ConfigurableStrategy applies sl_cooldown_bars
-    exactly like the backtest does for TIME_BARRIER exits.
+    (not the default "CLOSED") — truthful ledger/telemetry vocabulary.
   * The out-of-band close path must pass reason="CLOSED_OOB".
-  * ConfigurableStrategy must treat "CLOSED"/"CLOSED_OOB" as SL-flavored
-    (conservative: unknown closes get the longer cooldown).
+  * re-adjudicated: cooldown-single-authority-wiring_07222026_1051 — the
+    cooldown gate is now flavor-blind per-side cooldown_bars (any exit
+    reason arms it, matching the backtest's TieredEnsemble re-gate); the
+    SL-flavored vocabulary tuple is gone. CLOSED-family reasons still arm
+    the per-side cooldown like every other close.
 
 E — fill misrouting:
   * _on_standard_execution_event must NOT treat an unrecognized fill as an
@@ -134,8 +136,6 @@ def _make_strategy(config: dict) -> ConfigurableStrategy:
     strat._execution_guard = None
     strat._last_exit_bars_ago_long = 9999
     strat._last_exit_bars_ago_short = 9999
-    strat._last_exit_reason_long = ""
-    strat._last_exit_reason_short = ""
     strat.exit_mode = "SINGLE"
     strat.tp_atr_mult = 2.0
     strat.sl_atr_mult = 1.0
@@ -149,10 +149,10 @@ def _make_strategy(config: dict) -> ConfigurableStrategy:
     return strat
 
 
-CFG_SL7 = {
-    "nickname": "sl7",
-    "sl_cooldown_bars": 7,
-    "tp_cooldown_bars": 0,
+# re-adjudicated: cooldown-single-authority-wiring_07222026_1051 — per-side
+# cooldown_bars only (flavored sl/tp keys are dead vocabulary).
+CFG_CD1 = {
+    "nickname": "cd1",
     "long": {"cooldown_bars": 1},
     "short": {"cooldown_bars": 1},
 }
@@ -165,9 +165,9 @@ CFG_SL7 = {
 
 class TestExitReasonVocabulary:
     def test_time_barrier_exit_passes_time_barrier_reason(self):
-        """The time-barrier exit must reset with reason="TIME_BARRIER" so the
-        strategy applies sl_cooldown_bars — matching the backtest's flavor
-        (TIME_BARRIER exits are SL-flavored there)."""
+        """The time-barrier exit must reset with reason="TIME_BARRIER" (not
+        the default "CLOSED") — truthful ledger vocabulary; the cooldown gate
+        itself is flavor-blind per-side cooldown_bars."""
         t = _make_trader()
         t.exec_client.get_position.return_value = 1
         t.exec_client.cancel_open_orders.return_value = 2
@@ -246,18 +246,20 @@ class TestExitReasonVocabulary:
         t._reset_position_state.assert_called_once_with(reason="CLOSED_OOB")
 
     @pytest.mark.parametrize("reason", ["CLOSED", "CLOSED_OOB"])
-    def test_closed_reasons_get_sl_flavored_cooldown(self, reason):
-        """After on_exit with a CLOSED-family reason, the side must be gated by
-        sl_cooldown_bars (7), not tp_cooldown_bars (0). First evaluate() after
-        the exit reads counter 1 <= 7 → buy side zeroed."""
-        strat = _make_strategy(CFG_SL7)
+    def test_closed_reasons_arm_per_side_cooldown(self, reason):
+        """After on_exit with a CLOSED-family reason, the side must be gated
+        by the flavor-blind per-side cooldown_bars — every exit reason arms
+        it, exactly like the backtest's _close_trade. Exit-bar evaluate()
+        reads counter 0 <= 1 → buy side zeroed.
+        (re-adjudicated: cooldown-single-authority-wiring_07222026_1051)"""
+        strat = _make_strategy(CFG_CD1)
         strat.on_exit(1, reason, 5)
 
         sig = strat.evaluate(pd.DataFrame(), 70.0, 0.5, 0)
 
         assert sig.buy_prob == 0.0, (
-            f"reason={reason!r} must be SL-flavored (sl_cooldown_bars=7); "
-            f"got buy_prob={sig.buy_prob} — it fell through to tp_cooldown_bars=0"
+            f"reason={reason!r} must arm the per-side cooldown_bars gate; "
+            f"got buy_prob={sig.buy_prob} — the close did not arm the cooldown"
         )
 
 

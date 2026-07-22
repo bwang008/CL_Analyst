@@ -1,11 +1,16 @@
 """
-Tests for LiveTrader cooldown logic and timezone-safe resubscription.
+Tests for LiveTrader time-barrier exit routing and timezone-safe resubscription.
 
 Validates:
-- Post-exit cooldown blocks re-entry for configured number of bars
-- Cooldown counts down correctly then allows new entries
-- cooldown_bars=0 disables the feature (backward compat)
+- Time-barrier exit uses exit_mode from config (retire-then-submit flow)
 - Timezone-safe gap calculation in _resubscribe_and_backfill
+
+NOTE (cooldown-single-authority-wiring_07222026_1051): despite this module's
+name, the post-exit cooldown behavior is covered elsewhere —
+tests/test_cooldown_wiring.py (LiveTrader -> strategy.on_exit wiring),
+tests/test_parity_cooldown_single_authority.py + tests/test_exit_bar_semantics.py
+(ConfigurableStrategy gate), tests/test_backtest_engine.py
+TestExecutionStrategyCooldown (backtest re-gate).
 
 All tests use mocks — no live IB connection or real models needed.
 """

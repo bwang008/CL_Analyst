@@ -315,6 +315,11 @@ def _recovery_stub(executions, *, ledger_pos=None, cancel_by_ids=1):
     lt.rolling_df_5m = None
     lt.rolling_df_1h = None
     lt._bar_size = "5m"
+    # re-adjudicated: cooldown-single-authority-wiring_07222026_1051 — the
+    # recovery path's cooldown seeding now reaches the REAL strategy
+    # attribute (the old phantom-attr guard silently skipped it here too).
+    lt.strategy = MagicMock()
+    lt._position_bars_held = 0
     _attach_identity_seams(lt)
     return lt
 
@@ -424,7 +429,6 @@ def _entry_flow_stub(signal=None):
     strategy.name = "MockStrategy"
     strategy.direction = "LONG"
     lt.strategy = strategy
-    lt._strategy = strategy  # cooldown-notification seam (livetest parity)
     lt._data_mute = False
     lt._virtual_ledger = {"5m": 0, "1h": 0}
     lt.telemetry = MagicMock()
@@ -563,7 +567,6 @@ def _ttl_stub(filled_qty=0):
     lt.exec_client.cancel_open_orders.return_value = 1
     strategy = MagicMock()
     lt.strategy = strategy
-    lt._strategy = strategy
     lt._telegram = MagicMock()
     lt.telemetry = MagicMock()
     lt._active_trade_id = None
@@ -594,7 +597,6 @@ def _rollover_stub(position, pending_order_id=None):
     lt._telegram = MagicMock()
     strategy = MagicMock()
     lt.strategy = strategy
-    lt._strategy = strategy
     lt.telemetry = MagicMock()
     lt._pending_entry_order_id = pending_order_id
     lt._pending_entry_bar_time = (
@@ -632,7 +634,6 @@ def _kill_switch_stub():
     lt._telegram = MagicMock()
     strategy = MagicMock()
     lt.strategy = strategy
-    lt._strategy = strategy
     lt._processed_exit_order_ids = set()
     _attach_position_state(lt, side=1)
     lt._sl_order_id = None  # the naked-position trigger
@@ -672,7 +673,6 @@ def _oca_exit_stub():
     lt._active_trade_id = "trade_901"
     strategy = MagicMock()
     lt.strategy = strategy
-    lt._strategy = strategy
     _attach_position_state(lt, side=1)
     lt._position_bars_held = 6
     lt._tp_order_ids = [902]
@@ -1259,7 +1259,7 @@ class TestClearPendingEntry:
 
         assert lt._pending_entry_order_id is None
         assert lt._pending_entry_bar_time is None
-        assert not lt._strategy.on_exit.called, (
+        assert not lt.strategy.on_exit.called, (
             "_clear_pending_entry must NEVER fire strategy.on_exit — no "
             "fill ever occurred"
         )
@@ -1286,7 +1286,7 @@ class TestEntryCancellationPaths:
 
         lt._check_entry_order_ttl(pd.Timestamp("2026-07-07 15:00:00"))
 
-        assert not lt._strategy.on_exit.called, (
+        assert not lt.strategy.on_exit.called, (
             "TTL cancel of a never-filled entry fired strategy.on_exit — "
             "a phantom SL cooldown now suppresses real signals"
         )
@@ -1324,11 +1324,11 @@ class TestEntryCancellationPaths:
 
         lt._check_contract_rollover()
 
-        assert lt._strategy.on_exit.called, (
+        assert lt.strategy.on_exit.called, (
             "rollover force-close must still run the full in-position "
             "reset (strategy.on_exit + cooldown) — A2"
         )
-        reason = lt._strategy.on_exit.call_args.args[1]
+        reason = lt.strategy.on_exit.call_args.args[1]
         assert reason == "ROLLOVER"
         assert lt.exec_client.cancel_open_orders.called  # A8
         assert lt.exec_client.close_position.called
@@ -1349,7 +1349,7 @@ class TestEntryCancellationPaths:
             "cancel will silently miss it after the symbol updates"
         )
         assert lt._pending_entry_bar_time is None
-        assert not lt._strategy.on_exit.called, (
+        assert not lt.strategy.on_exit.called, (
             "no fill ever occurred — the rollover pending-clear must not "
             "fire cooldowns (A2 scoping)"
         )
@@ -1363,8 +1363,8 @@ class TestEntryCancellationPaths:
 
         lt._check_naked_position()
 
-        assert lt._strategy.on_exit.called
-        reason = lt._strategy.on_exit.call_args.args[1]
+        assert lt.strategy.on_exit.called
+        reason = lt.strategy.on_exit.call_args.args[1]
         assert reason == "NAKED_POSITION_KILL_SWITCH"
         # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
         # _check_naked_position now transmits its own bulk cancel and re-scans
@@ -1413,18 +1413,24 @@ class TestSoftwareOCAExitFence:
         close_kwargs = lt.telemetry.close_position.call_args.kwargs
         assert close_kwargs.get("reason") == "SL_HIT"
         assert close_kwargs.get("exit_price") == pytest.approx(67.50)
-        assert lt._strategy.on_exit.called
-        assert lt._strategy.on_exit.call_args.args[1] == "SL_HIT"
+        assert lt.strategy.on_exit.called
+        assert lt.strategy.on_exit.call_args.args[1] == "SL_HIT"
 
 
 # ===========================================================================
 # I — A7: cooldown vocabulary
+# re-adjudicated: cooldown-single-authority-wiring_07222026_1051 — the gate
+# is flavor-blind per-side cooldown_bars (every exit reason arms it, matching
+# the backtest's TieredEnsemble re-gate), so the SL-flavored vocabulary
+# tuples are GONE. A7's concern (an OOB-recovered SL exit falling through to
+# the no-cooldown TP flavor) is structurally impossible now; the inverted pin
+# below keeps a reason-conditional cooldown from regressing in silently.
 # ===========================================================================
 
 def _sl_cooldown_tuple_sites():
     """All parenthesized string-tuple literals in ConfigurableStrategy's
-    source that contain the exact element "SL_HIT" — the two cooldown
-    tuple sites (anchor per blueprint)."""
+    source that contain the exact element "SL_HIT" — the old flavored
+    cooldown tuple sites (must now be absent)."""
     source = inspect.getsource(cs_module)
     candidates = re.findall(r"\(([^()]*?)\)", source, flags=re.DOTALL)
     return [c for c in candidates if '"SL_HIT"' in c]
@@ -1432,38 +1438,16 @@ def _sl_cooldown_tuple_sites():
 
 class TestCooldownVocabularyA7:
 
-    def test_sl_cooldown_tuples_gain_oob_sl_flavors(self):
-        """A7: both SL-flavored cooldown tuple sites must add SL_HIT_OOB and
-        CLOSED_OOB_UNRECOVERED (SL flavor = conservative cooldown), and must
-        NOT add TP_HIT_OOB (TP flavor = absence, consciously excluded)."""
+    def test_flavored_cooldown_vocabulary_removed(self):
+        """The gate must be flavor-blind: no reason-vocabulary tuple may
+        condition the cooldown on the exit flavor. All exit reasons arm the
+        per-side cooldown_bars equally (see
+        tests/test_exit_reason_and_fill_routing.py for the behavioral pin)."""
         sites = _sl_cooldown_tuple_sites()
-        assert len(sites) >= 2, (
-            f"expected the two SL-cooldown tuple sites containing \"SL_HIT\" "
-            f"in configurable_strategy.py, found {len(sites)}"
-        )
-        for i, site in enumerate(sites):
-            assert '"SL_HIT_OOB"' in site, (
-                f"tuple site {i} lacks \"SL_HIT_OOB\" — an OOB-recovered SL "
-                f"exit would get the TP (no) cooldown: {site.strip()!r}"
-            )
-            assert '"CLOSED_OOB_UNRECOVERED"' in site, (
-                f"tuple site {i} lacks \"CLOSED_OOB_UNRECOVERED\" — an "
-                f"unrecovered OOB close must keep the conservative SL "
-                f"cooldown: {site.strip()!r}"
-            )
-            assert '"TP_HIT_OOB"' not in site, (
-                f"tuple site {i} contains \"TP_HIT_OOB\" — TP flavor is "
-                f"expressed by ABSENCE from the SL tuples (A7)"
-            )
-
-    def test_tp_hit_oob_consciously_absent_from_sl_tuples(self):
-        """FENCE (passes today and must keep passing after the Coder edits
-        the tuples): TP_HIT_OOB must never appear in any SL-cooldown tuple."""
-        sites = _sl_cooldown_tuple_sites()
-        assert sites, "SL-cooldown tuple sites disappeared entirely"
-        offenders = [s for s in sites if '"TP_HIT_OOB"' in s]
-        assert not offenders, (
-            f"TP_HIT_OOB found in SL-cooldown tuple(s): {offenders!r}"
+        assert sites == [], (
+            f"flavored cooldown vocabulary tuple(s) reappeared in "
+            f"configurable_strategy.py: {sites!r} — the cooldown gate is "
+            f"per-side cooldown_bars, any exit reason"
         )
 
     def test_reconciler_exit_reason_map_covers_oob_vocabulary(self):

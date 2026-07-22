@@ -143,6 +143,9 @@ def _base_trader() -> LiveTrader:
     t.telemetry = MagicMock()
     t._telegram = MagicMock()
     t._emit_health_event = MagicMock()
+    # re-adjudicated: cooldown-single-authority-wiring_07222026_1051 — the
+    # real _reset_position_state now notifies self.strategy.on_exit (mock sink)
+    t.strategy = MagicMock()
 
     t._execution_symbol = "NG"
     t._front_month_local_symbol = "NGQ6"

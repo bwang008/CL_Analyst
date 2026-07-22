@@ -1335,10 +1335,15 @@ class LiveTrader:
         }
 
     def _reset_position_state(self, reason: str = "CLOSED") -> None:
-        if hasattr(self, '_strategy') and self._strategy is not None and self._position_side != 0:
-            if hasattr(self._strategy, 'on_exit'):
-                self._strategy.on_exit(self._position_side, reason, self._position_bars_held)
-                
+        # Cooldown arming (cooldown-single-authority-wiring_07222026_1051):
+        # self.strategy is the REAL attribute (__init__). The old guard read
+        # a phantom private-underscore alias (never assigned) and silently
+        # skipped on_exit on every close - no hasattr softening here; a
+        # strategy without on_exit is a programming error and must crash.
+        if self._position_side != 0:
+            self.strategy.on_exit(self._position_side, reason, self._position_bars_held)
+
+
         self._position_entry_bar_time = None
         self._position_bars_held = 0
         self._trailing_activated = False
@@ -2326,9 +2331,9 @@ class LiveTrader:
         """settled == 0: the exit filled. Book the ledger CLOSED with the PROVEN
         execution price (NULL when no execution matches the exit order id — an
         explicit unknown, never the fabricated current_price; the :2305-2313
-        precedent), then reset with reason='TIME_BARRIER' (the backtest flavors
-        TIME_BARRIER exits as SL for sl_cooldown_bars parity) and report a
-        completed exit."""
+        precedent), then reset with reason='TIME_BARRIER' (truthful ledger
+        vocabulary; the re-entry cooldown is flavor-blind per-side
+        cooldown_bars, matching the backtest) and report a completed exit."""
         exit_price = self._resolve_exit_fill_price(exit_oid)
         if self._active_trade_id is not None:
             try:
@@ -2523,8 +2528,8 @@ class LiveTrader:
         """Re-arm the strategy's post-exit re-entry cooldown after a restart.
 
         The cooldown gate (ConfigurableStrategy) reads in-memory state that a
-        fresh process resets to "no recent exit", so ``sl_cooldown_bars`` is
-        silently dropped across restarts (ticket
+        fresh process resets to "no recent exit", so the per-side
+        ``cooldown_bars`` window is silently dropped across restarts (ticket
         cooldown-not-restored-on-restart_07082026_0230). This seeds it from a
         real exit:
 
@@ -2539,13 +2544,14 @@ class LiveTrader:
         Parity: seeding ``_last_exit_bars_ago = bars_elapsed - 1`` reproduces
         the counter a continuously-running bot would hold N bars after the
         close (the gate's pre-increment then reads the honest bars_elapsed),
-        matching the BacktestEngine. TP_HIT_OOB is excluded from the SL
-        cooldown tuple upstream, so a recovered take-profit applies no SL
-        cooldown.
+        matching the BacktestEngine. The gate is flavor-blind (per-side
+        ``cooldown_bars``, any exit reason) — same as the backtest's
+        TieredEnsemble re-gate, so recovered TP exits arm it too.
         """
-        strat = getattr(self, "_strategy", None)
-        if strat is None or not hasattr(strat, "on_exit"):
-            return
+        # Real attribute (cooldown-single-authority-wiring_07222026_1051):
+        # the old getattr(self, "_strategy", None) read a phantom attr and
+        # made this entire recovery path a silent no-op in production.
+        strat = self.strategy
         if side_int not in (1, -1) or reason is None:
             return
 
@@ -2571,8 +2577,9 @@ class LiveTrader:
 
     def _reconstruct_cooldown_from_ledger(self) -> None:
         """On a flat restart, re-seed each side's re-entry cooldown from the
-        most recent CLOSED ledger row for THAT side, so ``sl_cooldown_bars``
-        survives a restart even when the stop happened before shutdown.
+        most recent CLOSED ledger row for THAT side, so the per-side
+        ``cooldown_bars`` window survives a restart even when the exit
+        happened before shutdown.
 
         Per-side (a recent long exit and a recent short exit are both honored).
         Best-effort: a ledger-query failure must never block startup recovery.

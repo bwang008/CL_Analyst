@@ -5,11 +5,15 @@ Master backtesting engine for CL futures strategies.  All strategy
 parameters are loaded from a JSON config file (configs/strategies/*.json).
 
 Capabilities:
-- Single-position FSM mode (FLAT / IN_POSITION / COOLDOWN)
+- Single-position FSM mode (FLAT / IN_POSITION)
 - Concurrent multi-position mode (configurable max open positions)
 - Time-barrier exit (configurable max hold bars)
 - Trailing stop to breakeven (+N×ATR in favor → SL moves to entry)
-- Post-stop-out cooldown period (configurable bars)
+- Post-exit re-entry cooldown: flavor-blind per-side ``cooldown_bars``,
+  enforced by the execution strategy's re-gate (e.g. TieredEnsembleStrategy)
+  reading the engine's last_exit_bars_ago counters — armed by _close_trade
+  for EVERY exit reason (the engine-level flavored tp/sl_cooldown_bars were
+  removed in 3d95040)
 - Gap-aware slippage (fills at Open when bar gaps past stop)
 - Exit-trigger overlays, DEFAULT-OFF / backtest-only (ticket
   exit-triggers-eod-oppsignal_07072026_1924; see README "Exit-Trigger
@@ -318,8 +322,12 @@ class BacktestEngine:
     Supports two modes controlled by ``allow_concurrent``:
 
     **Single-position mode** (default, ``allow_concurrent=False``):
-        FLAT → IN_POSITION → COOLDOWN → FLAT
+        FLAT → IN_POSITION → FLAT
         Only one trade at a time.  Matches live trader behaviour.
+        Post-exit cooldown is NOT an engine concern: the engine only
+        maintains last_exit_bars_ago counters (reset in _close_trade for
+        every exit reason); the execution strategy's re-gate enforces the
+        per-side ``cooldown_bars`` window.
 
     **Concurrent mode** (``allow_concurrent=True``):
         Accepts new signals while positions are open (up to
@@ -330,9 +338,6 @@ class BacktestEngine:
         tp_atr_mult: ATR multiplier for take-profit barrier.
         sl_atr_mult: ATR multiplier for stop-loss barrier.
         max_horizon: Max bars to hold a position (time barrier).
-        cooldown_bars: Deprecated alias — if tp/sl not set, used for both.
-        tp_cooldown_bars: Bars to wait after a TP or trailing exit.
-        sl_cooldown_bars: Bars to wait after a SL exit.
         trailing_atr_mult: ATR move in favor to trigger trailing stop.
         trailing_sl_atr_offset: After trailing triggers, SL moves to
                            entry + offset×ATR (0 = breakeven, 0.25 = small profit).

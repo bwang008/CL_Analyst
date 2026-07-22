@@ -118,8 +118,6 @@ def _strategy() -> ConfigurableStrategy:
     s.config = {}
     s._last_exit_bars_ago_long = 9999
     s._last_exit_bars_ago_short = 9999
-    s._last_exit_reason_long = ""
-    s._last_exit_reason_short = ""
     s._exec_strategy = MagicMock()
     return s
 
@@ -128,13 +126,15 @@ class TestWeekendRestartCooldown:
     def test_cooldown_not_over_aged_across_weekend(self):
         """SL exit on Friday's last bar, restart Sunday 20:00 (2 bars later).
         Wall-clock math computed ~52 bars elapsed → cooldown fully aged-out;
-        honest count is 2 bars → sl_cooldown_bars=7 must still block."""
+        honest count is 2 bars → a per-side cooldown_bars=7 must still block.
+        (re-adjudicated: cooldown-single-authority-wiring_07222026_1051 —
+        real ``strategy`` attribute; flavor-blind gate, no reason record.)"""
         idx = _hourly_index_with_weekend_gap()
         # restart moment: only bars up to Sun 19:00 have been received
         seeded = idx[idx <= pd.Timestamp("2026-07-05 19:00:00")]
         s = _strategy()
         lt = object.__new__(LiveTrader)
-        lt._strategy = s
+        lt.strategy = s
         lt._bar_size = "1h"
         lt._position_bars_held = 0
         lt.rolling_df_1h = _df(seeded)
@@ -145,7 +145,7 @@ class TestWeekendRestartCooldown:
 
         # bars after Fri 16:00 in the received frame: Sun 18:00, 19:00 → 2
         assert s._last_exit_bars_ago_long == 1  # bars_elapsed(2) - 1
-        assert s._last_exit_reason_long == "SL_HIT"
+        s._exec_strategy.on_exit.assert_called_once_with(1, "SL_HIT", 0)
 
 
 # ---------------------------------------------------------------------------

@@ -159,6 +159,10 @@ def test_out_of_band_exit_routing(caplog):
     trader.telemetry = MagicMock()
     trader.telemetry.close_position = MagicMock()
 
+    # re-adjudicated: cooldown-single-authority-wiring_07222026_1051 — the
+    # real _reset_position_state now notifies self.strategy.on_exit (mock sink)
+    trader.strategy = MagicMock()
+
     trader.exec_client = MagicMock()
     trader.exec_client.cancel_open_orders.return_value = 2
     # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)

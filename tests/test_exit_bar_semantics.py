@@ -19,6 +19,12 @@ INTRABAR; the time-barrier check runs at bar close only if still in position.
 The backtest must therefore evaluate TP/SL breach BEFORE the time barrier on
 the barrier bar. Pessimistic SL-wins-over-TP on the same bar is preserved.
 
+re-adjudicated: cooldown-single-authority-wiring_07222026_1051 — the cooldown
+gate is now flavor-blind per-side cooldown_bars (the flavored
+sl/tp_cooldown_bars vocabulary is dead; the engine dropped it in 3d95040).
+Config shapes below re-expressed; counter semantics (reset -1, exit-bar
+reads 0, release at exit+N+1) are UNCHANGED.
+
 F — exit-bar evaluation semantics. The backtest reads counter value 0 on the
 exit bar (blocked for any cooldown >= 0) and releases at exit+N+1 reading N+1.
 With the exit-bar evaluation now always running in live (F3) and its pre-gate
@@ -168,8 +174,6 @@ def _make_strategy(config: dict) -> ConfigurableStrategy:
     strat._execution_guard = None
     strat._last_exit_bars_ago_long = 9999
     strat._last_exit_bars_ago_short = 9999
-    strat._last_exit_reason_long = ""
-    strat._last_exit_reason_short = ""
     strat.exit_mode = "SINGLE"
     strat.tp_atr_mult = 2.0
     strat.sl_atr_mult = 1.0
@@ -185,16 +189,12 @@ def _make_strategy(config: dict) -> ConfigurableStrategy:
 
 CFG_CD0 = {
     "nickname": "cd0",
-    "sl_cooldown_bars": 0,
-    "tp_cooldown_bars": 0,
     "long": {"cooldown_bars": 0},
     "short": {"cooldown_bars": 0},
 }
 
 CFG_CD1 = {
     "nickname": "cd1",
-    "sl_cooldown_bars": 1,
-    "tp_cooldown_bars": 1,
     "long": {"cooldown_bars": 1},
     "short": {"cooldown_bars": 1},
 }
@@ -222,7 +222,7 @@ class TestOnExitResetValue:
 
         assert sig1.buy_prob == 0.0, (
             "exit-bar evaluate must read 0 and block (0 <= cooldown 0) — no "
-            "same-bar re-entry after a TP with tp_cooldown=0"
+            "same-bar re-entry after a TP with cooldown_bars=0"
         )
         assert sig2.buy_prob > 0.0, "next bar reads 1 > 0 and must release"
 
@@ -238,22 +238,21 @@ class TestOnExitResetValue:
         assert probs[2] > 0.0, f"call 3 (reads 2 > 1) must release; got {probs}"
 
     def test_per_side_cooldown_bars_participates_in_the_gate(self):
-        """The backtest enforces BOTH the flavored tp/sl cooldown (engine gate)
-        AND the flavor-independent per-side `cooldown_bars` (TieredEnsemble
-        re-gate reading REAL counters). Live's re-gate is sentinel-neutralized,
-        so evaluate()'s gate must enforce the UNION: after a TP exit with
-        tp_cooldown_bars=0 but long.cooldown_bars=2, re-entry releases only
-        when the counter exceeds 2 (exit bar reads 0; released on the 4th
-        call reading 3)."""
+        """The backtest enforces exactly ONE cooldown: the flavor-blind
+        per-side `cooldown_bars` (TieredEnsemble re-gate reading REAL
+        counters, armed by _close_trade for EVERY exit reason — TP included).
+        Live's re-gate is sentinel-neutralized, so evaluate()'s gate must
+        enforce the same per-side value: after a TP exit with
+        long.cooldown_bars=2, re-entry releases only when the counter
+        exceeds 2 (exit bar reads 0; released on the 4th call reading 3).
+        (re-adjudicated: cooldown-single-authority-wiring_07222026_1051)"""
         cfg = {
-            "nickname": "union",
-            "sl_cooldown_bars": 7,
-            "tp_cooldown_bars": 0,
+            "nickname": "per_side",
             "long": {"cooldown_bars": 2},
             "short": {"cooldown_bars": 2},
         }
         strat = _make_strategy(cfg)
-        strat.on_exit(1, "TP_HIT", 5)  # TP exit -> flavored cooldown is 0
+        strat.on_exit(1, "TP_HIT", 5)  # TP exits arm cooldown_bars too
 
         probs = [strat.evaluate(pd.DataFrame(), 70.0, 0.5, 0).buy_prob for _ in range(4)]
 

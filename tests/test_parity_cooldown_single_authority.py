@@ -32,6 +32,17 @@ authority, mirroring the backtest convention (agent/backtest_engine.py):
 Do NOT modify execution_models.py. Deterministic, no I/O, no models, no
 network: the strategy object is built via object.__new__ (established stub
 pattern, see tests/test_cooldown.py) and inference is stubbed.
+
+re-adjudicated: cooldown-single-authority-wiring_07222026_1051 (human-
+authorized 2026-07-22): the gate is now FLAVOR-BLIND per-side cooldown_bars
+(resolution side_cfg -> top-level -> 0), exactly mirroring the backtest's
+TieredEnsemble re-gate — the ONLY cooldown the engine has enforced since
+3d95040 (2026-05-12) removed the flavored sl/tp_cooldown_bars params. The
+old flavored-union gate made live stricter than the backtest wherever the
+hand-template sl_cooldown_bars=7 exceeded the Optuna-searched per-side
+value. Config shapes below re-expressed with per-side cooldown_bars only;
+counter-increment semantics, sentinel neutralization, and per-side advance
+rules are UNCHANGED from the B(b)+F convention.
 """
 
 from __future__ import annotations
@@ -97,8 +108,6 @@ def _make_strategy(
     # Cooldown state (fresh: no exits yet)
     strat._last_exit_bars_ago_long = 9999
     strat._last_exit_bars_ago_short = 9999
-    strat._last_exit_reason_long = ""
-    strat._last_exit_reason_short = ""
 
     strat.exit_mode = "SINGLE"
     strat.tp_atr_mult = 2.0
@@ -119,40 +128,34 @@ def _evaluate(strat: ConfigurableStrategy, current_position: int = 0):
     return strat.evaluate(pd.DataFrame(), 70.0, 0.5, current_position)
 
 
-# HS14B-style key shapes: top-level sl/tp_cooldown_bars drive evaluate()'s own
-# gate; nested long/short cooldown_bars drive TieredEnsembleStrategy's re-gate.
+# Fleet-style key shapes (re-adjudicated: cooldown-single-authority-
+# wiring_07222026_1051): per-side cooldown_bars is the ONLY cooldown key —
+# it drives both evaluate()'s gate (live) and TieredEnsembleStrategy's
+# re-gate (backtest).
 CFG_CD1 = {
     "nickname": "cd1",
-    "sl_cooldown_bars": 1,
-    "tp_cooldown_bars": 0,
     "long": {"cooldown_bars": 1},
     "short": {"cooldown_bars": 1},
 }
 
-CFG_SL7 = {
-    "nickname": "sl7",
-    "sl_cooldown_bars": 7,
-    "tp_cooldown_bars": 0,
+CFG_CD7_SHORT = {
+    "nickname": "cd7_short",
     "long": {"cooldown_bars": 1},
-    "short": {"cooldown_bars": 1},
+    "short": {"cooldown_bars": 7},
 }
 
-CFG_TIERED_HS14B_LIKE = {
-    "nickname": "hs14b_like",
+CFG_TIERED_FLEET_LIKE = {
+    "nickname": "fleet_like",
     "execution_class": "TieredEnsembleStrategy",
     "conflict_resolution": "hold",
-    "sl_cooldown_bars": 7,
-    "tp_cooldown_bars": 0,
     "long": {"cooldown_bars": 1, "tiers": [{"min_prob": 0.99, "lots": 1}]},
-    "short": {"cooldown_bars": 1, "tiers": [{"min_prob": 0.55, "lots": 1}]},
+    "short": {"cooldown_bars": 7, "tiers": [{"min_prob": 0.55, "lots": 1}]},
 }
 
 CFG_REGATE_ONLY_DOWNSTREAM = {
     "nickname": "regate",
     "execution_class": "TieredEnsembleStrategy",
     "conflict_resolution": "hold",
-    "sl_cooldown_bars": 0,
-    "tp_cooldown_bars": 0,
     "long": {"cooldown_bars": 5, "tiers": [{"min_prob": 0.99, "lots": 1}]},
     "short": {"cooldown_bars": 5, "tiers": [{"min_prob": 0.55, "lots": 1}]},
 }
@@ -198,8 +201,8 @@ class TestCounterIncrementsBeforeGate:
             "cooldown 1) — backtest exit-bar convention"
         )
 
-    def test_short_release_exact_bar_with_sl_cooldown_7(self):
-        """SHORT SL exit, sl_cooldown_bars=7 (B(b)+F convention): the exit-bar
+    def test_short_release_exact_bar_with_cooldown_bars_7(self):
+        """SHORT exit, short.cooldown_bars=7 (B(b)+F convention): the exit-bar
         call plus 7 cooldown bars are gated (reads 0..7), released on call 9.
 
         Deterministic scripted-bar regression for the SHORT->cooldown-release
@@ -207,7 +210,7 @@ class TestCounterIncrementsBeforeGate:
         non-zeroed must be exactly the 9th evaluate() counting from the exit
         bar (counter reads 8 > 7), not one bar earlier or later.
         """
-        strat = _make_strategy(CFG_SL7)
+        strat = _make_strategy(CFG_CD7_SHORT)
         strat.on_exit(-1, "SL_HIT", 4)  # SHORT exit -> short counter -1
         assert strat._last_exit_bars_ago_short == -1
 
@@ -241,12 +244,10 @@ class TestCounterIncrementsBeforeGate:
 class TestEngineStateSentinel:
     def test_engine_state_carries_neutralizing_sentinel_when_flat(self):
         """EngineState passed to on_bar must carry 9999/9999, not real counters."""
-        strat = _make_strategy(CFG_SL7)
+        strat = _make_strategy(CFG_CD7_SHORT)
         # Mid-cooldown real counters on both sides
         strat._last_exit_bars_ago_long = 3
-        strat._last_exit_reason_long = "SL_HIT"
         strat._last_exit_bars_ago_short = 5
-        strat._last_exit_reason_short = "SL_HIT"
 
         _evaluate(strat, current_position=0)
 
@@ -263,11 +264,9 @@ class TestEngineStateSentinel:
 
     def test_engine_state_carries_sentinel_while_in_position(self):
         """Sentinel must also be fed while holding a position."""
-        strat = _make_strategy(CFG_SL7)
+        strat = _make_strategy(CFG_CD7_SHORT)
         strat._last_exit_bars_ago_long = 2
-        strat._last_exit_reason_long = "SL_HIT"
         strat._last_exit_bars_ago_short = 4
-        strat._last_exit_reason_short = "TP_HIT"
 
         _evaluate(strat, current_position=1)
 
@@ -284,15 +283,15 @@ class TestEngineStateSentinel:
 
 class TestSingleCooldownAuthorityEndToEnd:
     def test_short_boundary_release_emits_sell_on_exact_bar(self):
-        """HS14B-like config (sl_cooldown_bars=7, per-side cooldown_bars=1):
-        after a SHORT SL exit, the SELL entry must be emitted on exactly the
-        8th evaluate() — the double-enforcement path (real counter passed into
+        """Fleet-like config (short.cooldown_bars=7): after a SHORT SL exit,
+        the SELL entry must be emitted on exactly the 9th evaluate() — the
+        double-enforcement path (real counter passed into
         TieredEnsembleStrategy) shifts this by one bar.
         """
-        exec_strat = TieredEnsembleStrategy(CFG_TIERED_HS14B_LIKE)
+        exec_strat = TieredEnsembleStrategy(CFG_TIERED_FLEET_LIKE)
         # buy below the 0.99 long tier so only the SHORT side can ever fire
         strat = _make_strategy(
-            CFG_TIERED_HS14B_LIKE,
+            CFG_TIERED_FLEET_LIKE,
             buy_prob=0.50,
             sell_prob=0.80,
             exec_strategy=exec_strat,
@@ -312,14 +311,14 @@ class TestSingleCooldownAuthorityEndToEnd:
         )
 
     def test_cooldown_bars_enforced_once_with_backtest_release_bar(self):
-        """sl_cooldown_bars=0 but per-side cooldown_bars=5: the backtest
-        enforces cooldown_bars via the TieredEnsemble re-gate reading REAL
-        counters, so evaluate()'s sole-authority gate must enforce the UNION
-        (updated under ticket bb-f-exit-bar-semantics_07032026_2045). Against
-        the REAL TieredEnsembleStrategy (sentinel keeps its re-gate inert),
-        SELL must be emitted on exactly the 7th evaluate counting from the
-        exit bar (reads 6 > 5) — not earlier (union gate) and not later
-        (which would prove double enforcement via the un-neutralized re-gate).
+        """Per-side cooldown_bars=5: the backtest enforces it via the
+        TieredEnsemble re-gate reading REAL counters; live's sole-authority
+        gate enforces the SAME per-side value (re-adjudicated:
+        cooldown-single-authority-wiring_07222026_1051). Against the REAL
+        TieredEnsembleStrategy (sentinel keeps its re-gate inert), SELL must
+        be emitted on exactly the 7th evaluate counting from the exit bar
+        (reads 6 > 5) — not earlier, and not later (which would prove double
+        enforcement via an un-neutralized re-gate).
         """
         exec_strat = TieredEnsembleStrategy(CFG_REGATE_ONLY_DOWNSTREAM)
         strat = _make_strategy(
@@ -350,7 +349,7 @@ class TestSingleCooldownAuthorityEndToEnd:
 
 class TestPerSideAdvanceSemanticsPreserved:
     def test_flat_advances_both_long_only_short_short_only_long(self):
-        strat = _make_strategy(CFG_SL7)
+        strat = _make_strategy(CFG_CD7_SHORT)
         strat._last_exit_bars_ago_long = 100
         strat._last_exit_bars_ago_short = 200
 

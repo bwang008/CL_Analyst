@@ -72,12 +72,16 @@ def _make_signal(ohlcv: pd.DataFrame, bar_idx: int, side: int = 1) -> pd.DataFra
 
 
 def _bt(**kwargs) -> BacktestEngine:
-    """Create a backtester with test-friendly defaults."""
+    """Create a backtester with test-friendly defaults.
+
+    The engine itself takes NO cooldown parameters — cooldown lives in the
+    execution strategy (per-side cooldown_bars, TieredEnsembleStrategy
+    re-gate); see TestExecutionStrategyCooldown for that coverage.
+    """
     defaults = {
         "tp_atr_mult": 2.0,
         "sl_atr_mult": 1.0,
         "max_horizon": 288,
-        "cooldown_bars": 10,
         "trailing_atr_mult": 1.0,
         "atr_period": 14,
         "commission_per_side": 0.0,  # Zero commission for cleaner P&L assertions
@@ -85,8 +89,6 @@ def _bt(**kwargs) -> BacktestEngine:
         "contract_multiplier": 1000.0,
     }
     defaults.update(kwargs)
-    for k in ["cooldown_bars", "tp_cooldown_bars", "sl_cooldown_bars", "consecutive_signal_threshold"]:
-        defaults.pop(k, None)
     return BacktestEngine(**defaults)
 
 
@@ -909,94 +911,132 @@ class TestAggressiveEnsembleFlip:
 
 
 # ---------------------------------------------------------------------------
-# Separate TP/SL Cooldown Tests
+# Execution-Strategy Cooldown Tests
+# re-adjudicated: cooldown-single-authority-wiring_07222026_1051 — the old
+# TestSeparateCooldowns pinned engine-level flavored tp/sl_cooldown_bars that
+# 3d95040 (2026-05-12) REMOVED; _bt silently stripped the kwargs and the
+# tests passed vacuously (the "rejected" entry actually opened but was never
+# recorded because end-of-data open positions produce no TradeRecord). The
+# truncated test_time_barrier_no_cooldown had no assertions at all. These
+# tests pin the REAL current semantics: cooldown = flavor-blind per-side
+# cooldown_bars via the TieredEnsembleStrategy re-gate reading engine
+# counters, armed by _close_trade for EVERY exit reason. Every test closes
+# its second trade so the end-of-data vacuity trap cannot fake a pass.
 # ---------------------------------------------------------------------------
 
 
-class TestSeparateCooldowns:
-    """Separate tp_cooldown_bars and sl_cooldown_bars apply correctly."""
+_CD_TIERED_CFG = {
+    "nickname": "cooldown_tiered",
+    "execution_class": "TieredEnsembleStrategy",
+    "conflict_resolution": "hold",
+    "tp_atr_mult": 2.0,
+    "sl_atr_mult": 1.0,
+    "long": {"cooldown_bars": 5, "tiers": [{"min_prob": 0.60, "lots": 1}]},
+    "short": {"cooldown_bars": 5, "tiers": [{"min_prob": 0.99, "lots": 1}]},
+}
 
-    def test_sl_cooldown_rejects_during_window(self) -> None:
-        """SL exit activates sl_cooldown_bars, rejecting signals within it."""
-        n = 50
+
+def _cd_cfg(**overrides) -> dict:
+    cfg = {k: (dict(v) if isinstance(v, dict) else v)
+           for k, v in _CD_TIERED_CFG.items()}
+    cfg.update(overrides)
+    return cfg
+
+
+def _prob_buy_signals(ohlcv: pd.DataFrame, bar_idxs: list) -> pd.DataFrame:
+    return pd.DataFrame(
+        {"prob_Buy": [0.80] * len(bar_idxs)},
+        index=[ohlcv.index[i] for i in bar_idxs],
+    )
+
+
+class TestExecutionStrategyCooldown:
+    """Per-side cooldown_bars (the ONLY cooldown) blocks re-entry after ANY
+    exit reason and releases on the exact backtest timeline."""
+
+    def _flat_market(self, n=50):
         prices = [65.0] * n
         highs = [65.01] * n
         lows = [64.99] * n
+        return prices, highs, lows
 
-        # Bar 25: SL hit
-        lows[25] = 64.97
+    def test_sl_exit_blocks_within_window_releases_after(self) -> None:
+        """SL exit at bar 25 → signal at 28 (counter 3 <= 5) rejected; signal
+        at 35 (counter 10 > 5) entered. Trade 2 closes at bar 38 so it is
+        recorded — its entry_dt pins BOTH the rejection and the release."""
+        prices, highs, lows = self._flat_market()
+        lows[25] = 64.97   # SL for trade 1
+        lows[38] = 64.95   # SL for trade 2 (records it)
+        ohlcv = _make_ohlcv(50, prices=prices, highs=highs, lows=lows)
+        signals = _prob_buy_signals(ohlcv, [20, 28, 35])
 
-        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        result = _bt_with_strategy(_cd_cfg()).run(signals, ohlcv)
 
-        # Signal at bar 20 (accepted), signal at bar 28 (during sl_cooldown=5)
-        dt1 = ohlcv.index[20]
-        dt2 = ohlcv.index[28]
-        signals = pd.DataFrame({"side": [1, 1]}, index=[dt1, dt2])
-
-        bt = _bt(sl_cooldown_bars=5, tp_cooldown_bars=0)
-        result = bt.run(signals, ohlcv)
-
-        # Only 1 trade — second signal rejected during SL cooldown
-        assert result.trade_count == 1
-
-    def test_tp_cooldown_rejects_during_window(self) -> None:
-        """TP exit activates tp_cooldown_bars, rejecting signals within it."""
-        n = 50
-        prices = [65.0] * n
-        highs = [65.01] * n
-        lows = [64.99] * n
-
-        # Bar 25: TP hit
-        highs[25] = 65.05
-
-        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
-
-        # Signal at bar 20 (accepted), signal at bar 28 (during tp_cooldown=5)
-        dt1 = ohlcv.index[20]
-        dt2 = ohlcv.index[28]
-        signals = pd.DataFrame({"side": [1, 1]}, index=[dt1, dt2])
-
-        bt = _bt(tp_cooldown_bars=5, sl_cooldown_bars=0)
-        result = bt.run(signals, ohlcv)
-
-        # Only 1 trade — second signal rejected during TP cooldown
-        assert result.trade_count == 1
-
-    def test_different_tp_sl_cooldown_lengths(self) -> None:
-        """SL gets long cooldown (10), TP gets short cooldown (2)."""
-        n = 50
-        prices = [65.0] * n
-        highs = [65.01] * n
-        lows = [64.99] * n
-
-        highs[25] = 65.05  # TP hit for first trade
-        highs[35] = 65.05  # TP hit for second trade
-
-        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
-
-        dt1 = ohlcv.index[20]
-        dt2 = ohlcv.index[29]  # After tp_cooldown=2 expires
-        signals = pd.DataFrame({"side": [1, 1]}, index=[dt1, dt2])
-
-        bt = _bt(tp_cooldown_bars=2, sl_cooldown_bars=10)
-        result = bt.run(signals, ohlcv)
-
-        # Both trades should execute — TP cooldown (2 bars) expired before bar 29
         assert result.trade_count == 2
+        assert result.trades[0].exit_reason == ExitReason.SL
+        assert result.trades[1].entry_dt == ohlcv.index[35], (
+            f"second entry must be the post-release bar 35, got "
+            f"{result.trades[1].entry_dt} — bar-28 entry means the cooldown "
+            f"did not block; later means over-blocking"
+        )
 
-    def test_time_barrier_no_cooldown(self) -> None:
-        """Time barrier exit goes straight to FLAT with no cooldown."""
-        horizon = 5
-        n = 50
-        prices = [65.0] * n
-        highs = [65.01] * n
-        lows = [64.99] * n
+    def test_tp_exit_also_arms_cooldown_flavor_blind(self) -> None:
+        """TP exit arms the SAME per-side cooldown_bars (flavor-blind:
+        _close_trade resets the counter for every exit reason)."""
+        prices, highs, lows = self._flat_market()
+        highs[25] = 65.05  # TP for trade 1
+        highs[38] = 65.06  # TP for trade 2 (records it)
+        ohlcv = _make_ohlcv(50, prices=prices, highs=highs, lows=lows)
+        signals = _prob_buy_signals(ohlcv, [20, 28, 35])
 
-        ohlcv = _make_ohlcv(n, prices=prices, highs=highs, lows=lows)
+        result = _bt_with_strategy(_cd_cfg()).run(signals, ohlcv)
 
-        # Signal at bar 20, time barrier exits at bar 26, signal at bar 27
-        dt1 = ohlcv.index[20]
-        dt2 = ohlcv.index[27]
+        assert result.trade_count == 2
+        assert result.trades[0].exit_reason == ExitReason.TP
+        assert result.trades[1].entry_dt == ohlcv.index[35], (
+            f"TP exits must arm cooldown_bars exactly like SL exits; second "
+            f"entry expected at bar 35, got {result.trades[1].entry_dt}"
+        )
+
+    def test_time_barrier_exit_returns_flat_and_arms_cooldown(self) -> None:
+        """Time-barrier exit goes straight back to FLAT (no COOLDOWN state)
+        and arms the same per-side cooldown_bars as any other exit."""
+        prices, highs, lows = self._flat_market()
+        lows[38] = 64.95   # SL for trade 2 (records it)
+        ohlcv = _make_ohlcv(50, prices=prices, highs=highs, lows=lows)
+        signals = _prob_buy_signals(ohlcv, [20, 28, 35])
+
+        result = _bt_with_strategy(_cd_cfg(max_hold_bars=5)).run(signals, ohlcv)
+
+        assert result.trade_count == 2
+        assert result.trades[0].exit_reason == ExitReason.TIME_BARRIER
+        assert result.trades[1].entry_dt == ohlcv.index[35], (
+            f"TIME_BARRIER must arm cooldown_bars (bar-28 probe blocked) and "
+            f"release by bar 35; got {result.trades[1].entry_dt}"
+        )
+
+    def test_cooldown_zero_reenters_immediately(self) -> None:
+        """Negative control: cooldown_bars=0 accepts the bar-28 probe —
+        proving the blocking above comes from the cooldown re-gate."""
+        prices, highs, lows = self._flat_market()
+        lows[25] = 64.97   # SL for trade 1
+        lows[38] = 64.95   # SL for trade 2 (records it)
+        ohlcv = _make_ohlcv(50, prices=prices, highs=highs, lows=lows)
+        signals = _prob_buy_signals(ohlcv, [20, 28, 35])
+
+        cfg = _cd_cfg()
+        cfg["long"]["cooldown_bars"] = 0
+        cfg["short"]["cooldown_bars"] = 0
+        result = _bt_with_strategy(cfg).run(signals, ohlcv)
+
+        assert result.trade_count >= 2
+        assert result.trades[1].entry_dt == ohlcv.index[28], (
+            f"with cooldown_bars=0 the bar-28 signal must enter; got "
+            f"{result.trades[1].entry_dt}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Trailing Stop Offset Tests
 # ---------------------------------------------------------------------------
 

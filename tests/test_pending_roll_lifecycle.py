@@ -152,7 +152,6 @@ def _rollover_stub(dm1h, dm5m=None):
     lt._telegram = MagicMock()
     strategy = MagicMock()
     lt.strategy = strategy
-    lt._strategy = strategy
     lt.telemetry = MagicMock()
     lt._pending_entry_order_id = None
     lt._pending_entry_bar_time = None

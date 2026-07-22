@@ -723,12 +723,6 @@ def main():
     # 5. Inject sim clock and bootstrap
     _inject_sim_clock(trader)
 
-    # PARITY FIX: _reset_position_state() references self._strategy (private),
-    # but LiveTrader stores it as self.strategy (public). Without this alias,
-    # on_exit() is never called after TP/SL fills, so the strategy's cooldown
-    # counters never activate — causing immediate re-entry after SL exits.
-    trader._strategy = trader.strategy
-
     # 6. Disable Telegram unless explicitly opted in (prevents flooding
     #    real channels with hundreds of simulated trade notifications).
     if not args.telegram:

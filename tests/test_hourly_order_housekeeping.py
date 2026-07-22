@@ -607,7 +607,6 @@ def _housekeeping_stub(*, exec_client=None, position=0, resting=(),
     lt._reset_position_state = MagicMock()
     lt._book_recovered_executions = MagicMock()
     lt.strategy = MagicMock()
-    lt._strategy = lt.strategy
     _attach_identity_seams(lt)
     return lt
 
@@ -1499,7 +1498,7 @@ def _recovery_stub(executions, *, ledger_pos=None, cancel_by_ids=1):
     lt.rolling_df_5m = None
     lt.rolling_df_1h = None
     lt._bar_size = "5m"
-    lt._strategy = MagicMock()
+    lt.strategy = MagicMock()
     lt._position_bars_held = 0
     lt.telemetry.get_recent_closed_positions.return_value = []
     _attach_identity_seams(lt)
@@ -1579,10 +1578,10 @@ class TestStartupRecovery:
         # branch now ARMS the strategy re-entry cooldown with the truthful
         # recovered reason and the LEDGER side (SHORT → -1). (The three fences
         # above are unchanged; this is the added authorized behavior.)
-        assert lt._strategy.on_exit.called, (
+        assert lt.strategy.on_exit.called, (
             "startup OOB recovery must arm the strategy cooldown"
         )
-        args = lt._strategy.on_exit.call_args.args
+        args = lt.strategy.on_exit.call_args.args
         assert args[0] == -1 and args[1] == "TP_HIT_OOB", (
             f"cooldown must be armed with (ledger_side=-1, truthful reason), "
             f"got {args!r}"
@@ -1640,7 +1639,6 @@ class TestStartupRecovery:
         lt._telegram = MagicMock()
         strategy = MagicMock()
         lt.strategy = strategy
-        lt._strategy = strategy
         lt._active_trade_id = "trade_9"
         lt._position_entry_bar_time = pd.Timestamp("2026-07-07 10:00:00")
         lt._position_bars_held = 4
