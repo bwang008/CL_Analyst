@@ -107,6 +107,16 @@ def _mutate(base: dict, ladder, lots: int) -> dict:
                 {"qty_pct": pct, "tp_atr_mult": round(tp * scale, 4)}
                 for pct, scale in ladder
             ]
+            # _check_parameter_shadowing demands side == tiers[0] ==
+            # tiered_exits[0]; align the side/tier tp to rung 1 (those
+            # values feed only the single path, inactive under a ladder —
+            # rung prices govern the tranche path).
+            rung1_tp = side_cfg["tiered_exits"][0]["tp_atr_mult"]
+            if "tp_atr_mult" in side_cfg:
+                side_cfg["tp_atr_mult"] = rung1_tp
+            for tier in side_cfg["tiers"]:
+                if "tp_atr_mult" in tier:
+                    tier["tp_atr_mult"] = rung1_tp
         for tier in side_cfg["tiers"]:
             tier["lots"] = lots
     return cfg
