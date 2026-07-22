@@ -20,14 +20,12 @@
     },
     "models": {
         "long": {
-            "threshold": 0.5100581211082654,
             "experiment_id": "E2E_HourSet_02B_long_average_precision",
             "model_path": "reports/sweep_gc_hs02b_4x1_6h_scout_20260710-120946/registry/production_output/registry/E2E_HourSet_02B_long_average_precision/final_model.pkl",
             "predictions_path": "reports/batch_runs/batch_20260710_120946_GC_SCOUT/predictions/GC_Sharpe_E04_predictions.csv",
             "symbol": "GC"
         },
         "short": {
-            "threshold": 0.5696169967138925,
             "experiment_id": "E2E_HourSet_02B_short_average_precision",
             "model_path": "reports/sweep_gc_hs02b_1x0p5_1h_scout_20260710-120946/registry/production_output/registry/E2E_HourSet_02B_short_average_precision/final_model.pkl",
             "predictions_path": "reports/batch_runs/batch_20260710_120946_GC_SCOUT/predictions/GC_Sharpe_E04_predictions.csv",

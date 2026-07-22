@@ -20,14 +20,12 @@
     },
     "models": {
         "long": {
-            "threshold": 0.5,
             "experiment_id": "E2E_HourSet_01B_long_average_precision",
             "model_path": "reports/sweep_si_hs01b_4x1_36h_scout_20260706-0925/registry/production_output/registry/E2E_HourSet_01B_long_average_precision/final_model.pkl",
             "predictions_path": "reports/batch_runs/batch_20260706_0925/predictions/SI_Sharpe_E02_predictions.csv",
             "symbol": "SI"
         },
         "short": {
-            "threshold": 0.54,
             "experiment_id": "E2E_HourSet_01B_short_average_precision",
             "model_path": "reports/sweep_si_hs01b_2x1_3h_scout_20260706-0925/registry/production_output/registry/E2E_HourSet_01B_short_average_precision/final_model.pkl",
             "predictions_path": "reports/batch_runs/batch_20260706_0925/predictions/SI_Sharpe_E02_predictions.csv",

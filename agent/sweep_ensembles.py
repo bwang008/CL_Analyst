@@ -65,6 +65,29 @@ def _unique_model_name(model_path: str) -> str:
     return basename
 
 
+def _resolve_base_threshold(cfg: dict, side: str) -> float:
+    """Canonical per-side entry threshold of a base strategy config.
+
+    tiers[].min_prob is the execution source of truth for tiered configs
+    (models.*.threshold is optional there and may be absent entirely, ticket
+    threshold-min-prob-consolidation_07222026_1230); models.<side>.threshold
+    for non-tiered ensembles. NO silent default: the old 0.55 fallback got
+    written back into every tiers[*].min_prob downstream, silently rewriting
+    the strategy's entry threshold.
+    """
+    tiers = (cfg.get(side) or {}).get("tiers") or []
+    if tiers:
+        return min(float(t["min_prob"]) for t in tiers)
+    thr = (cfg.get("models", {}).get(side) or {}).get("threshold")
+    if thr is None:
+        raise ValueError(
+            f"base config resolves no entry threshold for side '{side}': "
+            f"neither {side}.tiers[].min_prob nor models.{side}.threshold "
+            f"is present - pass an explicit CLI threshold or fix the config"
+        )
+    return float(thr)
+
+
 # ---------------------------------------------------------------------------
 # Frictionless evaluation mode (Workflow C)
 # ---------------------------------------------------------------------------
@@ -76,9 +99,10 @@ def _run_frictionless(args, long_models, short_models):
     # Resolve threshold from base config, with CLI override
     with open(args.base_config) as f:
         _base = json.load(f)
-    threshold = _base.get("models", {}).get("long", {}).get("threshold", 0.55)
     if args.long_threshold is not None:
         threshold = args.long_threshold
+    else:
+        threshold = _resolve_base_threshold(_base, "long")
 
     print(f"Running frictionless alpha evaluation...")
     print(f"  Horizons: [6, 12, 24, 48, 72]")
@@ -245,11 +269,11 @@ def run_backtest(long_path, short_path, base_config, data_path, temp_config, lon
         cfg["models"] = {"long": {}, "short": {}}
 
     # --- Resolve thresholds ---
-    # Priority: CLI override > base config value > safe default of 0.55
-    base_long_thr  = cfg["models"].get("long",  {}).get("threshold", 0.55)
-    base_short_thr = cfg["models"].get("short", {}).get("threshold", 0.55)
-    final_long_thr  = long_threshold  if long_threshold  is not None else base_long_thr
-    final_short_thr = short_threshold if short_threshold is not None else base_short_thr
+    # Priority: CLI override > base config (tiers[].min_prob canonical,
+    # models.*.threshold fallback; loud failure when neither resolves —
+    # these values overwrite every tiers[*].min_prob below)
+    final_long_thr  = long_threshold  if long_threshold  is not None else _resolve_base_threshold(cfg, "long")
+    final_short_thr = short_threshold if short_threshold is not None else _resolve_base_threshold(cfg, "short")
 
     # --- Patch Long model ---
     cfg["models"]["long"]["experiment_id"]   = long_path.split("/")[-1]
@@ -348,10 +372,8 @@ def _run_backtest_legacy(args, long_models, short_models):
     # Resolve thresholds for display
     with open(args.base_config) as f:
         _base = json.load(f)
-    _base_long_thr  = _base.get("models", {}).get("long",  {}).get("threshold", 0.55)
-    _base_short_thr = _base.get("models", {}).get("short", {}).get("threshold", 0.55)
-    eff_long_thr  = args.long_threshold  if args.long_threshold  is not None else _base_long_thr
-    eff_short_thr = args.short_threshold if args.short_threshold is not None else _base_short_thr
+    eff_long_thr  = args.long_threshold  if args.long_threshold  is not None else _resolve_base_threshold(_base, "long")
+    eff_short_thr = args.short_threshold if args.short_threshold is not None else _resolve_base_threshold(_base, "short")
     print(f"Thresholds enforced: Buy >= {eff_long_thr}, Sell >= {eff_short_thr}")
 
     temp_cfg = "configs/strategies/temp_sweep_config.json"

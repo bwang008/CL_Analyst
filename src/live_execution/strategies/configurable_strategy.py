@@ -129,17 +129,32 @@ class ConfigurableStrategy(Strategy):
                 len(self._short_tiers), self._short_threshold,
             )
 
-        # ── Ensemble config ───────────────────────────────────────────
+        # ── Ensemble config (no tiers) ────────────────────────────────
         elif self._is_ensemble:
             self._long_tiers = []
             self._short_tiers = []
             models_cfg = self.config["models"]
-            self._long_threshold = float(
-                models_cfg.get("long", {}).get("threshold", 0.50)
-            )
-            self._short_threshold = float(
-                models_cfg.get("short", {}).get("threshold", 0.50)
-            )
+
+            # Without tiers, models.<side>.threshold IS the execution source
+            # of truth and must be explicit — no silent 0.50 default (ticket
+            # threshold-min-prob-consolidation_07222026_1230; tiered configs
+            # derive from tiers[].min_prob and may omit it entirely). A side
+            # absent from `models` can never fire: fail-closed 1.0, same as
+            # the tiered branch's missing-side sentinel.
+            def _side_threshold(side: str) -> float:
+                side_cfg = models_cfg.get(side) or {}
+                if not side_cfg:
+                    return 1.0
+                if "threshold" not in side_cfg:
+                    raise ValueError(
+                        f"[{self._nickname}] non-tiered ensemble config must "
+                        f"set models.{side}.threshold explicitly (no silent "
+                        f"default); tiered configs use tiers[].min_prob"
+                    )
+                return float(side_cfg["threshold"])
+
+            self._long_threshold = _side_threshold("long")
+            self._short_threshold = _side_threshold("short")
             self.entry_threshold = min(
                 self._long_threshold, self._short_threshold
             )
