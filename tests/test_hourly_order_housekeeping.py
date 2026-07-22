@@ -284,6 +284,10 @@ _ALLOWED_KINDS = frozenset({
     "housekeeping-protective-leg-healed",
     "housekeeping-ledger-persist-failed",
     "position-flat-unconfirmed",
+    # oca-stage2-residual-detection_07222026_0141 (additive registry update):
+    "oca-race-reversal",
+    "rearm-sign-mismatch",
+    "protective-leg-partial-fill",
     "housekeeping-error",
 })
 

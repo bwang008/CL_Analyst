@@ -238,6 +238,12 @@ _MAX_RESUBSCRIBE_RETRIES = 5
 # this ceiling only bounds how long we retry the exit quietly before shouting.
 _MAX_TIME_BARRIER_EXIT_ATTEMPTS = 6
 
+# Residual double-fill detection (oca-stage2-residual-detection_07222026_0141
+# R2): how long a just-closed bracket's leg-id snapshot stays matchable
+# against late sibling fills. Bounded so broker order-id reuse across
+# sessions can never trigger a phantom reversal flatten.
+_RECENTLY_CLOSED_LEGS_MAX_AGE_SEC = 6 * 3600
+
 # Hourly order housekeeping (hourly-order-housekeeping_07072026_0435):
 # in-child broker-vs-ledger sweep at ~:15 wall clock — after the :00
 # signal bar and the :06 read-only fleet monitor, so each hour composes
@@ -732,6 +738,18 @@ class LiveTrader:
         # TP/SL order tracking for software-side OCA (no parentId linkage)
         self._tp_order_ids: list[int] = []
         self._sl_order_id: Optional[int] = None
+        # Single-slot registry of the most recently closed bracket's leg ids
+        # (oca-stage2-residual-detection_07222026_0141 R2): snapshot taken by
+        # _reset_position_state BEFORE the ids are cleared, so a late sibling
+        # fill (broker OCA anomaly, legacy pre-OCA bracket, replay edge) is
+        # recognized as a residual double-fill instead of dying silently in
+        # the UNRECOGNIZED-FILL ignore path. Overwritten by the next close,
+        # cleared on the next recognized entry fill, aged out at match time.
+        self._recently_closed_legs: Optional[dict] = None
+        # Partial-fill observability dedupe (R4): (order_id, filled_qty)
+        # pairs already announced for tracked protective legs. Per-trade
+        # state - cleared by _reset_position_state.
+        self._partial_fill_signatures: set = set()
         # TIME BARRIER exit confirmation state (exit-fill-unverified_07152026_1855):
         # the exit is confirmed against a settled broker snapshot before the
         # ledger is booked; these bound the cross-bar retry and remember the
@@ -1310,6 +1328,27 @@ class LiveTrader:
         # Reset per-trade overrides (back to global config defaults)
         self._trade_trailing_atr_mult = None
         self._trade_max_hold_bars = None
+        # Snapshot the just-closed bracket's leg ids BEFORE clearing them
+        # (oca-stage2-residual-detection_07222026_0141 R2): a late Filled
+        # event on one of these ids is a residual double-fill (the sibling
+        # leg filled despite the OCA group), not an ignorable unrecognized
+        # fill. Single slot - one position per child; overwritten by the
+        # next close, cleared on the next recognized entry fill, aged out
+        # at match time.
+        if self._tp_order_ids or self._sl_order_id is not None:
+            self._recently_closed_legs = {
+                "trade_id": self._active_trade_id,
+                "reason": reason,
+                "leg_ids": {
+                    str(x) for x in list(self._tp_order_ids)
+                    + ([self._sl_order_id] if self._sl_order_id is not None
+                       else [])
+                },
+                "cleared_at": time.time(),
+            }
+        # Partial-fill dedupe is per-trade state (R4): a reused broker order
+        # id on the NEXT trade must be able to announce again.
+        self._partial_fill_signatures = set()
         # Clear TP/SL order tracking
         self._tp_order_ids = []
         self._sl_order_id = None
@@ -2069,8 +2108,42 @@ class LiveTrader:
         if settled == 0:
             # The exit filled after all — book the proven price and finish.
             return self._book_time_barrier_flat(exit_oid)
-        # Still open and the exit is provably dead -> A3: safe to re-arm.
-        self._rearm_time_barrier_protection(current_position)
+        # D2 (oca-stage2-residual-detection_07222026_0141 R3): the settled
+        # book can be REVERSED relative to the tracked side (residual
+        # double-fill, manual intervention). Re-arming protective legs on
+        # the OLD side against a reversed book places same-direction,
+        # exposure-INCREASING orders - NEVER re-arm; flatten and conclude.
+        if self._position_side in (1, -1) and (
+            (settled > 0) != (self._position_side > 0)
+        ):
+            detail = (
+                f"TIME BARRIER re-arm sign mismatch for trade "
+                f"{self._active_trade_id}: settled position {settled} is "
+                f"REVERSED vs tracked side {self._position_side} (exit "
+                f"order {exit_oid}) - flattening instead of re-arming"
+            )
+            log.critical("[TIME BARRIER] %s", detail)
+            try:
+                self._emit_health_event("rearm-sign-mismatch", detail)
+            except Exception:
+                log.debug(
+                    "emit_health_event failed (rearm-sign-mismatch)",
+                    exc_info=True,
+                )
+            self._flatten_book_and_reset(
+                reason="REVERSED_POSITION_KILL_SWITCH",
+                telegram_text=(
+                    f"[CRITICAL] *REVERSED POSITION* - "
+                    f"{self._execution_symbol}\n\n{detail}\n\n"
+                    f"*ACTION: Flattening book immediately.*"
+                ),
+                ledger_trade_id=self._active_trade_id,
+            )
+            return True
+        # Still open and the exit is provably dead -> A3: safe to re-arm,
+        # sized from the SETTLED broker position - never the stale
+        # pre-settled current_position argument (R3).
+        self._rearm_time_barrier_protection(settled)
         log.warning(
             "[TIME BARRIER] exit %s died without filling; re-armed protection "
             "and kept trade %s tracked — retrying exit next bar",
@@ -6257,6 +6330,82 @@ class LiveTrader:
 
 
 
+    def _flatten_book_and_reset(
+        self, *, reason: str, telegram_text: str,
+        ledger_trade_id: Optional[str],
+    ) -> None:
+        """UN-GATED flatten: cancel + market close + optional ledger close +
+        Telegram + full state reset (oca-stage2-residual-detection R1).
+
+        Extracted from _check_naked_position's flatten body so paths whose
+        book the tracker no longer owns (oca-race-reversal residual
+        double-fill, rearm-sign-mismatch) can still flatten. Deliberately
+        NO _active_trade_id / _sl_order_id / pending guards inside - the
+        callers own their own detection; gating here would recreate the
+        kill-switch blindness this helper exists to fix. The ledger close
+        runs ONLY when ledger_trade_id is not None (the reversal branch
+        must never re-close the already-truthfully-closed row).
+        """
+        # 1. Cancel all open orders on the execution symbol
+        try:
+            cancelled = self.exec_client.cancel_open_orders(
+                symbol=self._execution_symbol,
+            )
+            log.info(
+                "[FLATTEN] Cancelled %d open order(s)", cancelled,
+            )
+        except Exception:
+            log.exception("[FLATTEN] Failed to cancel open orders")
+
+        # 2. Flatten with a market order; register the exit order id so its
+        # own fill can never re-enter the unrecognized-fill machinery.
+        try:
+            current_price = 0.0
+            if self.rolling_df_5m is not None and len(self.rolling_df_5m) > 0:
+                current_price = float(self.rolling_df_5m["Close"].iloc[-1])
+            trade = self.exec_client.close_position(
+                symbol=self._execution_symbol,
+                exit_mode="market",
+                current_price=current_price,
+            )
+            close_order_id = getattr(
+                getattr(trade, "order", None), "orderId", None,
+            )
+            if close_order_id is not None:
+                self._processed_exit_order_ids.add(str(close_order_id))
+            log.critical(
+                "[FLATTEN] Market close order submitted (reason=%s)", reason,
+            )
+        except Exception:
+            log.exception(
+                "[FLATTEN] FAILED to flatten position - "
+                "MANUAL INTERVENTION REQUIRED"
+            )
+
+        # 3. Close ledger position - ONLY when the caller owns an open row.
+        if ledger_trade_id is not None:
+            try:
+                self.telemetry.close_position(
+                    ledger_trade_id,
+                    reason=reason,
+                    close_time=self._utc_iso_now(),
+                    bars_held=self._position_bars_held,
+                )
+            except Exception:
+                log.debug("[FLATTEN] Failed to close ledger", exc_info=True)
+
+        # 4. Telegram alert (never let a send failure block safety actions)
+        try:
+            self._telegram.send(telegram_text)
+        except Exception:
+            log.debug("[FLATTEN] Telegram send failed", exc_info=True)
+
+        # 5. Reset state to FLAT - a REAL close of a filled position (A2:
+        # full reset incl. strategy.on_exit); the pending record is cleared
+        # cooldown-free via _clear_pending_entry.
+        self._reset_position_state(reason=reason)
+        self._clear_pending_entry()
+
     def _check_naked_position(self) -> None:
         """Kill switch: detect and flatten naked positions.
 
@@ -6321,54 +6470,12 @@ class LiveTrader:
             ibkr_pos, self._active_trade_id,
         )
 
-        # 1. Cancel all open CL orders
-        try:
-            cancelled = self.exec_client.cancel_open_orders(
-                symbol=self._execution_symbol,
-            )
-            log.info(
-                "[KILL SWITCH] Cancelled %d open order(s)", cancelled,
-            )
-        except Exception:
-            log.exception("[KILL SWITCH] Failed to cancel open orders")
-
-        # 2. Flatten with market order
-        try:
-            current_price = 0.0
-            if self.rolling_df_5m is not None and len(self.rolling_df_5m) > 0:
-                current_price = float(self.rolling_df_5m["Close"].iloc[-1])
-            trade = self.exec_client.close_position(
-                symbol=self._execution_symbol,
-                exit_mode="market",
-                current_price=current_price,
-            )
-            close_order_id = getattr(getattr(trade, "order", None), "orderId", None)
-            if close_order_id is not None:
-                self._processed_exit_order_ids.add(str(close_order_id))
-            log.critical(
-                "[KILL SWITCH] Market close order submitted for %d contracts",
-                ibkr_pos,
-            )
-        except Exception:
-            log.exception(
-                "[KILL SWITCH] FAILED to flatten position — "
-                "MANUAL INTERVENTION REQUIRED"
-            )
-
-        # 3. Close ledger position
-        try:
-            self.telemetry.close_position(
-                self._active_trade_id,
-                reason="NAKED_POSITION_KILL_SWITCH",
-                close_time=self._utc_iso_now(),
-                bars_held=self._position_bars_held,
-            )
-        except Exception:
-            log.debug("[KILL SWITCH] Failed to close ledger", exc_info=True)
-
-        # 4. Telegram alert
-        try:
-            self._telegram.send(
+        # Steps 1-5 (cancel, market flatten, ledger close, Telegram, reset)
+        # live in the shared un-gated helper (oca-stage2-residual-detection
+        # R1 extraction) - observable behavior unchanged.
+        self._flatten_book_and_reset(
+            reason="NAKED_POSITION_KILL_SWITCH",
+            telegram_text=(
                 f"[CRITICAL] *NAKED POSITION DETECTED*\n"
                 f"IBKR position: `{ibkr_pos}` contracts\n"
                 f"SL order: `None` (MISSING)\n"
@@ -6376,15 +6483,9 @@ class LiveTrader:
                 f"Bars held: `{self._position_bars_held}`\n\n"
                 f"*ACTION: Flattening book immediately.*\n"
                 f"Fix root cause before restarting."
-            )
-        except Exception:
-            pass  # Never let Telegram failure block safety actions
-
-        # 5. Reset state to FLAT — a REAL close of a filled position (A2:
-        # full reset incl. strategy.on_exit); the pending record is cleared
-        # cooldown-free via _clear_pending_entry.
-        self._reset_position_state(reason="NAKED_POSITION_KILL_SWITCH")
-        self._clear_pending_entry()
+            ),
+            ledger_trade_id=self._active_trade_id,
+        )
 
     def _on_standard_execution_event(self, event: StandardExecutionEvent) -> None:
         self._open_orders[event.order_id] = event
@@ -6506,6 +6607,97 @@ class LiveTrader:
                 # is also stored under child order IDs for telemetry.
                 _known_entries = getattr(self, "_entry_order_ids", set())
                 if str(order_id) not in _known_entries:
+                    # Residual double-fill detection (oca-stage2-residual-
+                    # detection_07222026_0141 R2): a Filled event matching a
+                    # leg id of the JUST-closed bracket means the sibling
+                    # filled despite the OCA group - the book is now
+                    # reversed/untracked and the kill switch is blind
+                    # (_active_trade_id is None). Detect, record truthfully,
+                    # and flatten via the un-gated helper. Keys on
+                    # status=='Filled' only; fresh snapshots only.
+                    _closed = getattr(self, "_recently_closed_legs", None)
+                    if (
+                        _closed is not None
+                        and (time.time() - _closed.get("cleared_at", 0.0))
+                        <= _RECENTLY_CLOSED_LEGS_MAX_AGE_SEC
+                        and str(order_id) in _closed.get("leg_ids", set())
+                    ):
+                        detail = (
+                            f"RESIDUAL DOUBLE-FILL: order {order_id} "
+                            f"(sibling leg of just-closed trade "
+                            f"{_closed.get('trade_id')}, closed as "
+                            f"{_closed.get('reason')}) FILLED at "
+                            f"{avg_price} qty {int(qty)} despite the OCA "
+                            f"group - book may be REVERSED and untracked"
+                        )
+                        log.critical("[OCA] %s", detail)
+                        try:
+                            self._emit_health_event(
+                                "oca-race-reversal", detail,
+                            )
+                        except Exception:
+                            log.debug(
+                                "emit_health_event failed "
+                                "(oca-race-reversal)", exc_info=True,
+                            )
+                        try:
+                            self._telegram.send(
+                                f"[CRITICAL] *OCA RACE REVERSAL* - "
+                                f"{self._execution_symbol}\n\n{detail}"
+                            )
+                        except Exception:
+                            log.debug(
+                                "Telegram send failed (oca-race-reversal)",
+                                exc_info=True,
+                            )
+                        # Truthful record of the second fill - the original
+                        # trade row keeps its TP_HIT/SL_HIT close untouched.
+                        try:
+                            self.telemetry.log_tradebook_event(
+                                event_id=self._build_event_id(
+                                    event_type="OCA_RACE_REVERSAL",
+                                    event_ts=event_ts,
+                                    order_id=order_id,
+                                ),
+                                event_type="OCA_RACE_REVERSAL",
+                                event_timestamp_utc=event_ts,
+                                order_id=order_id,
+                                symbol=symbol_str,
+                                action=action_str,
+                                avg_fill_price=avg_price,
+                                fill_qty=qty,
+                            )
+                        except Exception:
+                            log.warning(
+                                "OCA_RACE_REVERSAL tradebook write failed",
+                                exc_info=True,
+                            )
+                        # In-callback context: cached read ONLY (A-2) - a
+                        # blocking get_position / settled read here would
+                        # deadlock the broker event loop.
+                        residual = self.exec_client.get_cached_position(
+                            symbol=self._execution_symbol,
+                        )
+                        if residual != 0:
+                            self._flatten_book_and_reset(
+                                reason="OCA_RACE_REVERSAL",
+                                telegram_text=(
+                                    f"[CRITICAL] *OCA RACE REVERSAL* - "
+                                    f"{self._execution_symbol}\n"
+                                    f"Cached residual position: "
+                                    f"`{residual}`\n"
+                                    f"*ACTION: Flattening book "
+                                    f"immediately.*"
+                                ),
+                                ledger_trade_id=None,
+                            )
+                        else:
+                            log.critical(
+                                "[OCA] cached residual position is 0 - "
+                                "book already flat; events recorded, no "
+                                "flatten order placed"
+                            )
+                        return
                     log.error(
                         "[TRADE] UNRECOGNIZED FILL: orderId=%s  action=%s  "
                         "fill=%.2f  qty=%d — not a tracked entry or TP/SL "
@@ -6516,6 +6708,10 @@ class LiveTrader:
                     return
                 if hasattr(self, '_processed_entry_order_ids'):
                     self._processed_entry_order_ids.add(order_id)
+                # A recognized entry fill starts a new position lifecycle -
+                # the previous bracket's recently-closed leg registry must
+                # not outlive it (oca-stage2-residual-detection R2).
+                self._recently_closed_legs = None
                 self._last_filled_entry_order_id = order_id
                 trade_id = "trade_" + str(order_id)
                 self._active_trade_id = trade_id
@@ -6658,6 +6854,65 @@ class LiveTrader:
                     qty=qty,
                     contract=contract,
                 )
+        else:
+            # Partial-fill observability (oca-stage2-residual-detection
+            # R4): a non-Filled status event carrying filled_qty > 0 on a
+            # tracked protective leg means the broker partially filled a
+            # TP/SL. Observability ONLY - broker-side ocaType=2 owns the
+            # sibling resize; no booking, no cancel, no state change
+            # beyond the (order_id, filled_qty) dedupe set.
+            try:
+                partial_qty = int(event.filled_qty or 0)
+            except (TypeError, ValueError):
+                partial_qty = 0
+            if partial_qty > 0:
+                order_id = event.order_id
+                order_id_int = None
+                try:
+                    order_id_int = int(order_id)
+                except (ValueError, TypeError):
+                    pass
+                tp_ids = getattr(self, "_tp_order_ids", []) or []
+                sl_id = getattr(self, "_sl_order_id", None)
+                is_tracked_tp = (
+                    order_id in tp_ids
+                    or (order_id_int is not None and order_id_int in tp_ids)
+                )
+                is_tracked_sl = sl_id is not None and (
+                    order_id == sl_id
+                    or (order_id_int is not None and order_id_int == sl_id)
+                )
+                if is_tracked_tp or is_tracked_sl:
+                    signatures = getattr(
+                        self, "_partial_fill_signatures", None,
+                    )
+                    if signatures is None:
+                        signatures = set()
+                        self._partial_fill_signatures = signatures
+                    sig = (str(order_id), partial_qty)
+                    if sig not in signatures:
+                        signatures.add(sig)
+                        leg = "TP" if is_tracked_tp else "SL"
+                        detail = (
+                            f"PARTIAL FILL on tracked {leg} leg: order "
+                            f"{order_id} status={event.status} "
+                            f"filled_qty={partial_qty} "
+                            f"remaining_qty={event.remaining_qty} (trade "
+                            f"{getattr(self, '_active_trade_id', None)}) - "
+                            f"broker-side OCA owns the sibling resize; "
+                            f"observability only"
+                        )
+                        log.warning("[OCA] %s", detail)
+                        try:
+                            self._emit_health_event(
+                                "protective-leg-partial-fill", detail,
+                            )
+                        except Exception:
+                            log.debug(
+                                "emit_health_event failed "
+                                "(protective-leg-partial-fill)",
+                                exc_info=True,
+                            )
 
 if __name__ == "__main__":
     from src.live_execution.cli import main

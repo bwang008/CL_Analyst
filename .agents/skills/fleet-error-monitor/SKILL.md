@@ -152,6 +152,29 @@ Judge each finding before opening any ticket — most have a fact-check step:
   - `housekeeping-error` — the sweep itself failed or ran slow (>10s):
     a code bug in housekeeping, never a market event → normal ticket
     flow; trading is unaffected by construction (never-raises boundary).
+  - `oca-race-reversal` — (oca-stage2-residual-detection_07222026_0141)
+    a SECOND fill arrived for a protective leg of an already-closed
+    bracket = both legs filled = the account was momentarily REVERSED.
+    The child has ALREADY auto-flattened the residual with a market
+    order (or confirmed cached-flat) and logged an OCA_RACE_REVERSAL
+    tradebook event. CRITICAL: verify the account is flat on the broker
+    (broker_audit / TWS) and reconcile the two exit fills' PnL. With
+    Stage-1 broker-side OCA groups this should be near-impossible — ANY
+    occurrence means the broker guarantee failed or a legacy pre-OCA
+    bracket was resting → ticket immediately.
+  - `rearm-sign-mismatch` — (same ticket) a retired TIME BARRIER exit's
+    settled snapshot came back with the OPPOSITE sign vs the tracked
+    side; the child refused to re-arm protection (which would have
+    ADDED exposure) and auto-flattened with reason
+    REVERSED_POSITION_KILL_SWITCH. CRITICAL: verify flat on the broker
+    and how the book reversed (double-fill chain) → ticket.
+  - `protective-leg-partial-fill` — (same ticket) a tracked TP or SL
+    reported a partial fill (status not yet Filled, filled_qty > 0).
+    INFORMATIONAL: broker-side ocaType=2 reduces the sibling
+    server-side; verify via the next broker_audit that the sibling's
+    quantity dropped by the filled amount. Recurring partials on 1-lot
+    positions are impossible — any such event is a sizing anomaly →
+    ticket.
 
 Close-out: health queue events move pending/ → done/ with an audit line
 like crash events. HEALTH_EVENT console lines need no queue file — audit
