@@ -1,0 +1,1 @@
+[2026-07-22 01:58] | oca-stage4-exit-ordering_07222026_0155 | TICKET-MANAGER | STATUS: Stage-4 ticket minted under operator authorization; blueprint written incl. the kill-switch keying design answer (_retiring_leg_ids widens the existing 291a9fd guard under the same budget). BLOCKED on Stage-2 GREEN+commit before TDD starts.

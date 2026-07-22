@@ -198,7 +198,10 @@ that stops the next run from re-investigating a solved thing.
 ## Step 6 — Report to the operator
 
 Lead with the PT datetime and the verdict — they want "is it fine?" answered in
-the first line.
+the first line. **"Health = N" is just the `fleet_health` finding COUNT (a scan
+tally, not a severity).** Never report it as a bare number: state the count, then
+say in plain words how many are the known-benign noise (below) and how many, if
+any, are genuinely new/actionable.
 
 ```markdown
 ## YYYY-MM-DD HH:MM PT (Day) — <one-line verdict>
@@ -206,13 +209,27 @@ the first line.
 - **Step 1 watcher:** `NO_EVENTS`.
 - **Step 3 broker truth:** <sym ±N (stop id)> ... — **N positions, 0 naked, all protected.**
 - **All 5 children** live, market OPEN, connected; no CRITICAL/Traceback/restart.
-- **Health = N, all known-benign:** ES/2000 + GC/4000 false stale-bars (retired client_ids) + NG/19 fill-price nag.
+- **Health = N** — all the known-benign baseline (ES/2000 + GC/4000 retired-id stale-bars, NG/19 fill nag, <any recurring incomplete-close rows>); nothing new. *(If any finding is NOT baseline, name it here and say what you did.)*
+
+**Open / unresolved** *(only list what genuinely needs the operator or is being actively tracked — omit the line entirely if truly nothing is open):*
+- <item> — <one-line status / what's blocking / what you need from them>
 
 <one line: what changed this hour, or "nothing to act on">
 ```
 
-Keep a quiet hour to a few lines. Spend words only on what changed or what the
-operator must decide.
+The **Open / unresolved** block is the important addition: it is a running,
+carried-forward digest so the operator sees standing items at a glance without
+re-reading history. What belongs there — anything awaiting THEM or being watched:
+pending canaries after a deploy, committed-but-not-yet-deployed fixes, operator-gated
+DB/ledger repairs (with "SQL ready" if prepped), TWS orphan-order glances, open
+follow-up tickets, a stuck file lock, an armed recurrence watch. What does NOT
+belong: the known-benign baseline health noise (that's a count on the Health line),
+and normal position turnover. Carry each item forward every hour with its current
+status until it's resolved, then drop it and note the resolution once. If the block
+would be empty (nothing open, no watches), omit it and just say "nothing to act on".
+
+Keep a quiet hour to a few lines. Spend words only on what changed, what's still
+open, or what the operator must decide.
 
 ## Escalation (naked / untracked / ambiguous position)
 
