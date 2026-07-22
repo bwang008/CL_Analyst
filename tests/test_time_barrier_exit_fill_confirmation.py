@@ -169,6 +169,12 @@ def _make_time_barrier_trader() -> LiveTrader:
     # Site B tracked state the fix declares (blueprint ~:643-647).
     t._time_barrier_exit_attempts = 0
     t._pending_exit_order_id = None
+    # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
+    # — mechanical fixture repair only: the Stage-4 attrs that
+    # _check_time_barrier / _reconcile_pending_position_state /
+    # _check_naked_position now read on an object.__new__ stub.
+    t._retiring_leg_ids = []
+    t._kill_switch_cancel_confirm_attempts = 0
 
     # Deterministic seams.
     t._utc_iso_now = MagicMock(return_value="2026-07-14T23:00:05")
@@ -220,11 +226,24 @@ def _submit_then_reconcile(t):
         "the in-callback _check_time_barrier must SUBMIT-AND-DEFER (return False) "
         "— the settled decision now belongs to the idle-loop reconciler"
     )
-    assert t._pending_exit_order_id == _EXIT_OID, (
-        "the submitted exit id must be recorded as pending for the reconciler"
+    # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
+    # The barrier tick no longer submits the exit at all: it arms
+    # _retiring_leg_ids (leg cancel-confirm AND exit submission both deferred
+    # to the idle reconciler) and records NO pending exit this tick. The first
+    # reconcile tick retires the legs and — settled permitting — submits the
+    # exit; the second runs the UNCHANGED pending-exit settled decision these
+    # tests pin, and its verdict is returned unchanged.
+    assert t._pending_exit_order_id is None, (
+        "the barrier tick must NOT submit/record an exit — submission belongs "
+        "to the idle reconciler (retire-then-submit)"
     )
+    assert t._retiring_leg_ids == ["65", "66"], (
+        "the barrier tick must arm _retiring_leg_ids with the tracked leg ids"
+    )
+    t.exec_client.close_position.assert_not_called()
     # The settled read must NOT happen inside the bar-update callback.
     t.exec_client.get_position_settled.assert_not_called()
+    t._reconcile_pending_position_state()
     return t._reconcile_pending_position_state()
 
 
@@ -421,7 +440,14 @@ class TestConfirmedFillBooksProvenPrice:
         RED today: telemetry.close_position is booked with
         exit_price=current_price (2.911), not the proven 2.905."""
         t = _make_time_barrier_trader()
-        t.exec_client.get_position_settled.return_value = 0  # flat: exit filled
+        # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
+        # The FIRST settled read now happens during leg retirement, BEFORE any
+        # exit exists (still holding -> 1); the reconciler then submits the
+        # exit, which fills before the SECOND read (0 = flat: exit filled).
+        _settled_seq = [1, 0]
+        t.exec_client.get_position_settled.side_effect = (
+            lambda *a, **k: _settled_seq.pop(0) if _settled_seq else 0
+        )
         t.exec_client.get_executions.return_value = [
             _execution_record(_EXIT_OID, _PROVEN_PRICE)
         ]
@@ -451,7 +477,14 @@ class TestConfirmedFillBooksProvenPrice:
 
         RED today: current_price is written unconditionally."""
         t = _make_time_barrier_trader()
-        t.exec_client.get_position_settled.return_value = 0
+        # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
+        # First settled read = 1 (retirement, pre-submission), second = 0
+        # (the reconciler-submitted exit filled) — same timeline shift as the
+        # proven-price case above.
+        _settled_seq = [1, 0]
+        t.exec_client.get_position_settled.side_effect = (
+            lambda *a, **k: _settled_seq.pop(0) if _settled_seq else 0
+        )
         # An execution exists, but for a DIFFERENT order id -> no match.
         t.exec_client.get_executions.return_value = [
             _execution_record(999999, 2.80)
@@ -490,8 +523,11 @@ class TestRaceBranchBindingCondition2:
         resting stop opening a naked reversal."""
         t = _make_time_barrier_trader()
 
-        # settled: 1 on the first read (stale, pre-fill), 0 on re-confirm.
-        settled_seq = [1, 0]
+        # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
+        # settled: 1 during leg retirement (still holding — the reconciler
+        # then submits the exit), 1 on the pending branch's A1 read (stale,
+        # pre-fill), 0 on the strictly-after-retirement re-confirm.
+        settled_seq = [1, 1, 0]
 
         def _settled(*args, **kwargs):
             return settled_seq.pop(0) if settled_seq else 0

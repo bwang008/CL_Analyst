@@ -644,6 +644,14 @@ def _kill_switch_stub():
     # AttributeError.
     lt._pending_exit_order_id = None
     lt._time_barrier_exit_attempts = 0
+    # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
+    # — mechanical fixture repair only: the widened kill-switch guard reads
+    # _retiring_leg_ids, and the new cancel-confirm reads the bounded counter
+    # and re-scans get_open_trades (clear book here -> the genuine-naked
+    # FENCE below still flattens in a single tick).
+    lt._retiring_leg_ids = []
+    lt._kill_switch_cancel_confirm_attempts = 0
+    lt.exec_client.get_open_trades.return_value = []
     _attach_identity_seams(lt)
     return lt
 
@@ -1358,7 +1366,19 @@ class TestEntryCancellationPaths:
         assert lt._strategy.on_exit.called
         reason = lt._strategy.on_exit.call_args.args[1]
         assert reason == "NAKED_POSITION_KILL_SWITCH"
-        lt.exec_client.cancel_open_orders.assert_called_once_with(symbol="GC")
+        # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
+        # _check_naked_position now transmits its own bulk cancel and re-scans
+        # the book (cancel-confirm) BEFORE the flatten helper's idempotent
+        # cancel — the A8 fence keeps every call bulk + symbol-scoped without
+        # pinning the (now 2-call) count; the Stage-4 suite
+        # (tests/test_oca_exit_ordering.py) pins the cancel-confirm ordering.
+        assert lt.exec_client.cancel_open_orders.called
+        for _c in lt.exec_client.cancel_open_orders.call_args_list:
+            _sym = _c.kwargs.get("symbol", _c.args[0] if _c.args else None)
+            assert _sym == "GC", (
+                f"kill-switch cancels must stay bulk symbol-scoped (A8); "
+                f"got {_c!r}"
+            )
         close_kwargs = lt.exec_client.close_position.call_args.kwargs
         assert close_kwargs.get("exit_mode") == "market"
         assert lt._pending_entry_order_id is None

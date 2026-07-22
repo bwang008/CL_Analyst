@@ -175,6 +175,12 @@ def _base_trader() -> LiveTrader:
     # TIME BARRIER confirmation state.
     t._time_barrier_exit_attempts = 0
     t._pending_exit_order_id = None
+    # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
+    # — mechanical fixture repair only: the Stage-4 attrs that
+    # _check_time_barrier / _reconcile_pending_position_state now read on an
+    # object.__new__ stub.
+    t._retiring_leg_ids = []
+    t._kill_switch_cancel_confirm_attempts = 0
 
     # Deterministic seams.
     t._utc_iso_now = MagicMock(return_value="2026-07-19T23:00:05")
@@ -270,9 +276,13 @@ class TestInCallbackDefersThenReconcilerBooks:
 
         # THE INVARIANT: no settled read from inside the callback.
         t.exec_client.get_position_settled.assert_not_called()
-        # Submitted the exit and deferred (recorded intent, no decision).
-        assert t._pending_exit_order_id == _EXIT_OID
-        assert t.exec_client.close_position.called, "the exit must still be submitted"
+        # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
+        # The in-callback barrier no longer submits the exit either: it arms
+        # _retiring_leg_ids (legs cancelled, exit submission deferred to the
+        # idle reconciler) and records NO pending exit this tick.
+        assert t._retiring_leg_ids == ["65", "66"]
+        assert t._pending_exit_order_id is None
+        t.exec_client.close_position.assert_not_called()
         # No inline booking / reset on the unconfirmed submission.
         t.telemetry.close_position.assert_not_called()
         t._reset_position_state.assert_not_called()

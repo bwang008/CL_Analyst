@@ -183,23 +183,39 @@ class TestTimeBarrierExitMode:
         trader.exec_client.get_position.return_value = 1
         trader.exec_client.cancel_open_orders.return_value = 0
         trader.exec_client.close_position.return_value = MagicMock(order=MagicMock(orderId=55))
-        # Fake-fidelity (exit-fill-unverified_07152026_1855): the fixed exit
-        # confirms the fill before booking/resetting. Model a fill that really
-        # happened so the completed-exit assertions below still hold.
-        trader.exec_client.get_position_settled.return_value = 0  # settled CONFIRMS the exit filled
+        # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
+        # Mechanical stub repair: tracked legs for the barrier to retire, the
+        # Stage-4/side/budget attrs the new flow reads, and a clear open book
+        # for the reconciler's retiring-leg scan.
+        trader._tp_order_ids = [65]
+        trader._sl_order_id = 66
+        trader._position_side = 1
+        trader._retiring_leg_ids = []
+        trader._time_barrier_exit_attempts = 0
+        trader.exec_client.get_open_trades.return_value = []
+        # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
+        # settled: 1 during leg retirement (still holding -> the reconciler
+        # submits the exit on tick 1), 0 on tick 2 (the exit filled).
+        _settled_seq = [1, 0]
+        trader.exec_client.get_position_settled.side_effect = (
+            lambda *a, **k: _settled_seq.pop(0) if _settled_seq else 0
+        )
         trader.exec_client.get_executions.return_value = [{"order_id": "55", "price": 72.50}]
 
-        # Submit-and-defer (settle-confirm-event-loop_07202026_0713): the
-        # in-callback _check_time_barrier now only SUBMITS the exit + records
-        # _pending_exit_order_id and returns False; the settled confirm/book runs
-        # BYTE-FOR-BYTE in the idle-loop reconciler. Drive both — the completed-exit
-        # verdict (result is True) and the exit_mode routing assertions are unchanged.
+        # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
+        # The barrier tick only RETIRES the legs; the reconciler submits the
+        # exit on tick 1 — the exit_mode routing assertion now targets that
+        # call, priced from the ROLLING FRAME's last close (the reconciler
+        # has no bar-callback price) — and books the fill on tick 2.
         submit_result = trader._check_time_barrier(
             bar_time=pd.Timestamp("2026-03-02 18:00:00"),
             current_price=72.50,
             atr_value=0.5,
         )
-        assert submit_result is False  # submit-and-defer: no inline confirm/book
+        assert submit_result is False  # retire-then-submit: no in-tick exit
+        assert trader._pending_exit_order_id is None  # no exit exists yet
+        handoff = trader._reconcile_pending_position_state()
+        assert handoff is False  # tick 1: legs retired, exit submitted
         result = trader._reconcile_pending_position_state()
 
         assert result is True
@@ -207,7 +223,7 @@ class TestTimeBarrierExitMode:
         trader.exec_client.close_position.assert_called_once_with(
             symbol=trader._execution_symbol,
             exit_mode="marketable_limit",
-            current_price=72.50,
+            current_price=float(trader.rolling_df_5m["Close"].iloc[-1]),
         )
         trader.exec_client.close_position_market.assert_not_called()
 
@@ -223,21 +239,37 @@ class TestTimeBarrierExitMode:
         trader.exec_client.get_position.return_value = 1
         trader.exec_client.cancel_open_orders.return_value = 0
         trader.exec_client.close_position.return_value = MagicMock(order=MagicMock(orderId=56))
-        # Fake-fidelity (exit-fill-unverified_07152026_1855): confirm the fill
-        # so the fixed exit reaches the completed-exit (flat) branch.
-        trader.exec_client.get_position_settled.return_value = 0  # settled CONFIRMS the exit filled
+        # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
+        # Mechanical stub repair + settled timeline shift, and the submission
+        # moves to the reconciler's tick-1 with the ROLLING FRAME's last
+        # close as its price source — same shape as the exit_mode test above.
+        trader._tp_order_ids = [65]
+        trader._sl_order_id = 66
+        trader._position_side = 1
+        trader._retiring_leg_ids = []
+        trader._time_barrier_exit_attempts = 0
+        trader.exec_client.get_open_trades.return_value = []
+        _settled_seq = [1, 0]
+        trader.exec_client.get_position_settled.side_effect = (
+            lambda *a, **k: _settled_seq.pop(0) if _settled_seq else 0
+        )
         trader.exec_client.get_executions.return_value = [{"order_id": "56", "price": 72.50}]
 
-        trader._check_time_barrier(
+        submit_result = trader._check_time_barrier(
             bar_time=pd.Timestamp("2026-03-02 18:00:00"),
             current_price=72.50,
             atr_value=0.5,
         )
+        assert submit_result is False  # retire-then-submit: no in-tick exit
+        assert trader._pending_exit_order_id is None  # no exit exists yet
+        handoff = trader._reconcile_pending_position_state()
+        assert handoff is False  # tick 1: legs retired, exit submitted
+        trader._reconcile_pending_position_state()  # tick 2: books the fill
 
         trader.exec_client.close_position.assert_called_once_with(
             symbol=trader._execution_symbol,
             exit_mode="market",
-            current_price=72.50,
+            current_price=float(trader.rolling_df_5m["Close"].iloc[-1]),
         )
 
 

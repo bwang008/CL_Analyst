@@ -85,6 +85,12 @@ def _make_trader() -> LiveTrader:
     # TIME BARRIER submit-and-defer state (settle-confirm-event-loop_07202026_0713):
     # the re-entrancy guard at the top of _check_time_barrier reads this.
     t._pending_exit_order_id = None
+    # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
+    # — mechanical fixture repair only: Stage-4 state the barrier re-entrancy
+    # guard, the reconciler retiring branch, and the fill routing now read;
+    # plus the retry-budget counter the deferral paths advance.
+    t._retiring_leg_ids = []
+    t._time_barrier_exit_attempts = 0
     t._build_event_id = MagicMock(return_value="evt-test")
     t._base_tradebook_fields = MagicMock(return_value={})
     return t
@@ -166,29 +172,45 @@ class TestExitReasonVocabulary:
         t.exec_client.get_position.return_value = 1
         t.exec_client.cancel_open_orders.return_value = 2
         t.exec_client.close_position.return_value = MagicMock(order=MagicMock(orderId=71))
-        # Fake-fidelity (exit-fill-unverified_07152026_1855): the fixed exit
-        # gates the book/reset on a broker confirmation. Model the fill that
-        # really happened — settled CONFIRMS the exit filled, and a matching
-        # execution supplies the proven price — so the reset (asserted below)
-        # still runs with reason="TIME_BARRIER".
-        t.exec_client.get_position_settled.return_value = 0  # settled CONFIRMS the exit filled
+        # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
+        # The barrier tick now only RETIRES the tracked protective legs (armed
+        # below) and defers the exit submission to the idle reconciler:
+        # reconcile tick 1 confirms the legs are gone (settled 1 = still
+        # holding) and submits the exit; tick 2 runs the UNCHANGED
+        # pending-exit decision (settled 0 = the exit filled, execution
+        # supplies the proven price) and resets with reason="TIME_BARRIER" —
+        # the same completed-exit outcome, submitted one idle tick later.
+        _settled_seq = [1, 0]
+        t.exec_client.get_position_settled.side_effect = (
+            lambda *a, **k: _settled_seq.pop(0) if _settled_seq else 0
+        )
         t.exec_client.get_executions.return_value = [{"order_id": "71", "price": 90.0}]
+        t.exec_client.get_open_trades.return_value = []
         t._active_trade_id = "trade_1"
+        t._position_side = 1
+        t._tp_order_ids = [65]
+        t._sl_order_id = 66
+        t._tracked_tp_price = 92.0
+        t._tracked_sl_price = 88.0
+        t.rolling_df_5m = pd.DataFrame(
+            {"Close": [90.0]},
+            index=pd.DatetimeIndex([pd.Timestamp("2026-06-01 06:55:00")]),
+        )
+        t.rolling_df_1h = None
         t._position_entry_bar_time = pd.Timestamp("2026-06-01 00:00:00")
         t._position_bars_held = 6
         t._trade_max_hold_bars = 6
         t._reset_position_state = MagicMock()
 
-        # Submit-and-defer (settle-confirm-event-loop_07202026_0713): the
-        # in-callback _check_time_barrier submits + defers; the settled confirm and
-        # the reset(reason="TIME_BARRIER") now run BYTE-FOR-BYTE in the idle-loop
-        # reconciler. Same completed-exit outcome, relocated.
         submit_result = t._check_time_barrier(
             bar_time=pd.Timestamp("2026-06-01 07:00:00"),
             current_price=90.0,
             atr_value=0.9,
         )
-        assert submit_result is False  # submit-and-defer: no inline confirm/reset
+        assert submit_result is False  # retire-then-submit: no in-tick exit
+        assert t._pending_exit_order_id is None  # no exit exists yet
+        handoff = t._reconcile_pending_position_state()
+        assert handoff is False  # tick 1: legs retired, exit submitted
         exited = t._reconcile_pending_position_state()
 
         assert exited is True

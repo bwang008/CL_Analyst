@@ -238,6 +238,14 @@ _MAX_RESUBSCRIBE_RETRIES = 5
 # this ceiling only bounds how long we retry the exit quietly before shouting.
 _MAX_TIME_BARRIER_EXIT_ATTEMPTS = 6
 
+# Kill-switch cancel-confirm bound (oca-stage4-exit-ordering_07222026_0155 R3):
+# how many heartbeat ticks the genuinely-naked flatten waits for its own bulk
+# cancel to clear the open book before proceeding anyway. Bounded so the
+# ultimate net can never be permanently suppressed by an order that refuses to
+# leave the book — at exhaustion the flatten fires LOUDLY and any survivor
+# gets the flatten helper's own idempotent cancel.
+_KILL_SWITCH_CANCEL_CONFIRM_MAX = 3
+
 # Residual double-fill detection (oca-stage2-residual-detection_07222026_0141
 # R2): how long a just-closed bracket's leg-id snapshot stays matchable
 # against late sibling fills. Bounded so broker order-id reuse across
@@ -756,6 +764,20 @@ class LiveTrader:
         # last pending exit order id. Both are CLEARED by _reset_position_state.
         self._time_barrier_exit_attempts: int = 0
         self._pending_exit_order_id: Optional[int] = None
+        # Retire-then-submit window (oca-stage4-exit-ordering_07222026_0155):
+        # leg ids the TIME BARRIER tick cancelled whose death is NOT yet
+        # confirmed. Armed BEFORE the cancels are transmitted (the kill-switch
+        # deferral guard must already cover the cancel-transmit gap), consumed
+        # by the idle reconciler's retiring-legs branch, cleared by every
+        # terminal path and by _reset_position_state. _retiring_sl_id
+        # remembers which retiring id was the stop so a leg that fills
+        # mid-retirement is booked truthfully (SL_HIT vs TP_HIT).
+        self._retiring_leg_ids: list[str] = []
+        self._retiring_sl_id: Optional[str] = None
+        # Bounded cancel-confirm deferrals spent by the naked-position kill
+        # switch waiting for its pre-flatten bulk cancel to clear the book
+        # (max _KILL_SWITCH_CANCEL_CONFIRM_MAX, reset on any flatten/reset).
+        self._kill_switch_cancel_confirm_attempts: int = 0
         # Persistent set of order IDs already processed as TP/SL exits.
         # Intentionally NOT cleared by _reset_position_state() so that a
         # duplicate IBKR Filled callback arriving after the state reset cannot
@@ -1360,6 +1382,12 @@ class LiveTrader:
         # exit id (exit-fill-unverified_07152026_1855).
         self._time_barrier_exit_attempts = 0
         self._pending_exit_order_id = None
+        # Stage-4 retirement window (oca-stage4-exit-ordering_07222026_0155):
+        # a fresh position must start with no stale retiring legs and a clean
+        # kill-switch cancel-confirm budget.
+        self._retiring_leg_ids = []
+        self._retiring_sl_id = None
+        self._kill_switch_cancel_confirm_attempts = 0
 
     def _clear_pending_entry(self) -> None:
         """Clear ONLY the pending-entry record — never in-position state.
@@ -1733,11 +1761,17 @@ class LiveTrader:
         _reconcile_pending_position_state, which runs on a genuinely-idle
         main-loop tick.
         """
-        # BINDING CONDITION 2 — re-entrancy guard. While a TIME BARRIER exit is
-        # already outstanding, the idle-loop reconciler owns its resolution; a
-        # second bar callback must NOT submit another exit or read settled (a
-        # repeat settled read would re-crash in-loop). Defer immediately.
-        if self._pending_exit_order_id is not None:
+        # BINDING CONDITION 2 — re-entrancy guard. While a TIME BARRIER exit
+        # is already outstanding OR the protective legs are still retiring
+        # (retire-then-submit: legs cancelled, no exit submitted yet), the
+        # idle-loop reconciler owns the lifecycle; a second bar callback must
+        # NOT cancel again, submit an exit, or read settled (a repeat settled
+        # read would re-crash in-loop). getattr: Strict-Locked pre-Stage-4
+        # stubs do not declare _retiring_leg_ids. Defer immediately.
+        if (
+            self._pending_exit_order_id is not None
+            or getattr(self, "_retiring_leg_ids", [])
+        ):
             return False
 
         current_position = self.exec_client.get_position(
@@ -1779,75 +1813,62 @@ class LiveTrader:
         if self._position_bars_held <= effective_max_hold:
             return False
 
+        # Retire-then-submit (oca-stage4-exit-ordering_07222026_0155 R1): the
+        # barrier tick only RETIRES the protective legs — the exit itself is
+        # submitted by the idle reconciler once the legs have provably left
+        # the book. Submitting in the same tick as the fire-and-forget cancel
+        # let a leg fill during the cancel-in-flight window and double-fill
+        # against the exit (double spread + flatten slippage).
+        #
+        # Arm the retiring registry BEFORE the cancels are transmitted: the
+        # kill-switch deferral guard keys on it, so a poll landing in the
+        # cancel-transmit gap must already see the window as reconciler-owned
+        # (the ordering is load-bearing). SL id last by construction;
+        # _retiring_sl_id lets the reconciler book a mid-retirement leg fill
+        # truthfully (SL_HIT vs TP_HIT).
+        self._retiring_leg_ids = [
+            str(x)
+            for x in list(self._tp_order_ids) + [self._sl_order_id]
+            if x is not None
+        ]
+        self._retiring_sl_id = (
+            str(self._sl_order_id) if self._sl_order_id is not None else None
+        )
         cancelled = self.exec_client.cancel_open_orders(
             symbol=self._execution_symbol,
         )
-        # :1679 just cancelled the resting SL/TP on the broker. Reflect that in
-        # memory NOW: the in-memory ids no longer point at live orders. Clearing
-        # _sl_order_id hands the exit lifecycle to the idle-loop reconciler
-        # (_reconcile_pending_position_state); it does NOT immediately arm the
-        # 5-minute kill switch over the deferral window. The kill switch DEFERS
-        # to the reconciler while _pending_exit_order_id is set AND the bounded
-        # retry budget (_time_barrier_exit_attempts < _MAX_TIME_BARRIER_EXIT_
-        # ATTEMPTS) is unspent (killswitch-pending-exit-guard_07202026_1805, see
-        # _check_naked_position); it covers the deferral window as the ultimate
-        # net only AFTER that budget is exhausted. The tracked PRICES survive so
-        # A3 can re-arm.
+        # The bulk cancel is only REQUESTED: the in-memory ids no longer point
+        # at orders we may treat as protective, so clear them — the tracked
+        # PRICES survive so the reconciler can re-arm (A0/A3). _sl_order_id=
+        # None would normally arm the 5-minute kill switch; the widened guard
+        # (_check_naked_position) defers it while _retiring_leg_ids is
+        # non-empty under the SAME bounded budget as the pending-exit window.
         self._sl_order_id = None
         self._tp_order_ids = []
 
-        trade = self.exec_client.close_position(
-            symbol=self._execution_symbol,
-            exit_mode=self._exit_mode,
-            current_price=current_price,
-        )
-        _exit_oid = getattr(getattr(trade, "order", None), "orderId", None)
         log.info(
-            "[TRADE] EXIT: TIME BARRIER after %d bars "
-            "(cancelled=%d orders, position=%d, price=%.2f)",
+            "[TIME BARRIER] legs retiring after %d bars (cancel requested "
+            "for %d orders, position=%d) - exit submission deferred to the "
+            "idle reconciler",
             self._position_bars_held, cancelled, current_position,
-            current_price,
         )
+        # No exit order exists this tick — the signal row must say so
+        # (action TIME_BARRIER_EXIT_PENDING, order_id None); the reconciler
+        # owns the actual submission.
         self.telemetry.log_signal(
             timestamp=bar_time,
             signal="Timeout",
             confidence_pct=0.0,
-            action_taken="TIME_BARRIER_EXIT",
+            action_taken="TIME_BARRIER_EXIT_PENDING",
             current_price=current_price,
             atr_value=atr_value,
             exit_reason="REASON_TIMEOUT",
-            order_id=_exit_oid,
+            order_id=None,
         )
-
-        # A0 — the exit was NEVER SUBMITTED: close_position returned None (the
-        # close_cl_position:825 no-match return) or an order object carrying no
-        # orderId. A missing orderId is a HARD failure (no silent-None default)
-        # — we can neither confirm nor cancel an exit that does not exist. Do
-        # NOT book, do NOT reset; re-arm protection (no live exit exists, so
-        # re-arming is safe here) and keep the trade tracked to retry next bar.
-        if trade is None or _exit_oid is None:
-            log.critical(
-                "[TIME BARRIER] exit order was NEVER SUBMITTED for trade %s "
-                "(close_position returned %r) — NOT booking; re-arming "
-                "protection and keeping the position tracked to retry next bar",
-                self._active_trade_id, trade,
-            )
-            self._rearm_time_barrier_protection(current_position)
-            self._pending_exit_order_id = None
-            self._note_time_barrier_deferral(_exit_oid)
-            return False
-
-        # The exit WAS submitted — register its id so the async fill callback
-        # recognises it as a known exit (not a PHANTOM FILL), record it as the
-        # pending exit, and DEFER. The settled confirm/book/re-arm decision runs
-        # in _reconcile_pending_position_state on the next genuinely-idle tick
-        # (this callback runs inside the running loop; a settled read here would
-        # raise 'This event loop is already running'). Until the reconciler
-        # clears _pending_exit_order_id the re-entrancy guard above blocks a
-        # second exit, and _sl_order_id is None so the 5-minute kill switch
-        # covers the deferral window.
-        self._processed_exit_order_ids.add(str(_exit_oid))
-        self._pending_exit_order_id = _exit_oid
+        # DEFER: the reconciler's retiring-legs branch confirms the legs are
+        # gone, then submits the exit and hands its lifecycle to the
+        # pending-exit branch. Until it clears _retiring_leg_ids the
+        # re-entrancy guard above blocks a second retirement.
         return False
 
     def _reconcile_pending_position_state(self) -> bool:
@@ -1861,7 +1882,14 @@ class LiveTrader:
         callback. It is therefore NEVER called from _check_time_barrier, which
         now only submits the exit + records intent and defers here.
 
-        Two independently-triggered branches, in order:
+        Three independently-triggered branches, in order:
+          * Retiring-legs (_retiring_leg_ids non-empty, oca-stage4-exit-
+            ordering_07222026_0155 R2): the barrier tick cancelled the
+            protective legs and deferred BOTH the cancel-confirm and the exit
+            submission here. Confirm the legs have left the book, then route
+            on settled: flat -> book the truthful close (a leg filled during
+            retirement, or OOB); reversed -> Stage-2 flatten; still-open ->
+            submit the exit NOW and hand it to the pending-exit branch.
           * Pending-exit (_pending_exit_order_id set): resolve the TIME BARRIER
             exit _check_time_barrier submitted-and-deferred — the a1464d2
             A1/A2/route settled decision, relocated byte-for-byte to this idle
@@ -1878,6 +1906,148 @@ class LiveTrader:
         book or re-arm on an unconfirmed / guessed value (no cheap fix).
         """
         try:
+            # --- Retiring-legs branch (oca-stage4 R2; runs FIRST) -------------
+            # getattr: Strict-Locked pre-Stage-4 stubs do not declare the attr.
+            retiring_ids = [
+                str(x) for x in getattr(self, "_retiring_leg_ids", [])
+            ]
+            if retiring_ids:
+                # Cancel-requested is not dead (the shipped BINDING CONDITION 1
+                # discipline, applied to the legs): while any retiring leg
+                # still rests it can still fill, so NO settled read this tick
+                # (its snapshot could pre-date the fill), no submission, no
+                # booking. Defer under the existing bounded budget.
+                open_trades = self.exec_client.get_open_trades(
+                    self._execution_symbol,
+                ) or []
+                if any(
+                    str(getattr(evt, "order_id", None)) in retiring_ids
+                    for evt in open_trades
+                ):
+                    log.warning(
+                        "[TIME BARRIER] retiring leg(s) %s still resting - "
+                        "deferring the settled read and the exit submission; "
+                        "retrying next idle tick", retiring_ids,
+                    )
+                    self._note_time_barrier_deferral(None)
+                    return False
+                # Legs gone -> STRICTLY AFTER that, the settled snapshot is
+                # authoritative (idle context — sanctioned).
+                settled = self._confirm_settled_position(self._execution_symbol)
+                if settled is None:
+                    # Unconfirmed -> fail closed: retain the retiring window so
+                    # this branch is re-entered, book/submit nothing.
+                    log.error(
+                        "[TIME BARRIER] legs retired for trade %s but the "
+                        "settled snapshot could not be confirmed - retaining "
+                        "the retiring window (fail-closed); retrying next "
+                        "idle tick", self._active_trade_id,
+                    )
+                    self._note_time_barrier_deferral(None)
+                    return False
+                if settled == 0:
+                    # Flat with NO exit ever submitted: a leg filled during
+                    # the cancel-in-flight window, or the close was OOB. Book
+                    # truthfully from broker executions and conclude.
+                    return self._book_retired_leg_close(retiring_ids)
+                if self._position_side in (1, -1) and (
+                    (settled > 0) != (self._position_side > 0)
+                ):
+                    # REVERSED vs the tracked side (Stage-2 R3 shape): never
+                    # submit or re-arm against a reversed book - flatten via
+                    # the un-gated helper and conclude.
+                    detail = (
+                        f"TIME BARRIER retirement sign mismatch for trade "
+                        f"{self._active_trade_id}: settled position {settled} "
+                        f"is REVERSED vs tracked side {self._position_side} "
+                        f"(retiring legs {retiring_ids}) - flattening instead "
+                        f"of submitting the exit"
+                    )
+                    log.critical("[TIME BARRIER] %s", detail)
+                    try:
+                        self._emit_health_event("rearm-sign-mismatch", detail)
+                    except Exception:
+                        log.debug(
+                            "emit_health_event failed (rearm-sign-mismatch)",
+                            exc_info=True,
+                        )
+                    self._flatten_book_and_reset(
+                        reason="REVERSED_POSITION_KILL_SWITCH",
+                        telegram_text=(
+                            f"[CRITICAL] *REVERSED POSITION* - "
+                            f"{self._execution_symbol}\n\n{detail}\n\n"
+                            f"*ACTION: Flattening book immediately.*"
+                        ),
+                        ledger_trade_id=self._active_trade_id,
+                    )
+                    self._retiring_leg_ids = []
+                    self._retiring_sl_id = None
+                    return True
+                # Still holding, sign OK -> submit the exit NOW, priced from
+                # the freshest rolling close (the reconciler has no bar-
+                # callback price and the barrier-tick price is stale by now).
+                # No frame at all -> unpriced market close (0.0), matching
+                # the flatten helper's convention.
+                exit_price_src = None
+                if (
+                    self.rolling_df_5m is not None
+                    and len(self.rolling_df_5m) > 0
+                ):
+                    exit_price_src = float(
+                        self.rolling_df_5m["Close"].iloc[-1]
+                    )
+                elif (
+                    self.rolling_df_1h is not None
+                    and len(self.rolling_df_1h) > 0
+                ):
+                    exit_price_src = float(
+                        self.rolling_df_1h["Close"].iloc[-1]
+                    )
+                trade = self.exec_client.close_position(
+                    symbol=self._execution_symbol,
+                    exit_mode=(
+                        self._exit_mode if exit_price_src is not None
+                        else "market"
+                    ),
+                    current_price=(
+                        exit_price_src if exit_price_src is not None else 0.0
+                    ),
+                )
+                exit_oid = getattr(
+                    getattr(trade, "order", None), "orderId", None,
+                )
+                if trade is None or exit_oid is None:
+                    # A0 relocated: the exit was NEVER SUBMITTED. Re-arm
+                    # protection sized from the SETTLED position (the legs
+                    # are provably gone, so re-arming cannot double-fill)
+                    # and keep the trade tracked to retry next idle tick.
+                    log.critical(
+                        "[TIME BARRIER] reconciler exit was NEVER SUBMITTED "
+                        "for trade %s (close_position returned %r) - "
+                        "re-arming settled-sized protection and keeping the "
+                        "position tracked to retry",
+                        self._active_trade_id, trade,
+                    )
+                    self._rearm_time_barrier_protection(settled)
+                    self._retiring_leg_ids = []
+                    self._retiring_sl_id = None
+                    self._note_time_barrier_deferral(None)
+                    return False
+                # Submitted: register the oid so its fill is recognised (not
+                # a PHANTOM FILL), record it pending, and hand the lifecycle
+                # to the UNCHANGED pending-exit branch from the next tick.
+                self._processed_exit_order_ids.add(str(exit_oid))
+                self._pending_exit_order_id = exit_oid
+                self._retiring_leg_ids = []
+                self._retiring_sl_id = None
+                log.info(
+                    "[TIME BARRIER] legs retired (settled=%d) - exit %s "
+                    "submitted by the idle reconciler; confirmation follows "
+                    "next idle tick",
+                    settled, exit_oid,
+                )
+                return False
+
             # --- Pending-exit branch (owns BINDING CONDITION 2's deferral) ----
             if self._pending_exit_order_id is not None:
                 exit_oid = self._pending_exit_order_id
@@ -2172,6 +2342,65 @@ class LiveTrader:
             except Exception:
                 log.debug("Failed to close ledger position", exc_info=True)
         self._reset_position_state(reason="TIME_BARRIER")
+        return True
+
+    def _book_retired_leg_close(self, retiring_ids: list) -> bool:
+        """settled == 0 with the retiring legs gone and NO exit ever
+        submitted (oca-stage4 R2.3): a protective leg filled during the
+        cancel-in-flight window, or the position closed out-of-band. Book
+        TRUTHFULLY — a broker execution matching a retiring id proves the leg
+        fill (SL_HIT/TP_HIT at the proven price); no match books CLOSED_OOB
+        with a NULL price (an honest unknown, never fabricated). Concludes
+        the trade (returns True)."""
+        executions = self.exec_client.get_executions(
+            self._execution_symbol,
+        ) or []
+        matched = None
+        for rec in executions:
+            if str(rec.get("order_id")) in retiring_ids:
+                matched = rec
+                break
+        if matched is not None:
+            # hasattr, not getattr-with-default: pre-Stage-4 stubs arm the
+            # list without the companion attr, and the R1 arming convention
+            # (TP ids first, SL last) recovers the stop id; a PRESENT but
+            # None value means the window was armed with no stop — never
+            # mis-book a TP fill as SL_HIT.
+            if hasattr(self, "_retiring_sl_id"):
+                retiring_sl = self._retiring_sl_id
+            else:
+                retiring_sl = retiring_ids[-1]
+            reason = (
+                "SL_HIT"
+                if str(matched.get("order_id")) == str(retiring_sl)
+                else "TP_HIT"
+            )
+            exit_price = matched.get("price")
+        else:
+            reason = "CLOSED_OOB"
+            exit_price = None
+        log.warning(
+            "[TIME BARRIER] flat during leg retirement for trade %s - "
+            "booking %s (exit_price=%s)",
+            self._active_trade_id, reason, exit_price,
+        )
+        if self._active_trade_id is not None:
+            try:
+                self.telemetry.close_position(
+                    self._active_trade_id,
+                    reason=reason,
+                    close_time=self._utc_iso_now(),
+                    bars_held=self._position_bars_held,
+                    exit_price=exit_price,
+                )
+            except Exception:
+                log.debug(
+                    "Failed to close ledger position (leg retirement)",
+                    exc_info=True,
+                )
+        self._retiring_leg_ids = []
+        self._retiring_sl_id = None
+        self._reset_position_state(reason=reason)
         return True
 
     def _resolve_exit_fill_price(self, exit_oid) -> Optional[float]:
@@ -6429,21 +6658,28 @@ class LiveTrader:
         if self._sl_order_id is not None:
             return  # SL is tracked — position is protected
 
-        # A TIME BARRIER exit submitted-and-deferred clears _sl_order_id and
-        # hands the exit lifecycle to the idle-loop reconciler
+        # A TIME BARRIER retirement (oca-stage4: _retiring_leg_ids armed, no
+        # exit submitted yet) or a submitted-and-deferred exit
+        # (_pending_exit_order_id set) clears _sl_order_id and hands the exit
+        # lifecycle to the idle-loop reconciler
         # (_reconcile_pending_position_state), which books on fill / re-arms the
         # SL on non-fill (A3) / escalates A4 at budget exhaustion. During that
         # window _sl_order_id is None but the position is NOT naked: firing here
         # would defeat the clean modeled exit, raise a false CRITICAL "naked"
         # alarm, and race the reconciler's live exit (double-close / reversal
-        # risk, the reconnect-false-flat-oob $296k class). Defer while a pending
-        # exit is unresolved AND the reconciler's bounded retry budget is unspent.
-        # The budget advances on EVERY unresolved poll incl. throws (the
+        # risk, the reconnect-false-flat-oob $296k class). Defer while EITHER
+        # window is open AND the reconciler's bounded retry budget is unspent —
+        # the SAME budget and release arithmetic as 291a9fd, condition widened
+        # only. The budget advances on EVERY unresolved poll incl. throws (the
         # never-raise boundary in _reconcile_pending_position_state), so this can
         # never skip forever; at _MAX the kill switch releases as the ultimate net
         # exactly when A4 pages a human (killswitch-pending-exit-guard_07202026_1805).
+        # getattr: Strict-Locked pre-Stage-4 stubs do not declare the attr.
         if (
-            self._pending_exit_order_id is not None
+            (
+                self._pending_exit_order_id is not None
+                or getattr(self, "_retiring_leg_ids", [])
+            )
             and self._time_barrier_exit_attempts < _MAX_TIME_BARRIER_EXIT_ATTEMPTS
         ):
             return
@@ -6469,6 +6705,51 @@ class LiveTrader:
             "active_trade=%s — FLATTENING BOOK",
             ibkr_pos, self._active_trade_id,
         )
+
+        # Cancel-confirm (oca-stage4 R3): transmit the bulk cancel FIRST and
+        # only flatten once the re-scan shows the book clear — flattening
+        # with an order still resting is the same double-fill shape the
+        # retire-then-submit split closes. Bounded deferral (max
+        # _KILL_SWITCH_CANCEL_CONFIRM_MAX ticks): at exhaustion the flatten
+        # PROCEEDS loudly — the ultimate net is never permanently suppressed
+        # (a survivor order gets the helper's own idempotent cancel). A scan
+        # failure also proceeds, for the same reason.
+        try:
+            self.exec_client.cancel_open_orders(
+                symbol=self._execution_symbol,
+            )
+            open_after_cancel = list(
+                self.exec_client.get_open_trades(self._execution_symbol)
+                or []
+            )
+        except Exception:
+            log.exception(
+                "[KILL SWITCH] cancel-confirm scan failed - proceeding to "
+                "flatten (ultimate net; the helper re-cancels idempotently)"
+            )
+            open_after_cancel = []
+        if open_after_cancel:
+            confirm_attempts = getattr(
+                self, "_kill_switch_cancel_confirm_attempts", 0,
+            )
+            if confirm_attempts < _KILL_SWITCH_CANCEL_CONFIRM_MAX:
+                self._kill_switch_cancel_confirm_attempts = (
+                    confirm_attempts + 1
+                )
+                log.warning(
+                    "[KILL SWITCH] %d order(s) still resting after the "
+                    "cancel - deferring the flatten one tick (%d/%d)",
+                    len(open_after_cancel),
+                    self._kill_switch_cancel_confirm_attempts,
+                    _KILL_SWITCH_CANCEL_CONFIRM_MAX,
+                )
+                return
+            log.critical(
+                "[KILL SWITCH] order(s) still resting after %d "
+                "cancel-confirm deferrals - PROCEEDING with the flatten "
+                "anyway (ultimate net)", confirm_attempts,
+            )
+        self._kill_switch_cancel_confirm_attempts = 0
 
         # Steps 1-5 (cancel, market flatten, ledger close, Telegram, reset)
         # live in the shared un-gated helper (oca-stage2-residual-detection
@@ -6607,6 +6888,25 @@ class LiveTrader:
                 # is also stored under child order IDs for telemetry.
                 _known_entries = getattr(self, "_entry_order_ids", set())
                 if str(order_id) not in _known_entries:
+                    # Retiring-leg fill (oca-stage4 R4): a Filled event for a
+                    # leg the TIME BARRIER tick is retiring is EXPECTED noise
+                    # of the cancel-in-flight window, not an unrecognized
+                    # fill and not a Stage-2 residual reversal (the trade is
+                    # still tracked; no registry snapshot exists). Booking
+                    # stays with the idle reconciler, which reads settled +
+                    # executions and books the truthful SL_HIT/TP_HIT.
+                    # getattr: pre-Stage-4 stubs do not declare the attr.
+                    if str(order_id) in {
+                        str(x)
+                        for x in getattr(self, "_retiring_leg_ids", [])
+                    }:
+                        log.warning(
+                            "[TIME BARRIER] leg %s FILLED during retirement "
+                            "(fill=%.4f qty=%d) - idle reconciler will book "
+                            "the close from settled/executions",
+                            order_id, avg_price, int(qty),
+                        )
+                        return
                     # Residual double-fill detection (oca-stage2-residual-
                     # detection_07222026_0141 R2): a Filled event matching a
                     # leg id of the JUST-closed bracket means the sibling

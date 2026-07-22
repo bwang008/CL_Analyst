@@ -139,41 +139,62 @@ def test_out_of_band_exit_routing(caplog):
     # TIME BARRIER submit-and-defer state (settle-confirm-event-loop_07202026_0713):
     # the re-entrancy guard at the top of _check_time_barrier reads this.
     trader._pending_exit_order_id = None
+    # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
+    # Mechanical stub repair: tracked legs for the barrier to retire, the
+    # Stage-4/side/budget attrs the new flow reads, and the rolling frame the
+    # reconciler's submit tick prices the exit from.
+    trader._retiring_leg_ids = []
+    trader._time_barrier_exit_attempts = 0
+    trader._position_side = 1
+    trader._tp_order_ids = [65]
+    trader._sl_order_id = 66
+    trader.rolling_df_5m = pd.DataFrame(
+        {"Close": [70.50]},
+        index=pd.DatetimeIndex([pd.Timestamp("2026-06-30 01:55:00", tz="UTC")]),
+    )
+    trader.rolling_df_1h = None
     trader._front_month_str = "202607"
-    
+
     # Track the system generated bracket IDs
     trader.telemetry = MagicMock()
     trader.telemetry.close_position = MagicMock()
-    
+
     trader.exec_client = MagicMock()
     trader.exec_client.cancel_open_orders.return_value = 2
-    # Fake-fidelity (exit-fill-unverified_07152026_1855): the fixed time-barrier
-    # exit confirms the fill before booking/resetting. Model the fill that
-    # really happened — settled CONFIRMS flat and a matching execution supplies
-    # the proven price — so the completed-exit assertions below still hold
-    # ("10" registered as a processed exit id, result True).
-    trader.exec_client.get_position_settled.return_value = 0  # settled CONFIRMS the exit filled
+    # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
+    # settled: 1 during leg retirement (still holding -> the reconciler
+    # submits the exit on tick 1), 0 on tick 2 (the exit filled); the clear
+    # open book lets the retiring-leg scan proceed.
+    trader.exec_client.get_open_trades.return_value = []
+    _settled_seq = [1, 0]
+    trader.exec_client.get_position_settled.side_effect = (
+        lambda *a, **k: _settled_seq.pop(0) if _settled_seq else 0
+    )
     trader.exec_client.get_executions.return_value = [{"order_id": "10", "price": 70.50}]
 
     mock_trade = MagicMock()
     mock_trade.order.orderId = 10
     trader.exec_client.close_position.return_value = mock_trade
     
-    # 1. Trigger the time barrier. Submit-and-defer
-    # (settle-confirm-event-loop_07202026_0713): the in-callback _check_time_barrier
-    # submits the exit + registers its id and returns False; the settled confirm/book
-    # runs in the idle-loop reconciler. The exit id is registered on submit (so the
-    # fill callback recognises it), and the completed-exit verdict (True) comes from
-    # the reconcile.
+    # 1. Trigger the time barrier.
+    # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
+    # The barrier tick only ARMS the leg retirement (no in-tick exit, no
+    # pending id); the RECONCILER submits the exit on tick 1 — the "10"
+    # processed-id registration moves to that submit, so the fill callback
+    # still recognises the close order — and books the confirmed fill on
+    # tick 2 (the completed-exit verdict True).
     submit_result = trader._check_time_barrier(
         bar_time=pd.Timestamp("2026-06-30 02:00:00", tz="UTC"),
         current_price=70.50,
         atr_value=0.5
     )
-    assert submit_result is False  # submit-and-defer: no inline confirm/book
-    assert "10" in trader._processed_exit_order_ids  # exit id registered on submit
+    assert submit_result is False  # retire-then-submit: no in-tick exit
+    assert trader._pending_exit_order_id is None  # no exit exists in-tick
+    handoff = trader._reconcile_pending_position_state()
+    assert handoff is False  # tick 1: legs retired, exit submitted
+    assert "10" in trader._processed_exit_order_ids  # registered on the reconciler submit
     result = trader._reconcile_pending_position_state()
-    assert result is True  # reconciler books the confirmed fill (_check_time_barrier exited)
+    assert result is True  # tick 2: reconciler books the confirmed fill
     
     # 2. Trigger the _on_standard_execution_event callback for the fill of order 10
     evt = StandardExecutionEvent(
