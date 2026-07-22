@@ -91,6 +91,35 @@ HOLD = [Order(action="HOLD", side=0, lots=0, reason="no_signal")]
 
 
 # ---------------------------------------------------------------------------
+# Shared Tranche Lot Allocator
+# ---------------------------------------------------------------------------
+
+
+def allocate_tranche_lots(total_lots: int, qty_pcts: list[float]) -> list[int]:
+    """Split a position's lots across tiered-exit rungs (LIVE parity).
+
+    Reproduces the live bracket-children allocator
+    (live_trader.py ``_place_bracket_children_on_fill``) EXACTLY: each
+    non-last rung gets ``min(max(1, int(round(total_lots * pct))),
+    remaining)`` — Python banker's rounding intact (round(2.5) == 2) —
+    the LAST rung gets the remainder, and zero-lot rungs are skipped.
+    The returned list conserves ``total_lots`` and contains only nonzero
+    tranches, in rung order.
+    """
+    remaining = total_lots
+    allocated: list[int] = []
+    for i, pct in enumerate(qty_pcts):
+        if i == len(qty_pcts) - 1:
+            rung_lots = remaining
+        else:
+            rung_lots = min(max(1, int(round(total_lots * pct))), remaining)
+        if rung_lots > 0:
+            allocated.append(rung_lots)
+        remaining -= rung_lots
+    return allocated
+
+
+# ---------------------------------------------------------------------------
 # Abstract Base
 # ---------------------------------------------------------------------------
 

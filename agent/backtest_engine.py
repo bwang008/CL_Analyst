@@ -81,6 +81,7 @@ from src.live_execution.strategies.execution_models import (
     EngineState,
     Order,
     HOLD,
+    allocate_tranche_lots,
     create_execution_strategy,
 )
 from src.live_execution.execution_guard import ExecutionGuard
@@ -171,6 +172,10 @@ class TradeRecord:
     lots: int = 1
     initial_tp_price: float = 0.0
     initial_sl_price: float = 0.0
+    # Per-tranche closes ({lots, exit_dt, exit_price, exit_fill, reason})
+    # for multi-tranche positions only; None otherwise. EXCLUDED from
+    # to_dataframe()/to_csv() — the unified ledger schema is frozen.
+    tranche_exits: Optional[list] = None
 
 
 @dataclass
@@ -376,7 +381,20 @@ class BacktestEngine:
         execution_guard: Optional[ExecutionGuard] = None,
         weekend_flatten: Optional["WeekendFlattenConfig"] = None,
         eod_flatten: Optional["WeekendFlattenConfig"] = None,
+        tranche_rungs_long: Optional[tuple[tuple[float, float], ...]] = None,
+        tranche_rungs_short: Optional[tuple[tuple[float, float], ...]] = None,
     ) -> None:
+        # Multi-rung tiered-exit (tranche) ladders are single-position-mode
+        # only: the concurrent path has no tranche machinery, so accepting
+        # one there would silently backtest single-rung economics.
+        if (tranche_rungs_long or tranche_rungs_short) and (
+            allow_concurrent or max_concurrent > 1
+        ):
+            raise ValueError(
+                "multi-rung tiered_exits: tranche exits v1 are "
+                "single-position mode only (allow_concurrent / "
+                "max_concurrent > 1 is unsupported)"
+            )
         self.tp_atr_mult = tp_atr_mult
         self.sl_atr_mult = sl_atr_mult
         self.max_horizon = max_horizon
@@ -418,6 +436,15 @@ class BacktestEngine:
         self._flatten_bars: set[pd.Timestamp] = set()
         self._eod_flatten_bars: set[pd.Timestamp] = set()
 
+        # Per-side (qty_pct, tp_atr_mult) tranche ladders (None = feature off,
+        # single-exit path bit-for-bit).  Validated in _parse_tranche_exits.
+        self.tranche_rungs_long = (
+            tuple(tranche_rungs_long) if tranche_rungs_long else None
+        )
+        self.tranche_rungs_short = (
+            tuple(tranche_rungs_short) if tranche_rungs_short else None
+        )
+
         # Mutable engine state (allocated once, reused across bars)
         self._engine_state = EngineState()
 
@@ -436,6 +463,12 @@ class BacktestEngine:
         self._highest_high: float = 0.0
         self._lowest_low: float = float("inf")
         self._lots: int = 1
+        # Multi-tranche state (active only when a side ladder allocates
+        # >= 2 nonzero tranches for the position's lots — S1)
+        self._multi_tranche: bool = False
+        self._tranche_open: list[tuple[int, float]] = []  # (lots, tp_price)
+        self._tranche_closed: list[dict] = []
+        self._remaining_lots: int = 0
         self._trades: list[TradeRecord] = []
         # Per-trade overrides (set at entry from Order, reset on close)
         self._trade_max_horizon: int = max_horizon
@@ -465,6 +498,10 @@ class BacktestEngine:
         # Safety check: warn if top-level params are shadowed by tier overrides
         cls._check_parameter_shadowing(cfg, strategy)
 
+        # Multi-rung tiered_exits ladders — validated here (S4); None for
+        # absent/single-rung sides (identity: zero new checks, zero state).
+        tranche_long, tranche_short = cls._parse_tranche_exits(cfg)
+
         # Instantiate execution guard if risk filter keys are present
         guard = None
         if cfg.get("blocked_entry_hours_est") or cfg.get("block_long_weekends") or cfg.get("blocked_entry_hours_by_day"):
@@ -491,9 +528,64 @@ class BacktestEngine:
             "execution_guard": guard,
             "weekend_flatten": sc.weekend_flatten,
             "eod_flatten": sc.eod_flatten,
+            "tranche_rungs_long": tranche_long,
+            "tranche_rungs_short": tranche_short,
         }
         kwargs.update(overrides)
         return cls(**kwargs)
+
+    @staticmethod
+    def _parse_tranche_exits(
+        cfg: dict,
+    ) -> tuple[
+        Optional[tuple[tuple[float, float], ...]],
+        Optional[tuple[tuple[float, float], ...]],
+    ]:
+        """Parse and validate per-side multi-rung ``tiered_exits`` (S1/S4).
+
+        Returns ``(long_rungs, short_rungs)`` where each side is a tuple of
+        ``(qty_pct, tp_atr_mult)`` rungs when it declares >= 2, else None.
+        Absent/single-rung sides get ZERO new validation (identity fence).
+        Validation crashes loudly — never clamps: qty_pct must sum to 1.0
+        (within 1e-6) and tp_atr_mult must be strictly increasing.
+        """
+        parsed: list[Optional[tuple[tuple[float, float], ...]]] = []
+        for side_key in ("long", "short"):
+            side_cfg = cfg.get(side_key) or {}
+            exits = side_cfg.get("tiered_exits") or []
+            if len(exits) < 2:
+                parsed.append(None)
+                continue
+            rungs: list[tuple[float, float]] = []
+            for i, rung in enumerate(exits):
+                if (
+                    not isinstance(rung, dict)
+                    or "qty_pct" not in rung
+                    or "tp_atr_mult" not in rung
+                ):
+                    raise ValueError(
+                        f"{side_key}.tiered_exits[{i}] must declare both "
+                        f"'qty_pct' and 'tp_atr_mult' (got {rung!r})"
+                    )
+                rungs.append(
+                    (float(rung["qty_pct"]), float(rung["tp_atr_mult"]))
+                )
+            pct_sum = sum(p for p, _ in rungs)
+            if abs(pct_sum - 1.0) > 1e-6:
+                raise ValueError(
+                    f"{side_key}.tiered_exits qty_pct values must sum to "
+                    f"1.0 (got {pct_sum})"
+                )
+            prev_tp = float("-inf")
+            for i, (_, tp) in enumerate(rungs):
+                if tp <= prev_tp:
+                    raise ValueError(
+                        f"{side_key}.tiered_exits tp_atr_mult must be "
+                        f"strictly increasing (rung {i}: {tp} <= {prev_tp})"
+                    )
+                prev_tp = tp
+            parsed.append(tuple(rungs))
+        return parsed[0], parsed[1]
 
     @staticmethod
     def _check_parameter_shadowing(cfg: dict, strategy) -> None:
@@ -558,6 +650,10 @@ class BacktestEngine:
         self._bars_held = 0
         self._highest_high = 0.0
         self._lowest_low = float("inf")
+        self._multi_tranche = False
+        self._tranche_open = []
+        self._tranche_closed = []
+        self._remaining_lots = 0
         self._trades = []
         self._realized_pnl = 0.0
         self._equity_curve = []
@@ -639,6 +735,12 @@ class BacktestEngine:
         exit_reason: ExitReason,
     ) -> None:
         """Record a completed trade and transition FSM state."""
+        if self._multi_tranche:
+            # Engine-level exits (e.g. SIGNAL_EXIT) close the REMAINDER of
+            # an active ladder — full-lots single-price booking would
+            # misprice the already-filled rungs.
+            self._close_tranche_remainder(exit_dt, exit_price, exit_reason)
+            return
         exit_order_side = "Sell" if self._side == 1 else "Buy"
         exit_fill = self._apply_slippage(exit_price, exit_order_side)
 
@@ -780,6 +882,32 @@ class BacktestEngine:
 
         self._original_sl_price = self._sl_price
 
+        # Multi-tranche activation (S1): >= 2 rungs AND the shared allocator
+        # yields >= 2 nonzero tranches for this position's lots; otherwise
+        # the position runs the existing single-exit path bit-for-bit
+        # (1-lot ladders collapse to a single tranche and take that path).
+        self._multi_tranche = False
+        self._tranche_open = []
+        self._tranche_closed = []
+        self._remaining_lots = lots
+        _side_rungs = (
+            self.tranche_rungs_long if signal_side == 1
+            else self.tranche_rungs_short
+        )
+        if _side_rungs:
+            _alloc = allocate_tranche_lots(lots, [p for p, _ in _side_rungs])
+            if len(_alloc) >= 2:
+                self._multi_tranche = True
+                # Zero-lot rungs are a suffix, so _alloc[i] maps to rung i.
+                for _rung_lots, (_pct, _tp_mult) in zip(_alloc, _side_rungs):
+                    # Entry-anchored rung TP, priced exactly like the single
+                    # TP above: fill-basis + penny-grid rounding.
+                    if signal_side == 1:
+                        _rung_tp = round(self._entry_fill + _tp_mult * atr, 2)
+                    else:
+                        _rung_tp = round(self._entry_fill - _tp_mult * atr, 2)
+                    self._tranche_open.append((_rung_lots, _rung_tp))
+
     def _flatten_exit_reason(
         self,
         dt: pd.Timestamp,
@@ -833,6 +961,12 @@ class BacktestEngine:
         # Track extremes since entry
         self._highest_high = max(self._highest_high, bar_high)
         self._lowest_low = min(self._lowest_low, bar_low)
+
+        # Multi-tranche ladders branch off here; the single path below is
+        # untouched (S5 identity fence).
+        if self._multi_tranche:
+            self._on_in_position_tranche(dt, bar_open, bar_high, bar_low)
+            return
 
         # 1. Evaluate BOTH TP and SL FIRST — pessimistic: SL wins on same-bar
         if self._side == 1:
@@ -908,6 +1042,195 @@ class BacktestEngine:
                     self._entry_price - _lock * self._atr_at_entry
                 )
             self._trailing_rung += 1
+
+    # -------------------------------------------------------------------
+    # Multi-tranche (scale-out) helpers — single-position mode only
+    # -------------------------------------------------------------------
+
+    def _on_in_position_tranche(self, dt: pd.Timestamp, bar_open: float,
+                                bar_high: float, bar_low: float) -> None:
+        """Per-bar management of an active multi-tranche ladder (S2).
+
+        Mirrors _on_in_position precedence: SL is pessimistic (closes the
+        whole remainder even when rungs also breached — unfilled rungs are
+        void); else every breached unfilled rung fills at its own gap-aware
+        TP price; ANY fill consumes the bar (barrier/flatten/ratchet resume
+        next bar); barrier/flatten close the remainder at bar open; the
+        trailing ratchet moves the one SL guarding the remainder.
+        """
+        if self._side == 1:
+            sl_hit = bar_low <= self._sl_price
+        else:
+            sl_hit = bar_high >= self._sl_price
+
+        if sl_hit:
+            exit_price = self._gap_fill_price(
+                bar_open, self._sl_price, self._side, is_tp=False
+            )
+            reason = ExitReason.TRAILING_BE if self._trailing_rung > 0 else ExitReason.SL
+            self._close_tranche_remainder(dt, exit_price, reason)
+            return
+
+        filled_this_bar = False
+        surviving: list[tuple[int, float]] = []
+        for rung_lots, rung_tp in self._tranche_open:
+            if self._side == 1:
+                tp_hit = bar_high >= rung_tp
+            else:
+                tp_hit = bar_low <= rung_tp
+            if tp_hit:
+                fill_price = self._gap_fill_price(
+                    bar_open, rung_tp, self._side, is_tp=True
+                )
+                self._book_tranche_close(
+                    dt, rung_lots, fill_price, ExitReason.TP
+                )
+                filled_this_bar = True
+            else:
+                surviving.append((rung_lots, rung_tp))
+        self._tranche_open = surviving
+
+        if self._remaining_lots == 0:
+            self._finalize_tranche_trade(dt, ExitReason.TP)
+            return
+        if filled_this_bar:
+            # Any fill consumes the bar (the single path returns after a
+            # fill): barrier, flatten overlays, and ratchet resume next bar.
+            return
+
+        if self._bars_held > self._trade_max_horizon:
+            self._close_tranche_remainder(dt, bar_open, ExitReason.TIME_BARRIER)
+            return
+
+        _flat_reason = self._flatten_exit_reason(
+            dt, self._side, self._entry_fill, bar_open, self._atr_at_entry
+        )
+        if _flat_reason is not None:
+            self._close_tranche_remainder(dt, bar_open, _flat_reason)
+            return
+
+        # Trailing ladder ratchet — unchanged math (see _on_in_position
+        # step 3); moves the one SL protecting the remainder.
+        _ladder = self._trade_trailing_ladder
+        while self._trailing_rung < len(_ladder):
+            _act, _lock = _ladder[self._trailing_rung]
+            if self._side == 1:
+                if self._highest_high < (
+                    self._entry_price + _act * self._atr_at_entry
+                ):
+                    break
+                self._sl_price = (
+                    self._entry_price + _lock * self._atr_at_entry
+                )
+            else:
+                if self._lowest_low > (
+                    self._entry_price - _act * self._atr_at_entry
+                ):
+                    break
+                self._sl_price = (
+                    self._entry_price - _lock * self._atr_at_entry
+                )
+            self._trailing_rung += 1
+
+    def _book_tranche_close(
+        self,
+        exit_dt: pd.Timestamp,
+        lots: int,
+        exit_price: float,
+        reason: ExitReason,
+    ) -> None:
+        """Accumulate one tranche close (slippage applied per tranche
+        exactly like _close_trade)."""
+        exit_order_side = "Sell" if self._side == 1 else "Buy"
+        exit_fill = self._apply_slippage(exit_price, exit_order_side)
+        self._tranche_closed.append({
+            "lots": lots,
+            "exit_dt": exit_dt,
+            "exit_price": exit_price,
+            "exit_fill": exit_fill,
+            "reason": reason,
+        })
+        self._remaining_lots -= lots
+
+    def _close_tranche_remainder(
+        self,
+        exit_dt: pd.Timestamp,
+        exit_price: float,
+        exit_reason: ExitReason,
+    ) -> None:
+        """Close the entire remainder at one price and finalize the trade.
+        Unfilled rungs are void (S2 SL pessimism / overlay closes)."""
+        self._book_tranche_close(
+            exit_dt, self._remaining_lots, exit_price, exit_reason
+        )
+        self._tranche_open = []
+        self._finalize_tranche_trade(exit_dt, exit_reason)
+
+    def _finalize_tranche_trade(
+        self, exit_dt: pd.Timestamp, exit_reason: ExitReason
+    ) -> None:
+        """Emit the ONE TradeRecord for a completed multi-tranche position
+        (S3): per-tranche gross, today's commission total, lots-weighted
+        exit price/fill, final-event exit_dt/reason; on_exit/cooldown fire
+        once here with the final reason."""
+        total_lots = self._lots
+        gross_pnl_dollars = 0.0
+        weighted_price = 0.0
+        weighted_fill = 0.0
+        for tranche in self._tranche_closed:
+            gross_pnl_dollars += (
+                self._side * (tranche["exit_fill"] - self._entry_fill)
+                * self.contract_multiplier * tranche["lots"]
+            )
+            weighted_price += tranche["exit_price"] * tranche["lots"]
+            weighted_fill += tranche["exit_fill"] * tranche["lots"]
+        commission = 2 * self.commission_per_side * total_lots
+        net_pnl = gross_pnl_dollars - commission
+
+        record = TradeRecord(
+            entry_dt=self._entry_dt,  # type: ignore[arg-type]
+            exit_dt=exit_dt,
+            entry_price=self._entry_price,
+            exit_price=weighted_price / total_lots,
+            entry_fill=self._entry_fill,
+            exit_fill=weighted_fill / total_lots,
+            side=self._side,
+            atr_at_entry=self._atr_at_entry,
+            exit_reason=exit_reason,
+            duration_bars=self._bars_held,
+            gross_pnl_dollars=gross_pnl_dollars,
+            commission_dollars=commission,
+            net_pnl_dollars=net_pnl,
+            lots=total_lots,
+            initial_tp_price=self._tp_price,
+            initial_sl_price=self._original_sl_price,
+            tranche_exits=(
+                list(self._tranche_closed)
+                if len(self._tranche_closed) >= 2 else None
+            ),
+        )
+        self._trades.append(record)
+        self._realized_pnl += net_pnl
+
+        # Track exit for strategy-level cooldown logic
+        if self._side == 1:
+            self._engine_state.last_exit_bars_ago_long = 0
+        elif self._side == -1:
+            self._engine_state.last_exit_bars_ago_short = 0
+
+        # Notify strategy of exit (once, with the final reason)
+        if self._execution_strategy is not None:
+            self._execution_strategy.on_exit(
+                self._side, exit_reason, self._bars_held
+            )
+
+        self._multi_tranche = False
+        self._tranche_open = []
+        self._tranche_closed = []
+        self._remaining_lots = 0
+
+        # FSM transition: always transition directly back to FLAT
+        self._state = TradeState.FLAT
 
     # -------------------------------------------------------------------
     # Concurrent-mode helpers
