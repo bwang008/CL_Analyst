@@ -433,6 +433,32 @@ class LiveTrader:
         self._max_position_size: int = int(
             strategy_config.get("max_position_size", max_lots_from_tiers)
         )
+
+        # STARTUP GATE (ticket oco-leg-race-audit_07212026_1935): TIERED
+        # exit mode with multi-lot sizing is refused at construction.
+        # Multi-rung TP ladders under a single shared OCA group have
+        # ill-defined proportionate-reduce semantics at IBKR, and the
+        # fill handler books the FIRST rung fill as a full close —
+        # stranding the remaining lots naked and untracked. Every live
+        # instance today sizes 1 lot (collapses to a single rung and is
+        # unaffected), so this blocks nothing deployed; it converts a
+        # silent future arming into a loud refusal until the per-tranche
+        # OCA-pair design (blueprint Stage 3) ships.
+        _cfg_exit_mode = str(strategy_config.get("exit_mode", "SINGLE")).upper()
+        if _cfg_exit_mode == "TIERED" and self._max_position_size > 1:
+            raise RuntimeError(
+                f"Config requests exit_mode TIERED with "
+                f"max_position_size={self._max_position_size} (>1). "
+                f"Multi-rung TP ladders under a single shared OCA group "
+                f"have ill-defined proportionate-reduce semantics at "
+                f"IBKR, and the fill handler books the first rung fill "
+                f"as a full close, stranding remaining lots naked. "
+                f"Multi-lot TIERED is blocked until the per-tranche "
+                f"OCA-pair design ships (ticket "
+                f"oco-leg-race-audit_07212026_1935, blueprint Stage 3). "
+                f"1-lot TIERED collapses to a single rung and is "
+                f"unaffected."
+            )
         self._emergency_halt: bool = False
         # Safety Mute: blocks new entries when macro data is stale.
         # Unlike _emergency_halt (permanent), mute auto-recovers when

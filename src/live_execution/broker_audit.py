@@ -48,16 +48,24 @@ def analyze(positions: list[dict], orders: list[dict]) -> tuple[list[dict], list
     Args:
         positions: dicts with keys ``symbol``, ``expiry``, ``position``.
         orders:    dicts with keys ``symbol``, ``expiry``, ``order_type``,
-                   ``status``, ``order_id``.
+                   ``status``, ``order_id``; OPTIONAL ``oca_group`` /
+                   ``oca_type`` (ticket oco-leg-race-audit_07212026_1935 —
+                   reporting only, never part of naked detection).
     Returns:
         (findings, checked) — ``findings`` is the list of naked positions;
-        ``checked`` is [(position, resting_stop_ids), ...] for every non-zero
-        position (for reporting).
+        ``checked`` is [(position, resting_stops), ...] for every non-zero
+        position (for reporting). Each resting-stop entry is the bare
+        order_id when the order dict lacks an ``oca_group`` key (backward
+        compat), or the tuple ``(order_id, oca_group)`` when it carries one.
     """
     stops: dict = {}
     for o in orders:
         if o.get("order_type") in _STOP_TYPES and o.get("status") in _RESTING_STATUSES:
-            stops.setdefault((o["symbol"], o["expiry"]), []).append(o["order_id"])
+            if "oca_group" in o:
+                entry = (o["order_id"], o["oca_group"])
+            else:
+                entry = o["order_id"]
+            stops.setdefault((o["symbol"], o["expiry"]), []).append(entry)
 
     findings: list[dict] = []
     checked: list[tuple] = []
@@ -74,6 +82,27 @@ def analyze(positions: list[dict], orders: list[dict]) -> tuple[list[dict], list
                            f"has NO resting stop on the broker — NAKED"),
             })
     return findings, checked
+
+
+def format_checked_line(position: dict, resting_stops: list) -> str:
+    """Render the BROKER_OK report line for one checked position (pure).
+
+    Each resting-stop entry renders ``id=<id> oca=<group>`` when it is an
+    ``(order_id, oca_group)`` tuple with a truthy group, and exactly
+    ``id=<id> oca=no-oca`` otherwise (legacy bare-id entry, or a tuple
+    whose group is falsy — IB returns '' for an order with no group).
+    No IB, no I/O, no printing — unit-testable like ``analyze``.
+    """
+    fragments = []
+    for entry in resting_stops:
+        if isinstance(entry, tuple):
+            order_id, group = entry
+        else:
+            order_id, group = entry, None
+        fragments.append(f"id={order_id} oca={group if group else 'no-oca'}")
+    return (f"BROKER_OK: {position['symbol']} {position['expiry']} "
+            f"pos={position['position']:+g} resting stops: "
+            f"{', '.join(fragments)}")
 
 
 def main(argv=None) -> int:
@@ -119,7 +148,11 @@ def main(argv=None) -> int:
              "expiry": t.contract.lastTradeDateOrContractMonth,
              "order_id": t.order.orderId,
              "order_type": t.order.orderType,
-             "status": t.orderStatus.status}
+             "status": t.orderStatus.status,
+             # OCA group membership (reporting only — broker-truth that the
+             # protective legs share a bracket group; '' / 0 mean no group).
+             "oca_group": (getattr(t.order, "ocaGroup", "") or None),
+             "oca_type": (getattr(t.order, "ocaType", 0) or None)}
             for t in ib.openTrades()
         ]
     finally:
@@ -131,8 +164,7 @@ def main(argv=None) -> int:
     findings, checked = analyze(positions, orders)
     for p, resting in checked:
         if resting:
-            print(f"BROKER_OK: {p['symbol']} {p['expiry']} pos={p['position']:+g} "
-                  f"— resting stop id={resting}")
+            print(format_checked_line(p, resting))
     for f in findings:
         print(f"BROKER_EVENT: naked-position | {f['symbol']}/{f['expiry']} | {f['detail']}")
     print(f"BROKER_SUMMARY: {len(checked)} open position(s), {len(findings)} naked "

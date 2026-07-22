@@ -23,6 +23,7 @@ Author: CL Analyst
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from types import SimpleNamespace
@@ -74,6 +75,7 @@ class _RestingOrder:
     price: float           # trigger price (limit for TP, stop for SL)
     order_type: _OrderType # LIMIT (TP) or STOP (SL)
     position_side: int     # +1 = long position, -1 = short position
+    oca_group: Optional[str] = None  # shared bracket tag (parity w/ live OCA)
 
 
 @dataclass
@@ -343,10 +345,19 @@ class SimulatedExecution(ExecutionClient):
         tp_price may be a scalar (single TP) or a list of
         ``(lots, price)`` tuples for tiered TPs.
 
+        All children of one call share one ``oca_group`` tag (parity
+        with the live broker-side OCA group, ticket
+        oco-leg-race-audit_07212026_1935); the atomic matcher in
+        ``on_bar_feed`` already mirrors the live broker-side OCA
+        cancel-sibling-on-fill behavior — the tag is observability only.
+
         Returns a list of mock Trade objects (TP trades + SL trade).
         """
         position_side = self._position_side
         child_trades = []
+        # One tag per call — uniqueness from the uuid, never from
+        # parent_order_id (parity with the live derivation ban).
+        oca_group = f"SIM-OCA-{symbol}-{uuid.uuid4().hex[:12]}"
 
         # ── TP orders ─────────────────────────────────────────────
         if isinstance(tp_price, list):
@@ -362,9 +373,11 @@ class SimulatedExecution(ExecutionClient):
                     price=price,
                     order_type=_OrderType.LIMIT,
                     position_side=position_side,
+                    oca_group=oca_group,
                 )
                 child_trades.append(SimpleNamespace(
-                    order=SimpleNamespace(orderId=tp_oid, parentId=parent_order_id),
+                    order=SimpleNamespace(orderId=tp_oid, parentId=parent_order_id,
+                                          ocaGroup=oca_group, ocaType=2),
                 ))
                 log.debug(
                     "SIM RESTING TP: orderId=%d price=%.2f lots=%d",
@@ -382,9 +395,11 @@ class SimulatedExecution(ExecutionClient):
                 price=tp_price,
                 order_type=_OrderType.LIMIT,
                 position_side=position_side,
+                oca_group=oca_group,
             )
             child_trades.append(SimpleNamespace(
-                order=SimpleNamespace(orderId=tp_oid, parentId=parent_order_id),
+                order=SimpleNamespace(orderId=tp_oid, parentId=parent_order_id,
+                                      ocaGroup=oca_group, ocaType=2),
             ))
             log.debug(
                 "SIM RESTING TP: orderId=%d price=%.2f qty=%d",
@@ -402,9 +417,11 @@ class SimulatedExecution(ExecutionClient):
             price=sl_price,
             order_type=_OrderType.STOP,
             position_side=position_side,
+            oca_group=oca_group,
         )
         child_trades.append(SimpleNamespace(
-            order=SimpleNamespace(orderId=sl_oid, parentId=parent_order_id),
+            order=SimpleNamespace(orderId=sl_oid, parentId=parent_order_id,
+                                  ocaGroup=oca_group, ocaType=2),
         ))
         log.debug(
             "SIM RESTING SL: orderId=%d price=%.2f qty=%d",

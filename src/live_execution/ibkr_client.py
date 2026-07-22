@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Iterable, Optional
@@ -1592,8 +1593,28 @@ class IBKRConnectionManager:
         Fast fills (e.g. 3-lot marketable limit split into 3 partial
         fills) reliably trigger this race condition.
 
-        OCA behavior (cancel the other leg on fill) is handled in
-        software by LiveTrader._on_order_status.
+        The children DO share a broker-side OCA group (ticket
+        oco-leg-race-audit_07212026_1935): one ``ocaGroup`` tag, unique
+        per bracket, is stamped on the SL and every TP before placement.
+        The tag is NEVER derived from parent_order_id — the heal path
+        calls with a hardcoded 0 on every re-placement
+        (live_trader.py:2590), so an id-derived tag would collide across
+        every healed bracket fleet-wide; a per-call uuid carries the
+        uniqueness instead.  ``ocaType=2`` means remaining group members
+        are proportionately reduced in size WITH block: a full TP fill
+        cancels the SL, a partial TP fill reduces it by the filled
+        quantity — enforced server-side at IBKR, so it holds even while
+        this process is disconnected.  ``ocaType=3`` (no block) is the
+        documented fallback if the paper canary shows with-block
+        overnight stop pathology.  An ocaGroup is a free-standing
+        sibling tag that never references the terminal parent order, so
+        Error 201 remains structurally impossible.
+
+        OCA behavior (cancel the other leg on fill) is additionally
+        handled in software by
+        LiveTrader._on_standard_execution_event — retained as
+        idempotent belt-and-braces (cancelling an already-dead order is
+        benign), no longer the only mechanism.
 
         Args:
             contract: Same contract as the parent entry order.
@@ -1610,6 +1631,15 @@ class IBKRConnectionManager:
         """
         self.ensure_connected()
 
+        # One broker-side OCA group per bracket.  Uniqueness comes from
+        # the uuid component ONLY — never from parent_order_id (it is 0
+        # on every heal re-placement, live_trader.py:2590); the prefix
+        # exists purely for log readability / audit joinability.
+        oca_group = (
+            f"OCA-{contract.localSymbol or contract.symbol}-"
+            f"{self.client_id}-{uuid.uuid4().hex[:12]}"
+        )
+
         trades = []
 
         # Take-profit order(s) (standalone LMT — no parentId)
@@ -1621,12 +1651,16 @@ class IBKRConnectionManager:
                 tp_order.outsideRth = True
                 tp_order.tif = "GTC"
                 tp_order.transmit = True
+                tp_order.ocaGroup = oca_group
+                tp_order.ocaType = 2  # proportionate reduce, with block
                 trades.append(self.ib.placeOrder(contract, tp_order))
         else:
             tp_order = LimitOrder(action, quantity, tp_price)
             tp_order.outsideRth = True
             tp_order.tif = "GTC"
             tp_order.transmit = True
+            tp_order.ocaGroup = oca_group
+            tp_order.ocaType = 2  # proportionate reduce, with block
             trades.append(self.ib.placeOrder(contract, tp_order))
 
         # Stop-loss order (standalone STP — no parentId)
@@ -1635,6 +1669,8 @@ class IBKRConnectionManager:
         sl_order.tif = "GTC"
         sl_order.triggerMethod = 1  # native exchange trigger (double bid/ask)
         sl_order.transmit = True
+        sl_order.ocaGroup = oca_group
+        sl_order.ocaType = 2  # proportionate reduce, with block
 
         trades.append(self.ib.placeOrder(contract, sl_order))
 
