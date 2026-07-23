@@ -24,6 +24,11 @@
       "config": "configs/strategies/SI01B_Sharpe_E02_07062026.json",
       "enabled": true,
       "extra_args": []
+    },
+    {
+      "config": "configs/strategies/NQ02B_Sharpe_E04_baseline_07172026.json",
+      "enabled": true,
+      "extra_args": []
     }
   ],
   "stagger_seconds": 30,

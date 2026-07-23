@@ -1,0 +1,115 @@
+{
+    "nickname": "NQ_Sharpe_E04_baseline_07172026",
+    "description": "BASELINE (pass-1 graft) \u2014 NQ_Sharpe_E04_baseline_07172026",
+    "execution_class": "TieredEnsembleStrategy",
+    "override_global_filters": true,
+    "exit_mode": "TIERED",
+    "tp_atr_mult": 10.0,
+    "sl_atr_mult": 3.0,
+    "trailing_atr_mult": 1.25,
+    "tp_cooldown_bars": 0,
+    "sl_cooldown_bars": 7,
+    "max_hold_bars": 240,
+    "allow_concurrent": false,
+    "max_concurrent": 1,
+    "max_position_size": 1,
+    "execution_symbol": "MNQ",
+    "bar_size": "1h",
+    "live_config": {
+        "client_id": 2500,
+        "entry_mode": "marketable_limit",
+        "exit_mode": "marketable_limit"
+    },
+    "models": {
+        "long": {
+            "threshold": 0.47721792496489185,
+            "experiment_id": "E2E_HourSet_02B_long_logloss",
+            "model_path": "reports/sweep_nq_hs02b_2x1_3h_scout_20260717-101153/registry/production_output/registry/E2E_HourSet_02B_long_logloss/final_model.pkl",
+            "predictions_path": "reports/batch_runs/batch_20260717_101153_NQ_02B_SCOUT/predictions/baseline/NQ_Sharpe_E04_baseline_long_predictions.csv",
+            "symbol": "NQ"
+        },
+        "short": {
+            "threshold": 0.5187111590730082,
+            "experiment_id": "E2E_HourSet_02B_short_average_precision",
+            "model_path": "reports/sweep_nq_hs02b_3x1_6h_scout_20260717-101153/registry/production_output/registry/E2E_HourSet_02B_short_average_precision/final_model.pkl",
+            "predictions_path": "reports/batch_runs/batch_20260717_101153_NQ_02B_SCOUT/predictions/baseline/NQ_Sharpe_E04_baseline_short_predictions.csv",
+            "symbol": "NQ"
+        }
+    },
+    "long": {
+        "tp_atr_mult": 7.25,
+        "sl_atr_mult": 1.0,
+        "trailing_atr_mult": 5.8,
+        "cooldown_bars": 1,
+        "cooldown_arming": "all",
+        "max_hold_bars": 36,
+        "consecutive_signal_threshold": 2,
+        "atr_period": 28,
+        "trailing_sl_atr_offset": 1.16,
+        "tiered_exits": [
+            {
+                "qty_pct": 1.0,
+                "tp_atr_mult": 7.25
+            }
+        ],
+        "tiers": [
+            {
+                "min_prob": 0.47721792496489185,
+                "lots": 1,
+                "tp_atr_mult": 7.25,
+                "sl_atr_mult": 1.0,
+                "trailing_atr_mult": 5.8,
+                "max_hold_bars": 36
+            }
+        ],
+        "trailing_ladder": [
+            {
+                "activation_atr": 5.8,
+                "lock_atr": 1.16
+            },
+            {
+                "activation_atr": 6.525,
+                "lock_atr": 5.8
+            }
+        ]
+    },
+    "short": {
+        "tp_atr_mult": 7.25,
+        "sl_atr_mult": 2.5,
+        "trailing_atr_mult": 1.45,
+        "cooldown_bars": 5,
+        "cooldown_arming": "all",
+        "max_hold_bars": 18,
+        "consecutive_signal_threshold": 0,
+        "atr_period": 4,
+        "trailing_sl_atr_offset": 1.16,
+        "tiered_exits": [
+            {
+                "qty_pct": 1.0,
+                "tp_atr_mult": 7.25
+            }
+        ],
+        "tiers": [
+            {
+                "min_prob": 0.5187111590730082,
+                "lots": 1,
+                "tp_atr_mult": 7.25,
+                "sl_atr_mult": 2.5,
+                "trailing_atr_mult": 1.45,
+                "max_hold_bars": 18
+            }
+        ],
+        "trailing_ladder": [
+            {
+                "activation_atr": 1.45,
+                "lock_atr": 1.16
+            },
+            {
+                "activation_atr": 4.35,
+                "lock_atr": 1.45
+            }
+        ]
+    },
+    "holdout_months": 12,
+    "conflict_resolution": "hold"
+}
