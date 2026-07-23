@@ -30,6 +30,11 @@
       "name": "socket-disconnect",
       "regex": "Socket disconnect|ib_insync\\.client.*disconnected|API connection lost",
       "notes": "ib_insync detected the API socket dropping — infra-side unless it correlates with a code change."
+    },
+    {
+      "name": "ibkr-connect-refused-1225",
+      "regex": "Could not connect to IBKR on any port|\\[WinError 1225\\]",
+      "notes": "The ibkr_client.connect() re-raise (ConnectionError, not ConnectionRefusedError — the old gateway-unreachable regex missed it) when the gateway is not listening on any candidate port. WinError 1225 = remote refused. Seen 2026-07-21 21:04-21:19 PT: fleet relaunched during a deploy before the gateway was back up; all 5 children exhausted restart caps, runner exited, 21:21:40 relaunch succeeded. gave_up:true on these still means the fleet was DOWN at the time — the watchdog report must say whether it is back."
     }
   ]
 }
