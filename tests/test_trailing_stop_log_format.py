@@ -57,6 +57,11 @@ def _make_trailing_stop_trader(
     # Offset used to compute new SL
     trader._trailing_sl_atr_offset_long = 0.5
     trader._trailing_sl_atr_offset_short = 0.5
+    # Mechanical stub repair (live-trailing-ladder-phase3_07232026_0035):
+    # _check_trailing_stop now resolves per-side ladders; None = the legacy
+    # single-rung path this suite pins.
+    trader._trailing_ladder_long = None
+    trader._trailing_ladder_short = None
 
     # Bar extremes — set so the trigger condition is satisfied immediately
     trader._highest_high = highest_high

@@ -530,6 +530,11 @@ def _trailing_stub(active_trade_id):
     lt._trailing_atr_mult = 2.0
     lt._trailing_sl_atr_offset_long = 0.5
     lt._trailing_sl_atr_offset_short = 0.5
+    # Mechanical stub repair (live-trailing-ladder-phase3_07232026_0035):
+    # _check_trailing_stop now resolves per-side ladders; None = the legacy
+    # single-rung path this suite pins.
+    lt._trailing_ladder_long = None
+    lt._trailing_ladder_short = None
     idx = pd.DatetimeIndex([pd.Timestamp("2026-07-07 14:00:00")])
     # trigger bar: High 70.0 >= 68.0 + 2.0 * 0.5 = 69.0
     lt.rolling_df_5m = pd.DataFrame({

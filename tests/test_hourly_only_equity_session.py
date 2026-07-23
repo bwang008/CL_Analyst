@@ -747,6 +747,11 @@ def _make_inposition_trader(symbol: str, *, df_5m, df_1h):
     trader._trailing_atr_mult = 1.0
     trader._trailing_sl_atr_offset_long = 0.5
     trader._trailing_sl_atr_offset_short = 0.5
+    # Mechanical stub repair (live-trailing-ladder-phase3_07232026_0035):
+    # _check_trailing_stop now resolves per-side ladders; None = the legacy
+    # single-rung path this suite pins.
+    trader._trailing_ladder_long = None
+    trader._trailing_ladder_short = None
     trader._position_side = 1
     trader._highest_high = 70.0
     trader._lowest_low = 70.0

@@ -406,19 +406,39 @@ class LiveTrader:
         from src.live_execution.strategy_config import StrategyConfig
         _sc = StrategyConfig.from_dict(strategy_config)
 
-        # BACKTEST-ONLY GUARD (ticket trailing-stop-ladder_07132026_1745):
-        # the live trailing path implements only the single one-shot rung.
-        # Refuse to start on a multi-rung ladder config until the live
-        # implementation + /validate-parity land (blueprint Phase 3).
-        for _lside in ("long", "short"):
-            _ladder = getattr(_sc, _lside).trailing_ladder
-            if _ladder is not None and len(_ladder) > 1:
-                raise RuntimeError(
-                    f"Config has a multi-rung {_lside}.trailing_ladder "
-                    f"({len(_ladder)} rungs) but live execution only supports "
-                    f"the single legacy trailing rung — trailing_ladder is "
-                    f"backtest-only until the Phase-3 live implementation ships."
-                )
+        # Per-side trailing ladders (Phase 3, ticket
+        # live-trailing-ladder-phase3_07232026_0035): None = legacy single
+        # one-shot rung (ladder-less fleet configs are byte-identical).
+        # Rung 1 always equals the side's legacy scalars — enforced by
+        # strategy_config.parse_trailing_ladder at StrategyConfig.from_dict.
+        self._trailing_ladder_long = _sc.long.trailing_ladder
+        self._trailing_ladder_short = _sc.short.trailing_ladder
+
+        # Engine-parity conflict check (backtest_engine._open_position raises
+        # when a per-order trailing override differs from the ladder's rung-1
+        # activation): tiers are the only live source of per-trade
+        # trailing_atr_mult overrides (submission ctx -> ledger -> recovery),
+        # so the same internal inconsistency is statically detectable here —
+        # refuse loudly at construction instead of silently ignoring the
+        # override on every bar (no-silent-defaults doctrine).
+        for _lside, _ladder in (("long", self._trailing_ladder_long),
+                                ("short", self._trailing_ladder_short)):
+            if not _ladder:
+                continue
+            _block = strategy_config.get(_lside, {})
+            _tiers = _block.get("tiers", []) if isinstance(_block, dict) else []
+            for _tier in _tiers:
+                _t_trail = _tier.get("trailing_atr_mult")
+                if _t_trail is not None and abs(
+                    float(_t_trail) - _ladder[0][0]
+                ) > 1e-9:
+                    raise ValueError(
+                        f"{_lside} tier trailing_atr_mult ({_t_trail}) "
+                        f"conflicts with trailing_ladder rung 1 activation "
+                        f"({_ladder[0][0]}) — internally inconsistent config "
+                        f"(engine parity: BacktestEngine raises the same "
+                        f"conflict at order fill)"
+                    )
 
         self._max_hold_bars: int = _sc.max_hold_bars
 
@@ -1567,12 +1587,27 @@ class LiveTrader:
             log.debug("Failed to snapshot decision state", exc_info=True)
 
     def _check_trailing_stop(self) -> None:
-        """Check if trailing stop should activate and modify IBKR SL order.
+        """Check if the trailing stop should (re)ratchet and modify IBKR SL.
 
-        Mirrors backtest engine _on_in_position trailing logic:
+        Mirrors backtest engine _on_in_position trailing logic (the rung
+        walk at backtest_engine.py ~1046):
         - Track highest_high / lowest_low since entry
-        - When price moves +trailing_atr_mult × ATR in favor, move SL
-          to entry ± trailing_sl_atr_offset × ATR
+        - Legacy single rung (no ladder key): when price moves
+          +trailing_atr_mult × ATR in favor, move SL to
+          entry ± trailing_sl_atr_offset × ATR — one-shot latch, unchanged.
+        - Multi-rung ladder (Phase 3, ticket
+          live-trailing-ladder-phase3_07232026_0035): STATELESS — each bar
+          recompute the HIGHEST rung whose activation the favorable extreme
+          has crossed and target its lock (entry ± lock×ATR-at-entry); a
+          modify is transmitted only when the target is STRICTLY tighter
+          than the tracked (ledger-restored) SL, so the ratchet is
+          restart-safe and never loosens without a persisted rung counter.
+          A gap through several activations locks the highest in ONE
+          modify (engine parity: multiple rungs consumed in one bar).
+          Known inherited limitation (same as the legacy single rung):
+          extremes reset on restart, so a rung whose activation was touched
+          only BEFORE the restart re-arms when price re-crosses it; the
+          tracked-SL comparison guarantees locked rungs never loosen.
         - Modify the live IBKR STP child order in-place
         """
         # D2.3: hard-gate on CONFIRMED in-position state before ANY work —
@@ -1586,7 +1621,16 @@ class LiveTrader:
         # (test_tick_order_pricing) evidence the fill via the SL order.
         if self._active_trade_id is None and self._sl_order_id is None:
             return
-        if self._trailing_activated:
+        # Phase 3: resolve the side's configured ladder BEFORE the one-shot
+        # latch — a multi-rung ladder must keep evaluating after the first
+        # rung locks. Ladder-less configs keep the legacy early return
+        # byte-identical (once latched, not even the extremes update runs).
+        _side_ladder = (
+            self._trailing_ladder_long if self._position_side == 1
+            else self._trailing_ladder_short if self._position_side == -1
+            else None
+        )
+        if _side_ladder is None and self._trailing_activated:
             return
         if self._entry_price is None or self._atr_at_entry is None:
             return
@@ -1612,40 +1656,72 @@ class LiveTrader:
         self._highest_high = max(self._highest_high, bar_high)
         self._lowest_low = min(self._lowest_low, bar_low)
 
-        # Check trailing trigger condition
-        # Use per-trade override if set, otherwise global config
-        effective_trailing = (
-            self._trade_trailing_atr_mult
-            if self._trade_trailing_atr_mult is not None
-            else self._trailing_atr_mult
-        )
-        triggered = False
-        if self._position_side == 1:  # Long
-            if self._highest_high >= (
-                self._entry_price
-                + effective_trailing * self._atr_at_entry
-            ):
-                triggered = True
-        elif self._position_side == -1:  # Short
-            if self._lowest_low <= (
-                self._entry_price
-                - effective_trailing * self._atr_at_entry
-            ):
-                triggered = True
+        if _side_ladder is None:
+            # Legacy single rung — unchanged one-shot behavior.
+            # Check trailing trigger condition
+            # Use per-trade override if set, otherwise global config
+            effective_trailing = (
+                self._trade_trailing_atr_mult
+                if self._trade_trailing_atr_mult is not None
+                else self._trailing_atr_mult
+            )
+            triggered = False
+            if self._position_side == 1:  # Long
+                if self._highest_high >= (
+                    self._entry_price
+                    + effective_trailing * self._atr_at_entry
+                ):
+                    triggered = True
+            elif self._position_side == -1:  # Short
+                if self._lowest_low <= (
+                    self._entry_price
+                    - effective_trailing * self._atr_at_entry
+                ):
+                    triggered = True
 
-        if not triggered:
-            return
+            if not triggered:
+                return
 
-        # Calculate new SL price — route to the correct per-side offset
-        effective_offset = (
-            self._trailing_sl_atr_offset_long if self._position_side == 1
-            else self._trailing_sl_atr_offset_short
-        )
-        offset = effective_offset * self._atr_at_entry
-        if self._position_side == 1:
-            new_sl = self._entry_price + offset
+            # Calculate new SL price — route to the correct per-side offset
+            effective_offset = (
+                self._trailing_sl_atr_offset_long if self._position_side == 1
+                else self._trailing_sl_atr_offset_short
+            )
+            offset = effective_offset * self._atr_at_entry
+            if self._position_side == 1:
+                new_sl = self._entry_price + offset
+            else:
+                new_sl = self._entry_price - offset
         else:
-            new_sl = self._entry_price - offset
+            # Phase-3 ladder walk (engine parity, backtest_engine.py ~1046):
+            # find the HIGHEST rung whose activation the favorable extreme
+            # has crossed; its lock is the target. Recomputed from scratch
+            # every bar — the per-trade trailing override is deliberately
+            # not consulted here (rung 1 equals the side's legacy scalars by
+            # parse; a conflicting tier override is refused at __init__).
+            _rung = -1
+            effective_trailing = 0.0
+            effective_offset = 0.0
+            for _act, _lock in _side_ladder:
+                if self._position_side == 1:
+                    if self._highest_high < (
+                        self._entry_price + _act * self._atr_at_entry
+                    ):
+                        break
+                else:
+                    if self._lowest_low > (
+                        self._entry_price - _act * self._atr_at_entry
+                    ):
+                        break
+                _rung += 1
+                effective_trailing = _act
+                effective_offset = _lock
+            if _rung < 0:
+                return  # no rung activated yet
+            if self._position_side == 1:
+                new_sl = self._entry_price + effective_offset * self._atr_at_entry
+            else:
+                new_sl = self._entry_price - effective_offset * self._atr_at_entry
         # S6 (T3): snap to the instrument grid (CL: bit-identical to the
         # legacy round(new_sl, 2) via the power-of-ten fast path).
         new_sl = round_to_tick(new_sl, self._tick_size)
@@ -1668,6 +1744,27 @@ class LiveTrader:
             )
             self._trailing_activated = True
             return
+
+        # Phase-3 never-loosen fence (ladder path only): transmit ONLY when
+        # the target is STRICTLY tighter than the tracked SL (long: higher,
+        # short: lower). Restart case: with a HIGHER rung's lock resting
+        # (ledger-restored tracked price) and the reset extremes having
+        # re-crossed only a lower rung, the computed target is looser —
+        # never move the stop backwards. No re-latch here: per the blueprint
+        # the latch re-arms only via a successful modify or the half-tick
+        # skip guard above (known inherited restart limitation).
+        if _side_ladder is not None and self._tracked_sl_price is not None:
+            if (
+                self._position_side == 1 and new_sl <= self._tracked_sl_price
+            ) or (
+                self._position_side == -1 and new_sl >= self._tracked_sl_price
+            ):
+                log.debug(
+                    "TRAILING STOP: ladder target %.10g not tighter than "
+                    "tracked SL %.10g - no modify (never loosen)",
+                    new_sl, self._tracked_sl_price,
+                )
+                return
 
         # Full-precision prices (%.10g): NG ticks 0.001 — the old %.2f
         # display hid the 3rd decimal ("2.94 -> 2.94" for a real

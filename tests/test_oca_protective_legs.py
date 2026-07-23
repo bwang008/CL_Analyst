@@ -392,7 +392,8 @@ class TestTrailingModifyOcaMembership:
 # B -- LiveTrader startup gate: TIERED + multi-lot refuses to start
 # (full-init seam mirrors tests/test_symbol_data_paths.py /
 #  tests/test_tick_order_pricing.py::_build_full_trader; precedent = the
-#  multi-rung trailing_ladder guard at live_trader.py:391-403)
+#  former multi-rung trailing_ladder guard, removed when live ladder
+#  support shipped — ticket live-trailing-ladder-phase3_07232026_0035)
 # ===========================================================================
 
 class DummyStrategy:
