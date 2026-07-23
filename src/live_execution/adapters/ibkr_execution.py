@@ -10,6 +10,7 @@ from src.live_execution.interfaces.execution_interface import (
     StandardExecutionEvent,
 )
 from src.live_execution.ibkr_client import IBKRConnectionManager
+from src.live_execution.log_config import register_expected_cancel_bounce
 import logging
 
 log = logging.getLogger("IBKRExecAdapter")
@@ -303,6 +304,9 @@ class IBKRExecutionClient(ExecutionClient):
                 continue
             if str(getattr(order, "orderId", None)) not in wanted:
                 continue
+            # Expected-bounce registration
+            # (log-cosmetics-cancel-bounce_07222026_2330)
+            register_expected_cancel_bounce(order.orderId)
             self.manager.ib.cancelOrder(trade.order)
             cancelled += 1
             log.info(

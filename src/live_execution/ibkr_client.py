@@ -15,6 +15,7 @@ from ib_insync import (
 
 # Pure stdlib leaf — no import cycle (instrument_master imports nothing
 # from live_execution).
+from src.live_execution.log_config import register_expected_cancel_bounce
 from src.core.instrument_master import (
     contract_matches, get_instrument, round_to_tick,
 )
@@ -700,6 +701,10 @@ class IBKRConnectionManager:
             ):
                 continue
             try:
+                # A 10147/10148 bounce for this id is now expected noise
+                # (log-cosmetics-cancel-bounce_07222026_2330): under OCA the
+                # broker may have already cancelled it server-side.
+                register_expected_cancel_bounce(getattr(order, "orderId", ""))
                 self.ib.cancelOrder(order)
                 cancelled += 1
             except Exception as exc:

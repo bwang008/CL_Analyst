@@ -1698,7 +1698,7 @@ class LiveTrader:
                     return
                 # --- success only below this line ---
                 log.info(
-                    "TRAILING STOP: modified SL order %s: %.2f → %.2f",
+                    "TRAILING STOP: modified SL order %s: %.2f -> %.2f",
                     order_id, old_sl, new_sl,
                 )
                 self._trailing_activated = True
