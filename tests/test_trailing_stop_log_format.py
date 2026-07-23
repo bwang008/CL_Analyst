@@ -46,6 +46,9 @@ def _make_trailing_stop_trader(
     trader._entry_price = entry_price
     trader._atr_at_entry = atr_at_entry
     trader._trailing_activated = False
+    # log-cosmetics-cancel-bounce_07222026_2330 (mechanical stub repair):
+    # the no-op skip guard reads the tracked SL cache; None = no skip.
+    trader._tracked_sl_price = None
 
     # Per-trade override is None → falls back to global
     trader._trade_trailing_atr_mult = None

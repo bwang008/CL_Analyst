@@ -133,3 +133,86 @@ class TestArrowAtSource:
             l for l in src.splitlines() if "TRAILING STOP: modified SL order" in l
         )
         assert line.isascii(), f"non-ASCII in trailing modify log line: {line!r}"
+
+
+# ---------------------------------------------------------------------------
+# Item 3 (operator go 2026-07-23): no-op trailing modify skip + full-precision
+# prices (NG ticks 0.001 — %.2f hid the 3rd decimal: "2.94 -> 2.94" could be
+# a real 2.937 -> 2.941 move)
+# ---------------------------------------------------------------------------
+
+
+from types import SimpleNamespace  # noqa: E402
+from unittest.mock import MagicMock  # noqa: E402
+
+import pandas as pd  # noqa: E402
+
+from src.live_execution.live_trader import LiveTrader  # noqa: E402
+
+
+def _trailing_stub(*, tracked_sl, aux_price=2.85):
+    lt = object.__new__(LiveTrader)
+    lt._active_trade_id = "trade_1"
+    lt._sl_order_id = 55
+    lt._trailing_activated = False
+    lt._entry_price = 2.905
+    lt._atr_at_entry = 0.02
+    lt._position_side = 1
+    lt._trade_trailing_atr_mult = None
+    lt._trailing_atr_mult = 1.0          # trigger at 2.925
+    lt._trailing_sl_atr_offset_long = 1.6   # new_sl = 2.905 + 0.032 = 2.937
+    lt._trailing_sl_atr_offset_short = 1.6
+    # _tick_size is a property; feed it via the instrument-context seam
+    lt._instrument_context = SimpleNamespace(
+        execution_instrument=SimpleNamespace(tick_size=0.001)
+    )
+    lt._tracked_sl_price = tracked_sl
+    lt._highest_high = 0.0
+    lt._lowest_low = float("inf")
+    lt.rolling_df_5m = pd.DataFrame(
+        {"High": [2.93], "Low": [2.90]},
+        index=[pd.Timestamp("2026-07-23 06:00:00")],
+    )
+    lt.rolling_df_1h = None
+    lt._execution_symbol = "NG"
+    lt._open_orders = {
+        55: SimpleNamespace(
+            symbol="NG", order_id=55,
+            raw_event=SimpleNamespace(
+                order=SimpleNamespace(auxPrice=aux_price)
+            ),
+        )
+    }
+    lt.exec_client = MagicMock()
+    lt.telemetry = MagicMock()
+    lt._last_decision_context_by_order_id = {}
+    return lt
+
+
+class TestNoOpTrailingSkip:
+    def test_identical_price_skips_transmit_and_relatches(self, caplog):
+        lt = _trailing_stub(tracked_sl=2.937)
+        with caplog.at_level(logging.DEBUG, logger="LiveTrader"):
+            lt._check_trailing_stop()
+        lt.exec_client.modify_order.assert_not_called()
+        assert lt._trailing_activated is True, (
+            "the resting stop IS the trail's price — a lost latch "
+            "(reconnect state loss) must be re-armed"
+        )
+        assert any("no-op modify skipped" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_real_move_still_transmits_with_full_precision(self, caplog):
+        lt = _trailing_stub(tracked_sl=2.85, aux_price=2.85)
+        with caplog.at_level(logging.INFO, logger="LiveTrader"):
+            lt._check_trailing_stop()
+        lt.exec_client.modify_order.assert_called_once()
+        assert lt._trailing_activated is True
+        assert lt._tracked_sl_price == pytest.approx(2.937)
+        modified = next(
+            r.getMessage() for r in caplog.records
+            if "modified SL order" in r.getMessage()
+        )
+        assert "2.85 -> 2.937" in modified, (
+            f"full tick precision required (NG=0.001); got: {modified}"
+        )

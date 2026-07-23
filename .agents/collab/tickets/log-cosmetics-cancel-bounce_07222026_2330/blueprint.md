@@ -71,4 +71,9 @@ _setup_file_logging installs the wrapper filter + Ascii console formatter
       be a REAL 2.937->2.941 move hidden by rounding. Addendum: full-
       precision (%g) prices in trailing lines + skip transmit only when
       the ACTUAL to-be-transmitted price equals the tracked one.
-- [ ] Addendum implemented + committed (deploy pending operator restart)
+- [x] Addendum implemented (no-op skip + re-latch + %.10g precision; 2 new
+      tests + 4 stub repairs; full suite 2654/0). FOLLOW-UP OPENED:
+      _trailing_activated latch lost across reconnects (memory:
+      trailing-latch-lost-on-reconnect) — the skip guard re-latches per
+      bar but the root cause is untfixed.
+- [x] Committed (deploy pending operator restart)

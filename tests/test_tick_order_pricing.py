@@ -782,6 +782,9 @@ def _make_trailing_trader(symbol: str, *, entry, atr, mult, offset_long,
     trader = LiveTrader.__new__(LiveTrader)
     trader._execution_symbol = symbol
     trader._trailing_activated = False
+    # log-cosmetics-cancel-bounce_07222026_2330 (mechanical stub repair):
+    # the no-op skip guard reads the tracked SL cache; None = no skip.
+    trader._tracked_sl_price = None
     trader._entry_price = entry
     trader._atr_at_entry = atr
     trader._trade_trailing_atr_mult = None
@@ -923,6 +926,7 @@ class TestLiveTraderTickSites:
                 entry = round(rng.uniform(1.0, 150.0), 2)
                 off = rng.randrange(0, 600) / 200.0  # half-cent lattice
             trader._trailing_activated = False
+            trader._tracked_sl_price = None  # same stub repair as above
             trader._entry_price = entry
             trader._highest_high = entry
             trader._lowest_low = entry

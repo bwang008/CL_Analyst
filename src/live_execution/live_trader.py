@@ -1650,9 +1650,31 @@ class LiveTrader:
         # legacy round(new_sl, 2) via the power-of-ten fast path).
         new_sl = round_to_tick(new_sl, self._tick_size)
 
+        # Operator-approved no-op skip (log-cosmetics-cancel-bounce ticket
+        # item 3, go 2026-07-23): the trail price is FIXED per trade
+        # (entry +/- offset*ATR-at-entry), so once it rests at the broker a
+        # re-transmit is a guaranteed no-op round-trip. Skipping also
+        # RE-LATCHES _trailing_activated: the resting stop IS the trail's
+        # price, so a lost latch (reconnect state loss, observed 23:00 PT
+        # 07-22 — separate follow-up) is repaired instead of re-modifying
+        # hourly. Half-tick tolerance = same point on the instrument grid.
+        if (
+            self._tracked_sl_price is not None
+            and abs(new_sl - self._tracked_sl_price) < self._tick_size / 2.0
+        ):
+            log.debug(
+                "TRAILING STOP: SL already resting at %.10g - no-op modify "
+                "skipped (latch re-armed)", new_sl,
+            )
+            self._trailing_activated = True
+            return
+
+        # Full-precision prices (%.10g): NG ticks 0.001 — the old %.2f
+        # display hid the 3rd decimal ("2.94 -> 2.94" for a real
+        # 2.937 -> 2.941 move). ASCII at source per ascii_safe doctrine.
         log.info(
-            "TRAILING STOP: activated — entry=%.2f  ATR=%.4f  "
-            "trigger=%.2f×ATR  offset=%.2f×ATR  new_SL=%.2f",
+            "TRAILING STOP: activated - entry=%.10g  ATR=%.4f  "
+            "trigger=%.2fxATR  offset=%.2fxATR  new_SL=%.10g",
             self._entry_price, self._atr_at_entry,
             effective_trailing, effective_offset,
             new_sl,
@@ -1691,14 +1713,14 @@ class LiveTrader:
                         raw_order.auxPrice = old_sl  # un-poison the cached Trade
                     log.exception(
                         "TRAILING STOP: SL modify transmit FAILED for order "
-                        "%s (SL remains %.2f at broker) — will retry on "
+                        "%s (SL remains %.10g at broker) — will retry on "
                         "next bar",
                         order_id, old_sl,
                     )
                     return
                 # --- success only below this line ---
                 log.info(
-                    "TRAILING STOP: modified SL order %s: %.2f -> %.2f",
+                    "TRAILING STOP: modified SL order %s: %.10g -> %.10g",
                     order_id, old_sl, new_sl,
                 )
                 self._trailing_activated = True
