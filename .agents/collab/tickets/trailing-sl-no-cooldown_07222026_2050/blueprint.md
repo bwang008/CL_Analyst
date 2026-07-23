@@ -89,7 +89,20 @@ fleet restart.
 
 - [x] Blueprint approved (operator, 2026-07-22: rule = only original SL;
       backtest-first)
-- [ ] Implementation (both engines + restart recovery)
-- [ ] Tests green (new + full fast suite, delta-clean vs baseline)
-- [ ] Study results presented
+- [x] Implementation (both engines + restart recovery) — commit 433e7bd
+- [x] Tests green (2628 passed / 0 failed; 12 old-rule pins re-adjudicated)
+- [x] Study results presented — reports/trailing_cooldown_study_2026-07-22.md
 - [ ] Operator go/no-go on live deploy
+
+## Study result (2026-07-22)
+
+Full-period: new rule WORSE on 4/5 symbols (net + PF): CL -6.5k, MES -13.2k
+(PF 1.236->1.07, DD +71%), NG -1.9k, MGC -1.9k; only SIL +4.6k. Last-12mo
+tail: CL +5.3k, NG +9.2k, SIL +7.4k better; MES -2.3k, MGC -0.5k worse. The
+extra re-entries (+60..+94 trades/symbol) skew toward SL exits — the old
+blocks were earning their keep historically. Agent recommendation: NO-GO on
+deploying with the CURRENT Optuna cooldown_bars; if the operator keeps the
+rule on principle, either re-search cooldown_bars under the new rule (next
+scout batch) or make the rule config-gated per symbol. The commit changes
+the rule UNCONDITIONALLY — a NO-GO decision requires either reverting
+433e7bd or a follow-up making it opt-in before the next fleet restart.
