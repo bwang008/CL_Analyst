@@ -83,6 +83,7 @@ from src.live_execution.strategies.execution_models import (
     HOLD,
     allocate_tranche_lots,
     create_execution_strategy,
+    exit_reason_arms_cooldown,
 )
 from src.live_execution.execution_guard import ExecutionGuard
 
@@ -770,11 +771,13 @@ class BacktestEngine:
         self._trades.append(record)
         self._realized_pnl += net_pnl
 
-        # Track exit for strategy-level cooldown logic
-        if self._side == 1:
-            self._engine_state.last_exit_bars_ago_long = 0
-        elif self._side == -1:
-            self._engine_state.last_exit_bars_ago_short = 0
+        # Track exit for strategy-level cooldown logic — only an original SL
+        # arms it (trailing-sl-no-cooldown_07222026_2050)
+        if exit_reason_arms_cooldown(exit_reason):
+            if self._side == 1:
+                self._engine_state.last_exit_bars_ago_long = 0
+            elif self._side == -1:
+                self._engine_state.last_exit_bars_ago_short = 0
 
         # Notify strategy of exit (for internal state tracking)
         if self._execution_strategy is not None:
@@ -1212,11 +1215,13 @@ class BacktestEngine:
         self._trades.append(record)
         self._realized_pnl += net_pnl
 
-        # Track exit for strategy-level cooldown logic
-        if self._side == 1:
-            self._engine_state.last_exit_bars_ago_long = 0
-        elif self._side == -1:
-            self._engine_state.last_exit_bars_ago_short = 0
+        # Track exit for strategy-level cooldown logic — only an original SL
+        # arms it (trailing-sl-no-cooldown_07222026_2050)
+        if exit_reason_arms_cooldown(exit_reason):
+            if self._side == 1:
+                self._engine_state.last_exit_bars_ago_long = 0
+            elif self._side == -1:
+                self._engine_state.last_exit_bars_ago_short = 0
 
         # Notify strategy of exit (once, with the final reason)
         if self._execution_strategy is not None:

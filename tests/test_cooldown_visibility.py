@@ -138,12 +138,14 @@ class TestCooldownBarsLeftFields:
     def test_entry_signal_carries_opposite_side_cooldown(self):
         # Long entry fires while the short side is still cooling: the BUY
         # signal must still surface the short block for the log line.
+        # (Armed via SL_HIT — under trailing-sl-no-cooldown_07222026_2050
+        # only an original SL arms the cooldown.)
         exec_strategy = MagicMock()
         exec_strategy.on_bar.return_value = [
             Order(action="BUY", side=1, lots=1, reason="entry")
         ]
         strat = _make_strategy(CFG, exec_strategy=exec_strategy)
-        strat.on_exit(-1, "TP_HIT", 4)
+        strat.on_exit(-1, "SL_HIT", 4)
 
         sig = _evaluate(strat)
         assert sig.action == "BUY"

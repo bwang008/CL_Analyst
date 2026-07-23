@@ -146,6 +146,10 @@ def test_out_of_band_exit_routing(caplog):
     trader._retiring_leg_ids = []
     trader._time_barrier_exit_attempts = 0
     trader._position_side = 1
+    # trailing-sl-no-cooldown_07222026_2050: _reset_position_state now READS
+    # the trailing flag (to reclassify a trailed stop); __init__ sets it in
+    # production, so the stub must too.
+    trader._trailing_activated = False
     trader._tp_order_ids = [65]
     trader._sl_order_id = 66
     trader.rolling_df_5m = pd.DataFrame(

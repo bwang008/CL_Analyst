@@ -980,9 +980,10 @@ class TestExecutionStrategyCooldown:
             f"did not block; later means over-blocking"
         )
 
-    def test_tp_exit_also_arms_cooldown_flavor_blind(self) -> None:
-        """TP exit arms the SAME per-side cooldown_bars (flavor-blind:
-        _close_trade resets the counter for every exit reason)."""
+    def test_tp_exit_does_not_arm_cooldown(self) -> None:
+        """re-adjudicated: trailing-sl-no-cooldown_07222026_2050 — only an
+        ORIGINAL SL arms the cooldown; a TP exit must leave the bar-28 probe
+        free to enter (the old flavor-blind rule blocked it until bar 35)."""
         prices, highs, lows = self._flat_market()
         highs[25] = 65.05  # TP for trade 1
         highs[38] = 65.06  # TP for trade 2 (records it)
@@ -993,27 +994,30 @@ class TestExecutionStrategyCooldown:
 
         assert result.trade_count == 2
         assert result.trades[0].exit_reason == ExitReason.TP
-        assert result.trades[1].entry_dt == ohlcv.index[35], (
-            f"TP exits must arm cooldown_bars exactly like SL exits; second "
-            f"entry expected at bar 35, got {result.trades[1].entry_dt}"
+        assert result.trades[1].entry_dt == ohlcv.index[28], (
+            f"TP exits must NOT arm cooldown_bars; second entry expected at "
+            f"the bar-28 probe, got {result.trades[1].entry_dt}"
         )
 
     def test_time_barrier_exit_returns_flat_and_arms_cooldown(self) -> None:
-        """Time-barrier exit goes straight back to FLAT (no COOLDOWN state)
-        and arms the same per-side cooldown_bars as any other exit."""
+        """Time-barrier exit goes straight back to FLAT (no COOLDOWN state).
+        re-adjudicated: trailing-sl-no-cooldown_07222026_2050 — TIME_BARRIER
+        no longer arms the cooldown, so the bar-28 probe enters; its barrier
+        exit at 33 frees bar 35 for trade 3, which the bar-38 SL records."""
         prices, highs, lows = self._flat_market()
-        lows[38] = 64.95   # SL for trade 2 (records it)
+        lows[38] = 64.95   # SL for trade 3 (records it)
         ohlcv = _make_ohlcv(50, prices=prices, highs=highs, lows=lows)
         signals = _prob_buy_signals(ohlcv, [20, 28, 35])
 
         result = _bt_with_strategy(_cd_cfg(max_hold_bars=5)).run(signals, ohlcv)
 
-        assert result.trade_count == 2
+        assert result.trade_count == 3
         assert result.trades[0].exit_reason == ExitReason.TIME_BARRIER
-        assert result.trades[1].entry_dt == ohlcv.index[35], (
-            f"TIME_BARRIER must arm cooldown_bars (bar-28 probe blocked) and "
-            f"release by bar 35; got {result.trades[1].entry_dt}"
+        assert result.trades[1].entry_dt == ohlcv.index[28], (
+            f"TIME_BARRIER must NOT arm cooldown_bars; bar-28 entry expected, "
+            f"got {result.trades[1].entry_dt}"
         )
+        assert result.trades[1].exit_reason == ExitReason.TIME_BARRIER
 
     def test_cooldown_zero_reenters_immediately(self) -> None:
         """Negative control: cooldown_bars=0 accepts the bar-28 probe —

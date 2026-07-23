@@ -1574,17 +1574,15 @@ class TestStartupRecovery:
             f"COMMISSION_{_EXEC_ID_TP}"
         )
 
-        # cooldown-not-restored-on-restart_07082026_0230: the startup OOB
-        # branch now ARMS the strategy re-entry cooldown with the truthful
-        # recovered reason and the LEDGER side (SHORT → -1). (The three fences
-        # above are unchanged; this is the added authorized behavior.)
-        assert lt.strategy.on_exit.called, (
-            "startup OOB recovery must arm the strategy cooldown"
-        )
-        args = lt.strategy.on_exit.call_args.args
-        assert args[0] == -1 and args[1] == "TP_HIT_OOB", (
-            f"cooldown must be armed with (ledger_side=-1, truthful reason), "
-            f"got {args!r}"
+        # re-adjudicated: trailing-sl-no-cooldown_07222026_2050 — only an
+        # ORIGINAL SL arms the re-entry cooldown, so a TP_HIT_OOB recovery
+        # must now stay INERT on the strategy (the three fences above are
+        # unchanged; the cooldown-not-restored-on-restart_07082026_0230
+        # arming behavior remains, but only for SL-family recoveries — see
+        # tests/test_trailing_sl_no_cooldown.py).
+        assert not lt.strategy.on_exit.called, (
+            "a TP_HIT_OOB recovery must NOT arm the strategy cooldown under "
+            "the only-original-SL rule"
         )
 
     def test_startup_oob_unrecovered_null_price_fence(self):

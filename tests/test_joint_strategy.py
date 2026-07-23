@@ -230,7 +230,15 @@ class TestJointApplyTrialParams:
         strat = JointPortfolioStrategy(_make_config())
         strat._current_side = 1
 
+        # TP close: clears the side but does NOT arm the cooldown counter
+        # (trailing-sl-no-cooldown_07222026_2050 — only an original SL arms).
         strat.on_exit(1, "TP", 10)
+        assert strat._current_side == 0
+        assert strat._bars_since_long_exit == 9999
+
+        # An SL close arms it
+        strat._current_side = 1
+        strat.on_exit(1, "SL", 10)
         assert strat._current_side == 0
         assert strat._bars_since_long_exit == 0
 

@@ -246,20 +246,20 @@ class TestExitReasonVocabulary:
         t._reset_position_state.assert_called_once_with(reason="CLOSED_OOB")
 
     @pytest.mark.parametrize("reason", ["CLOSED", "CLOSED_OOB"])
-    def test_closed_reasons_arm_per_side_cooldown(self, reason):
-        """After on_exit with a CLOSED-family reason, the side must be gated
-        by the flavor-blind per-side cooldown_bars — every exit reason arms
-        it, exactly like the backtest's _close_trade. Exit-bar evaluate()
-        reads counter 0 <= 1 → buy side zeroed.
-        (re-adjudicated: cooldown-single-authority-wiring_07222026_1051)"""
+    def test_closed_reasons_do_not_arm_per_side_cooldown(self, reason):
+        """re-adjudicated: trailing-sl-no-cooldown_07222026_2050 — only an
+        ORIGINAL SL arms the cooldown. A CLOSED-family (OOB/unknown) close
+        must leave the gate un-armed: exit-bar evaluate() shows the raw
+        prob, not a zeroed one."""
         strat = _make_strategy(CFG_CD1)
         strat.on_exit(1, reason, 5)
 
         sig = strat.evaluate(pd.DataFrame(), 70.0, 0.5, 0)
 
-        assert sig.buy_prob == 0.0, (
-            f"reason={reason!r} must arm the per-side cooldown_bars gate; "
-            f"got buy_prob={sig.buy_prob} — the close did not arm the cooldown"
+        assert sig.buy_prob > 0.0, (
+            f"reason={reason!r} must NOT arm the per-side cooldown_bars "
+            f"gate under the only-original-SL rule; got zeroed "
+            f"buy_prob={sig.buy_prob}"
         )
 
 

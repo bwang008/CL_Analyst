@@ -119,6 +119,25 @@ def allocate_tranche_lots(total_lots: int, qty_pcts: list[float]) -> list[int]:
     return allocated
 
 
+# Ticket trailing-sl-no-cooldown_07222026_2050: the post-exit re-entry
+# cooldown arms ONLY on an original stop-loss exit. Exits that lock profit or
+# end a trade for non-loss reasons (TRAILING_BE, TP, TIME_BARRIER,
+# SIGNAL_EXIT, EOD/WEEKEND flattens, OOB/unknown closes) must not block
+# re-entry.
+COOLDOWN_ARMING_EXIT_REASONS = frozenset({"SL", "SL_HIT", "SL_HIT_OOB"})
+
+
+def exit_reason_arms_cooldown(exit_reason: object) -> bool:
+    """True iff this exit reason arms the per-side re-entry cooldown.
+
+    Accepts ExitReason enum members or the live trader's reason strings.
+    None/unknown reasons never arm — a cooldown must come from a proven
+    original-SL exit.
+    """
+    value = getattr(exit_reason, "value", exit_reason)
+    return isinstance(value, str) and value in COOLDOWN_ARMING_EXIT_REASONS
+
+
 # ---------------------------------------------------------------------------
 # Abstract Base
 # ---------------------------------------------------------------------------
@@ -1063,13 +1082,17 @@ class IsolatedAsymmetricalStrategy(BaseExecutionStrategy):
         self._bars_since_short_exit: int = 9999
 
     def on_exit(self, side: int, exit_reason: object, bars_held: int) -> None:
-        """Track per-side position closure."""
+        """Track per-side position closure. Cooldown counters reset only on
+        an original SL (trailing-sl-no-cooldown_07222026_2050)."""
+        arms = exit_reason_arms_cooldown(exit_reason)
         if side == 1:
             self._long_is_open = False
-            self._bars_since_long_exit = 0
+            if arms:
+                self._bars_since_long_exit = 0
         elif side == -1:
             self._short_is_open = False
-            self._bars_since_short_exit = 0
+            if arms:
+                self._bars_since_short_exit = 0
 
     def on_bar(
         self,
@@ -1253,8 +1276,11 @@ class JointPortfolioStrategy(BaseExecutionStrategy):
         self._bars_since_short_exit: int = 9999
 
     def on_exit(self, side: int, exit_reason: object, bars_held: int) -> None:
-        """Track position closure."""
+        """Track position closure. Cooldown counters reset only on an
+        original SL (trailing-sl-no-cooldown_07222026_2050)."""
         self._current_side = 0
+        if not exit_reason_arms_cooldown(exit_reason):
+            return
         if side == 1:
             self._bars_since_long_exit = 0
         elif side == -1:

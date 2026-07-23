@@ -438,10 +438,11 @@ class TestEodUnitTriggers:
 
         assert engine._trades[-1].exit_reason == ExitReason.TP
 
-    def test_eod_close_resets_cooldown_counter_like_time_barrier(self):
-        """Pin: _close_trade treats EOD_FLATTEN like every other reason —
-        the side's last_exit_bars_ago counter resets to 0 (cooldown parity
-        with TIME_BARRIER/WEEKEND_FLATTEN)."""
+    def test_eod_close_does_not_reset_cooldown_counter(self):
+        """re-adjudicated: trailing-sl-no-cooldown_07222026_2050 — only an
+        ORIGINAL SL arms the cooldown. An EOD_FLATTEN close (a profitable
+        winner flattened before the halt) must leave last_exit_bars_ago
+        untouched, exactly like TP/TRAILING_BE/TIME_BARRIER."""
         engine = _make_engine2(eod=_flatten_cfg(0.0, 2.0))
         engine._eod_flatten_bars = {FLATTEN_DT}
         _enter_long(engine)
@@ -450,7 +451,10 @@ class TestEodUnitTriggers:
         engine._on_in_position(FLATTEN_DT, bar_open, bar_open + 0.02, bar_open - 0.02)
 
         assert engine._trades[-1].exit_reason == ExitReason.EOD_FLATTEN
-        assert engine._engine_state.last_exit_bars_ago_long == 0
+        assert engine._engine_state.last_exit_bars_ago_long == 9999, (
+            "EOD_FLATTEN must NOT arm the cooldown under the "
+            "only-original-SL rule"
+        )
 
     def test_concurrent_check_position_fires_eod(self):
         engine = _make_engine2(eod=_flatten_cfg(1.0, 2.0))

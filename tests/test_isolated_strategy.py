@@ -119,8 +119,16 @@ class TestIsolatedIndependentPositions:
         strat.on_bar(None, 70.0, 71.0, 69.0, 70.5, 0.5, 0.60, 0.0, state)
         assert strat._long_is_open is True
 
-        # Engine closes the long
+        # Engine closes the long via TP: frees the slot but does NOT arm the
+        # cooldown counter (trailing-sl-no-cooldown_07222026_2050 — only an
+        # original SL arms).
         strat.on_exit(1, "TP", 10)
+        assert strat._long_is_open is False
+        assert strat._bars_since_long_exit >= 9999  # TP must not arm
+
+        # An SL close arms the counter
+        strat._long_is_open = True
+        strat.on_exit(1, "SL", 10)
         assert strat._long_is_open is False
         assert strat._bars_since_long_exit == 0
 

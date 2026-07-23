@@ -41,7 +41,11 @@ log = logging.getLogger("LiveTrader")
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 from src.data_paths import get_model_path as _dp_model_path
-from src.live_execution.strategies.execution_models import create_execution_strategy, EngineState
+from src.live_execution.strategies.execution_models import (
+    EngineState,
+    create_execution_strategy,
+    exit_reason_arms_cooldown,
+)
 from src.live_execution.execution_guard import ExecutionGuard
 
 
@@ -609,11 +613,18 @@ class ConfigurableStrategy(Strategy):
         exact value the backtest gate reads on the exit bar. Release then
         happens at exit+N+1 reading N+1, matching the backtest for every
         cooldown including 0 (B(b)+F ticket, human-authorized 2026-07-03).
+
+        Only an ORIGINAL stop-loss arms the counter
+        (trailing-sl-no-cooldown_07222026_2050) — trailing/TP/barrier/flatten
+        exits pass through to the execution strategy but never block
+        re-entry. Forwarding is unconditional: per-side open/close tracking
+        must see every exit.
         """
-        if side == 1:
-            self._last_exit_bars_ago_long = -1
-        elif side == -1:
-            self._last_exit_bars_ago_short = -1
+        if exit_reason_arms_cooldown(exit_reason):
+            if side == 1:
+                self._last_exit_bars_ago_long = -1
+            elif side == -1:
+                self._last_exit_bars_ago_short = -1
 
         if hasattr(self._exec_strategy, 'on_exit'):
             self._exec_strategy.on_exit(side, exit_reason, bars_held)

@@ -201,8 +201,11 @@ CFG_CD1 = {
 
 
 class TestOnExitResetValue:
-    @pytest.mark.parametrize("reason", ["SL_HIT", "TP_HIT", "TIME_BARRIER", "CLOSED_OOB"])
+    @pytest.mark.parametrize("reason", ["SL_HIT", "SL_HIT_OOB"])
     def test_on_exit_resets_counter_to_minus_one(self, reason):
+        # re-adjudicated: trailing-sl-no-cooldown_07222026_2050 — only the
+        # SL family arms; exempt reasons (TP/barrier/OOB/trailing) are pinned
+        # in tests/test_trailing_sl_no_cooldown.py.
         strat = _make_strategy(CFG_CD0)
         strat.on_exit(1, reason, 5)
         assert strat._last_exit_bars_ago_long == -1, (
@@ -215,14 +218,16 @@ class TestOnExitResetValue:
         """Backtest convention: the exit bar itself is ALWAYS blocked
         (counter 0 <= cooldown 0); release is the next bar (reads 1 > 0)."""
         strat = _make_strategy(CFG_CD0)
-        strat.on_exit(1, "TP_HIT", 5)
+        # re-adjudicated: trailing-sl-no-cooldown_07222026_2050 — armed via
+        # SL_HIT (a TP no longer arms).
+        strat.on_exit(1, "SL_HIT", 5)
 
         sig1 = strat.evaluate(pd.DataFrame(), 70.0, 0.5, 0)  # exit bar
         sig2 = strat.evaluate(pd.DataFrame(), 70.0, 0.5, 0)  # exit bar + 1
 
         assert sig1.buy_prob == 0.0, (
             "exit-bar evaluate must read 0 and block (0 <= cooldown 0) — no "
-            "same-bar re-entry after a TP with cooldown_bars=0"
+            "same-bar re-entry after an SL with cooldown_bars=0"
         )
         assert sig2.buy_prob > 0.0, "next bar reads 1 > 0 and must release"
 
@@ -252,7 +257,10 @@ class TestOnExitResetValue:
             "short": {"cooldown_bars": 2},
         }
         strat = _make_strategy(cfg)
-        strat.on_exit(1, "TP_HIT", 5)  # TP exits arm cooldown_bars too
+        # re-adjudicated: trailing-sl-no-cooldown_07222026_2050 — armed via
+        # SL_HIT (a TP no longer arms; the per-side participation being
+        # tested is reason-agnostic among ARMING reasons).
+        strat.on_exit(1, "SL_HIT", 5)
 
         probs = [strat.evaluate(pd.DataFrame(), 70.0, 0.5, 0).buy_prob for _ in range(4)]
 
