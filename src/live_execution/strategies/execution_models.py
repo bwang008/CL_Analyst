@@ -514,13 +514,6 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
         ``close_existing_position_if_profit``
             EXIT when opposite fires, own side is silent, and the position
             is green (requires EngineState.floating_pnl_points).
-        ``close_existing_position_if_own_weak``
-            EXIT when opposite fires (raw tier match) AND the own side's
-            probability has collapsed to <= the per-side
-            ``weak_prob_exit_threshold`` floor (e.g. mean - 1*std of the
-            model's OOS probability distribution — see
-            scripts/compute_weak_prob_thresholds.py). Both floors are
-            REQUIRED in config for every side that has entry tiers.
 
     Config shape::
 
@@ -549,7 +542,6 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
         "close_existing_position",
         "reverse_position",
         "close_existing_position_if_profit",
-        "close_existing_position_if_own_weak",
     )
 
     def __init__(self, config: dict) -> None:
@@ -574,22 +566,6 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
             raise ValueError(
                 f"Invalid conflict_resolution '{self.conflict_resolution}'. "
                 f"Must be one of {self.VALID_CONFLICT_MODES}"
-            )
-
-        # Weak-own-prob exit floors. A side that can open positions (has
-        # entry tiers) MUST declare its floor explicitly when the mode is
-        # active — the value is a distribution statistic (e.g. mean - 1*std
-        # of the model's OOS probabilities, see
-        # scripts/compute_weak_prob_thresholds.py) computed offline, and
-        # defaulting it would silently disable or mis-tune the exit.
-        self.long_weak_prob_exit: Optional[float] = None
-        self.short_weak_prob_exit: Optional[float] = None
-        if self.conflict_resolution == "close_existing_position_if_own_weak":
-            self.long_weak_prob_exit = self._parse_weak_floor(
-                long_cfg, "long", bool(self.long_tiers)
-            )
-            self.short_weak_prob_exit = self._parse_weak_floor(
-                short_cfg, "short", bool(self.short_tiers)
             )
 
         # Derive effective thresholds from tiers (single source of truth).
@@ -621,40 +597,6 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
                     UserWarning,
                     stacklevel=2,
                 )
-
-    @staticmethod
-    def _parse_weak_floor(
-        side_cfg: dict, side_name: str, side_tradeable: bool
-    ) -> Optional[float]:
-        """Parse and validate a side's ``weak_prob_exit_threshold``.
-
-        Required for any side with entry tiers (positions can open on it);
-        a side with no tiers can never hold a position, so its floor is
-        irrelevant and may be omitted.
-        """
-        raw = side_cfg.get("weak_prob_exit_threshold")
-        if raw is None:
-            if not side_tradeable:
-                return None
-            raise ValueError(
-                f"conflict_resolution='close_existing_position_if_own_weak' "
-                f"requires '{side_name}.weak_prob_exit_threshold' — this side "
-                f"has entry tiers, so positions can open on it. Compute the "
-                f"floor offline (e.g. mean - 1*std of the model's OOS "
-                f"probability distribution, see "
-                f"scripts/compute_weak_prob_thresholds.py) and set it "
-                f"explicitly. No silent default."
-            )
-        if (
-            isinstance(raw, bool)
-            or not isinstance(raw, (int, float))
-            or not (0.0 <= float(raw) <= 1.0)
-        ):
-            raise ValueError(
-                f"'{side_name}.weak_prob_exit_threshold' must be a number "
-                f"in [0, 1]; got {raw!r}"
-            )
-        return float(raw)
 
     @staticmethod
     def _parse_tiers(raw: list[dict], base_cfg: dict = None) -> list[dict]:
@@ -947,48 +889,6 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
                                 f"TIERED_PROFIT_CLOSE opposite signal "
                                 f"({opposite_prob:.4f}), own side silent, "
                                 f"unrealized {state.floating_pnl_points:+.4f} pts"
-                            ),
-                        )]
-                return HOLD
-
-            elif self.conflict_resolution == "close_existing_position_if_own_weak":
-                # EXIT iff the opposite side's RAW probability clears its
-                # tier threshold AND the own side's probability has collapsed
-                # to <= the configured floor (e.g. mean - 1*std of the
-                # model's prediction distribution).
-                #
-                # The opposite trigger is deliberately the RAW tier match,
-                # NOT the consecutive/cooldown-gated `opposite_ok` above.
-                # Those gates are ENTRY filters: the consecutive counters
-                # freeze while in position (they only accumulate when flat),
-                # so a gated trigger could never fire mid-position for
-                # configs with consecutive_signal_threshold > 0; and the
-                # live runtime feeds sentinel cooldown state (9999) while in
-                # position (ConfigurableStrategy.evaluate), so gating on
-                # last_exit_bars_ago here would diverge live-vs-backtest.
-                if current_side != 0:
-                    raw_opposite_tier = (
-                        self._match_tier(prob_sell, self.short_tiers)
-                        if current_side == 1
-                        else self._match_tier(prob_buy, self.long_tiers)
-                    )
-                    own_prob = prob_buy if current_side == 1 else prob_sell
-                    own_floor = (
-                        self.long_weak_prob_exit if current_side == 1
-                        else self.short_weak_prob_exit
-                    )
-                    raw_opp_prob = prob_sell if current_side == 1 else prob_buy
-                    if (
-                        raw_opposite_tier is not None
-                        and own_floor is not None
-                        and own_prob <= own_floor
-                    ):
-                        return [Order(
-                            action="EXIT", side=current_side,
-                            reason=(
-                                f"TIERED_WEAK_EXIT opposite signal "
-                                f"({raw_opp_prob:.4f}), own prob collapsed "
-                                f"({own_prob:.4f} <= floor {own_floor:.4f})"
                             ),
                         )]
                 return HOLD
