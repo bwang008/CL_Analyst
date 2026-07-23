@@ -356,6 +356,7 @@ def _buy_signal():
         signal_label="Buy", skip_reason=None, buy_prob=0.81, sell_prob=0.12,
         lots=1, tp_price=68.9, sl_price=67.4, atr_at_entry=0.42,
         trailing_atr_mult=1.7, max_hold_bars=48,
+        cooldown_bars_left_long=None, cooldown_bars_left_short=None,
     )
 
 

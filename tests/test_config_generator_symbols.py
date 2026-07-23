@@ -709,6 +709,7 @@ def _hold_signal():
         action="HOLD", buy_prob=0.62, sell_prob=0.01, probability=0.62,
         confidence_pct=62.0, signal_label="Hold", skip_reason=None,
         tp_price=None, sl_price=None, lots=1,
+        cooldown_bars_left_long=None, cooldown_bars_left_short=None,
     )
 
 
@@ -717,6 +718,7 @@ def _buy_signal():
         action="BUY", buy_prob=0.71, sell_prob=0.02, probability=0.71,
         confidence_pct=71.0, signal_label="Buy", skip_reason=None,
         tp_price=72.0, sl_price=69.0, lots=1,
+        cooldown_bars_left_long=None, cooldown_bars_left_short=None,
     )
 
 

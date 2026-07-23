@@ -5627,9 +5627,15 @@ class LiveTrader:
             sell_prob_str = "N/A"
 
         skip_str = f"  skip={signal.skip_reason}" if signal.skip_reason else ""
+        cd_bits = []
+        if signal.cooldown_bars_left_long is not None:
+            cd_bits.append(f"buy={signal.cooldown_bars_left_long}")
+        if signal.cooldown_bars_left_short is not None:
+            cd_bits.append(f"sell={signal.cooldown_bars_left_short}")
+        cooldown_str = f"  cooldown[{' '.join(cd_bits)} bars left]" if cd_bits else ""
         inference_log = (
             f"INFERENCE [{self.strategy.name}] {direction}: buy_prob={buy_prob_str}  sell_prob={sell_prob_str}  "
-            f"signal={signal.signal_label}  action={signal.action}{skip_str}"
+            f"signal={signal.signal_label}  action={signal.action}{skip_str}{cooldown_str}"
         )
         log.info(inference_log)
         self._last_inference_log = f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} [INFO] {inference_log}"

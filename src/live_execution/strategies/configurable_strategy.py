@@ -448,6 +448,10 @@ class ConfigurableStrategy(Strategy):
         # (2026-05-12) and is dead vocabulary — enforcing it here made live
         # stricter than the backtest wherever the hand-template 7 exceeded
         # the Optuna-searched per-side value.
+        # Display-only companions to the zeroing below: bars still blocked
+        # including the current one (release reads cooldown+1).
+        cd_left_long: Optional[int] = None
+        cd_left_short: Optional[int] = None
         if current_position == 0:
             long_cfg = self.config.get("long", {})
             long_cooldown = int(
@@ -455,6 +459,7 @@ class ConfigurableStrategy(Strategy):
             )
             if self._last_exit_bars_ago_long <= long_cooldown:
                 buy_prob = 0.0
+                cd_left_long = long_cooldown - self._last_exit_bars_ago_long + 1
 
             short_cfg = self.config.get("short", {})
             short_cooldown = int(
@@ -462,6 +467,7 @@ class ConfigurableStrategy(Strategy):
             )
             if self._last_exit_bars_ago_short <= short_cooldown:
                 sell_prob = 0.0
+                cd_left_short = short_cooldown - self._last_exit_bars_ago_short + 1
 
         state = EngineState(
             position=1 if current_position != 0 else 0,
@@ -509,6 +515,8 @@ class ConfigurableStrategy(Strategy):
                 skip_reason=skip_reason,
                 buy_prob=buy_prob,
                 sell_prob=sell_prob,
+                cooldown_bars_left_long=cd_left_long,
+                cooldown_bars_left_short=cd_left_short,
             )
 
         # 4. Map first actionable order to TradeSignal
@@ -587,6 +595,8 @@ class ConfigurableStrategy(Strategy):
             sell_prob=sell_prob,
             tiered_tp_offsets=tiered_tp_offsets,
             atr_at_entry=side_atr,
+            cooldown_bars_left_long=cd_left_long,
+            cooldown_bars_left_short=cd_left_short,
             **tier_overrides,
         )
 

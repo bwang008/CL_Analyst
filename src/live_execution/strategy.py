@@ -59,6 +59,12 @@ class TradeSignal:
     tiered_tp_offsets: Optional[list[tuple[float, float]]] = None
     # Side-specific ATR value used for bracket sizing (parity with BacktestEngine)
     atr_at_entry: Optional[float] = None
+    # Post-exit re-entry cooldown visibility (display-only): bars this side is
+    # still blocked INCLUDING the current bar; None = side not gated. The gate
+    # zeroes the gated side's buy/sell_prob, which is indistinguishable from a
+    # dead model in the INFERENCE line without these.
+    cooldown_bars_left_long: Optional[int] = None
+    cooldown_bars_left_short: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
