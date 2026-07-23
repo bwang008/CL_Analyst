@@ -70,7 +70,10 @@ from src.features.macro_features import (
 from src.live_execution.strategy import Strategy, TradeSignal
 
 from src.live_execution.strategies.configurable_strategy import ConfigurableStrategy
-from src.live_execution.strategies.execution_models import exit_reason_arms_cooldown
+from src.live_execution.strategies.execution_models import (
+    exit_reason_arms_cooldown,
+    resolve_cooldown_arming,
+)
 from src.live_execution.instrument_context import resolve_instrument_context
 from src.live_execution.data_manager import (
     REQUIRED_1H_BARS,
@@ -1343,12 +1346,14 @@ class LiveTrader:
         # strategy without on_exit is a programming error and must crash.
         if self._position_side != 0:
             # A filled stop AFTER the trail activated is the trailed
-            # (profit-lock) order, not the original SL - reclassify so the
-            # cooldown does not arm (trailing-sl-no-cooldown_07222026_2050).
+            # (profit-lock) order, not the original SL - reclassify as
+            # TRAILING_BE so the strategy's cooldown_arming mode can
+            # distinguish it (trailing-sl-no-cooldown_07222026_2050; the
+            # "sl_only" predicate doubles as the SL-family test here).
             # Ledger/tradebook keep the truthful broker fill reason; this
             # remap exists only on the strategy-notification path.
             exit_reason = reason
-            if self._trailing_activated and exit_reason_arms_cooldown(reason):
+            if self._trailing_activated and exit_reason_arms_cooldown(reason, "sl_only"):
                 exit_reason = "TRAILING_BE"
             self.strategy.on_exit(self._position_side, exit_reason, self._position_bars_held)
 
@@ -2561,12 +2566,17 @@ class LiveTrader:
         # the old getattr(self, "_strategy", None) read a phantom attr and
         # made this entire recovery path a silent no-op in production.
         strat = self.strategy
-        # Only an original SL arms the cooldown
-        # (trailing-sl-no-cooldown_07222026_2050): exempt reasons (TP,
-        # TRAILING_BE, barrier, flatten, OOB/unknown, None) stay fully inert
-        # here - at restart there is no in-session exec-strategy state to
-        # notify, so skipping on_exit for them is harmless.
-        if side_int not in (1, -1) or not exit_reason_arms_cooldown(reason):
+        # Arming follows the side's cooldown_arming mode
+        # (trailing-sl-no-cooldown_07222026_2050): reasons the mode exempts
+        # (and None) stay fully inert here - at restart there is no
+        # in-session exec-strategy state to notify, so skipping on_exit for
+        # them is harmless.
+        if side_int not in (1, -1):
+            return
+        _cd_mode = resolve_cooldown_arming(
+            strat.config, "long" if side_int == 1 else "short"
+        )
+        if not exit_reason_arms_cooldown(reason, _cd_mode):
             return
 
         if close_time is None:
@@ -2617,10 +2627,11 @@ class LiveTrader:
             seen.add(side_int)  # the most-recent CLOSED row for this side
             reason = row.get("close_reason")
             # A trailed-stop close is a profit-lock exit, not an original SL:
-            # remap so the seed filter keeps it inert
-            # (trailing-sl-no-cooldown_07222026_2050). Legacy rows without
+            # remap to TRAILING_BE so the seed's mode filter can distinguish
+            # it (trailing-sl-no-cooldown_07222026_2050; the "sl_only"
+            # predicate doubles as the SL-family test). Legacy rows without
             # the column count as untrailed (errs toward blocking).
-            if row.get("trailing_activated") and exit_reason_arms_cooldown(reason):
+            if row.get("trailing_activated") and exit_reason_arms_cooldown(reason, "sl_only"):
                 reason = "TRAILING_BE"
             if reason is not None:
                 self._seed_restart_cooldown(
@@ -2745,9 +2756,11 @@ class LiveTrader:
                 # _reset_position_state, but that no-ops here (_position_side==0
                 # at startup), so seed on_exit DIRECTLY with the LEDGER side.
                 # The OOB close just happened → full sl_cooldown window,
-                # matching mid-session behavior. A trailed stop is remapped so
-                # it stays inert (trailing-sl-no-cooldown_07222026_2050).
-                if ledger_pos.get("trailing_activated") and exit_reason_arms_cooldown(reason):
+                # matching mid-session behavior. A trailed stop is remapped to
+                # TRAILING_BE for the seed's mode filter
+                # (trailing-sl-no-cooldown_07222026_2050; "sl_only" doubles
+                # as the SL-family test).
+                if ledger_pos.get("trailing_activated") and exit_reason_arms_cooldown(reason, "sl_only"):
                     reason = "TRAILING_BE"
                 self._seed_restart_cooldown(
                     1 if side == "LONG" else -1, reason, close_time=None,

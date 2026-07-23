@@ -60,6 +60,11 @@ SEARCHED_BASE_KEYS = {
     # 2026-07-14, ticket trailing-stop-ladder_07132026_1745). Rung placement
     # is derived (trigger2 = a1 + 0.5*(TP-a1), lock2 = a1), never searched.
     "ladder_enabled",
+    # Boolean cooldown-arming mode (operator-approved 2026-07-22, ticket
+    # trailing-sl-no-cooldown_07222026_2050): True -> side cooldown_arming
+    # "sl_only" (only an original SL blocks re-entry), False -> "all"
+    # (flavor-blind historical default). Searched WITH cooldown_bars.
+    "cooldown_sl_only",
 }
 
 
@@ -232,6 +237,7 @@ class TestSingleSideTrials:
             assert t.params["consecutive_signal_threshold_long"] in CONSEC_GRID
             assert t.params["atr_period_long"] in ATR_GRID
             assert t.params["ladder_enabled_long"] in {True, False}
+            assert t.params["cooldown_sl_only_long"] in {True, False}
             # conflict_resolution must never be suggested
             assert "conflict_resolution" not in t.params
 

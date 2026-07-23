@@ -106,3 +106,21 @@ rule on principle, either re-search cooldown_bars under the new rule (next
 scout batch) or make the rule config-gated per symbol. The commit changes
 the rule UNCONDITIONALLY — a NO-GO decision requires either reverting
 433e7bd or a follow-up making it opt-in before the next fleet restart.
+
+## Opt-in revision (operator decision 2026-07-22 ~23:00 PT)
+
+Operator chose: config-gated opt-in + Optuna-searchable. Implemented:
+per-side `cooldown_arming: "all" | "sl_only"` (absent = "all" =
+pre-ticket flavor-blind behavior; invalid raises), resolved side ->
+top-level -> default in ONE shared resolver consumed by the engine
+(from_config, validated at construction), ConfigurableStrategy.on_exit,
+restart seeding/reconstruction, and Isolated/Joint counters. Optuna dim
+`cooldown_sl_only` (bool, ladder_enabled pattern) searched WITH
+cooldown_bars; warm-start anchors on the config's mode. The 433e7bd
+test re-adjudications were RESTORED to original (default = old rule);
+sl_only semantics pinned in tests/test_trailing_sl_no_cooldown.py.
+
+Fleet configs (operator picks): CL (HS14B) + SI (SI01B) = "sl_only"
+both sides (SIL won the study full-period; CL won the 12mo tail);
+ES/NG/GC explicit "all". LIVE CHANGE for CL+SI at next restart; the
+restart gate from the study NO-GO is CLEARED.

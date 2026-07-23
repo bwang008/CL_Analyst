@@ -73,6 +73,10 @@ def _make_trader() -> LiveTrader:
     t.telemetry = MagicMock()
     t._telegram = MagicMock()
     t.strategy = MagicMock()
+    # trailing-sl-no-cooldown_07222026_2050 (mechanical stub repair): the
+    # seed path resolves cooldown_arming from strategy.config, a real dict
+    # on every real strategy — absent field = "all" (historical default).
+    t.strategy.config = {}
     t._execution_symbol = "SIL"
     t._front_month_str = "202609"
     t._exit_mode = "MKT"

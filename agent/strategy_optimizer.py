@@ -875,6 +875,13 @@ _PARAM_RANGES = {
     # trigger2 = a1 + 0.5*(TP - a1), lock2 = a1 (ratchet to previous trigger).
     # Placement is never searched — only this boolean is.
     "ladder_enabled":                 (False, True, None, "bool"),
+    # Cooldown arming mode (ticket trailing-sl-no-cooldown_07222026_2050,
+    # operator decision 2026-07-22): True -> side_cfg cooldown_arming
+    # "sl_only" (only an original SL blocks re-entry), False -> "all"
+    # (flavor-blind, the historical default). Searched WITH cooldown_bars so
+    # the window is re-tuned under whichever rule the trial picks — the
+    # decision-gate study showed the old Optuna values don't transfer.
+    "cooldown_sl_only":               (False, True, None, "bool"),
 }
 
 # Frozen (formerly searched) dims. Emptied by the rebalanced tier (2026-07-12):
@@ -1153,6 +1160,12 @@ def _extract_warm_start_params(
             "atr_period": side_cfg.get("atr_period", cfg.get("atr_period", 14)),
             # Boolean dim — presence of a config ladder anchors the warm start.
             "ladder_enabled": bool(side_cfg.get("trailing_ladder")),
+            # Boolean dim — the config's cooldown_arming mode anchors the
+            # warm start (absent = "all", the historical default).
+            "cooldown_sl_only": (
+                side_cfg.get("cooldown_arming",
+                             cfg.get("cooldown_arming", "all")) == "sl_only"
+            ),
         }
         if not include_atr:
             raw_values.pop("atr_period")
@@ -1235,6 +1248,7 @@ def _baseline_side_display_params(cfg: dict) -> dict:
             "tp_atr_mult": sc.get("tp_atr_mult", cfg.get("tp_atr_mult")),
             "sl_atr_mult": sc.get("sl_atr_mult", cfg.get("sl_atr_mult")),
             "cooldown_bars": sc.get("cooldown_bars", cfg.get("cooldown_bars")),
+            "cooldown_arming": sc.get("cooldown_arming", cfg.get("cooldown_arming")),
             "max_hold_bars": sc.get("max_hold_bars", cfg.get("max_hold_bars")),
             "consecutive_signal_threshold": sc.get(
                 "consecutive_signal_threshold", cfg.get("consecutive_signal_threshold")

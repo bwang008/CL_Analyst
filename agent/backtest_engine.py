@@ -84,6 +84,7 @@ from src.live_execution.strategies.execution_models import (
     allocate_tranche_lots,
     create_execution_strategy,
     exit_reason_arms_cooldown,
+    resolve_cooldown_arming,
 )
 from src.live_execution.execution_guard import ExecutionGuard
 
@@ -371,6 +372,8 @@ class BacktestEngine:
         trailing_sl_atr_offset_short: Optional[float] = None,
         trailing_ladder_long=None,
         trailing_ladder_short=None,
+        cooldown_arming_long: str = "all",
+        cooldown_arming_short: str = "all",
         commission_per_side: float = 2.50,
         slippage_per_side: float = 0.01,
         contract_multiplier: float = 1000.0,
@@ -415,6 +418,17 @@ class BacktestEngine:
         self.trailing_ladder_short = _normalize_trailing_ladder(
             trailing_ladder_short, "trailing_ladder_short"
         )
+        # Per-side cooldown arming mode (trailing-sl-no-cooldown_07222026_2050):
+        # "all" (default, pre-ticket flavor-blind) or "sl_only". Validated here
+        # so an invalid config crashes at construction, not mid-run.
+        for _mode in (cooldown_arming_long, cooldown_arming_short):
+            if _mode not in ("all", "sl_only"):
+                raise ValueError(
+                    f"Invalid cooldown_arming mode {_mode!r} — must be "
+                    f"'all' or 'sl_only'"
+                )
+        self.cooldown_arming_long = cooldown_arming_long
+        self.cooldown_arming_short = cooldown_arming_short
         self.commission_per_side = commission_per_side
         self.slippage_per_side = slippage_per_side
         self.contract_multiplier = contract_multiplier
@@ -525,6 +539,8 @@ class BacktestEngine:
             "trailing_sl_atr_offset_short": sc.short.trailing_sl_atr_offset,
             "trailing_ladder_long": sc.long.trailing_ladder,
             "trailing_ladder_short": sc.short.trailing_ladder,
+            "cooldown_arming_long": resolve_cooldown_arming(cfg, "long"),
+            "cooldown_arming_short": resolve_cooldown_arming(cfg, "short"),
             "execution_strategy": strategy,
             "execution_guard": guard,
             "weekend_flatten": sc.weekend_flatten,
@@ -771,9 +787,11 @@ class BacktestEngine:
         self._trades.append(record)
         self._realized_pnl += net_pnl
 
-        # Track exit for strategy-level cooldown logic — only an original SL
-        # arms it (trailing-sl-no-cooldown_07222026_2050)
-        if exit_reason_arms_cooldown(exit_reason):
+        # Track exit for strategy-level cooldown logic — arming per the
+        # side's cooldown_arming mode (trailing-sl-no-cooldown_07222026_2050)
+        _cd_mode = (self.cooldown_arming_long if self._side == 1
+                    else self.cooldown_arming_short)
+        if exit_reason_arms_cooldown(exit_reason, _cd_mode):
             if self._side == 1:
                 self._engine_state.last_exit_bars_ago_long = 0
             elif self._side == -1:
@@ -1215,9 +1233,11 @@ class BacktestEngine:
         self._trades.append(record)
         self._realized_pnl += net_pnl
 
-        # Track exit for strategy-level cooldown logic — only an original SL
-        # arms it (trailing-sl-no-cooldown_07222026_2050)
-        if exit_reason_arms_cooldown(exit_reason):
+        # Track exit for strategy-level cooldown logic — arming per the
+        # side's cooldown_arming mode (trailing-sl-no-cooldown_07222026_2050)
+        _cd_mode = (self.cooldown_arming_long if self._side == 1
+                    else self.cooldown_arming_short)
+        if exit_reason_arms_cooldown(exit_reason, _cd_mode):
             if self._side == 1:
                 self._engine_state.last_exit_bars_ago_long = 0
             elif self._side == -1:

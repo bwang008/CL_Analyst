@@ -13,10 +13,13 @@ live deploy.
 Method
 - Same fleet table, economics and data plumbing as
   scripts/study_tranche_exits.py (corrected predictions paths included).
-- Arm A "old_flavor_blind": `exit_reason_arms_cooldown` monkey-patched to
-  always-True in BOTH consuming namespaces (agent.backtest_engine +
-  execution_models) — byte-identical to the pre-ticket engine behavior.
-- Arm B "new_only_SL": the working tree as-is.
+- Arm A "old_flavor_blind": `resolve_cooldown_arming` forced to "all" in
+  BOTH consuming namespaces (agent.backtest_engine + execution_models) —
+  the pre-ticket flavor-blind behavior (also the config default).
+- Arm B "new_only_SL": `resolve_cooldown_arming` forced to "sl_only" —
+  the mode is FORCED per arm regardless of what the fleet configs declare,
+  so the study stays a clean A/B after the opt-in fields landed in the
+  live configs.
 - Metrics: full-period net PnL / PF / max DD / PnL-over-DD / trades / exit
   distribution, plus a last-12-months tail slice (net + trades) matching the
   current holdout convention's window length.
@@ -126,18 +129,24 @@ def _metrics(result, tail_start) -> dict:
     }
 
 
-class _FlavorBlind:
-    """Context manager restoring the pre-ticket rule: every exit arms."""
+class _ForceMode:
+    """Force every side's cooldown_arming resolution to one mode, in both
+    consuming namespaces, for a clean A/B regardless of config declarations."""
+
+    def __init__(self, mode: str):
+        self._mode = mode
 
     def __enter__(self):
-        self._be, self._em = be.exit_reason_arms_cooldown, em.exit_reason_arms_cooldown
-        be.exit_reason_arms_cooldown = lambda reason: True
-        em.exit_reason_arms_cooldown = lambda reason: True
+        self._be = be.resolve_cooldown_arming
+        self._em = em.resolve_cooldown_arming
+        forced = self._mode
+        be.resolve_cooldown_arming = lambda cfg, side_key: forced
+        em.resolve_cooldown_arming = lambda cfg, side_key: forced
         return self
 
     def __exit__(self, *exc):
-        be.exit_reason_arms_cooldown = self._be
-        em.exit_reason_arms_cooldown = self._em
+        be.resolve_cooldown_arming = self._be
+        em.resolve_cooldown_arming = self._em
         return False
 
 
@@ -165,18 +174,17 @@ def main() -> int:
         slip = default_slippage_points(sym)
         tail_start = ohlcv.index.max() - pd.DateOffset(months=TAIL_MONTHS)
 
-        for arm in ("old_flavor_blind", "new_only_SL"):
-            bt = BacktestEngine.from_config(
-                base,
-                commission_per_side=COMMISSION_PER_SIDE,
-                slippage_per_side=slip,
-                contract_multiplier=mult,
-            )
-            if arm == "old_flavor_blind":
-                with _FlavorBlind():
-                    result = bt.run(preds, ohlcv, ohlcv_exec_df=ohlcv_exec,
-                                    label=f"{sym}_{arm}")
-            else:
+        for arm, forced_mode in (("old_flavor_blind", "all"),
+                                 ("new_only_SL", "sl_only")):
+            # Construction AND run under the forced mode: from_config
+            # resolves the modes at engine build time.
+            with _ForceMode(forced_mode):
+                bt = BacktestEngine.from_config(
+                    base,
+                    commission_per_side=COMMISSION_PER_SIDE,
+                    slippage_per_side=slip,
+                    contract_multiplier=mult,
+                )
                 result = bt.run(preds, ohlcv, ohlcv_exec_df=ohlcv_exec,
                                 label=f"{sym}_{arm}")
             m = _metrics(result, tail_start)

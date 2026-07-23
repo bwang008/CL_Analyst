@@ -158,15 +158,11 @@ class TestReconstructCooldownFromLedger:
 
     def test_each_side_from_its_own_most_recent_row(self):
         # guard (d): per-side, not rows[0]-only.
-        # re-adjudicated: trailing-sl-no-cooldown_07222026_2050 — both rows
-        # are SL closes now (a TIME_BARRIER row would correctly stay inert
-        # under the only-original-SL rule and no longer probes per-side
-        # selection).
         s = _strategy()
         lt = _trader(s, bar_size="1h")
         lt.telemetry.get_recent_closed_positions.return_value = [
             _closed("LONG", "SL_HIT", hours_ago=1),      # most recent overall
-            _closed("SHORT", "SL_HIT_OOB", hours_ago=3),
+            _closed("SHORT", "TIME_BARRIER", hours_ago=3),
         ]
         lt._reconstruct_cooldown_from_ledger()
         assert s._last_exit_bars_ago_long == 0            # 1 - 1

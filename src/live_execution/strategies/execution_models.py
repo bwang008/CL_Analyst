@@ -119,23 +119,53 @@ def allocate_tranche_lots(total_lots: int, qty_pcts: list[float]) -> list[int]:
     return allocated
 
 
-# Ticket trailing-sl-no-cooldown_07222026_2050: the post-exit re-entry
-# cooldown arms ONLY on an original stop-loss exit. Exits that lock profit or
-# end a trade for non-loss reasons (TRAILING_BE, TP, TIME_BARRIER,
-# SIGNAL_EXIT, EOD/WEEKEND flattens, OOB/unknown closes) must not block
-# re-entry.
-COOLDOWN_ARMING_EXIT_REASONS = frozenset({"SL", "SL_HIT", "SL_HIT_OOB"})
+# Ticket trailing-sl-no-cooldown_07222026_2050 (opt-in revision, operator
+# decision 2026-07-22 after the decision-gate study): which exits arm the
+# post-exit re-entry cooldown is a PER-SIDE config choice, Optuna-searchable
+# (``cooldown_sl_only`` bool dim -> ``cooldown_arming`` config string):
+#   "all"     — every exit arms (pre-ticket flavor-blind behavior; DEFAULT)
+#   "sl_only" — only an original stop-loss arms; profit-lock / non-loss exits
+#               (TRAILING_BE, TP, TIME_BARRIER, SIGNAL_EXIT, flattens,
+#               OOB/unknown) never block re-entry.
+SL_FAMILY_EXIT_REASONS = frozenset({"SL", "SL_HIT", "SL_HIT_OOB"})
+VALID_COOLDOWN_ARMING_MODES = ("all", "sl_only")
 
 
-def exit_reason_arms_cooldown(exit_reason: object) -> bool:
-    """True iff this exit reason arms the per-side re-entry cooldown.
+def resolve_cooldown_arming(cfg: dict, side_key: str) -> str:
+    """Resolve a side's ``cooldown_arming`` mode: side -> top-level -> "all".
+
+    "all" is the documented opt-in default (absent field = pre-ticket
+    behavior); an INVALID value raises — no silent fallback.
+    """
+    side_cfg = cfg.get(side_key) or {}
+    mode = side_cfg.get("cooldown_arming", cfg.get("cooldown_arming", "all"))
+    if mode not in VALID_COOLDOWN_ARMING_MODES:
+        raise ValueError(
+            f"Invalid cooldown_arming {mode!r} for side {side_key!r} — "
+            f"must be one of {VALID_COOLDOWN_ARMING_MODES}"
+        )
+    return mode
+
+
+def exit_reason_arms_cooldown(exit_reason: object, mode: str) -> bool:
+    """True iff this exit reason arms the per-side re-entry cooldown under
+    ``mode`` (see VALID_COOLDOWN_ARMING_MODES).
 
     Accepts ExitReason enum members or the live trader's reason strings.
-    None/unknown reasons never arm — a cooldown must come from a proven
-    original-SL exit.
+    None/unknown reasons never arm in ANY mode — a cooldown must come from a
+    proven exit.
     """
+    if mode not in VALID_COOLDOWN_ARMING_MODES:
+        raise ValueError(
+            f"Invalid cooldown_arming mode {mode!r} — must be one of "
+            f"{VALID_COOLDOWN_ARMING_MODES}"
+        )
     value = getattr(exit_reason, "value", exit_reason)
-    return isinstance(value, str) and value in COOLDOWN_ARMING_EXIT_REASONS
+    if not isinstance(value, str):
+        return False
+    if mode == "all":
+        return True
+    return value in SL_FAMILY_EXIT_REASONS
 
 
 # ---------------------------------------------------------------------------
@@ -686,6 +716,12 @@ class TieredEnsembleStrategy(BaseExecutionStrategy):
                 side_cfg["max_hold_bars"] = max_hold
             if "cooldown_bars" in params:
                 side_cfg["cooldown_bars"] = params["cooldown_bars"]
+            # Searched bool dim -> readable config string
+            # (trailing-sl-no-cooldown_07222026_2050, ladder_enabled pattern)
+            if "cooldown_sl_only" in params:
+                side_cfg["cooldown_arming"] = (
+                    "sl_only" if params["cooldown_sl_only"] else "all"
+                )
             if "consecutive_signal_threshold" in params:
                 side_cfg["consecutive_signal_threshold"] = params["consecutive_signal_threshold"]
             if "atr_period" in params:
@@ -1082,9 +1118,12 @@ class IsolatedAsymmetricalStrategy(BaseExecutionStrategy):
         self._bars_since_short_exit: int = 9999
 
     def on_exit(self, side: int, exit_reason: object, bars_held: int) -> None:
-        """Track per-side position closure. Cooldown counters reset only on
-        an original SL (trailing-sl-no-cooldown_07222026_2050)."""
-        arms = exit_reason_arms_cooldown(exit_reason)
+        """Track per-side position closure. Cooldown counters reset per the
+        side's cooldown_arming mode (trailing-sl-no-cooldown_07222026_2050)."""
+        arms = side in (1, -1) and exit_reason_arms_cooldown(
+            exit_reason,
+            resolve_cooldown_arming(self.config, "long" if side == 1 else "short"),
+        )
         if side == 1:
             self._long_is_open = False
             if arms:
@@ -1276,10 +1315,15 @@ class JointPortfolioStrategy(BaseExecutionStrategy):
         self._bars_since_short_exit: int = 9999
 
     def on_exit(self, side: int, exit_reason: object, bars_held: int) -> None:
-        """Track position closure. Cooldown counters reset only on an
-        original SL (trailing-sl-no-cooldown_07222026_2050)."""
+        """Track position closure. Cooldown counters reset per the side's
+        cooldown_arming mode (trailing-sl-no-cooldown_07222026_2050)."""
         self._current_side = 0
-        if not exit_reason_arms_cooldown(exit_reason):
+        if side not in (1, -1):
+            return
+        mode = resolve_cooldown_arming(
+            self.config, "long" if side == 1 else "short"
+        )
+        if not exit_reason_arms_cooldown(exit_reason, mode):
             return
         if side == 1:
             self._bars_since_long_exit = 0

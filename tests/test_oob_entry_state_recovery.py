@@ -319,6 +319,10 @@ def _recovery_stub(executions, *, ledger_pos=None, cancel_by_ids=1):
     # recovery path's cooldown seeding now reaches the REAL strategy
     # attribute (the old phantom-attr guard silently skipped it here too).
     lt.strategy = MagicMock()
+    # trailing-sl-no-cooldown_07222026_2050 (mechanical stub repair): the
+    # seed path resolves cooldown_arming from strategy.config, a real dict
+    # on every real strategy — absent field = "all" (historical default).
+    lt.strategy.config = {}
     lt._position_bars_held = 0
     _attach_identity_seams(lt)
     return lt

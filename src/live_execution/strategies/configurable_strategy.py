@@ -45,6 +45,7 @@ from src.live_execution.strategies.execution_models import (
     EngineState,
     create_execution_strategy,
     exit_reason_arms_cooldown,
+    resolve_cooldown_arming,
 )
 from src.live_execution.execution_guard import ExecutionGuard
 
@@ -614,17 +615,21 @@ class ConfigurableStrategy(Strategy):
         happens at exit+N+1 reading N+1, matching the backtest for every
         cooldown including 0 (B(b)+F ticket, human-authorized 2026-07-03).
 
-        Only an ORIGINAL stop-loss arms the counter
-        (trailing-sl-no-cooldown_07222026_2050) — trailing/TP/barrier/flatten
-        exits pass through to the execution strategy but never block
-        re-entry. Forwarding is unconditional: per-side open/close tracking
-        must see every exit.
+        Arming follows the side's ``cooldown_arming`` mode
+        (trailing-sl-no-cooldown_07222026_2050): "all" (default) arms on every
+        exit; "sl_only" arms only on an original stop-loss, so
+        trailing/TP/barrier/flatten exits never block re-entry. Forwarding is
+        unconditional: per-side open/close tracking must see every exit.
         """
-        if exit_reason_arms_cooldown(exit_reason):
-            if side == 1:
-                self._last_exit_bars_ago_long = -1
-            elif side == -1:
-                self._last_exit_bars_ago_short = -1
+        if side in (1, -1):
+            mode = resolve_cooldown_arming(
+                self.config, "long" if side == 1 else "short"
+            )
+            if exit_reason_arms_cooldown(exit_reason, mode):
+                if side == 1:
+                    self._last_exit_bars_ago_long = -1
+                elif side == -1:
+                    self._last_exit_bars_ago_short = -1
 
         if hasattr(self._exec_strategy, 'on_exit'):
             self._exec_strategy.on_exit(side, exit_reason, bars_held)
