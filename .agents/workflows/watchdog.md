@@ -41,6 +41,7 @@ disagree, the SKILL wins.
 | NG | 3000 | NG | `NG01B_Sharpe_E03_07052026` |
 | GC | 4010 | **MGC** (micro) | `GC02B_Sharpe_E04_07102026` |
 | SI | 5000 | **SIL** (micro) | `SI01B_Sharpe_E02_07062026` |
+| NQ | 2500 | **MNQ** (micro) | `NQ02B_Sharpe_E04_baseline_07172026` — **PARKED** (`enabled: false`) until the operator's Phase-3-ladder restart; data preflight verified CLEAN 07-23 |
 
 Exec session = `client_id + 1`. Three models trade **micro** contracts while the
 DB stores the **brain** symbol — never value PnL at the brain multiplier.
@@ -110,6 +111,14 @@ Report them as a count, not a paragraph. Anything **beyond** this set is real:
   for an id **in the manifest table above** is real; 2000/4000 are not.
 - **`missing-fill-price | NG/3000 | EXECUTE order_id=19 ... 2026-07-07`** — a
   long-adjudicated nag on one historical row.
+- **`[INFO] ... Error 10148/10147 ... (expected: deliberate cancel raced ...)`**
+  — the EXPECTED form of OCA sibling-cancel bounces since the quiet-down
+  (3bed550, live 07-23). One per protective-leg fill. A 10147/10148 still at
+  **ERROR** level means an UNREGISTERED order id bounced — that one is real.
+- **`incomplete-close | NG/3000 | trade_115 ... CLOSED_OOB_UNRECOVERED`** —
+  TEMPORARY nag from the 07-23 NG roll; clears when the operator runs the
+  prepared repair SQL (audit log 2026-07-24T01:10Z). Root cause fixed in
+  f9c1acc (deploy pending); do not re-investigate.
 - Weekend/holiday stale-bars while the market is closed.
 
 ### Known recurring patterns (verify recovery, one audit line, move on)
