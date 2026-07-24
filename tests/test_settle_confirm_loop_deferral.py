@@ -222,6 +222,13 @@ def _post_submit_trader() -> LiveTrader:
     t._tp_order_ids = []                  # cancelled during submission (:1753)
     t._processed_exit_order_ids = {str(_EXIT_OID)}
     t._pending_exit_order_id = _EXIT_OID  # the exit awaiting confirmation
+    # re-adjudicated: rollover-close-fill-registration_07232026_1920 —
+    # mechanical fixture repair only: registration now pairs the pending
+    # order id with the close reason it must book under
+    # (_register_pending_exit; no silent TIME_BARRIER default at booking),
+    # so a stub that arms the id directly must declare the paired reason
+    # the production registration would have recorded. No assertion changes.
+    t._pending_exit_reason = "TIME_BARRIER"
     t._position_bars_held = 6
     return t
 

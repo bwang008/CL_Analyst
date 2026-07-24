@@ -1326,22 +1326,64 @@ class TestEntryCancellationPaths:
         )
 
     def test_rollover_real_close_still_fires_cooldown(self):
-        """FENCE (passes today) — A2: rollover force-close of a FILLED
-        position is a REAL close: full in-position reset including
-        strategy.on_exit(reason='ROLLOVER'), and the bulk cancel sweep
-        (A8) is preserved."""
+        """FENCE — A2: rollover force-close of a FILLED position is a REAL
+        close: full in-position reset including strategy.on_exit, and the
+        bulk cancel sweep (A8) is preserved.
+
+        re-adjudicated: rollover-close-fill-registration_07232026_1920 —
+        the force-close no longer resets inline (the inline reset left the
+        ledger row OPEN and the close order's fill UNRECOGNIZED, the
+        2026-07-23 NG incident). It REGISTERS the close order with the
+        pending-exit machinery and the full in-position reset — including
+        strategy.on_exit, now with the truthful reason
+        'ROLLOVER_FORCE_CLOSE' — fires when the idle reconciler books the
+        PROVEN fill. The A2 substance (a real close of a filled position
+        still runs the full reset + cooldown machinery exactly once) is
+        asserted at its new booking site; the A8 bulk-cancel fence is
+        unchanged. Mechanical stub additions: the registration/booking
+        seams (_processed_exit_order_ids, settled read, executions) the
+        new flow reads on an object.__new__ stub."""
         lt = _rollover_stub(position=1)
+        lt._processed_exit_order_ids = set()
+        lt._pending_exit_order_id = None
+        lt._pending_exit_reason = None
+        lt._retiring_leg_ids = []
+        lt._time_barrier_exit_attempts = 0
+        lt._recently_closed_legs = None
+        lt.exec_client.close_position.return_value = SimpleNamespace(
+            order=SimpleNamespace(orderId=120),
+        )
 
         lt._check_contract_rollover()
 
-        assert lt.strategy.on_exit.called, (
-            "rollover force-close must still run the full in-position "
-            "reset (strategy.on_exit + cooldown) — A2"
-        )
-        reason = lt.strategy.on_exit.call_args.args[1]
-        assert reason == "ROLLOVER"
         assert lt.exec_client.cancel_open_orders.called  # A8
         assert lt.exec_client.close_position.called
+        # The close is REGISTERED, not booked inline: the reset (and its
+        # cooldown) belongs to the proven-fill booking.
+        assert lt._pending_exit_order_id == 120
+        assert lt._pending_exit_reason == "ROLLOVER_FORCE_CLOSE"
+        assert not lt.strategy.on_exit.called, (
+            "the reset is deferred to the reconciler's booking of the "
+            "proven fill — no inline strategy.on_exit at registration"
+        )
+
+        # Booking tick: confirmed flat books the proven fill and runs the
+        # full in-position reset (A2 at its new site).
+        lt.exec_client.get_position.return_value = 0
+        lt.exec_client.get_position_settled.return_value = 0
+        lt.exec_client.get_executions.return_value = [
+            _exec_record("120", 68.55, side="SLD", exec_id="exec-roll-120"),
+        ]
+
+        booked = lt._reconcile_pending_position_state()
+
+        assert booked is True
+        assert lt.strategy.on_exit.called, (
+            "rollover force-close must still run the full in-position "
+            "reset (strategy.on_exit + cooldown) — A2, at the booking site"
+        )
+        reason = lt.strategy.on_exit.call_args.args[1]
+        assert reason == "ROLLOVER_FORCE_CLOSE"
 
     def test_rollover_flat_with_pending_clears_pending_without_cooldown(self):
         """D2.4/A2: rollover is an entry-cancellation path — a pending

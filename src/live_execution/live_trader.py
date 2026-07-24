@@ -788,6 +788,14 @@ class LiveTrader:
         # last pending exit order id. Both are CLEARED by _reset_position_state.
         self._time_barrier_exit_attempts: int = 0
         self._pending_exit_order_id: Optional[int] = None
+        # Close reason the pending exit MUST book under, registered
+        # ATOMICALLY with the order id by _register_pending_exit
+        # ("TIME_BARRIER" for the reconciler's own exit,
+        # "ROLLOVER_FORCE_CLOSE" for the rollover force-close;
+        # rollover-close-fill-registration_07232026_1920). There is NO
+        # default at booking time — a pending exit without a registered
+        # reason raises loudly instead of silently booking TIME_BARRIER.
+        self._pending_exit_reason: Optional[str] = None
         # Retire-then-submit window (oca-stage4-exit-ordering_07222026_0155):
         # leg ids the TIME BARRIER tick cancelled whose death is NOT yet
         # confirmed. Armed BEFORE the cancels are transmitted (the kill-switch
@@ -1421,6 +1429,7 @@ class LiveTrader:
         # exit id (exit-fill-unverified_07152026_1855).
         self._time_barrier_exit_attempts = 0
         self._pending_exit_order_id = None
+        self._pending_exit_reason = None
         # Stage-4 retirement window (oca-stage4-exit-ordering_07222026_0155):
         # a fresh position must start with no stale retiring legs and a clean
         # kill-switch cancel-confirm budget.
@@ -2178,10 +2187,12 @@ class LiveTrader:
                     self._note_time_barrier_deferral(None)
                     return False
                 # Submitted: register the oid so its fill is recognised (not
-                # a PHANTOM FILL), record it pending, and hand the lifecycle
-                # to the UNCHANGED pending-exit branch from the next tick.
-                self._processed_exit_order_ids.add(str(exit_oid))
-                self._pending_exit_order_id = exit_oid
+                # a PHANTOM FILL), record it pending PAIRED with the reason
+                # it must book under (rollover-close-fill-registration_
+                # 07232026_1920: booking no longer assumes TIME_BARRIER), and
+                # hand the lifecycle to the UNCHANGED pending-exit branch
+                # from the next tick.
+                self._register_pending_exit(exit_oid, reason="TIME_BARRIER")
                 self._retiring_leg_ids = []
                 self._retiring_sl_id = None
                 log.info(
@@ -2218,8 +2229,12 @@ class LiveTrader:
                     self._note_time_barrier_deferral(exit_oid)
                     return False
                 if settled == 0:
-                    # Flat: the exit filled. Book the PROVEN price and finish.
-                    return self._book_time_barrier_flat(exit_oid)
+                    # Flat: the exit filled. Book the PROVEN price under the
+                    # REGISTERED reason and finish (reason threading:
+                    # rollover-close-fill-registration_07232026_1920).
+                    return self._book_time_barrier_flat(
+                        exit_oid, self._pending_exit_reason,
+                    )
 
                 # settled != 0 — the incident: the exit did not (yet) fill. A2:
                 # retire the stranded GTC exit BEFORE touching protection —
@@ -2420,8 +2435,12 @@ class LiveTrader:
             self._note_time_barrier_deferral(exit_oid)
             return False
         if settled == 0:
-            # The exit filled after all — book the proven price and finish.
-            return self._book_time_barrier_flat(exit_oid)
+            # The exit filled after all — book the proven price under the
+            # registered reason and finish (reason threading:
+            # rollover-close-fill-registration_07232026_1920).
+            return self._book_time_barrier_flat(
+                exit_oid, self._pending_exit_reason,
+            )
         # D2 (oca-stage2-residual-detection_07222026_0141 R3): the settled
         # book can be REVERSED relative to the tracked side (residual
         # double-fill, manual intervention). Re-arming protective legs on
@@ -2466,26 +2485,57 @@ class LiveTrader:
         self._note_time_barrier_deferral(exit_oid)
         return False
 
-    def _book_time_barrier_flat(self, exit_oid) -> bool:
+    def _register_pending_exit(self, exit_oid, reason: str) -> None:
+        """Register a submitted close order with the pending-exit machinery.
+
+        Single registration authority (rollover-close-fill-registration_
+        07232026_1920): the order id is added to _processed_exit_order_ids so
+        its Filled event is RECOGNIZED by the fill router (never an
+        UNRECOGNIZED FILL), recorded as _pending_exit_order_id for the idle
+        reconciler, and PAIRED atomically with the close reason the booking
+        must carry ("TIME_BARRIER" for the reconciler's own exit,
+        "ROLLOVER_FORCE_CLOSE" for the rollover force-close) — so no booking
+        site ever assumes a default reason (no silent defaults)."""
+        if not isinstance(reason, str) or not reason:
+            raise ValueError(
+                f"pending-exit registration for order {exit_oid!r} requires "
+                f"an explicit close reason, got {reason!r}"
+            )
+        self._processed_exit_order_ids.add(str(exit_oid))
+        self._pending_exit_order_id = exit_oid
+        self._pending_exit_reason = reason
+
+    def _book_time_barrier_flat(self, exit_oid, reason) -> bool:
         """settled == 0: the exit filled. Book the ledger CLOSED with the PROVEN
         execution price (NULL when no execution matches the exit order id — an
         explicit unknown, never the fabricated current_price; the :2305-2313
-        precedent), then reset with reason='TIME_BARRIER' (truthful ledger
-        vocabulary; the re-entry cooldown is flavor-blind per-side
-        cooldown_bars, matching the backtest) and report a completed exit."""
+        precedent), then reset through the normal close path with the reason
+        REGISTERED at submission (_register_pending_exit: "TIME_BARRIER" for
+        the reconciler's own exit, "ROLLOVER_FORCE_CLOSE" for a rollover
+        force-close; rollover-close-fill-registration_07232026_1920). The
+        reason is threaded EXPLICITLY — a pending exit that reaches booking
+        without a registered reason raises loudly (caught by the reconciler's
+        never-raise boundary → fail-closed defer + A4 escalation) instead of
+        silently booking TIME_BARRIER."""
+        if not isinstance(reason, str) or not reason:
+            raise ValueError(
+                f"pending exit {exit_oid!r} reached booking without a "
+                f"registered close reason (got {reason!r}) - registration "
+                f"must go through _register_pending_exit"
+            )
         exit_price = self._resolve_exit_fill_price(exit_oid)
         if self._active_trade_id is not None:
             try:
                 self.telemetry.close_position(
                     self._active_trade_id,
-                    reason="TIME_BARRIER",
+                    reason=reason,
                     close_time=self._utc_iso_now(),
                     bars_held=self._position_bars_held,
                     exit_price=exit_price,
                 )
             except Exception:
                 log.debug("Failed to close ledger position", exc_info=True)
-        self._reset_position_state(reason="TIME_BARRIER")
+        self._reset_position_state(reason=reason)
         return True
 
     def _book_retired_leg_close(self, retiring_ids: list) -> bool:
@@ -3268,8 +3318,42 @@ class LiveTrader:
         # provably done (matched execution) is a live orphan hazard — the
         # exact 2026-07-06 failure was silent by construction (success
         # logged only if cancelled > 0, except -> log.debug).
+        #
+        # Rollover-cancelled legs are ACCOUNTED (rollover-close-fill-
+        # registration_07232026_1920): the ROLLOVER FORCE-CLOSE records the
+        # leg ids it cancels in _recently_closed_legs (reason "ROLLOVER")
+        # before clearing them, so a sweep landing before/instead of the fill
+        # booking must not page "possible live orphan" for legs the roll
+        # itself provably cancelled. The check is NARROW — same trade, reason
+        # "ROLLOVER", within the registry's age window — so a GENUINELY
+        # unknown resting order still warns (asymmetry preserved). getattr:
+        # pre-Stage-2 stubs do not declare the registry.
+        rollover_accounted = 0
+        _closed = getattr(self, "_recently_closed_legs", None)
+        if (
+            _closed is not None
+            and _closed.get("reason") == "ROLLOVER"
+            and str(_closed.get("trade_id")) == str(trade_id)
+            and (time.time() - _closed.get("cleared_at", 0.0))
+            <= _RECENTLY_CLOSED_LEGS_MAX_AGE_SEC
+        ):
+            _matched_ids = {str(r.get("order_id")) for r in matched}
+            _rollover_leg_ids = _closed.get("leg_ids", set())
+            rollover_accounted = sum(
+                1 for oid in expected_ids
+                if str(oid) in _rollover_leg_ids
+                and str(oid) not in _matched_ids
+            )
+            if rollover_accounted:
+                log.info(
+                    "[RECOVERY] %d protective order(s) of trade %s accounted "
+                    "as cancelled-by-rollover (tp=%s sl=%s) - not orphan "
+                    "candidates",
+                    rollover_accounted, trade_id, tp_order_id, sl_order_id,
+                )
         unaccounted = (
-            len(expected_ids) - len(matched) - cancelled_by_id - bulk_cancelled
+            len(expected_ids) - len(matched) - cancelled_by_id
+            - bulk_cancelled - rollover_accounted
         )
         if unaccounted > 0:
             log.error(
@@ -4540,6 +4624,24 @@ class LiveTrader:
                     "cancelling brackets and closing at market",
                     current_position, old_sym,
                 )
+                # Record the legs this roll is about to cancel BEFORE
+                # clearing them (rollover-close-fill-registration_
+                # 07232026_1920): the sweep's unaccounted-leg check
+                # recognizes them as cancelled-by-rollover (never a
+                # "possible live orphan" page), and a late fill on one
+                # still lands in the Stage-2 residual branch instead of
+                # dying as an UNRECOGNIZED FILL.
+                if self._tp_order_ids or self._sl_order_id is not None:
+                    self._recently_closed_legs = {
+                        "trade_id": self._active_trade_id,
+                        "reason": "ROLLOVER",
+                        "leg_ids": {
+                            str(x) for x in list(self._tp_order_ids)
+                            + ([self._sl_order_id]
+                               if self._sl_order_id is not None else [])
+                        },
+                        "cleared_at": time.time(),
+                    }
                 # Cancel resting TP/SL bracket orders
                 try:
                     cancelled = self.exec_client.cancel_open_orders(
@@ -4548,23 +4650,60 @@ class LiveTrader:
                     log.info("Rollover: cancelled %d resting orders", cancelled)
                 except Exception as exc:
                     log.warning("Rollover: cancel_open_orders failed: %s", exc)
+                # The cancelled ids no longer point at orders we may treat
+                # as protective (the TIME BARRIER retire discipline); the
+                # close order below owns the exit lifecycle.
+                self._sl_order_id = None
+                self._tp_order_ids = []
 
                 # Market-close the old position (uses pos.contract from
                 # IBKR portfolio — targets the actual old-month contract,
                 # not our cached reference).
+                close_oid = None
                 try:
-                    self.exec_client.close_position(
+                    close_trade = self.exec_client.close_position(
                         symbol=self._execution_symbol,
                         exit_mode="market",
                         current_price=0.0,  # market order, price unused
                     )
-                    log.info("Rollover: market close order submitted")
+                    close_oid = getattr(
+                        getattr(close_trade, "order", None), "orderId", None,
+                    )
+                    log.info(
+                        "Rollover: market close order submitted (order id %s)",
+                        close_oid,
+                    )
                 except Exception as exc:
                     log.error("Rollover: close_position failed: %s", exc)
 
-                # Reset internal position tracking — a REAL close of a
-                # filled position: full reset incl. strategy.on_exit (A2).
-                self._reset_position_state(reason="ROLLOVER")
+                if close_oid is not None:
+                    # Register the close with the pending-exit machinery
+                    # (rollover-close-fill-registration_07232026_1920 — the
+                    # TIME BARRIER mechanism, reused): its fill is
+                    # RECOGNIZED (no UNRECOGNIZED FILL) and the idle
+                    # reconciler books the close truthfully — proven fill
+                    # price, reason ROLLOVER_FORCE_CLOSE — then resets
+                    # position state via the normal close path. NO inline
+                    # reset: the trade stays tracked until the fill is
+                    # proven (the old inline reset left the ledger row
+                    # OPEN and the fill unrecognized — the 2026-07-23 NG
+                    # incident).
+                    self._register_pending_exit(
+                        close_oid, reason="ROLLOVER_FORCE_CLOSE",
+                    )
+                else:
+                    # Close never submitted / broker returned no id:
+                    # nothing to register — keep the legacy immediate
+                    # reset (status-quo failure path; the ledger row stays
+                    # OPEN for the sweep and housekeeping's untracked
+                    # detection remains the net).
+                    log.error(
+                        "Rollover: close order id unavailable - cannot "
+                        "defer booking to the fill; falling back to the "
+                        "immediate ROLLOVER reset (ledger row stays OPEN "
+                        "for the sweep)"
+                    )
+                    self._reset_position_state(reason="ROLLOVER")
                 self._clear_pending_entry()
 
                 self._telegram.send(
