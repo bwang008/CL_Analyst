@@ -203,6 +203,7 @@ CREATE TABLE IF NOT EXISTS active_positions (
     bars_held           INTEGER,
     trailing_atr_mult   REAL,
     max_hold_bars       INTEGER,
+    trailing_activated  INTEGER DEFAULT 0,  -- latch: restart recovery restores it (trailing-latch-reconnect-restore_07232026_1920)
     created_at          TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 """
@@ -310,6 +311,7 @@ CREATE TABLE IF NOT EXISTS active_positions (
     bars_held           INTEGER,
     trailing_atr_mult   REAL,
     max_hold_bars       INTEGER,
+    trailing_activated  INTEGER DEFAULT 0,  -- latch: restart recovery restores it (trailing-latch-reconnect-restore_07232026_1920)
     created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
     UNIQUE(client_id, trade_id)
 );
@@ -393,6 +395,11 @@ class TelemetryDB:
                 + _CREATE_ACTIVE_POSITIONS_INDEXES
             )
             self._migrate_fleet_identity_columns(conn)
+            # Fleet files created before trailing-latch-reconnect-
+            # restore_07232026_1920 predate active_positions.trailing_activated
+            # — this path never ran the column migration (CREATE IF NOT
+            # EXISTS keeps the old shape). Idempotent: PRAGMA-guarded.
+            self._migrate_active_positions_columns(conn)
             conn.execute(f"PRAGMA user_version = {_FLEET_SCHEMA_VERSION}")
             conn.commit()
             return
@@ -508,6 +515,14 @@ class TelemetryDB:
             conn.execute("ALTER TABLE active_positions ADD COLUMN exit_price REAL")
         if "initial_sl_price" not in cols:
             conn.execute("ALTER TABLE active_positions ADD COLUMN initial_sl_price REAL")
+        if "trailing_activated" not in cols:
+            # trailing-latch-reconnect-restore_07232026_1920: pre-ticket
+            # rows migrate to 0 (untrailed) — recovery must never invent a
+            # True the ledger cannot prove.
+            conn.execute(
+                "ALTER TABLE active_positions "
+                "ADD COLUMN trailing_activated INTEGER DEFAULT 0"
+            )
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -1148,23 +1163,32 @@ class TelemetryDB:
         *,
         new_sl_price: float,
         sl_order_id: Optional[int] = None,
+        trailing_activated: Optional[bool] = None,
     ) -> None:
-        """Update SL price after trailing stop modification."""
+        """Update SL price after trailing stop modification.
+
+        ``trailing_activated=True`` additionally stamps the row's latch
+        column in the SAME statement as the trailed price
+        (trailing-latch-reconnect-restore_07232026_1920) so restart
+        recovery can restore ``_trailing_activated``. ``None`` (the
+        default) leaves the column untouched — heal paths that re-place an
+        un-trailed SL must not clear an armed latch.
+        """
         conn = self._get_conn()
         scope_sql, scope_vals = self._client_scope()
+        set_fragments = ["sl_price = ?"]
+        set_vals: list = [new_sl_price]
         if sl_order_id is not None:
-            conn.execute(
-                "UPDATE active_positions "
-                "SET sl_price = ?, sl_order_id = ? "
-                f"WHERE trade_id = ? AND status = 'OPEN'{scope_sql}",
-                (new_sl_price, sl_order_id, trade_id) + scope_vals,
-            )
-        else:
-            conn.execute(
-                "UPDATE active_positions SET sl_price = ? "
-                f"WHERE trade_id = ? AND status = 'OPEN'{scope_sql}",
-                (new_sl_price, trade_id) + scope_vals,
-            )
+            set_fragments.append("sl_order_id = ?")
+            set_vals.append(sl_order_id)
+        if trailing_activated is not None:
+            set_fragments.append("trailing_activated = ?")
+            set_vals.append(1 if trailing_activated else 0)
+        conn.execute(
+            f"UPDATE active_positions SET {', '.join(set_fragments)} "
+            f"WHERE trade_id = ? AND status = 'OPEN'{scope_sql}",
+            tuple(set_vals) + (trade_id,) + scope_vals,
+        )
         conn.commit()
 
     def close_position(

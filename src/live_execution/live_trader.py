@@ -1829,6 +1829,12 @@ class LiveTrader:
                             self._active_trade_id,
                             new_sl_price=new_sl,
                             sl_order_id=order_id,
+                            # Persist the latch WITH the trailed price so
+                            # restart recovery restores it (trailing-latch-
+                            # reconnect-restore_07232026_1920: both NG
+                            # re-activations on 2026-07-22 were restart
+                            # recoveries with nothing to restore from).
+                            trailing_activated=True,
                         )
                     except Exception:
                         # LOUD, not swallowed (ticket
@@ -2926,6 +2932,28 @@ class LiveTrader:
         self._trade_max_hold_bars = (
             int(max_hold_bars) if max_hold_bars is not None else None
         )
+        # Restore the trailing latch from the ledger row (trailing-latch-
+        # reconnect-restore_07232026_1920). Recovery previously restored
+        # every field EXCEPT _trailing_activated (left at __init__ False),
+        # so the first bar close after every restart re-fired "TRAILING
+        # STOP: activated" (redundant no-op SL modify — NG order 110 at
+        # 19:15:06 and 23:00:05 PT, fleet_20260722.log) and, worse, an SL
+        # fill in that gap booked plain SL_HIT instead of TRAILING_BE,
+        # wrongly arming "sl_only" cooldowns. Absent column / NULL / 0 ->
+        # False (legacy rows): never invent a True the ledger cannot
+        # prove. _tracked_sl_price needs no twin restore — the row's
+        # sl_price IS the trailed price (update_position_sl persists both
+        # atomically) and _verify_and_heal_protective_legs below restores
+        # it.
+        self._trailing_activated = bool(
+            ledger_pos.get("trailing_activated") or 0
+        )
+        if self._trailing_activated:
+            log.info(
+                "[RECOVERY] Trailing latch restored from ledger "
+                "(trailing_activated=1) - trailed SL %s stays latched",
+                sl_price,
+            )
 
         # Restore entry bar time and COUNT bars held from received brain
         # bars (gap-immune _bars_since): the old wall-clock division counted
