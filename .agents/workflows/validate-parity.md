@@ -159,7 +159,14 @@ load rows per symbol, `X = DataFrame(features).reindex(columns=booster.
 feature_name()).astype(float32)`, `sigmoid(booster.predict(X))`, diff vs
 logged probs.
 
-**PASS**: |Δ| ≈ 0 (CL/SI/GC re-scored to 0.000000 on 2026-07-11).
+**PASS**: |Δ| ≈ 0 (CL/SI/GC re-scored to 0.000000 on 2026-07-11; all 5
+symbols 0.000000 on 2026-07-24).
+**Post-gate probs (since the cooldown fix went live 07-22):** shadow rows
+store the POST-cooldown-gate probs, so a gate-zeroed side logs 0.000000
+while the raw model score is nonzero — that re-scores as a large fake
+"divergence". Exclude/expect rows whose INFERENCE line carries the
+`cooldown[...]` tag (verified 2026-07-24: NG short "divergence" of 0.58
+was exactly the 3 gate-zeroed bars, countdown tags matching).
 **Pairing rule:** compare each shadow window against the model that was
 deployed DURING that window — after a re-pin, yesterday's rows belong to
 yesterday's pickle (this produced false 0.04–0.06 "divergence" for ES/GC on
