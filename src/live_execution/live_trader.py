@@ -242,6 +242,16 @@ _MAX_RESUBSCRIBE_RETRIES = 5
 # this ceiling only bounds how long we retry the exit quietly before shouting.
 _MAX_TIME_BARRIER_EXIT_ATTEMPTS = 6
 
+# Alert throttle (time-barrier-retire-loop_07282026_2150): once attempts
+# reach the max, shout AT the crossing and then every Nth attempt after —
+# never per-tick (the 2026-07-28 incident alerted ~2,100 times in 3.5h).
+_TIME_BARRIER_ALERT_EVERY = 120
+
+# Grace before the pending-exit branch retires an unfilled exit (same
+# ticket): a marketable limit deserves more than one ~5s idle tick to fill;
+# retiring earlier guarantees a cancel/resubmit churn cycle per bar.
+_PENDING_EXIT_GRACE_SECONDS = 30.0
+
 # Kill-switch cancel-confirm bound (oca-stage4-exit-ordering_07222026_0155 R3):
 # how many heartbeat ticks the genuinely-naked flatten waits for its own bulk
 # cancel to clear the open book before proceeding anyway. Bounded so the
@@ -796,6 +806,11 @@ class LiveTrader:
         # default at booking time — a pending exit without a registered
         # reason raises loudly instead of silently booking TIME_BARRIER.
         self._pending_exit_reason: Optional[str] = None
+        # Monotonic stamp of the pending exit's submission — the pending-exit
+        # branch's retire step honors _PENDING_EXIT_GRACE_SECONDS against it
+        # (time-barrier-retire-loop_07282026_2150). None = unknown age =
+        # retire-eligible (legacy behavior).
+        self._pending_exit_submitted_at: Optional[float] = None
         # Retire-then-submit window (oca-stage4-exit-ordering_07222026_0155):
         # leg ids the TIME BARRIER tick cancelled whose death is NOT yet
         # confirmed. Armed BEFORE the cancels are transmitted (the kill-switch
@@ -1430,6 +1445,7 @@ class LiveTrader:
         self._time_barrier_exit_attempts = 0
         self._pending_exit_order_id = None
         self._pending_exit_reason = None
+        self._pending_exit_submitted_at = None
         # Stage-4 retirement window (oca-stage4-exit-ordering_07222026_0155):
         # a fresh position must start with no stale retiring legs and a clean
         # kill-switch cancel-confirm budget.
@@ -2236,8 +2252,27 @@ class LiveTrader:
                         exit_oid, self._pending_exit_reason,
                     )
 
-                # settled != 0 — the incident: the exit did not (yet) fill. A2:
-                # retire the stranded GTC exit BEFORE touching protection —
+                # settled != 0 — the exit did not (yet) fill. GRACE
+                # (time-barrier-retire-loop_07282026_2150): a marketable limit
+                # deserves more than one ~5s idle tick — the 2026-07-28
+                # incident retired a 5-second-old exit and looped for 3.5h.
+                # Young exit -> plain defer: no cancel, no deferral note (a
+                # grace wait is not a retirement failure). None stamp =
+                # unknown age = retire-eligible (legacy rows/paths).
+                _submitted_at = self._pending_exit_submitted_at
+                if (
+                    _submitted_at is not None
+                    and time.monotonic() - _submitted_at
+                    < _PENDING_EXIT_GRACE_SECONDS
+                ):
+                    log.info(
+                        "[TIME BARRIER] exit %s resting %.0fs (grace %ds) - "
+                        "waiting for the fill before any retire",
+                        exit_oid, time.monotonic() - _submitted_at,
+                        int(_PENDING_EXIT_GRACE_SECONDS),
+                    )
+                    return False
+                # A2: retire the stranded GTC exit BEFORE touching protection —
                 # leaving it resting would let it double-fill against a re-armed
                 # stop.
                 cancel_count = self.exec_client.cancel_orders_by_ids([exit_oid])
@@ -2477,6 +2512,14 @@ class LiveTrader:
         # sized from the SETTLED broker position - never the stale
         # pre-settled current_position argument (R3).
         self._rearm_time_barrier_protection(settled)
+        # Loop-killer (time-barrier-retire-loop_07282026_2150, exit-fill
+        # follow-up #6): the dead exit's pending state MUST clear here, or the
+        # reconciler re-processes the dead id every idle tick forever (the
+        # 2026-07-28 ~2,090-cycle incident). Cleared -> the NEXT BAR's barrier
+        # check runs retire-then-submit fresh, bounded by the attempts budget.
+        self._pending_exit_order_id = None
+        self._pending_exit_reason = None
+        self._pending_exit_submitted_at = None
         log.warning(
             "[TIME BARRIER] exit %s died without filling; re-armed protection "
             "and kept trade %s tracked — retrying exit next bar",
@@ -2504,6 +2547,7 @@ class LiveTrader:
         self._processed_exit_order_ids.add(str(exit_oid))
         self._pending_exit_order_id = exit_oid
         self._pending_exit_reason = reason
+        self._pending_exit_submitted_at = time.monotonic()
 
     def _book_time_barrier_flat(self, exit_oid, reason) -> bool:
         """settled == 0: the exit filled. Book the ledger CLOSED with the PROVEN
@@ -2642,6 +2686,15 @@ class LiveTrader:
         never a sleep — the 5-minute kill switch is the real net."""
         self._time_barrier_exit_attempts += 1
         if self._time_barrier_exit_attempts < _MAX_TIME_BARRIER_EXIT_ATTEMPTS:
+            return
+        # Throttle (time-barrier-retire-loop_07282026_2150): shout AT the
+        # crossing and every _TIME_BARRIER_ALERT_EVERY attempts after — never
+        # per attempt (the 2026-07-28 flood was ~2,100 alerts in 3.5h).
+        _over = (
+            self._time_barrier_exit_attempts
+            - _MAX_TIME_BARRIER_EXIT_ATTEMPTS
+        )
+        if _over > 0 and _over % _TIME_BARRIER_ALERT_EVERY != 0:
             return
         detail = (
             f"TIME BARRIER exit for trade {self._active_trade_id} still "

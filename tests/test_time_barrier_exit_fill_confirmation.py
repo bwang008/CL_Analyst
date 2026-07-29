@@ -169,6 +169,11 @@ def _make_time_barrier_trader() -> LiveTrader:
     # Site B tracked state the fix declares (blueprint ~:643-647).
     t._time_barrier_exit_attempts = 0
     t._pending_exit_order_id = None
+    # re-adjudicated: time-barrier-retire-loop_07282026_2150 — mechanical
+    # fixture repair only: the pending-exit branch now reads the submission
+    # stamp for its grace window; None = unknown age = the legacy
+    # retire-eligible path every scenario here pins. No assertion changes.
+    t._pending_exit_submitted_at = None
     # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
     # — mechanical fixture repair only: the Stage-4 attrs that
     # _check_time_barrier / _reconcile_pending_position_state /
@@ -244,6 +249,16 @@ def _submit_then_reconcile(t):
     # The settled read must NOT happen inside the bar-update callback.
     t.exec_client.get_position_settled.assert_not_called()
     t._reconcile_pending_position_state()
+    # re-adjudicated: time-barrier-retire-loop_07282026_2150 — the first
+    # reconcile tick's REAL submission stamps _pending_exit_submitted_at, and
+    # the new grace window would (correctly) defer a seconds-old exit. These
+    # scenarios pin the POST-grace retire/race semantics, so back-date the
+    # stamp past _PENDING_EXIT_GRACE_SECONDS. No assertion changes.
+    if getattr(t, "_pending_exit_submitted_at", None) is not None:
+        import src.live_execution.live_trader as _lt_mod
+        t._pending_exit_submitted_at -= (
+            _lt_mod._PENDING_EXIT_GRACE_SECONDS + 1.0
+        )
     return t._reconcile_pending_position_state()
 
 

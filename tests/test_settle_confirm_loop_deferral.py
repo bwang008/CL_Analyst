@@ -178,6 +178,11 @@ def _base_trader() -> LiveTrader:
     # TIME BARRIER confirmation state.
     t._time_barrier_exit_attempts = 0
     t._pending_exit_order_id = None
+    # re-adjudicated: time-barrier-retire-loop_07282026_2150 — mechanical
+    # fixture repair only: the pending-exit branch now reads the submission
+    # stamp for its grace window; None = unknown age = the legacy
+    # retire-eligible path every scenario here pins. No assertion changes.
+    t._pending_exit_submitted_at = None
     # re-adjudicated: oca-stage4-exit-ordering_07222026_0155 (retire-then-submit)
     # — mechanical fixture repair only: the Stage-4 attrs that
     # _check_time_barrier / _reconcile_pending_position_state now read on an
