@@ -291,6 +291,40 @@ def _price_decimals(tick_size) -> int:
     exponent = Decimal(str(tick_size)).normalize().as_tuple().exponent
     return max(0, -exponent)
 
+
+def _fmt_price(value, decimals: int = 2) -> str:
+    """Render a price for an operator line, or "n/a" when it is unknown.
+
+    Never fabricates a number: an absent/unrenderable price is an explicit
+    unknown (exit-fill-observability_08112026_1749 M2, and the "no silent
+    null defaults" project rule). Pre-formatting to a str also keeps the
+    caller's log call safe from a lazy %-formatting error at emit time -
+    the exit branch is dispatched with NO exception isolation
+    (adapters/ibkr_execution.py:112-113), so nothing there may raise.
+    """
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.{max(0, int(decimals))}f}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def _fmt_money(value) -> str:
+    """Render a dollar figure for an operator line, or "n/a" when unknown.
+
+    A 0.0 stand-in on a money line would be a fabricated number (M2); an
+    absent figure must read as absent. No thousands separator - operator
+    lines are parsed field-wise.
+    """
+    if value is None:
+        return "n/a"
+    try:
+        return f"${float(value):.2f}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
 # Watchdog-family Telegram throttle
 # (watchdog-telegram-throttle_07062026_0007, user directive #2): at most
 # ONE watchdog-family Telegram per instance per hour — STALE BAR WATCHDOG,
@@ -1333,6 +1367,26 @@ class LiveTrader:
                 "COMMISSION telemetry write failed (execId=%s)",
                 getattr(evt, "exec_id", "?"), exc_info=True,
             )
+        # R2b (exit-fill-observability_08112026_1749): the broker's own
+        # realized figure, already in hand - zero extra I/O, no blocking read.
+        # The heartbeat's real= is a SUM over this column, so without this line
+        # the operator sees realized PnL move with no narrative anywhere. It
+        # also reconciles against the EXIT FILLED line's gross_est
+        # (gross_est - commission == realized_pnl). realized_pnl is None on
+        # entry fills (IBKR's DBL_MAX sentinel, mapped by the adapter) and
+        # renders n/a - never a fabricated 0.0.
+        try:
+            log.info(
+                "[TRADE] COMMISSION: orderId=%s  execId=%s  symbol=%s  "
+                "commission=%s  realized_pnl=%s",
+                str(getattr(evt, "order_id", "n/a")),
+                str(getattr(evt, "exec_id", "n/a")),
+                str(getattr(evt, "symbol", "n/a")),
+                _fmt_money(getattr(evt, "commission", None)),
+                _fmt_money(getattr(evt, "realized_pnl", None)),
+            )
+        except Exception:
+            pass
 
     def _extract_contract_month(self, contract) -> Optional[str]:
         month = getattr(contract, "lastTradeDateOrContractMonth", None)
@@ -2568,6 +2622,24 @@ class LiveTrader:
                 f"must go through _register_pending_exit"
             )
         exit_price = self._resolve_exit_fill_price(exit_oid)
+        # A1 (exit-fill-observability_08112026_1749): this path closed the
+        # ledger and reset state in TOTAL silence - blinder than the TP/SL
+        # branch the operator reported. One INFO line, emitted before the
+        # ledger write so it survives a failure there. A NULL exit price is an
+        # explicit n/a, never a fabricated number.
+        try:
+            _dp = _price_decimals(self._tick_size)
+        except Exception:
+            _dp = 2
+        log.info(
+            "[TIME BARRIER] EXIT BOOKED: trade_id=%s  reason=%s  "
+            "exit_price=%s  bars_held=%s  orderId=%s",
+            str(getattr(self, "_active_trade_id", None) or "n/a"),
+            str(reason),
+            _fmt_price(exit_price, _dp),
+            str(getattr(self, "_position_bars_held", "n/a")),
+            str(exit_oid),
+        )
         if self._active_trade_id is not None:
             try:
                 self.telemetry.close_position(
@@ -2578,7 +2650,15 @@ class LiveTrader:
                     exit_price=exit_price,
                 )
             except Exception:
-                log.debug("Failed to close ledger position", exc_info=True)
+                # R6: was log.debug - invisible under the INFO fleet handler,
+                # leaving the active_positions row OPEN forever while
+                # get_open_position, restart recovery and the kill switch all
+                # read it.
+                log.error(
+                    "Failed to close ledger position for trade %s "
+                    "(reason=%s) - the row stays OPEN",
+                    str(self._active_trade_id), str(reason), exc_info=True,
+                )
         self._reset_position_state(reason=reason)
         return True
 
@@ -2632,9 +2712,12 @@ class LiveTrader:
                     exit_price=exit_price,
                 )
             except Exception:
-                log.debug(
-                    "Failed to close ledger position (leg retirement)",
-                    exc_info=True,
+                # R6 (exit-fill-observability_08112026_1749): was log.debug -
+                # invisible under the INFO fleet handler, leaving the row OPEN.
+                log.error(
+                    "Failed to close ledger position (leg retirement) for "
+                    "trade %s (reason=%s) - the row stays OPEN",
+                    str(self._active_trade_id), str(reason), exc_info=True,
                 )
         self._retiring_leg_ids = []
         self._retiring_sl_id = None
@@ -7009,7 +7092,13 @@ class LiveTrader:
                     bars_held=self._position_bars_held,
                 )
             except Exception:
-                log.debug("[FLATTEN] Failed to close ledger", exc_info=True)
+                # R6/M4 (exit-fill-observability_08112026_1749): was log.debug -
+                # invisible under the INFO fleet handler, leaving the row OPEN.
+                log.error(
+                    "[FLATTEN] Failed to close ledger for trade %s "
+                    "(reason=%s) - the row stays OPEN",
+                    str(ledger_trade_id), str(reason), exc_info=True,
+                )
 
         # 4. Telegram alert (never let a send failure block safety actions)
         try:
@@ -7236,36 +7325,199 @@ class LiveTrader:
                 if hasattr(self, '_processed_exit_order_ids'):
                     self._processed_exit_order_ids.add(str(order_id))
                 exit_reason = "TP_HIT" if is_tp_fill else "SL_HIT"
-                
+
+                # exit-fill-observability_08112026_1749. EVERY statement added
+                # to this branch is individually exception-isolated (M1):
+                # adapters/ibkr_execution.py:112-113 dispatches order-status
+                # callbacks with NO isolation, so anything escaping here aborts
+                # the branch before _reset_position_state and strands
+                # _position_side / _active_trade_id / TP-SL tracking in memory
+                # while the book is flat broker-side (phantom position).
+                #
+                # M3: capture the ledger identity FIRST - _reset_position_state
+                # clears _active_trade_id, and the failure path needs it.
+                exit_trade_id = getattr(self, "_active_trade_id", None)
+                state_reset_done = False
+
                 # Software OCA: cancel the remaining resting protective order(s).
                 # cancel_open_orders is a bulk, symbol-scoped cancel; at exit time
                 # exactly one bracket is live, so this clears only the sibling leg(s).
+                cancelled = None
                 try:
                     cancelled = self.exec_client.cancel_open_orders(symbol=self._execution_symbol)
                     log.info(f"[OCA] cancelled {cancelled} resting protective order(s) after {exit_reason}")
                 except Exception as e:
                     log.warning(f"[OCA] Failed to cancel resting protective orders after {exit_reason}: {e}")
-                                
+
+                # R1/R2a: the operator-visible exit record - the peer of the
+                # ENTRY FILLED line. Emitted AFTER the OCA sweep (so cancelled
+                # is available) but BEFORE the Telegram and ledger blocks, so it
+                # survives a failure in either. Every field is pre-formatted to a
+                # str and passed with %s: a lazy %-format error at emit time
+                # would be raised inside logging, outside this try.
                 try:
-                    self._telegram.send(
+                    try:
+                        _dp = _price_decimals(self._tick_size)
+                    except Exception:
+                        _dp = 2
+                    _entry_px = getattr(self, "_entry_price", None)
+                    _pos_side = getattr(self, "_position_side", 0) or 0
+                    # R2a/M2: gross estimate from in-memory state only - a
+                    # blocking broker read here would deadlock the event loop
+                    # (A-2). It is NOT the booked figure (that arrives ~0.7s
+                    # later on the commission report), so it is labeled
+                    # gross_est and excludes commission. n/a - never 0.0 - when
+                    # the entry price is unknown, the side is flat, or the
+                    # multiplier lookup raises (_execution_instrument raises on
+                    # an unknown symbol / missing seam).
+                    _gross_est = None
+                    if _entry_px is not None and _pos_side:
+                        try:
+                            _mult = float(self._execution_instrument.multiplier)
+                            _gross_est = (
+                                (float(avg_price) - float(_entry_px))
+                                * float(_pos_side) * float(qty) * _mult
+                            )
+                        except Exception:
+                            _gross_est = None
+                    _side_str = (
+                        "LONG" if _pos_side > 0
+                        else ("SHORT" if _pos_side < 0 else "FLAT")
+                    )
+                    log.info(
+                        "[TRADE] EXIT FILLED: orderId=%s  leg=%s  reason=%s  "
+                        "symbol=%s  action=%s  side=%s  fill=%s  qty=%s  "
+                        "entry=%s  gross_est=%s (excl commission)  "
+                        "bars_held=%s  trailing=%s  oca_cancelled=%s  "
+                        "trade_id=%s",
+                        str(order_id),
+                        "TP" if is_tp_fill else "SL",
+                        exit_reason,
+                        str(getattr(self, "_execution_symbol", "n/a")),
+                        str(action_str),
+                        _side_str,
+                        _fmt_price(avg_price, _dp),
+                        str(int(qty)),
+                        _fmt_price(_entry_px, _dp),
+                        _fmt_money(_gross_est),
+                        str(getattr(self, "_position_bars_held", "n/a")),
+                        str(getattr(self, "_trailing_activated", "n/a")),
+                        "n/a" if cancelled is None else str(cancelled),
+                        str(exit_trade_id) if exit_trade_id is not None else "n/a",
+                    )
+                except Exception:
+                    # M1: degrade to a minimal line, never escape.
+                    try:
+                        log.info(
+                            "[TRADE] EXIT FILLED: orderId=%s  reason=%s  "
+                            "fill=%s  (degraded line - detail rendering failed)",
+                            str(order_id), exit_reason, str(avg_price),
+                        )
+                    except Exception:
+                        pass
+
+                # R3: the exit alert is the operator's only push notification.
+                # to_ascii() and datetime.now(tz) sit OUTSIDE send()'s internal
+                # try, so the except is live code - but a swallowed failure (or
+                # a discarded False return) is exactly what made the 2026-08-11
+                # exit unexplainable. Telegram send #1 of at most 2 (M3).
+                _tg_delivered = None
+                try:
+                    _tg_delivered = self._telegram.send(
                         f"[CLOSED] *POSITION CLOSED* ({_tg_escape(exit_reason)})\n"
                         f"Price: `{avg_price}`\n"
                         f"Qty: `{int(qty)}`\n"
                         f"Action: `{action_str}`"
                     )
                 except Exception:
-                    pass
-                try:
-                    self.telemetry.close_position(
-                        trade_id=self._active_trade_id or "unknown", 
-                        reason=exit_reason, 
-                        close_time=self._utc_iso_now(), 
-                        bars_held=self._position_bars_held, 
-                        exit_price=avg_price
+                    log.warning(
+                        "EXIT Telegram alert send FAILED for trade %s - the "
+                        "fill IS booked",
+                        str(exit_trade_id), exc_info=True,
                     )
-                except Exception:
-                    pass
-                self._reset_position_state(reason=exit_reason)
+                if _tg_delivered is False:
+                    log.warning(
+                        "EXIT Telegram alert NOT delivered for trade %s - the "
+                        "fill IS booked",
+                        str(exit_trade_id),
+                    )
+
+                # R4/R5/R8: the active_positions row is what get_open_position,
+                # restart recovery and the kill switch read. A silent failure
+                # here leaves it OPEN forever.
+                if exit_trade_id is None:
+                    # R5: close_position would run
+                    # UPDATE ... WHERE trade_id='unknown' - it matches nothing,
+                    # commits cleanly and raises nothing, so the failure would
+                    # be structurally invisible. No fabricated id is written
+                    # (no silent null defaults).
+                    log.error(
+                        "[TRADE] EXIT ledger close SKIPPED: no active trade id "
+                        "for orderId=%s reason=%s - this exit CANNOT be booked "
+                        "to any ledger row; no fabricated trade id is written",
+                        str(order_id), exit_reason,
+                    )
+                else:
+                    try:
+                        rowcount = self.telemetry.close_position(
+                            trade_id=exit_trade_id,
+                            reason=exit_reason,
+                            close_time=self._utc_iso_now(),
+                            bars_held=self._position_bars_held,
+                            exit_price=avg_price,
+                        )
+                    except Exception:
+                        # M3 ordering: ERROR -> health event -> state reset ->
+                        # CRITICAL Telegram. No blocking network I/O between
+                        # the exit and the reset; the position IS flat
+                        # broker-side either way, so the reset must still run.
+                        log.error(
+                            "[TRADE] EXIT ledger close FAILED for trade %s "
+                            "(reason=%s exit_price=%s) - the active_positions "
+                            "row stays OPEN and recovery/kill-switch read it",
+                            str(exit_trade_id), exit_reason, str(avg_price),
+                            exc_info=True,
+                        )
+                        self._emit_health_event(
+                            "exit-ledger-close-failed",
+                            f"trade={exit_trade_id} reason={exit_reason} "
+                            f"orderId={order_id} exit_price={avg_price}",
+                        )
+                        state_reset_done = True
+                        self._reset_position_state(reason=exit_reason)
+                        # Telegram send #2 of at most 2 (M3).
+                        try:
+                            self._telegram.send(
+                                f"[CRITICAL] *LEDGER CLOSE FAILED*\n"
+                                f"Trade: `{_tg_escape(str(exit_trade_id))}`\n"
+                                f"Reason: `{_tg_escape(exit_reason)}`\n"
+                                f"The position IS flat broker-side; the ledger "
+                                f"row is still OPEN.\n"
+                                f"Repair the row before the next restart."
+                            )
+                        except Exception:
+                            log.warning(
+                                "CRITICAL ledger-close Telegram alert send "
+                                "FAILED for trade %s",
+                                str(exit_trade_id), exc_info=True,
+                            )
+                    else:
+                        # R8/M5: rowcount 0 means the UPDATE matched nothing -
+                        # the class R4 is structurally blind to. WARNING only
+                        # (no Telegram, no health event): both causes are
+                        # benign. isinstance guards non-int returns from
+                        # mocked/legacy telemetry.
+                        if isinstance(rowcount, int) and rowcount == 0:
+                            log.warning(
+                                "[TRADE] EXIT ledger close matched NO row for "
+                                "trade %s (rowcount=0, reason=%s) - benign "
+                                "causes: the row was already CLOSED by another "
+                                "path, or this instance's shared-fleet-DB "
+                                "client scope binding did not match",
+                                str(exit_trade_id), exit_reason,
+                            )
+                if not state_reset_done:
+                    self._reset_position_state(reason=exit_reason)
             else:
                 # Guard: only orders registered at submission may book a NEW
                 # trade. A fill that is neither a tracked TP/SL exit nor a

@@ -1199,11 +1199,21 @@ class TelemetryDB:
         close_time: str,
         bars_held: Optional[int] = None,
         exit_price: Optional[float] = None,
-    ) -> None:
-        """Mark a position as closed in the ledger."""
+    ) -> int:
+        """Mark a position as closed in the ledger.
+
+        Returns the UPDATE rowcount (R8,
+        exit-fill-observability_08112026_1749). A 0 means the UPDATE matched
+        nothing - the row was already CLOSED by another path, or this
+        instance's _client_scope() binding on the shared fleet DB did not
+        match - which commits cleanly and raises nothing, so it is otherwise
+        undetectable by the callers' try/except. Purely additive: every
+        existing caller discards the return, and repair_closed_position
+        already reports its rowcount the same way.
+        """
         conn = self._get_conn()
         scope_sql, scope_vals = self._client_scope()
-        conn.execute(
+        cur = conn.execute(
             "UPDATE active_positions "
             "SET status = 'CLOSED', close_reason = ?, close_time = ?, "
             "    bars_held = ?, exit_price = ? "
@@ -1212,6 +1222,7 @@ class TelemetryDB:
              self._sanitize_float(exit_price), trade_id) + scope_vals,
         )
         conn.commit()
+        return cur.rowcount
 
     def repair_closed_position(
         self,

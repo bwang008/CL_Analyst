@@ -27,7 +27,7 @@
     },
     {
       "config": "configs/strategies/NQ02B_Sharpe_E04_baseline_07172026.json",
-      "enabled": true,
+      "enabled": false,
       "extra_args": []
     }
   ],

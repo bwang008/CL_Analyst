@@ -74,7 +74,7 @@ class TelegramAlerter:
 
         if not self.enabled:
             log.info(
-                "Telegram alerts DISABLED — set TELEGRAM_BOT_TOKEN and "
+                "Telegram alerts DISABLED - set TELEGRAM_BOT_TOKEN and "
                 "TELEGRAM_CHAT_ID in .env to enable."
             )
         else:
@@ -119,7 +119,7 @@ class TelegramAlerter:
         message = to_ascii(f"_{now_str}_\n\n{prefix_str}{message}")
 
         if requests is None:
-            log.warning("requests library not installed — cannot send Telegram alert")
+            log.warning("requests library not installed - cannot send Telegram alert")
             return False
 
         url = _TELEGRAM_API_URL.format(token=self.token)
@@ -154,10 +154,20 @@ class TelegramAlerter:
                 return False
             return True
         except requests.exceptions.Timeout:
-            log.debug("Telegram send timed out (%.1fs) — skipping", _TIMEOUT)
+            # R7 (exit-fill-observability_08112026_1749): was log.debug, and
+            # setup_fleet_logging attaches the root handler at INFO
+            # (fleet_log.py:163) - so every timed-out send was a LOST operator
+            # alert that left no trace. The non-200 branch above is already
+            # WARNING; the split was inconsistent, not deliberate.
+            log.warning(
+                "Telegram send timed out (%.1fs) - message NOT delivered",
+                _TIMEOUT,
+            )
             return False
         except Exception:
             # Catch everything: DNS failure, connection reset, SSL error, etc.
-            # A Telegram outage must NEVER crash the trader.
-            log.debug("Telegram send failed", exc_info=True)
+            # A Telegram outage must NEVER crash the trader (the "Never raises"
+            # contract above is untouched) - but each occurrence is a lost
+            # operator alert and must be visible (R7).
+            log.warning("Telegram send failed - message NOT delivered", exc_info=True)
             return False
